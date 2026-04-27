@@ -7,6 +7,9 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/dullkingsman/dpg/internal/pipeline"
+	"github.com/dullkingsman/dpg/internal/project"
+	snapshotpkg "github.com/dullkingsman/dpg/internal/snapshot"
 	"github.com/dullkingsman/dpg/internal/version"
 
 	// Import default pipeline implementations to trigger their init() registration.
@@ -48,8 +51,8 @@ Source: https://github.com/dullkingsman/dpg`,
 	}
 
 	root.PersistentFlags().StringVarP(
-		&projectDir, "project-dir", "C", "",
-		"project root directory (default: working directory)",
+		&projectDir, "dir", "C", "",
+		"project root directory (default: current working directory)",
 	)
 
 	root.AddCommand(
@@ -69,7 +72,7 @@ func resolveProjectDir() (string, error) {
 	if projectDir != "" {
 		abs, err := absPath(projectDir)
 		if err != nil {
-			return "", fmt.Errorf("--project-dir: %w", err)
+			return "", fmt.Errorf("--dir: %w", err)
 		}
 		return abs, nil
 	}
@@ -78,6 +81,25 @@ func resolveProjectDir() (string, error) {
 		return "", fmt.Errorf("cannot get working directory: %w", err)
 	}
 	return dir, nil
+}
+
+// discoverProject resolves the project root, discovers clusters/databases, and
+// configures the snapshot store to use the project's snapshot directory.
+func discoverProject() (*project.Project, error) {
+	dir, err := resolveProjectDir()
+	if err != nil {
+		return nil, err
+	}
+	proj, err := project.Discover(dir)
+	if err != nil {
+		return nil, err
+	}
+	if store, ok := pipeline.Resolve[pipeline.SnapshotStore](pipeline.Default, pipeline.KeySnapshotStore); ok {
+		if fs, ok := store.(*snapshotpkg.FileStore); ok {
+			fs.Dir = proj.SnapshotDir()
+		}
+	}
+	return proj, nil
 }
 
 func absPath(p string) (string, error) {

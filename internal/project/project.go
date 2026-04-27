@@ -35,14 +35,17 @@ type Cluster struct {
 // Name returns the cluster name from config.
 func (c *Cluster) Name() string { return c.Config.Cluster.Name }
 
-// PrimaryNode returns the primary node definition, or nil if none is configured.
-func (c *Cluster) PrimaryNode() *config.NodeDef {
-	for i := range c.Config.Cluster.Nodes {
-		if c.Config.Cluster.Nodes[i].Role == "primary" {
-			return &c.Config.Cluster.Nodes[i]
-		}
-	}
-	return nil
+// ConnectionString returns the raw URL or Link value from cluster config.
+// Callers that support secrets (apply, verify, dump) must check whether the
+// value is a link URI and resolve it via the SecretResolver before connecting.
+func (c *Cluster) ConnectionString() string {
+	return c.Config.Cluster.ConnectionURL()
+}
+
+// IsLink reports whether the connection string is a secrets-provider URI
+// (i.e. the Link field is set rather than URL).
+func (c *Cluster) IsLink() bool {
+	return c.Config.Cluster.Link != "" && c.Config.Cluster.URL == ""
 }
 
 // Database represents a single PostgreSQL database within a cluster.
@@ -84,32 +87,60 @@ func Discover(startDir string) (*Project, error) {
 	}, nil
 }
 
-// findRoot walks up from dir looking for a dpg.toml file.
+// findRoot walks up from dir looking for a dpg.toml that is the project root
+// config (i.e. contains [compiler], [linter], or [snapshots] — not [cluster]
+// or [database], which identify cluster/database-level configs).
 func findRoot(dir string) (string, error) {
 	current := filepath.Clean(dir)
 	for {
-		if _, err := os.Stat(filepath.Join(current, "dpg.toml")); err == nil {
+		candidate := filepath.Join(current, "dpg.toml")
+		if _, err := os.Stat(candidate); err == nil && isRootConfig(candidate) {
 			return current, nil
 		}
 		parent := filepath.Dir(current)
 		if parent == current {
-			return "", fmt.Errorf("no dpg.toml found in %s or any parent directory", dir)
+			return "", fmt.Errorf("no project root dpg.toml found in %s or any parent directory", dir)
 		}
 		current = parent
 	}
 }
 
-// discoverClusters finds all *.dpg.toml files in rootDir and builds a Cluster for each.
-func discoverClusters(rootDir string) ([]*Cluster, error) {
-	pattern := filepath.Join(rootDir, "*.dpg.toml")
-	tomlPaths, err := filepath.Glob(pattern)
+// isRootConfig reports whether the dpg.toml at path is a project root config
+// rather than a cluster or database config. Root configs must not contain a
+// [cluster] or [database] section.
+func isRootConfig(path string) bool {
+	data, err := os.ReadFile(path)
 	if err != nil {
-		return nil, fmt.Errorf("globbing cluster configs in %s: %w", rootDir, err)
+		return false
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		t := strings.TrimSpace(line)
+		if t == "[cluster]" || strings.HasPrefix(t, "[cluster.") || t == "[database]" {
+			return false
+		}
+	}
+	return true
+}
+
+// discoverClusters scans immediate subdirectories of rootDir. Any subdirectory
+// containing a dpg.toml is treated as a cluster directory.
+func discoverClusters(rootDir string) ([]*Cluster, error) {
+	entries, err := os.ReadDir(rootDir)
+	if err != nil {
+		return nil, fmt.Errorf("reading project root %s: %w", rootDir, err)
 	}
 
 	var clusters []*Cluster
-	for _, tomlPath := range tomlPaths {
-		cluster, err := loadCluster(rootDir, tomlPath)
+	for _, entry := range entries {
+		if !entry.IsDir() || strings.HasPrefix(entry.Name(), ".") {
+			continue
+		}
+		clusterDir := filepath.Join(rootDir, entry.Name())
+		cfgPath := filepath.Join(clusterDir, "dpg.toml")
+		if _, err := os.Stat(cfgPath); os.IsNotExist(err) {
+			continue
+		}
+		cluster, err := loadCluster(clusterDir, cfgPath)
 		if err != nil {
 			return nil, err
 		}
@@ -118,21 +149,11 @@ func discoverClusters(rootDir string) ([]*Cluster, error) {
 	return clusters, nil
 }
 
-// loadCluster loads a single cluster from its *.dpg.toml file.
-func loadCluster(rootDir, tomlPath string) (*Cluster, error) {
-	cfg, err := config.LoadCluster(tomlPath)
+// loadCluster loads a single cluster from its dpg.toml inside clusterDir.
+func loadCluster(clusterDir, cfgPath string) (*Cluster, error) {
+	cfg, err := config.LoadCluster(cfgPath)
 	if err != nil {
 		return nil, err
-	}
-
-	// The cluster directory has the same stem as the .dpg.toml file.
-	// e.g. production.dpg.toml → production/
-	stem := clusterStem(tomlPath)
-	clusterDir := filepath.Join(rootDir, stem)
-
-	if info, err := os.Stat(clusterDir); err != nil || !info.IsDir() {
-		return nil, fmt.Errorf("cluster directory %s not found (expected alongside %s)",
-			clusterDir, filepath.Base(tomlPath))
 	}
 
 	objectsDir := filepath.Join(clusterDir, cfg.Cluster.ClusterObjectsDir)
@@ -150,26 +171,29 @@ func loadCluster(rootDir, tomlPath string) (*Cluster, error) {
 	}, nil
 }
 
-// discoverDatabases finds all *.dpg.toml files in clusterDir and builds a Database for each.
+// discoverDatabases scans immediate subdirectories of clusterDir. Any
+// subdirectory that contains a dpg.toml and is not the cluster objects
+// directory is treated as a database directory.
 func discoverDatabases(clusterDir, reservedDir string) ([]*Database, error) {
-	pattern := filepath.Join(clusterDir, "*.dpg.toml")
-	tomlPaths, err := filepath.Glob(pattern)
+	entries, err := os.ReadDir(clusterDir)
 	if err != nil {
-		return nil, fmt.Errorf("globbing database configs in %s: %w", clusterDir, err)
+		return nil, fmt.Errorf("reading cluster directory %s: %w", clusterDir, err)
 	}
 
 	var databases []*Database
-	for _, tomlPath := range tomlPaths {
-		stem := clusterStem(tomlPath) // reuse: same logic, strips ".dpg.toml"
-
-		// Validate: no database may share the cluster objects dir name.
-		if stem == reservedDir {
-			return nil, fmt.Errorf(
-				"database name %q conflicts with cluster_objects_dir %q in %s",
-				stem, reservedDir, tomlPath)
+	for _, entry := range entries {
+		if !entry.IsDir() || strings.HasPrefix(entry.Name(), ".") {
+			continue
 		}
-
-		db, err := loadDatabase(clusterDir, tomlPath, stem)
+		if entry.Name() == reservedDir {
+			continue // cluster-level objects directory — not a database
+		}
+		dbDir := filepath.Join(clusterDir, entry.Name())
+		cfgPath := filepath.Join(dbDir, "dpg.toml")
+		if _, err := os.Stat(cfgPath); os.IsNotExist(err) {
+			continue
+		}
+		db, err := loadDatabase(dbDir, cfgPath)
 		if err != nil {
 			return nil, err
 		}
@@ -178,17 +202,11 @@ func discoverDatabases(clusterDir, reservedDir string) ([]*Database, error) {
 	return databases, nil
 }
 
-// loadDatabase loads a single database from its *.dpg.toml file.
-func loadDatabase(clusterDir, tomlPath, stem string) (*Database, error) {
-	cfg, err := config.LoadDatabase(tomlPath)
+// loadDatabase loads a single database from its dpg.toml inside dbDir.
+func loadDatabase(dbDir, cfgPath string) (*Database, error) {
+	cfg, err := config.LoadDatabase(cfgPath)
 	if err != nil {
 		return nil, err
-	}
-
-	dbDir := filepath.Join(clusterDir, stem)
-	if info, err := os.Stat(dbDir); err != nil || !info.IsDir() {
-		return nil, fmt.Errorf("database directory %s not found (expected alongside %s)",
-			dbDir, filepath.Base(tomlPath))
 	}
 
 	sourceFiles, err := collectSourceFiles(dbDir)
@@ -216,11 +234,4 @@ func collectSourceFiles(dir string) ([]string, error) {
 		return nil
 	})
 	return files, err
-}
-
-// clusterStem strips the ".dpg.toml" suffix from a file path and returns the base name.
-// e.g. "/path/to/production.dpg.toml" → "production"
-func clusterStem(path string) string {
-	base := filepath.Base(path)
-	return strings.TrimSuffix(base, ".dpg.toml")
 }

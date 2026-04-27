@@ -30,11 +30,7 @@ catalog, and DPG-managed grants that are missing from the live catalog.
 Extra grants present in the live catalog but absent from DPG source are
 not reported (additive grant model).`,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			dir, err := resolveProjectDir()
-			if err != nil {
-				return err
-			}
-			proj, err := project.Discover(dir)
+			proj, err := discoverProject()
 			if err != nil {
 				return err
 			}
@@ -109,13 +105,12 @@ func runVerify(
 	}
 
 	// Connect to the live database.
-	primary := cl.PrimaryNode()
-	if primary == nil {
-		return false, fmt.Errorf("cluster %q has no primary node configured", cl.Name())
+	connStr := cl.ConnectionString()
+	if connStr == "" {
+		return false, fmt.Errorf("cluster %q has no connection configured (set url or link in cluster dpg.toml)", cl.Name())
 	}
-	connStr := primary.URL
-	if primary.Link != "" {
-		connStr, err = secretResolver.Resolve(primary.Link)
+	if cl.IsLink() {
+		connStr, err = secretResolver.Resolve(connStr)
 		if err != nil {
 			return false, fmt.Errorf("resolve connection secret: %w", err)
 		}

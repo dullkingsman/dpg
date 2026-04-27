@@ -36,11 +36,7 @@ primary node, and updates the committed snapshot on success.
 Destructive operations are blocked unless --allow-destructive is set.
 Partition strategy changes additionally require --approve-partition-rebuild.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			dir, err := resolveProjectDir()
-			if err != nil {
-				return err
-			}
-			proj, err := project.Discover(dir)
+			proj, err := discoverProject()
 			if err != nil {
 				return err
 			}
@@ -191,13 +187,12 @@ func runApply(
 	}
 
 	// Resolve connection URL.
-	primary := cl.PrimaryNode()
-	if primary == nil {
-		return fmt.Errorf("cluster %q has no primary node configured", cl.Name())
+	connStr := cl.ConnectionString()
+	if connStr == "" {
+		return fmt.Errorf("cluster %q has no connection configured (set url or link in cluster dpg.toml)", cl.Name())
 	}
-	connStr := primary.URL
-	if primary.Link != "" {
-		connStr, err = secretResolver.Resolve(primary.Link)
+	if cl.IsLink() {
+		connStr, err = secretResolver.Resolve(connStr)
 		if err != nil {
 			return fmt.Errorf("resolve connection secret: %w", err)
 		}

@@ -37,11 +37,7 @@ Use this to bootstrap a DPG project from an existing database.`,
 				return fmt.Errorf("--database is required")
 			}
 
-			dir, err := resolveProjectDir()
-			if err != nil {
-				return err
-			}
-			proj, err := project.Discover(dir)
+			proj, err := discoverProject()
 			if err != nil {
 				return err
 			}
@@ -96,14 +92,13 @@ func runDump(
 ) error {
 	ctx := context.Background()
 
-	primary := cl.PrimaryNode()
-	if primary == nil {
-		return fmt.Errorf("cluster %q has no primary node configured", cl.Name())
+	connStr := cl.ConnectionString()
+	if connStr == "" {
+		return fmt.Errorf("cluster %q has no connection configured (set url or link in cluster dpg.toml)", cl.Name())
 	}
-	connStr := primary.URL
-	if primary.Link != "" {
+	if cl.IsLink() {
 		var err error
-		connStr, err = secretResolver.Resolve(primary.Link)
+		connStr, err = secretResolver.Resolve(connStr)
 		if err != nil {
 			return fmt.Errorf("resolve connection secret: %w", err)
 		}

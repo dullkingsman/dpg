@@ -7,7 +7,6 @@ import (
 
 	"github.com/dullkingsman/dpg/internal/compiler"
 	"github.com/dullkingsman/dpg/internal/pipeline"
-	"github.com/dullkingsman/dpg/internal/project"
 )
 
 func newPortabilityCmd() *cobra.Command {
@@ -25,11 +24,7 @@ with standard SQL alternatives where available.
 
 This command never blocks compilation or apply.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			dir, err := resolveProjectDir()
-			if err != nil {
-				return err
-			}
-			proj, err := project.Discover(dir)
+			proj, err := discoverProject()
 			if err != nil {
 				return err
 			}

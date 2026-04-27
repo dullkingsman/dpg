@@ -83,33 +83,34 @@ func (c CompilerConfig) validate() error {
 	}
 }
 
-// ClusterConfig represents a <cluster-name>.dpg.toml file.
+// ClusterConfig represents the dpg.toml file inside a cluster directory.
 type ClusterConfig struct {
 	Cluster ClusterDef `toml:"cluster"`
 }
 
-// ClusterDef holds the cluster topology and options.
+// ClusterDef holds the cluster connection and options.
 type ClusterDef struct {
 	Name string `toml:"name"`
 	// ClusterObjectsDir is the subdirectory within the cluster directory
 	// that holds cluster-level objects (roles, tablespaces, FDWs).
 	// Default: "cluster". This name is reserved — no database may share it.
-	ClusterObjectsDir string         `toml:"cluster_objects_dir"`
-	Nodes             []NodeDef      `toml:"nodes"`
-	Options           ClusterOptions `toml:"options"`
+	ClusterObjectsDir string `toml:"cluster_objects_dir"`
+	// URL is an inline PostgreSQL connection string for the primary node.
+	// Mutually exclusive with Link. May be omitted for offline-only usage.
+	URL string `toml:"url"`
+	// Link is a secrets-provider URI (e.g. "env:PRIMARY_DB_URL") resolved at
+	// connection time. Mutually exclusive with URL.
+	Link    string         `toml:"link"`
+	Options ClusterOptions `toml:"options"`
 }
 
-// NodeDef describes a single PostgreSQL node in the cluster.
-type NodeDef struct {
-	Name string `toml:"name"`
-	// URL is an inline connection string. Mutually exclusive with Link.
-	URL string `toml:"url"`
-	// Link is a secrets-provider URI (e.g. "vault://prod/pg-primary").
-	// Resolved at connection time by the SecretResolver. Mutually exclusive with URL.
-	Link string `toml:"link"`
-	// Role is either "primary" (writable; target of dpg apply) or "replica"
-	// (read-only; used by dpg verify). Exactly one node must be "primary".
-	Role string `toml:"role"`
+// ConnectionURL returns the effective connection string, preferring URL over Link.
+// Callers that need secret resolution should check Link first.
+func (c ClusterDef) ConnectionURL() string {
+	if c.URL != "" {
+		return c.URL
+	}
+	return c.Link
 }
 
 // ClusterOptions holds per-cluster behavioural options.
@@ -127,7 +128,7 @@ func DefaultClusterConfig() ClusterConfig {
 	}
 }
 
-// LoadCluster loads and parses a <cluster-name>.dpg.toml file at path.
+// LoadCluster loads and parses the dpg.toml inside a cluster directory.
 func LoadCluster(path string) (ClusterConfig, error) {
 	cfg := DefaultClusterConfig()
 	if _, err := toml.DecodeFile(path, &cfg); err != nil {
@@ -140,30 +141,13 @@ func LoadCluster(path string) (ClusterConfig, error) {
 }
 
 func (c ClusterDef) validate(path string) error {
-	primaryCount := 0
-	for _, n := range c.Nodes {
-		switch n.Role {
-		case "primary":
-			primaryCount++
-		case "replica":
-		default:
-			return fmt.Errorf("%s: node %q: role must be \"primary\" or \"replica\", got %q",
-				path, n.Name, n.Role)
-		}
-		if n.URL != "" && n.Link != "" {
-			return fmt.Errorf("%s: node %q: url and link are mutually exclusive", path, n.Name)
-		}
-		if n.URL == "" && n.Link == "" {
-			return fmt.Errorf("%s: node %q: one of url or link is required", path, n.Name)
-		}
-	}
-	if len(c.Nodes) > 0 && primaryCount != 1 {
-		return fmt.Errorf("%s: exactly one node must have role = \"primary\", found %d", path, primaryCount)
+	if c.URL != "" && c.Link != "" {
+		return fmt.Errorf("%s: url and link are mutually exclusive", path)
 	}
 	return nil
 }
 
-// DatabaseConfig represents a <db-name>.dpg.toml file.
+// DatabaseConfig represents the dpg.toml file inside a database directory.
 type DatabaseConfig struct {
 	Database DatabaseDef `toml:"database"`
 }
@@ -183,7 +167,7 @@ func DefaultDatabaseConfig() DatabaseConfig {
 	}
 }
 
-// LoadDatabase loads and parses a <db-name>.dpg.toml file at path.
+// LoadDatabase loads and parses the dpg.toml inside a database directory.
 func LoadDatabase(path string) (DatabaseConfig, error) {
 	cfg := DefaultDatabaseConfig()
 	if _, err := toml.DecodeFile(path, &cfg); err != nil {

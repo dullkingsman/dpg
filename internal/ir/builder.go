@@ -922,11 +922,26 @@ func nodeToText(n *pg_query.Node) string {
 			return "false"
 		}
 	}
-	// For complex nodes, deparse via pg_query.
+	// For expression nodes (FuncCall, TypeCast, etc.) deparse by wrapping in
+	// SELECT so pg_query sees a full statement, then strip the SELECT prefix.
+	selectStmt := &pg_query.Node{
+		Node: &pg_query.Node_SelectStmt{
+			SelectStmt: &pg_query.SelectStmt{
+				TargetList: []*pg_query.Node{
+					{Node: &pg_query.Node_ResTarget{
+						ResTarget: &pg_query.ResTarget{Val: n},
+					}},
+				},
+			},
+		},
+	}
 	pr := &pg_query.ParseResult{
-		Stmts: []*pg_query.RawStmt{{Stmt: n}},
+		Stmts: []*pg_query.RawStmt{{Stmt: selectStmt}},
 	}
 	if sql, err := pg_query.Deparse(pr); err == nil {
+		if after, ok := strings.CutPrefix(sql, "SELECT "); ok {
+			return after
+		}
 		return sql
 	}
 	return "<expr>"

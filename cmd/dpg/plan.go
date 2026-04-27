@@ -33,11 +33,7 @@ minimal SQL required to reach the desired state. No database connection
 is required. Safe, Caution, Destructive, and Manual operations are
 labelled in the output.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			dir, err := resolveProjectDir()
-			if err != nil {
-				return err
-			}
-			proj, err := project.Discover(dir)
+			proj, err := discoverProject()
 			if err != nil {
 				return err
 			}
@@ -55,9 +51,16 @@ labelled in the output.`,
 				return err
 			}
 
+			if len(proj.Clusters) == 0 {
+				return fmt.Errorf("no clusters found under project root %s\n  (each cluster must be a subdirectory containing dpg.toml)", proj.RootDir)
+			}
 			printed := false
 			for _, cl := range proj.Clusters {
 				if clusterName != "" && cl.Name() != clusterName {
+					continue
+				}
+				if len(cl.Databases) == 0 {
+					fmt.Fprintf(os.Stderr, "warn: cluster %q has no databases\n", cl.Name())
 					continue
 				}
 				for _, db := range cl.Databases {
@@ -71,7 +74,10 @@ labelled in the output.`,
 				}
 			}
 			if !printed {
-				return fmt.Errorf("no matching cluster/database found")
+				if clusterName != "" || databaseName != "" {
+					return fmt.Errorf("no cluster/database matched (--cluster=%q --database=%q)", clusterName, databaseName)
+				}
+				return fmt.Errorf("no databases found in any cluster under %s", proj.RootDir)
 			}
 			return nil
 		},

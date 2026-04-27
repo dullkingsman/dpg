@@ -46,8 +46,8 @@ Plain-value passwords in `ROLE` declarations are rejected by the `forbid_hardcod
 
 | Location | Field | Description |
 |---|---|---|
-| Cluster node | `link` | Full connection string URI |
-| Cluster node | `url` | Plain connection string (not a secret resolver) |
+| Cluster config | `link` | Full connection string URI |
+| Cluster config | `url` | Plain connection string (not a secret resolver) |
 | Role declaration | `PASSWORD 'env:VAR'` | Role password |
 | User mapping | `OPTIONS (password 'env:VAR')` | FDW user mapping credential |
 
@@ -61,20 +61,11 @@ Plain-value passwords in `ROLE` declarations are rejected by the `forbid_hardcod
 ## Example: Full Cluster Config with Secrets
 
 ```toml
-# production.dpg.toml
+# production/dpg.toml
 
 [cluster]
 name = "production"
-
-[[cluster.nodes]]
-name = "primary-1"
 link = "env:PROD_PRIMARY_URL"
-role = "primary"
-
-[[cluster.nodes]]
-name = "replica-1"
-link = "env:PROD_REPLICA_1_URL"
-role = "replica"
 ```
 
 ```

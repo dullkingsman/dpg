@@ -8,14 +8,15 @@ A DPG project maps onto the physical topology of a PostgreSQL deployment: one or
 myproject/
 ├── dpg.toml                          # Root: tool configuration and linter rules
 │
-├── production.dpg.toml               # Cluster config for the "production" cluster
 ├── production/                        # Cluster directory
+│   ├── dpg.toml                       # Cluster config (connection, options)
+│   │
 │   ├── cluster/                       # Cluster-level objects (roles, tablespaces, FDWs)
 │   │   ├── roles.dpg
 │   │   └── tablespaces.dpg
 │   │
-│   ├── myapp.dpg.toml                 # Database config for "myapp" on "production"
-│   ├── myapp/                         # Database source files
+│   ├── myapp/                         # Database directory
+│   │   ├── dpg.toml                   # Database config
 │   │   ├── extensions.dpg
 │   │   └── schemas/
 │   │       ├── public/
@@ -28,12 +29,12 @@ myproject/
 │   │       └── analytics/
 │   │           └── tables.dpg
 │   │
-│   ├── analytics_db.dpg.toml
 │   └── analytics_db/
+│       ├── dpg.toml
 │       └── ...
 │
-├── staging.dpg.toml
 ├── staging/
+│   ├── dpg.toml
 │   └── ...
 │
 └── .dpg/
@@ -43,9 +44,11 @@ myproject/
 ```
 
 **Rules:**
-- The cluster directory name must match the cluster `name` in its `.dpg.toml`.
-- The database directory name must match the database `name` in its `.dpg.toml`.
-- The `cluster/` subdirectory (default name, configurable) is reserved for cluster-level objects. No database may share this name.
+- Each cluster is a subdirectory of the project root containing a `dpg.toml`.
+- Each database is a subdirectory of its cluster directory containing a `dpg.toml`.
+- The cluster name is declared inside `<cluster>/dpg.toml`, not derived from the directory name.
+- The database name is declared inside `<cluster>/<db>/dpg.toml`.
+- The `cluster/` subdirectory (default name, configurable) is reserved for cluster-level objects. No database may share this name, and it must not contain a `dpg.toml`.
 - All `.dpg` files in a database directory and its subdirectories are compiled together as a single unit.
 - File ordering within a database does not matter — the compiler resolves dependencies before emitting SQL.
 - Snapshot files are committed to version control. They represent the last successfully applied state.
@@ -85,74 +88,70 @@ warn_on_scalar_merge_conflict = true
 directory = ".dpg/snapshots"
 ```
 
-## `<cluster-name>.dpg.toml` — Cluster Configuration
+## `<cluster>/dpg.toml` — Cluster Configuration
 
-One file per cluster, placed in the project root alongside `dpg.toml`.
+One file per cluster, placed inside the cluster directory.
 
 ```toml
 [cluster]
-# Must match the cluster directory name.
+# Cluster name. Used in snapshot filenames and log output.
 name = "production"
 
 # Subdirectory within the cluster directory holding cluster-level objects.
-# Default: "cluster". Reserved name — no database may use this name.
+# Default: "cluster". Reserved — no database may use this name.
 cluster_objects_dir = "cluster"
 
-[[cluster.nodes]]
-name = "primary-1"
-# Inline connection string. Mutually exclusive with "link".
-url  = "postgresql://pguser@primary.prod.internal:5432/postgres"
-# "primary": writable; target of dpg apply. Exactly one node must be "primary".
-role = "primary"
+# Inline PostgreSQL connection string for the primary node.
+# Mutually exclusive with link.
+url = "postgresql://pguser@primary.prod.internal:5432/postgres"
 
-[[cluster.nodes]]
-name = "replica-1"
-url  = "postgresql://pguser@replica-1.prod.internal:5432/postgres"
-# "replica": read-only; used by dpg verify for catalog introspection.
-role = "replica"
-
-[[cluster.nodes]]
-name = "replica-2"
-# Secrets-provider URI. Resolved at connection time by the configured SecretResolver.
-# Mutually exclusive with "url". Supported schemes: "env:", "link:".
-link = "env:REPLICA_2_URL"
-role = "replica"
+# Alternatively, a secrets-provider URI resolved at runtime:
+# link = "env:PRIMARY_DB_URL"
 
 [cluster.options]
 # Write an updated snapshot after every successful dpg apply.
 snapshot_on_apply = true
 ```
 
-**Node fields:**
+**Connection fields:**
 
 | Field | Type | Description |
 |---|---|---|
-| `name` | string | Human-readable node label. Used in log output. |
-| `url` | string | PostgreSQL connection string (DSN or URL format). Mutually exclusive with `link`. |
-| `link` | string | Secrets-provider URI. See [Secrets](secrets.md) for supported schemes. Mutually exclusive with `url`. |
-| `role` | string | `"primary"` or `"replica"`. Exactly one node must be `"primary"`. |
+| `url` | string | Inline PostgreSQL connection string (DSN or URL). Mutually exclusive with `link`. |
+| `link` | string | Secrets-provider URI resolved at connection time. See [Secrets](secrets.md). Mutually exclusive with `url`. |
+
+Both `url` and `link` are optional for offline-only use cases (`dpg plan`, `dpg diff`). Commands that connect to the database (`dpg apply`, `dpg verify`, `dpg dump`) require one to be set.
 
 **Validation errors:**
-- Exactly one node must have `role = "primary"`.
-- `url` and `link` are mutually exclusive; one is required.
-- Unknown role values are rejected at startup.
+- `url` and `link` are mutually exclusive.
 
-## `<db-name>.dpg.toml` — Database Configuration
+## `<cluster>/<db>/dpg.toml` — Database Configuration
 
-One file per database, placed inside the cluster directory.
+One file per database, placed inside the database directory.
 
 ```toml
 [database]
-# Must match the database directory name.
+# Must match the intended PostgreSQL database name.
 name = "myapp"
 
 # The default schema for unqualified object references.
 default_schema = "public"
 ```
 
+## Discovery Algorithm
+
+When any `dpg` command runs, it:
+
+1. Walks up from the working directory (or `--project-dir`) until it finds a `dpg.toml` containing root-level configuration. That directory is the project root.
+2. Scans immediate subdirectories of the project root. Any subdirectory containing a `dpg.toml` is a cluster.
+3. For each cluster, scans its immediate subdirectories. Any subdirectory containing a `dpg.toml` that is not the cluster objects directory is a database.
+4. Collects all `.dpg` files recursively within each database directory as that database's source files.
+
+Hidden directories (names beginning with `.`) are skipped at every level.
+
 ## Cluster-Level vs. Database-Level Objects
 
-**Cluster-level objects** belong to the PostgreSQL cluster (server), not to a single database. They are declared in `.dpg` files inside the cluster objects directory (`cluster/` by default).
+**Cluster-level objects** belong to the PostgreSQL cluster (server), not to a single database. They are declared in `.dpg` files inside the cluster objects directory (`cluster/` by default). This directory does not contain a `dpg.toml` and is never treated as a database.
 
 Cluster-level objects:
 - Roles (`ROLE`)
@@ -168,6 +167,7 @@ DPG does not require any specific file names or directory structure within a dat
 
 ```
 myapp/
+├── dpg.toml               # Database config
 ├── extensions.dpg         # EXTENSION declarations
 ├── schemas/
 │   ├── public/
