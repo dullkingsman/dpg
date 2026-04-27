@@ -32,11 +32,20 @@ func (r *Resolver) Sort(objects []pipeline.IRObject) ([]pipeline.IRObject, error
 		return nil, nil
 	}
 
-	// Build index: qualifiedName → position.
+	// Build index: qualifiedName → position. Also record the set of schemas
+	// declared in source — references whose schema is in this set must resolve;
+	// references into schemas not in source (e.g. extension-managed `extensions.geometry`)
+	// are out of DPG's scope and silently allowed.
 	idx := make(map[string]int, n)
+	schemaSet := make(map[string]bool)
 	for i, obj := range objects {
 		idx[obj.QualifiedName()] = i
+		if s, ok := obj.(*ir.Schema); ok {
+			schemaSet[s.Name] = true
+		}
 	}
+
+	var diags pipeline.Diagnostics
 
 	// edges[i] = set of j where i must come BEFORE j (i → j).
 	// Equivalently: j depends on i.
@@ -80,30 +89,51 @@ func (r *Resolver) Sort(objects []pipeline.IRObject) ([]pipeline.IRObject, error
 			// Table depends on its schema.
 			schemaEdge(i, o.Schema)
 
-			// Table depends on any custom types used in columns.
+			// Table depends on any custom types used in columns. If the schema is
+			// in source but the type isn't defined, that's a real bug — surface it
+			// rather than silently dropping the dependency.
 			for _, col := range o.Columns {
-				if col.Type.Schema != "" && col.Type.Schema != "pg_catalog" {
-					typeKey := col.Type.Schema + "." + col.Type.Name
-					if j, ok := idx[typeKey]; ok {
-						dependsOn(i, j)
-					}
+				if col.Type.Schema == "" || col.Type.Schema == "pg_catalog" {
+					continue
+				}
+				typeKey := col.Type.Schema + "." + col.Type.Name
+				if j, ok := idx[typeKey]; ok {
+					dependsOn(i, j)
+				} else if schemaSet[col.Type.Schema] {
+					diags = append(diags, pipeline.Errorf(col.SrcPos,
+						"unresolved type reference %q used by column %s.%s.%s — no such type defined in source",
+						typeKey, o.Schema, o.Name, col.Name))
 				}
 			}
 
-			// Table depends on FK-referenced tables.
+			// Table depends on FK-referenced tables. Like type refs, if the
+			// referenced schema is managed in source, an unresolved FK target is
+			// reported as an error so user typos surface at plan time.
 			for _, cst := range o.Constraints {
-				if cst.Type == "FOREIGN KEY" {
-					ref := extractFKRef(cst.Expr)
-					if ref != "" {
-						if j, ok := idx[ref]; ok {
-							dependsOn(i, j)
-						} else if !strings.Contains(ref, ".") && o.Schema != "" {
-							// Unqualified reference — try with the table's own schema.
-							if j, ok := idx[o.Schema+"."+ref]; ok {
-								dependsOn(i, j)
-							}
-						}
+				if cst.Type != "FOREIGN KEY" {
+					continue
+				}
+				refSchema, refTable := extractFKRefParts(cst.Expr)
+				if refTable == "" {
+					continue
+				}
+				resolvedKey, ok := resolveFKTarget(idx, refSchema, refTable, o.Schema)
+				if ok {
+					dependsOn(i, idx[resolvedKey])
+					continue
+				}
+				effectiveSchema := refSchema
+				if effectiveSchema == "" {
+					effectiveSchema = o.Schema
+				}
+				if effectiveSchema == "" || schemaSet[effectiveSchema] {
+					displayRef := refTable
+					if effectiveSchema != "" {
+						displayRef = effectiveSchema + "." + refTable
 					}
+					diags = append(diags, pipeline.Errorf(cst.Pos,
+						"unresolved FK reference %q from %s — no such table defined in source",
+						displayRef, o.QualifiedName()))
 				}
 			}
 
@@ -162,6 +192,10 @@ func (r *Resolver) Sort(objects []pipeline.IRObject) ([]pipeline.IRObject, error
 		case *ir.TSTemplate:
 			schemaEdge(i, o.Schema)
 		}
+	}
+
+	if diags.HasErrors() {
+		return nil, diags
 	}
 
 	// Kahn's algorithm.
@@ -267,17 +301,57 @@ func (r *Resolver) Sort(objects []pipeline.IRObject) ([]pipeline.IRObject, error
 // Expr. The Expr looks like `FOREIGN KEY ("col") REFERENCES "schema"."table" ("col2")`.
 // Returns the name in the unquoted form used as index keys (e.g. "schema.table" or "table").
 func extractFKRef(expr string) string {
+	schema, table := extractFKRefParts(expr)
+	if table == "" {
+		return ""
+	}
+	if schema != "" {
+		return schema + "." + table
+	}
+	return table
+}
+
+// extractFKRefParts splits the FK target into (schema, table). schema is "" when
+// the source text wrote an unqualified reference. Quotes around either component
+// are stripped.
+func extractFKRefParts(expr string) (schema, table string) {
 	upper := strings.ToUpper(expr)
 	i := strings.Index(upper, "REFERENCES")
 	if i < 0 {
-		return ""
+		return "", ""
 	}
 	rest := strings.TrimSpace(expr[i+len("REFERENCES"):])
-	// rest starts with the (possibly schema-qualified, possibly quoted) table name,
-	// followed by optional column list and action clauses.
-	// Extract the first "token" which may be "schema"."table" or "schema.table".
-	ref := extractFirstIdent(rest)
-	return unquoteIdent(ref)
+	ref := unquoteIdent(extractFirstIdent(rest))
+	if ref == "" {
+		return "", ""
+	}
+	if dot := strings.Index(ref, "."); dot >= 0 {
+		return ref[:dot], ref[dot+1:]
+	}
+	return "", ref
+}
+
+// resolveFKTarget looks up the FK target in idx, falling back to the referencing
+// table's own schema when the source wrote an unqualified reference. Returns the
+// resolved index key and whether a hit was found.
+func resolveFKTarget(idx map[string]int, refSchema, refTable, ownSchema string) (string, bool) {
+	if refSchema != "" {
+		key := refSchema + "." + refTable
+		if _, ok := idx[key]; ok {
+			return key, true
+		}
+		return "", false
+	}
+	if _, ok := idx[refTable]; ok {
+		return refTable, true
+	}
+	if ownSchema != "" {
+		key := ownSchema + "." + refTable
+		if _, ok := idx[key]; ok {
+			return key, true
+		}
+	}
+	return "", false
 }
 
 // extractFirstIdent reads the leading identifier (possibly schema."name" or "schema"."name")
