@@ -1,0 +1,35 @@
+-- DPG Example: Schema with intentional lint issues
+-- Demonstrates the built-in linter catching common mistakes.
+
+SCHEMA public {
+    OWNER "postgres";
+
+    -- Rule: deprecated — this table is marked for removal.
+    TABLE legacy_sessions (
+        id         BIGINT GENERATED ALWAYS AS IDENTITY,
+        token      TEXT NOT NULL,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        CONSTRAINT pk_legacy_sessions PRIMARY KEY (id)
+    )
+    {
+        DEPRECATED "Use the jwt_tokens table instead";
+    }
+
+    -- Rule: hardcoded-password — default value looks like a password literal.
+    TABLE service_accounts (
+        id       BIGINT GENERATED ALWAYS AS IDENTITY,
+        username TEXT   NOT NULL,
+        password TEXT   NOT NULL DEFAULT 'changeme',
+        CONSTRAINT pk_service_accounts PRIMARY KEY (id)
+    );
+
+    -- Rule: security-definer-search-path — SECURITY DEFINER without SET search_path.
+    -- The linter checks whether the function body contains "search_path".
+    FUNCTION unsafe_auth(p_user TEXT) RETURNS BOOLEAN
+    LANGUAGE plpgsql SECURITY DEFINER
+    AS $$
+    BEGIN
+        RETURN EXISTS (SELECT 1 FROM users WHERE email = p_user);
+    END;
+    $$;
+}

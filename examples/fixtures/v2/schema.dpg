@@ -1,0 +1,110 @@
+-- DPG Example: Evolved e-commerce schema (v2)
+-- Changes from v1:
+--   SAFE:        users.phone added
+--   SAFE:        order_items.notes added
+--   SAFE:        coupons table added
+--   DESTRUCTIVE: products.active dropped
+
+EXTENSION pgcrypto;
+
+ROLE app_readonly NOLOGIN
+{
+    COMMENT "Read-only access for analytics and reporting";
+}
+
+ROLE app_service LOGIN CONNECTION LIMIT 20
+{
+    COMMENT "Application service account";
+}
+
+SCHEMA public {
+    OWNER "postgres";
+
+    TABLE users (
+        id         BIGINT      GENERATED ALWAYS AS IDENTITY,
+        email      TEXT        NOT NULL,
+        full_name  TEXT        NOT NULL,
+        phone      TEXT,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        CONSTRAINT pk_users       PRIMARY KEY (id),
+        CONSTRAINT uq_users_email UNIQUE (email)
+    )
+    {
+        COMMENT "Registered user accounts";
+        INDICES {
+            idx_users_email (email);
+            idx_users_phone (phone) WHERE phone IS NOT NULL;
+        }
+        GRANTS { SELECT TO app_readonly; SELECT, INSERT, UPDATE TO app_service; }
+    }
+
+    TABLE products (
+        id          BIGINT  GENERATED ALWAYS AS IDENTITY,
+        name        TEXT    NOT NULL,
+        price_cents INTEGER NOT NULL,
+        CONSTRAINT pk_products PRIMARY KEY (id)
+    )
+    {
+        GRANTS { SELECT TO app_readonly; SELECT, INSERT, UPDATE TO app_service; }
+    }
+
+    TABLE orders (
+        id          BIGINT      GENERATED ALWAYS AS IDENTITY,
+        user_id     BIGINT      NOT NULL,
+        total_cents INTEGER     NOT NULL DEFAULT 0,
+        placed_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        CONSTRAINT pk_orders      PRIMARY KEY (id),
+        CONSTRAINT fk_orders_user FOREIGN KEY (user_id) REFERENCES users(id)
+    )
+    {
+        INDICES { idx_orders_user (user_id); idx_orders_placed (placed_at); }
+        GRANTS  { SELECT TO app_readonly; SELECT, INSERT, UPDATE TO app_service; }
+    }
+
+    TABLE order_items (
+        id          BIGINT  GENERATED ALWAYS AS IDENTITY,
+        order_id    BIGINT  NOT NULL,
+        product_id  BIGINT  NOT NULL,
+        quantity    INTEGER NOT NULL DEFAULT 1,
+        price_cents INTEGER NOT NULL,
+        notes       TEXT,
+        CONSTRAINT pk_order_items   PRIMARY KEY (id),
+        CONSTRAINT fk_items_order   FOREIGN KEY (order_id)   REFERENCES orders(id),
+        CONSTRAINT fk_items_product FOREIGN KEY (product_id) REFERENCES products(id)
+    )
+    {
+        GRANTS { SELECT TO app_readonly; SELECT, INSERT TO app_service; }
+    }
+
+    TABLE coupons (
+        id           BIGINT   GENERATED ALWAYS AS IDENTITY,
+        code         TEXT     NOT NULL,
+        discount_pct SMALLINT NOT NULL,
+        max_uses     INTEGER,
+        expires_at   TIMESTAMPTZ,
+        CONSTRAINT pk_coupons      PRIMARY KEY (id),
+        CONSTRAINT uq_coupons_code UNIQUE (code)
+    )
+    {
+        COMMENT "Promotional discount codes";
+        INDICES { idx_coupons_code (code); }
+        GRANTS  { SELECT TO app_readonly; SELECT, INSERT, UPDATE TO app_service; }
+    }
+
+    VIEW active_users AS
+        SELECT id, email, full_name, created_at
+        FROM users;
+    {
+        GRANTS { SELECT TO app_readonly; }
+    }
+
+    FUNCTION user_order_count(p_user_id BIGINT) RETURNS BIGINT
+    LANGUAGE sql STABLE
+    AS $$
+        SELECT COUNT(*) FROM orders WHERE user_id = p_user_id;
+    $$;
+    {
+        COMMENT "Returns the total number of orders placed by a user";
+        GRANTS  { EXECUTE TO app_service; }
+    }
+}
