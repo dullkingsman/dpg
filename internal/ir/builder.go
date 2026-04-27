@@ -180,11 +180,12 @@ func (b *Builder) buildTable(cs *pg_query.CreateStmt, block pipeline.BlockAST, p
 	for _, elt := range cs.TableElts {
 		switch e := elt.Node.(type) {
 		case *pg_query.Node_ColumnDef:
-			col, err := b.buildColumn(e.ColumnDef, pos)
+			col, promoted, err := b.buildColumn(e.ColumnDef, pos)
 			if err != nil {
 				return nil, err
 			}
 			tbl.Columns = append(tbl.Columns, col)
+			tbl.Constraints = append(tbl.Constraints, promoted...)
 		case *pg_query.Node_Constraint:
 			cst := buildConstraint(e.Constraint, pos)
 			tbl.Constraints = append(tbl.Constraints, cst)
@@ -232,7 +233,9 @@ func (b *Builder) buildForeignTable(cs *pg_query.CreateForeignTableStmt, block p
 	return t, nil
 }
 
-func (b *Builder) buildColumn(cd *pg_query.ColumnDef, pos pipeline.SourcePos) (*Column, error) {
+// buildColumn returns the Column and any table-level constraints promoted from
+// inline column syntax (PRIMARY KEY, UNIQUE, REFERENCES).
+func (b *Builder) buildColumn(cd *pg_query.ColumnDef, pos pipeline.SourcePos) (*Column, []*Constraint, error) {
 	col := &Column{
 		Name:   cd.Colname,
 		SrcPos: pos,
@@ -240,6 +243,8 @@ func (b *Builder) buildColumn(cd *pg_query.ColumnDef, pos pipeline.SourcePos) (*
 	if cd.TypeName != nil {
 		col.Type = typeNameToRef(cd.TypeName)
 	}
+
+	var promoted []*Constraint
 
 	for _, cn := range cd.Constraints {
 		cst := cn.GetConstraint()
@@ -249,24 +254,99 @@ func (b *Builder) buildColumn(cd *pg_query.ColumnDef, pos pipeline.SourcePos) (*
 		switch cst.Contype {
 		case pg_query.ConstrType_CONSTR_NOTNULL:
 			col.NotNull = true
+
 		case pg_query.ConstrType_CONSTR_DEFAULT:
 			if cst.RawExpr != nil {
 				raw := nodeToText(cst.RawExpr)
 				col.Default = &raw
 			}
+
 		case pg_query.ConstrType_CONSTR_GENERATED:
-			// GENERATED ALWAYS AS (expr) STORED
 			if cst.RawExpr != nil {
 				expr := nodeToText(cst.RawExpr)
 				col.Generated = &Generated{Expr: expr, Stored: true}
 			}
+
 		case pg_query.ConstrType_CONSTR_IDENTITY:
-			// GENERATED [ALWAYS|BY DEFAULT] AS IDENTITY: GeneratedWhen = "a" or "d"
 			col.Identity = &Identity{Always: cst.GeneratedWhen == "a"}
+
+		case pg_query.ConstrType_CONSTR_PRIMARY:
+			// Inline PRIMARY KEY — promote to a table-level constraint.
+			tc := &Constraint{
+				Name:              cst.Conname,
+				Type:              "PRIMARY KEY",
+				Columns:           []string{cd.Colname},
+				Deferrable:        cst.Deferrable,
+				InitiallyDeferred: cst.Initdeferred,
+				Pos:               pos,
+			}
+			tc.Expr = "PRIMARY KEY (" + quoteIdent(cd.Colname) + ")"
+			promoted = append(promoted, tc)
+
+		case pg_query.ConstrType_CONSTR_UNIQUE:
+			// Inline UNIQUE — promote to a table-level constraint.
+			tc := &Constraint{
+				Name:              cst.Conname,
+				Type:              "UNIQUE",
+				Columns:           []string{cd.Colname},
+				Deferrable:        cst.Deferrable,
+				InitiallyDeferred: cst.Initdeferred,
+				Pos:               pos,
+			}
+			nd := ""
+			if cst.NullsNotDistinct {
+				nd = "NULLS NOT DISTINCT "
+			}
+			tc.Expr = "UNIQUE " + nd + "(" + quoteIdent(cd.Colname) + ")"
+			promoted = append(promoted, tc)
+
+		case pg_query.ConstrType_CONSTR_FOREIGN:
+			// Inline REFERENCES — promote to a table-level FK constraint.
+			refCols := nodeListToNames(cst.PkAttrs)
+			var fkBuf strings.Builder
+			fkBuf.WriteString("FOREIGN KEY (")
+			fkBuf.WriteString(quoteIdent(cd.Colname))
+			fkBuf.WriteString(") REFERENCES ")
+			if cst.Pktable != nil {
+				if cst.Pktable.Schemaname != "" {
+					fkBuf.WriteString(quoteIdent(cst.Pktable.Schemaname))
+					fkBuf.WriteByte('.')
+				}
+				fkBuf.WriteString(quoteIdent(cst.Pktable.Relname))
+			}
+			if len(refCols) > 0 {
+				fkBuf.WriteString(" (")
+				fkBuf.WriteString(strings.Join(quoteIdents(refCols), ", "))
+				fkBuf.WriteByte(')')
+			}
+			if action := fkAction(cst.FkUpdAction); action != "" {
+				fkBuf.WriteString(" ON UPDATE ")
+				fkBuf.WriteString(action)
+			}
+			if action := fkAction(cst.FkDelAction); action != "" {
+				fkBuf.WriteString(" ON DELETE ")
+				fkBuf.WriteString(action)
+			}
+			if cst.Deferrable {
+				fkBuf.WriteString(" DEFERRABLE")
+				if cst.Initdeferred {
+					fkBuf.WriteString(" INITIALLY DEFERRED")
+				}
+			}
+			tc := &Constraint{
+				Name:              cst.Conname,
+				Type:              "FOREIGN KEY",
+				Columns:           []string{cd.Colname},
+				Deferrable:        cst.Deferrable,
+				InitiallyDeferred: cst.Initdeferred,
+				Expr:              fkBuf.String(),
+				Pos:               pos,
+			}
+			promoted = append(promoted, tc)
 		}
 	}
 
-	return col, nil
+	return col, promoted, nil
 }
 
 func buildConstraint(c *pg_query.Constraint, pos pipeline.SourcePos) *Constraint {
@@ -280,26 +360,118 @@ func buildConstraint(c *pg_query.Constraint, pos pipeline.SourcePos) *Constraint
 	switch c.Contype {
 	case pg_query.ConstrType_CONSTR_PRIMARY:
 		cst.Type = "PRIMARY KEY"
+		cols := nodeListToNames(c.Keys)
+		cst.Columns = cols
+		if len(cols) > 0 {
+			cst.Expr = "PRIMARY KEY (" + strings.Join(quoteIdents(cols), ", ") + ")"
+		}
+
 	case pg_query.ConstrType_CONSTR_UNIQUE:
 		cst.Type = "UNIQUE"
+		cols := nodeListToNames(c.Keys)
+		cst.Columns = cols
+		if len(cols) > 0 {
+			nd := ""
+			if c.NullsNotDistinct {
+				nd = "NULLS NOT DISTINCT "
+			}
+			cst.Expr = "UNIQUE " + nd + "(" + strings.Join(quoteIdents(cols), ", ") + ")"
+		}
+
 	case pg_query.ConstrType_CONSTR_CHECK:
 		cst.Type = "CHECK"
 		if c.RawExpr != nil {
-			cst.Expr = nodeToText(c.RawExpr)
+			expr := nodeToText(c.RawExpr)
+			cst.Expr = "CHECK (" + expr + ")"
 		}
+
 	case pg_query.ConstrType_CONSTR_FOREIGN:
 		cst.Type = "FOREIGN KEY"
+		localCols := nodeListToNames(c.FkAttrs)
+		refCols := nodeListToNames(c.PkAttrs)
+		cst.Columns = localCols
+		var b strings.Builder
+		b.WriteString("FOREIGN KEY (")
+		b.WriteString(strings.Join(quoteIdents(localCols), ", "))
+		b.WriteString(") REFERENCES ")
+		if c.Pktable != nil {
+			if c.Pktable.Schemaname != "" {
+				b.WriteString(quoteIdent(c.Pktable.Schemaname))
+				b.WriteByte('.')
+			}
+			b.WriteString(quoteIdent(c.Pktable.Relname))
+		}
+		if len(refCols) > 0 {
+			b.WriteString(" (")
+			b.WriteString(strings.Join(quoteIdents(refCols), ", "))
+			b.WriteByte(')')
+		}
+		if action := fkAction(c.FkUpdAction); action != "" {
+			b.WriteString(" ON UPDATE ")
+			b.WriteString(action)
+		}
+		if action := fkAction(c.FkDelAction); action != "" {
+			b.WriteString(" ON DELETE ")
+			b.WriteString(action)
+		}
+		if c.Deferrable {
+			b.WriteString(" DEFERRABLE")
+			if c.Initdeferred {
+				b.WriteString(" INITIALLY DEFERRED")
+			}
+		}
+		cst.Expr = b.String()
+
 	case pg_query.ConstrType_CONSTR_EXCLUSION:
 		cst.Type = "EXCLUDE"
+		cst.Expr = "EXCLUDE" // full exclusion body is complex; preserve via rawSQL if needed
 	default:
 		cst.Type = "UNKNOWN"
 	}
-	for _, k := range c.Keys {
-		if sv := k.GetString_(); sv != nil {
-			cst.Columns = append(cst.Columns, sv.Sval)
+	return cst
+}
+
+// quoteIdent double-quotes a SQL identifier, escaping embedded quotes.
+func quoteIdent(s string) string {
+	return `"` + strings.ReplaceAll(s, `"`, `""`) + `"`
+}
+
+// nodeListToNames extracts string values from a pg_query Node list (Keys, FkAttrs, etc.).
+func nodeListToNames(nodes []*pg_query.Node) []string {
+	names := make([]string, 0, len(nodes))
+	for _, n := range nodes {
+		if sv := n.GetString_(); sv != nil {
+			names = append(names, sv.Sval)
 		}
 	}
-	return cst
+	return names
+}
+
+// quoteIdents returns a slice of double-quoted identifiers.
+func quoteIdents(names []string) []string {
+	out := make([]string, len(names))
+	for i, n := range names {
+		out[i] = quoteIdent(n)
+	}
+	return out
+}
+
+// fkAction converts a pg_query FK action char to its SQL keyword.
+// Returns "" for NO ACTION (the PostgreSQL default) to keep DDL concise.
+func fkAction(action string) string {
+	switch action {
+	case "a", "": // NO ACTION is the default; omit it
+		return ""
+	case "r":
+		return "RESTRICT"
+	case "c":
+		return "CASCADE"
+	case "n":
+		return "SET NULL"
+	case "d":
+		return "SET DEFAULT"
+	}
+	return ""
 }
 
 func buildPartitionSpec(ps *pg_query.PartitionSpec) *PartitionSpec {
