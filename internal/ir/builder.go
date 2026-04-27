@@ -32,58 +32,137 @@ func (b *Builder) Build(pg pipeline.PGParseResult, block pipeline.BlockAST) (pip
 	}
 	pos := pg.Pos
 
+	var obj pipeline.IRObject
+	var err error
 	switch n := node.Node.(type) {
 	case *pg_query.Node_CreateStmt:
-		return b.buildTable(n.CreateStmt, block, pos, false, false)
+		obj, err = b.buildTable(n.CreateStmt, block, pos, false, false)
 	case *pg_query.Node_CreateForeignTableStmt:
-		return b.buildForeignTable(n.CreateForeignTableStmt, block, pos)
+		obj, err = b.buildForeignTable(n.CreateForeignTableStmt, block, pos)
 	case *pg_query.Node_ViewStmt:
-		return b.buildView(n.ViewStmt, block, pos, false, false)
+		obj, err = b.buildView(n.ViewStmt, block, pos, false, false)
 	case *pg_query.Node_CreateFunctionStmt:
-		return b.buildFunction(n.CreateFunctionStmt, pg, block, pos)
+		obj, err = b.buildFunction(n.CreateFunctionStmt, pg, block, pos)
 	case *pg_query.Node_CreateEnumStmt:
-		return b.buildEnum(n.CreateEnumStmt, block, pos)
+		obj, err = b.buildEnum(n.CreateEnumStmt, block, pos)
 	case *pg_query.Node_CreateSchemaStmt:
-		return b.buildSchema(n.CreateSchemaStmt, block, pos)
+		obj, err = b.buildSchema(n.CreateSchemaStmt, block, pos)
 	case *pg_query.Node_CreateExtensionStmt:
-		return b.buildExtension(n.CreateExtensionStmt, block, pos)
+		obj, err = b.buildExtension(n.CreateExtensionStmt, block, pos)
 	case *pg_query.Node_CreateSeqStmt:
-		return b.buildSequence(n.CreateSeqStmt, block, pos)
+		obj, err = b.buildSequence(n.CreateSeqStmt, block, pos)
 	case *pg_query.Node_CreateRoleStmt:
-		return b.buildRole(n.CreateRoleStmt, block, pos)
+		obj, err = b.buildRole(n.CreateRoleStmt, block, pos)
 	case *pg_query.Node_CreateTableSpaceStmt:
-		return b.buildTablespace(n.CreateTableSpaceStmt, block, pos, rawSQL(node))
+		obj, err = b.buildTablespace(n.CreateTableSpaceStmt, block, pos, rawSQL(node))
 	case *pg_query.Node_CreateFdwStmt:
-		return b.buildFDW(n.CreateFdwStmt, block, pos, rawSQL(node))
+		obj, err = b.buildFDW(n.CreateFdwStmt, block, pos, rawSQL(node))
 	case *pg_query.Node_CreateForeignServerStmt:
-		return b.buildServer(n.CreateForeignServerStmt, block, pos, rawSQL(node))
+		obj, err = b.buildServer(n.CreateForeignServerStmt, block, pos, rawSQL(node))
 	case *pg_query.Node_CreateUserMappingStmt:
-		return b.buildUserMapping(n.CreateUserMappingStmt, block, pos, rawSQL(node))
+		obj, err = b.buildUserMapping(n.CreateUserMappingStmt, block, pos, rawSQL(node))
 	case *pg_query.Node_CreatePublicationStmt:
-		return b.buildOpaque(node, block, pos, "PUBLICATION")
+		obj, err = b.buildOpaque(node, block, pos, "PUBLICATION")
 	case *pg_query.Node_CreateSubscriptionStmt:
-		return b.buildOpaque(node, block, pos, "SUBSCRIPTION")
+		obj, err = b.buildOpaque(node, block, pos, "SUBSCRIPTION")
 	case *pg_query.Node_CreateEventTrigStmt:
-		return b.buildOpaque(node, block, pos, "EVENT TRIGGER")
+		obj, err = b.buildOpaque(node, block, pos, "EVENT TRIGGER")
 	case *pg_query.Node_DefineStmt:
-		return b.buildDefineStmt(n.DefineStmt, block, pos)
+		obj, err = b.buildDefineStmt(n.DefineStmt, block, pos)
 	case *pg_query.Node_CreateDomainStmt:
-		return b.buildDomain(n.CreateDomainStmt, block, pos)
+		obj, err = b.buildDomain(n.CreateDomainStmt, block, pos, rawSQL(node))
 	case *pg_query.Node_CreateOpClassStmt:
-		return b.buildOpaque(node, block, pos, "OPERATOR CLASS")
+		obj, err = b.buildOpaque(node, block, pos, "OPERATOR CLASS")
 	case *pg_query.Node_CreateOpFamilyStmt:
-		return b.buildOpaque(node, block, pos, "OPERATOR FAMILY")
+		obj, err = b.buildOpaque(node, block, pos, "OPERATOR FAMILY")
 	case *pg_query.Node_CreateStatsStmt:
-		return b.buildStatistics(n.CreateStatsStmt, block, pos)
+		obj, err = b.buildStatistics(n.CreateStatsStmt, block, pos)
 	case *pg_query.Node_AlterDefaultPrivilegesStmt:
-		return b.buildDefaultPrivileges(n.AlterDefaultPrivilegesStmt, block, pos)
+		obj, err = b.buildDefaultPrivileges(n.AlterDefaultPrivilegesStmt, block, pos)
 	case *pg_query.Node_CreateOpClassItem:
-		return b.buildOpaque(node, block, pos, "OPERATOR")
+		obj, err = b.buildOpaque(node, block, pos, "OPERATOR")
 	case *pg_query.Node_CreateCastStmt:
-		return b.buildCast(n.CreateCastStmt, block, pos, rawSQL(node))
+		obj, err = b.buildCast(n.CreateCastStmt, block, pos, rawSQL(node))
 	default:
-		// Generic fallback: store as opaque with qualified name from block or pos.
-		return &OpaqueObject{kind: "UNKNOWN", body: "", SrcPos: pos}, nil
+		obj = &OpaqueObject{kind: "UNKNOWN", body: "", SrcPos: pos}
+	}
+	if err != nil {
+		return nil, err
+	}
+	if pg.SchemaContext != "" && obj != nil {
+		applySchemaContext(obj, pg.SchemaContext)
+	}
+	return obj, nil
+}
+
+// applySchemaContext sets the Schema field on schema-scoped IR objects when it
+// is empty, using the enclosing SCHEMA { } block's name as the context.
+func applySchemaContext(obj pipeline.IRObject, schema string) {
+	switch o := obj.(type) {
+	case *Table:
+		if o.Schema == "" {
+			o.Schema = schema
+		}
+	case *View:
+		if o.Schema == "" {
+			o.Schema = schema
+		}
+	case *Function:
+		if o.Schema == "" {
+			o.Schema = schema
+		}
+	case *Procedure:
+		if o.Schema == "" {
+			o.Schema = schema
+		}
+	case *Type:
+		if o.Schema == "" {
+			o.Schema = schema
+		}
+	case *Sequence:
+		if o.Schema == "" {
+			o.Schema = schema
+		}
+	case *Aggregate:
+		if o.Schema == "" {
+			o.Schema = schema
+		}
+	case *Operator:
+		if o.Schema == "" {
+			o.Schema = schema
+		}
+	case *Collation:
+		if o.Schema == "" {
+			o.Schema = schema
+		}
+	case *TSConfig:
+		if o.Schema == "" {
+			o.Schema = schema
+		}
+	case *TSDict:
+		if o.Schema == "" {
+			o.Schema = schema
+		}
+	case *TSParser:
+		if o.Schema == "" {
+			o.Schema = schema
+		}
+	case *TSTemplate:
+		if o.Schema == "" {
+			o.Schema = schema
+		}
+	case *StatisticsObject:
+		if o.Schema == "" {
+			o.Schema = schema
+		}
+	case *OperatorClass:
+		if o.Schema == "" {
+			o.Schema = schema
+		}
+	case *OperatorFamily:
+		if o.Schema == "" {
+			o.Schema = schema
+		}
 	}
 }
 
@@ -697,12 +776,13 @@ func (b *Builder) buildUserMapping(cs *pg_query.CreateUserMappingStmt, block pip
 
 // ── Domain ────────────────────────────────────────────────────────────────────
 
-func (b *Builder) buildDomain(cs *pg_query.CreateDomainStmt, block pipeline.BlockAST, pos pipeline.SourcePos) (pipeline.IRObject, error) {
+func (b *Builder) buildDomain(cs *pg_query.CreateDomainStmt, block pipeline.BlockAST, pos pipeline.SourcePos, body string) (pipeline.IRObject, error) {
 	schema, name := extractTypeName(cs.Domainname)
 	t := &Type{
 		Schema:  schema,
 		Name:    name,
 		Variant: "DOMAIN",
+		Body:    body,
 		SrcPos:  pos,
 	}
 	if block.Comment != nil {

@@ -65,6 +65,7 @@ func Compile(files []string, reg *pipeline.Registry) ([]pipeline.IRObject, error
 	var irObjects []pipeline.IRObject
 	for _, raw := range rawObjects {
 		pgResult, pgErr := pgParser.Parse(raw.Kind, raw.Part1, raw.Pos)
+		pgResult.SchemaContext = raw.Schema
 		if pgErr != nil {
 			if ce, ok := pgErr.(*pipeline.CompilerError); ok {
 				diags = append(diags, ce)

@@ -200,6 +200,10 @@ type DiffOp interface {
 type PGParseResult struct {
 	Raw any
 	Pos SourcePos
+	// SchemaContext is the enclosing SCHEMA name when this object was declared
+	// inside a SCHEMA { } block. The IR builder uses it as a schema fallback
+	// for objects whose Part1 text has no schema qualifier.
+	SchemaContext string
 }
 
 // IRObject is the common interface for all fully-resolved internal representation

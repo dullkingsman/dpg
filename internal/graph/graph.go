@@ -5,6 +5,7 @@ package graph
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 
 	"github.com/dullkingsman/dpg/internal/ir"
@@ -37,10 +38,33 @@ func (r *Resolver) Sort(objects []pipeline.IRObject) ([]pipeline.IRObject, error
 		idx[obj.QualifiedName()] = i
 	}
 
-	// Build adjacency: edges[i] = set of j that i depends on (j must come before i).
+	// edges[i] = set of j where i must come BEFORE j (i → j).
+	// Equivalently: j depends on i.
 	edges := make([]map[int]bool, n)
 	for i := range edges {
 		edges[i] = make(map[int]bool)
+	}
+
+	// mustPrecede(before, after) records that `before` must be emitted before `after`.
+	mustPrecede := func(before, after int) {
+		if before != after {
+			edges[before][after] = true
+		}
+	}
+
+	// dependsOn(obj, dep) records that obj depends on dep (dep must come first).
+	dependsOn := func(obj, dep int) {
+		mustPrecede(dep, obj)
+	}
+
+	// schemaEdge adds a dependency from a schema-scoped object to its schema.
+	schemaEdge := func(objIdx int, schema string) {
+		if schema == "" {
+			return
+		}
+		if schemaIdx, ok := idx[schema]; ok {
+			dependsOn(objIdx, schemaIdx)
+		}
 	}
 
 	// Circular FK edges that can be deferred.
@@ -50,52 +74,98 @@ func (r *Resolver) Sort(objects []pipeline.IRObject) ([]pipeline.IRObject, error
 	}
 	var deferred []deferredFK
 
-	addEdge := func(from, to int) {
-		if from != to {
-			edges[from][to] = true
-		}
-	}
-
 	for i, obj := range objects {
 		switch o := obj.(type) {
 		case *ir.Table:
-			// FK constraints → referenced table.
-			for _, cst := range o.Constraints {
-				if cst.Type == "FOREIGN KEY" && cst.Name != "" {
-					// Try to identify the referenced table from the constraint Expr.
-					// The Expr for FK is the raw text like "REFERENCES foo (id)".
-					ref := extractFKRef(cst.Expr)
-					if ref != "" {
-						if j, ok := idx[ref]; ok {
-							addEdge(i, j)
-						}
-					}
-				}
-			}
-			// Columns referencing custom types.
+			// Table depends on its schema.
+			schemaEdge(i, o.Schema)
+
+			// Table depends on any custom types used in columns.
 			for _, col := range o.Columns {
 				if col.Type.Schema != "" && col.Type.Schema != "pg_catalog" {
 					typeKey := col.Type.Schema + "." + col.Type.Name
 					if j, ok := idx[typeKey]; ok {
-						addEdge(i, j)
+						dependsOn(i, j)
 					}
 				}
 			}
+
+			// Table depends on FK-referenced tables.
+			for _, cst := range o.Constraints {
+				if cst.Type == "FOREIGN KEY" {
+					ref := extractFKRef(cst.Expr)
+					if ref != "" {
+						if j, ok := idx[ref]; ok {
+							dependsOn(i, j)
+						} else if !strings.Contains(ref, ".") && o.Schema != "" {
+							// Unqualified reference — try with the table's own schema.
+							if j, ok := idx[o.Schema+"."+ref]; ok {
+								dependsOn(i, j)
+							}
+						}
+					}
+				}
+			}
+
 		case *ir.View:
-			// Heuristic: all tables must precede all views (query AST analysis deferred).
+			// View depends on its schema.
+			schemaEdge(i, o.Schema)
+			// Heuristic: all views depend on all tables (query AST analysis deferred).
 			for j, dep := range objects {
 				if j != i {
 					if _, ok := dep.(*ir.Table); ok {
-						addEdge(i, j)
+						dependsOn(i, j)
 					}
 				}
 			}
+
+		case *ir.Type:
+			// Type/domain/enum depends on its schema.
+			schemaEdge(i, o.Schema)
+
 		case *ir.Function:
-			_ = o
+			schemaEdge(i, o.Schema)
+
+		case *ir.Procedure:
+			schemaEdge(i, o.Schema)
+
+		case *ir.Aggregate:
+			schemaEdge(i, o.Schema)
+
+		case *ir.Sequence:
+			schemaEdge(i, o.Schema)
+
+		case *ir.Collation:
+			schemaEdge(i, o.Schema)
+
+		case *ir.Operator:
+			schemaEdge(i, o.Schema)
+
+		case *ir.OperatorClass:
+			schemaEdge(i, o.Schema)
+
+		case *ir.OperatorFamily:
+			schemaEdge(i, o.Schema)
+
+		case *ir.StatisticsObject:
+			schemaEdge(i, o.Schema)
+
+		case *ir.TSConfig:
+			schemaEdge(i, o.Schema)
+
+		case *ir.TSDict:
+			schemaEdge(i, o.Schema)
+
+		case *ir.TSParser:
+			schemaEdge(i, o.Schema)
+
+		case *ir.TSTemplate:
+			schemaEdge(i, o.Schema)
 		}
 	}
 
 	// Kahn's algorithm.
+	// inDegree[i] = number of objects that must come before i.
 	inDegree := make([]int, n)
 	for i := range edges {
 		for j := range edges[i] {
@@ -115,12 +185,17 @@ func (r *Resolver) Sort(objects []pipeline.IRObject) ([]pipeline.IRObject, error
 		cur := queue[0]
 		queue = queue[1:]
 		sorted = append(sorted, objects[cur])
+		var newlyReady []int
 		for j := range edges[cur] {
 			inDegree[j]--
 			if inDegree[j] == 0 {
-				queue = append(queue, j)
+				newlyReady = append(newlyReady, j)
 			}
 		}
+		// Sort by original position to make the output deterministic and stable
+		// (respects source file order as tiebreaker between independent objects).
+		sort.Ints(newlyReady)
+		queue = append(queue, newlyReady...)
 	}
 
 	if len(sorted) != n {
@@ -150,7 +225,6 @@ func (r *Resolver) Sort(objects []pipeline.IRObject) ([]pipeline.IRObject, error
 						ref := extractFKRef(cst.Expr)
 						if ref != "" {
 							if j, ok := idx[ref]; ok && cycleSet[j] {
-								// This is a circular FK — defer it.
 								deferred = append(deferred, deferredFK{table: tbl, fk: cst})
 								continue
 							}
@@ -158,21 +232,16 @@ func (r *Resolver) Sort(objects []pipeline.IRObject) ([]pipeline.IRObject, error
 					}
 					keepConstraints = append(keepConstraints, cst)
 				}
-				// Create a modified copy of the table without the circular FK.
 				tblCopy := *tbl
 				tblCopy.Constraints = keepConstraints
 				modified[i] = &tblCopy
 			}
 
-			// Re-sort without the circular FKs.
 			reResolved, err := (&Resolver{}).Sort(modified)
 			if err != nil {
-				// Still a cycle after removing circular FKs — fall back to original order.
 				return objects, nil
 			}
 
-			// Add the deferred FKs back to their tables in the sorted result so the
-			// differ can generate the ALTER TABLE ... ADD CONSTRAINT statements.
 			for _, df := range deferred {
 				for _, obj := range reResolved {
 					if t, ok := obj.(*ir.Table); ok && t.Schema == df.table.Schema && t.Name == df.table.Name {
@@ -203,7 +272,6 @@ func extractFKRef(expr string) string {
 		return ""
 	}
 	rest := strings.TrimSpace(expr[idx+len("REFERENCES"):])
-	// rest now starts with the table name, possibly schema-qualified.
 	parts := strings.Fields(rest)
 	if len(parts) == 0 {
 		return ""

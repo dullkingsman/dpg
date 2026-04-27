@@ -864,6 +864,25 @@ func createType(o *ir.Type) []pipeline.DiffOp {
 		}
 		b.WriteString(");")
 		ops = append(ops, safeOp(b.String(), o.SrcPos))
+	case "DOMAIN":
+		body := o.Body
+		// rawSQL produces "CREATE DOMAIN unqualname AS ..."; qualify the name when schema is set.
+		if o.Schema != "" && body != "" {
+			unqualPrefix := "CREATE DOMAIN " + o.Name
+			if strings.HasPrefix(body, unqualPrefix) {
+				body = "CREATE DOMAIN " + qualIdent(o.Schema, o.Name) + body[len(unqualPrefix):]
+			}
+		}
+		if body != "" {
+			ops = append(ops, safeOp(body+";", o.SrcPos))
+		}
+		if o.Comment != nil {
+			ops = append(ops, safeOp(
+				fmt.Sprintf("COMMENT ON DOMAIN %s IS %s;", qualIdent(o.Schema, o.Name), quoteLit(*o.Comment)),
+				o.SrcPos,
+			))
+		}
+		return ops
 	default:
 		if o.Body != "" {
 			ops = append(ops, safeOp(o.Body+";", o.SrcPos))
