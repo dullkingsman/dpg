@@ -263,20 +263,39 @@ func (r *Resolver) Sort(objects []pipeline.IRObject) ([]pipeline.IRObject, error
 	return sorted, nil
 }
 
-// extractFKRef extracts the referenced table name from a FK constraint Expr text.
-// The Expr looks like "FOREIGN KEY (col) REFERENCES schema.table (col2)".
+// extractFKRef extracts the referenced table's qualified name from a FK constraint
+// Expr. The Expr looks like `FOREIGN KEY ("col") REFERENCES "schema"."table" ("col2")`.
+// Returns the name in the unquoted form used as index keys (e.g. "schema.table" or "table").
 func extractFKRef(expr string) string {
 	upper := strings.ToUpper(expr)
-	idx := strings.Index(upper, "REFERENCES")
-	if idx < 0 {
+	i := strings.Index(upper, "REFERENCES")
+	if i < 0 {
 		return ""
 	}
-	rest := strings.TrimSpace(expr[idx+len("REFERENCES"):])
-	parts := strings.Fields(rest)
-	if len(parts) == 0 {
-		return ""
+	rest := strings.TrimSpace(expr[i+len("REFERENCES"):])
+	// rest starts with the (possibly schema-qualified, possibly quoted) table name,
+	// followed by optional column list and action clauses.
+	// Extract the first "token" which may be "schema"."table" or "schema.table".
+	ref := extractFirstIdent(rest)
+	return unquoteIdent(ref)
+}
+
+// extractFirstIdent reads the leading identifier (possibly schema."name" or "schema"."name")
+// stopping before the first space or '('.
+func extractFirstIdent(s string) string {
+	end := strings.IndexAny(s, " \t\n(")
+	if end < 0 {
+		return s
 	}
-	return parts[0]
+	return s[:end]
+}
+
+// unquoteIdent removes double-quotes from a (possibly schema-qualified) identifier
+// and returns the canonical "schema.name" or "name" form used in the dependency index.
+func unquoteIdent(s string) string {
+	s = strings.ReplaceAll(s, `""`, `"`) // unescape embedded double-quotes
+	s = strings.ReplaceAll(s, `"`, "")   // strip delimiter quotes
+	return s
 }
 
 // findCycle finds nodes involved in a cycle using DFS.
