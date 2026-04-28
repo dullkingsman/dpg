@@ -1371,45 +1371,61 @@ func diffColumns(tbl string, o *ir.Table, snap *snapshot.SnapTable) []pipeline.D
 func diffConstraints(tbl string, o *ir.Table, snap *snapshot.SnapTable, pos pipeline.SourcePos) []pipeline.DiffOp {
 	var ops []pipeline.DiffOp
 
-	snapByName := make(map[string]*snapshot.SnapConstraint, len(snap.Constraints))
-	for i := range snap.Constraints {
-		if snap.Constraints[i].Name != "" {
-			snapByName[snap.Constraints[i].Name] = &snap.Constraints[i]
+	// Inline constraints (e.g. `id BIGINT PRIMARY KEY`) have no user-supplied
+	// name, so matching by name alone would treat them as new on every run.
+	// Fall back to a signature derived from type + normalized expression.
+	key := func(name, typ, expr string) string {
+		if name != "" {
+			return "n:" + name
 		}
-	}
-	desiredByName := make(map[string]*ir.Constraint, len(o.Constraints))
-	for _, c := range o.Constraints {
-		if c.Name != "" {
-			desiredByName[c.Name] = c
-		}
+		return "s:" + typ + "|" + normalizeWS(expr)
 	}
 
-	for _, sc := range snap.Constraints {
-		if sc.Name == "" {
+	snapByKey := make(map[string]*snapshot.SnapConstraint, len(snap.Constraints))
+	for i := range snap.Constraints {
+		sc := &snap.Constraints[i]
+		snapByKey[key(sc.Name, sc.Type, sc.Expr)] = sc
+	}
+	desiredByKey := make(map[string]*ir.Constraint, len(o.Constraints))
+	for _, c := range o.Constraints {
+		desiredByKey[key(c.Name, c.Type, c.Expr)] = c
+	}
+
+	for i := range snap.Constraints {
+		sc := &snap.Constraints[i]
+		if _, ok := desiredByKey[key(sc.Name, sc.Type, sc.Expr)]; ok {
 			continue
 		}
-		if _, ok := desiredByName[sc.Name]; !ok {
+		if sc.Name == "" {
+			// Cannot DROP CONSTRAINT without a name; surface a manual notice.
 			ops = append(ops, destructiveOp(
-				fmt.Sprintf("ALTER TABLE %s DROP CONSTRAINT %s;", tbl, quoteIdent(sc.Name)),
+				fmt.Sprintf("-- WARNING: unnamed constraint on %s (%s %s) is no longer in desired; drop it manually",
+					tbl, sc.Type, sc.Expr),
 				pos,
 			))
+			continue
 		}
+		ops = append(ops, destructiveOp(
+			fmt.Sprintf("ALTER TABLE %s DROP CONSTRAINT %s;", tbl, quoteIdent(sc.Name)),
+			pos,
+		))
 	}
 	for _, c := range o.Constraints {
-		if _, exists := snapByName[c.Name]; !exists {
-			notValid := ""
-			if c.NotValid {
-				notValid = " NOT VALID"
-			}
-			var sql string
-			if c.Name != "" {
-				sql = fmt.Sprintf("ALTER TABLE %s ADD CONSTRAINT %s %s%s;",
-					tbl, quoteIdent(c.Name), c.Expr, notValid)
-			} else {
-				sql = fmt.Sprintf("ALTER TABLE %s ADD %s%s;", tbl, c.Expr, notValid)
-			}
-			ops = append(ops, cautionOp(sql, c.Pos))
+		if _, exists := snapByKey[key(c.Name, c.Type, c.Expr)]; exists {
+			continue
 		}
+		notValid := ""
+		if c.NotValid {
+			notValid = " NOT VALID"
+		}
+		var sql string
+		if c.Name != "" {
+			sql = fmt.Sprintf("ALTER TABLE %s ADD CONSTRAINT %s %s%s;",
+				tbl, quoteIdent(c.Name), c.Expr, notValid)
+		} else {
+			sql = fmt.Sprintf("ALTER TABLE %s ADD %s%s;", tbl, c.Expr, notValid)
+		}
+		ops = append(ops, cautionOp(sql, c.Pos))
 	}
 	return ops
 }
