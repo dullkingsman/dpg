@@ -63,11 +63,25 @@ func (d *Differ) Diff(desired []pipeline.IRObject, snap *pipeline.Snapshot) ([]p
 	consumed := make(map[string]bool)
 
 	// Pass 1: handle object renames.
-	// A rename is detected when desired has RenamedFrom and the snapshot has the
-	// old key but not the new key. Per RFC §7.4 step 5, a RENAMED FROM that
-	// names something not in the snapshot is a compiler error — once the rename
-	// has been applied (and the snapshot updated), the directive must be
-	// removed; otherwise this would silently degrade into a fresh CREATE.
+	//
+	// A rename is detected when desired has RenamedFrom, the snapshot has the
+	// OLD key, and the snapshot does NOT yet have the NEW key. After a rename
+	// is applied, the snapshot is rewritten to use the new key — so on every
+	// subsequent run the new key IS present and the old key is gone. RFC §7.4
+	// step 5 says a stale RENAMED FROM is a compiler error; the trick is to
+	// distinguish "stale because user typo'd" from "stale because the rename
+	// already happened." We use the new key's presence as the discriminator:
+	//
+	//   • new in snap                → rename already landed (or no-op); skip
+	//                                   directive validation, fall through to
+	//                                   the normal alter pipeline.
+	//   • new not in snap, old in    → State A, fresh rename; emit it.
+	//   • new not in snap, old not   → State C, stale/typo'd directive on a
+	//                                   brand-new object; error.
+	//
+	// State D (both in snap, e.g. a hand-edited snapshot or a partial apply)
+	// is intentionally NOT an error: the new key already exists, so we treat
+	// it as a post-apply state and let Pass 2 drop the orphaned old key.
 	for _, obj := range desired {
 		oldKey := renamedFromKey(obj)
 		if oldKey == "" {
@@ -80,14 +94,14 @@ func (d *Differ) Diff(desired []pipeline.IRObject, snap *pipeline.Snapshot) ([]p
 		var newSnap snapshot.SnapObject
 		newFound, _ := snap.GetObject(newKey, &newSnap)
 
+		if newFound {
+			// Post-apply (or State D): nothing to rename. Don't consume the
+			// old key — if it still exists in snap, Pass 2 will drop it.
+			continue
+		}
 		if !oldFound {
 			return nil, pipeline.Errorf(obj.Pos(),
-				"RENAMED FROM %q on %s %q does not match the snapshot — no such object exists. Remove RENAMED FROM if this is a genuinely new object.",
-				oldKey, describeKind(obj), newKey)
-		}
-		if newFound {
-			return nil, pipeline.Errorf(obj.Pos(),
-				"RENAMED FROM %q on %s %q conflicts with an existing snapshot entry under the new name. A rename requires the new name to be free.",
+				"RENAMED FROM %q on %s %q does not match the snapshot — neither the old nor the new name exists there. Remove RENAMED FROM if this is a genuinely new object.",
 				oldKey, describeKind(obj), newKey)
 		}
 		consumed[oldKey] = true
@@ -1265,11 +1279,14 @@ func diffTable(o *ir.Table, snap *snapshot.SnapTable) ([]pipeline.DiffOp, error)
 // use these so a column rename doesn't fabricate spurious drop/recreate pairs,
 // and so PG-cascaded objects on dropped columns aren't double-emitted.
 //
-// Per RFC §7.4 step 5, a RENAMED FROM whose source column isn't in the
-// snapshot is a compiler error. Silently treating it as a fresh ADD COLUMN
-// (the prior behaviour) hides typos and means stale rename directives just
-// degrade into add-then-keep, which is exactly what the directive is meant
-// to prevent.
+// RENAMED FROM is validated using the same logic as object-level renames in
+// Diff(): the new column's presence in the snapshot is the discriminator
+// between "stale typo" and "rename already applied". The snapshot is rewritten
+// after every apply (see snapshot.Populate) so the new column appears there
+// from the next plan onward — erroring on a missing OLD name without checking
+// for the NEW name would make every directive a one-shot. The collision check
+// (RENAMED FROM names a column ALSO present in the desired DDL) stays
+// snapshot-independent because it's incoherent intent regardless of state.
 func diffColumns(tbl string, o *ir.Table, snap *snapshot.SnapTable) ([]pipeline.DiffOp, map[string]string, map[string]bool, error) {
 	var ops []pipeline.DiffOp
 
@@ -1289,14 +1306,25 @@ func diffColumns(tbl string, o *ir.Table, snap *snapshot.SnapTable) ([]pipeline.
 		if col.RenamedFrom == nil {
 			continue
 		}
-		if _, ok := snapByName[*col.RenamedFrom]; !ok {
+		if desiredHasName[*col.RenamedFrom] {
+			// Caught even in post-apply state: the user listed both old and
+			// new in the table's ( ) section while also asserting a rename.
+			// Snapshot state can't disambiguate this — it's always wrong.
 			return nil, nil, nil, pipeline.Errorf(col.SrcPos,
-				"RENAMED FROM %q on column %q in %s does not match the snapshot — no such column exists. Remove RENAMED FROM if this is a genuinely new column.",
+				"RENAMED FROM %q on column %q in %s collides with another column of the same name in the desired DDL. Remove the stale column from the table's ( ) list.",
 				*col.RenamedFrom, col.Name, tbl)
 		}
-		if desiredHasName[*col.RenamedFrom] {
+		_, oldInSnap := snapByName[*col.RenamedFrom]
+		_, newInSnap := snapByName[col.Name]
+		if newInSnap {
+			// Post-apply / no-op state: the snapshot already has the new
+			// name. Don't add to the rename map (no SQL needed) and don't
+			// validate the directive — the rename has already happened.
+			continue
+		}
+		if !oldInSnap {
 			return nil, nil, nil, pipeline.Errorf(col.SrcPos,
-				"RENAMED FROM %q on column %q in %s collides with another column in the desired DDL of the same name. Remove the stale column from the table's ( ) list.",
+				"RENAMED FROM %q on column %q in %s does not match the snapshot — neither the old nor the new name exists there. Remove RENAMED FROM if this is a genuinely new column.",
 				*col.RenamedFrom, col.Name, tbl)
 		}
 		renamedFrom[*col.RenamedFrom] = col.Name

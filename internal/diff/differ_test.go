@@ -513,10 +513,38 @@ func TestDiffTableRenameMissingSnapshotErrors(t *testing.T) {
 	}
 }
 
-// TestDiffTableRenameNewNameCollidesErrors guards the symmetric case: the new
-// name already exists in the snapshot. A rename can't proceed without a free
-// landing spot.
-func TestDiffTableRenameNewNameCollidesErrors(t *testing.T) {
+// TestDiffTableRenamePostApplyIsNoop verifies the post-apply state: once the
+// rename has run and the snapshot has been rewritten to the new name, leaving
+// RENAMED FROM in the source must not error and must not regenerate the
+// rename. Without this, every directive would become a one-shot that the user
+// has to remove after applying — defeating the point of declarative state.
+func TestDiffTableRenamePostApplyIsNoop(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.accounts", &snapshot.SnapObject{
+		Kind:  "table",
+		Table: &snapshot.SnapTable{Schema: "public", Name: "accounts"},
+	})
+	stale := "users" // already-applied rename: not in snapshot
+	desired := []pipeline.IRObject{
+		&ir.Table{Schema: "public", Name: "accounts", RenamedFrom: &stale},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatalf("expected no error in post-apply state, got: %v", err)
+	}
+	for _, o := range ops {
+		if strings.Contains(o.SQL(), "RENAME TO") {
+			t.Errorf("did not expect a RENAME TO op in post-apply state, got: %s", o.SQL())
+		}
+	}
+}
+
+// TestDiffTableRenameStateDDropsOrphan verifies the symmetric case: snapshot
+// has both the old and new names (a partial apply or hand-edited snapshot).
+// Old behaviour erred. New behaviour treats it as cleanup — Pass 2 drops the
+// orphaned old name, Pass 3 diffs the new one.
+func TestDiffTableRenameStateDDropsOrphan(t *testing.T) {
 	d := New()
 	snap := &pipeline.Snapshot{}
 	_ = snap.SetObject("public.users", &snapshot.SnapObject{
@@ -531,12 +559,62 @@ func TestDiffTableRenameNewNameCollidesErrors(t *testing.T) {
 	desired := []pipeline.IRObject{
 		&ir.Table{Schema: "public", Name: "accounts", RenamedFrom: &stale},
 	}
-	_, err := d.Diff(desired, snap)
-	if err == nil {
-		t.Fatal("expected diff error for rename collision, got nil")
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatalf("expected no error for State D, got: %v", err)
 	}
-	if !strings.Contains(err.Error(), "conflicts") {
-		t.Errorf("error missing expected substring 'conflicts': %s", err.Error())
+	var sawDropUsers bool
+	for _, o := range ops {
+		sql := o.SQL()
+		if strings.Contains(sql, "DROP TABLE") && strings.Contains(sql, `"users"`) {
+			sawDropUsers = true
+		}
+		if strings.Contains(sql, "RENAME TO") {
+			t.Errorf("did not expect RENAME TO in State D, got: %s", sql)
+		}
+	}
+	if !sawDropUsers {
+		t.Errorf("expected DROP TABLE for orphaned users, got: %v", sqlList(ops))
+	}
+}
+
+// TestDiffColumnRenamePostApplyIsNoop is the column-level analogue: the rename
+// has been applied, the snapshot has the new column name, and RENAMED FROM is
+// still in the source. Must not error and must not emit a redundant
+// ALTER TABLE RENAME COLUMN.
+func TestDiffColumnRenamePostApplyIsNoop(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.users", &snapshot.SnapObject{
+		Kind: "table",
+		Table: &snapshot.SnapTable{
+			Schema: "public",
+			Name:   "users",
+			Columns: []snapshot.SnapColumn{
+				{Name: "id", Type: "bigint"},
+				{Name: "email_address", Type: "text"},
+			},
+		},
+	})
+	stale := "email"
+	desired := []pipeline.IRObject{
+		&ir.Table{
+			Schema: "public",
+			Name:   "users",
+			Columns: []*ir.Column{
+				{Name: "id", Type: ir.TypeRef{Name: "bigint"}},
+				{Name: "email_address", Type: ir.TypeRef{Name: "text"}, RenamedFrom: &stale},
+			},
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatalf("expected no error in column post-apply state, got: %v", err)
+	}
+	for _, o := range ops {
+		if strings.Contains(o.SQL(), "RENAME COLUMN") {
+			t.Errorf("did not expect RENAME COLUMN in post-apply state, got: %s", o.SQL())
+		}
 	}
 }
 
