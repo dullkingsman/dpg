@@ -458,6 +458,88 @@ func TestDiffRegistration(t *testing.T) {
 	}
 }
 
+// TestDiffColumnRenameMissingSnapshotErrors verifies RFC §7.4 step 5: a
+// RENAMED FROM that names a column the snapshot doesn't contain is a compiler
+// error rather than a silent fall-through to ADD COLUMN.
+func TestDiffColumnRenameMissingSnapshotErrors(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.users", &snapshot.SnapObject{
+		Kind: "table",
+		Table: &snapshot.SnapTable{
+			Schema:  "public",
+			Name:    "users",
+			Columns: []snapshot.SnapColumn{{Name: "id", Type: "bigint"}},
+		},
+	})
+	stale := "ghost_col" // not in snapshot
+	desired := []pipeline.IRObject{
+		&ir.Table{
+			Schema: "public",
+			Name:   "users",
+			Columns: []*ir.Column{
+				{Name: "id", Type: ir.TypeRef{Name: "bigint"}},
+				{Name: "email", Type: ir.TypeRef{Name: "text"}, RenamedFrom: &stale},
+			},
+		},
+	}
+	_, err := d.Diff(desired, snap)
+	if err == nil {
+		t.Fatal("expected diff error for stale RENAMED FROM, got nil")
+	}
+	for _, want := range []string{"RENAMED FROM", `"ghost_col"`, `"email"`} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error message missing %q: %s", want, err.Error())
+		}
+	}
+}
+
+// TestDiffTableRenameMissingSnapshotErrors verifies the same rule for table-
+// level RENAMED FROM directives. Without the guard, a stale rename silently
+// degrades to a CREATE TABLE that loses the link to the original.
+func TestDiffTableRenameMissingSnapshotErrors(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	stale := "ghost_table"
+	desired := []pipeline.IRObject{
+		&ir.Table{Schema: "public", Name: "accounts", RenamedFrom: &stale},
+	}
+	_, err := d.Diff(desired, snap)
+	if err == nil {
+		t.Fatal("expected diff error for stale table RENAMED FROM, got nil")
+	}
+	if !strings.Contains(err.Error(), "RENAMED FROM") || !strings.Contains(err.Error(), "ghost_table") {
+		t.Errorf("error missing expected substrings: %s", err.Error())
+	}
+}
+
+// TestDiffTableRenameNewNameCollidesErrors guards the symmetric case: the new
+// name already exists in the snapshot. A rename can't proceed without a free
+// landing spot.
+func TestDiffTableRenameNewNameCollidesErrors(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.users", &snapshot.SnapObject{
+		Kind:  "table",
+		Table: &snapshot.SnapTable{Schema: "public", Name: "users"},
+	})
+	_ = snap.SetObject("public.accounts", &snapshot.SnapObject{
+		Kind:  "table",
+		Table: &snapshot.SnapTable{Schema: "public", Name: "accounts"},
+	})
+	stale := "users"
+	desired := []pipeline.IRObject{
+		&ir.Table{Schema: "public", Name: "accounts", RenamedFrom: &stale},
+	}
+	_, err := d.Diff(desired, snap)
+	if err == nil {
+		t.Fatal("expected diff error for rename collision, got nil")
+	}
+	if !strings.Contains(err.Error(), "conflicts") {
+		t.Errorf("error missing expected substring 'conflicts': %s", err.Error())
+	}
+}
+
 // TestDiffColumnRenameKeepsConstraints verifies that a RENAMED FROM directive
 // doesn't manufacture a spurious drop+recreate of constraints whose snapshot
 // expression still references the pre-rename column name.

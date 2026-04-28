@@ -64,7 +64,10 @@ func (d *Differ) Diff(desired []pipeline.IRObject, snap *pipeline.Snapshot) ([]p
 
 	// Pass 1: handle object renames.
 	// A rename is detected when desired has RenamedFrom and the snapshot has the
-	// old key but not the new key.
+	// old key but not the new key. Per RFC §7.4 step 5, a RENAMED FROM that
+	// names something not in the snapshot is a compiler error — once the rename
+	// has been applied (and the snapshot updated), the directive must be
+	// removed; otherwise this would silently degrade into a fresh CREATE.
 	for _, obj := range desired {
 		oldKey := renamedFromKey(obj)
 		if oldKey == "" {
@@ -77,16 +80,24 @@ func (d *Differ) Diff(desired []pipeline.IRObject, snap *pipeline.Snapshot) ([]p
 		var newSnap snapshot.SnapObject
 		newFound, _ := snap.GetObject(newKey, &newSnap)
 
-		if oldFound && !newFound {
-			consumed[oldKey] = true
-			// Route to diffObject; individual diff functions emit RENAME when
-			// the snap name differs from the desired name.
-			alterOps, err := diffObject(obj, &oldSnap)
-			if err != nil {
-				return nil, err
-			}
-			ops = append(ops, alterOps...)
+		if !oldFound {
+			return nil, pipeline.Errorf(obj.Pos(),
+				"RENAMED FROM %q on %s %q does not match the snapshot — no such object exists. Remove RENAMED FROM if this is a genuinely new object.",
+				oldKey, describeKind(obj), newKey)
 		}
+		if newFound {
+			return nil, pipeline.Errorf(obj.Pos(),
+				"RENAMED FROM %q on %s %q conflicts with an existing snapshot entry under the new name. A rename requires the new name to be free.",
+				oldKey, describeKind(obj), newKey)
+		}
+		consumed[oldKey] = true
+		// Route to diffObject; individual diff functions emit RENAME when
+		// the snap name differs from the desired name.
+		alterOps, err := diffObject(obj, &oldSnap)
+		if err != nil {
+			return nil, err
+		}
+		ops = append(ops, alterOps...)
 	}
 
 	// Pass 2: drop objects in snapshot that are absent from desired and not consumed.
@@ -163,6 +174,23 @@ func qualKey(schema, name string) string {
 		return name
 	}
 	return schema + "." + name
+}
+
+// describeKind returns a lowercase noun for an IRObject — used in user-facing
+// error messages so "RENAMED FROM ..." failures name the kind concretely
+// ("table", "column", ...) instead of a generic "object".
+func describeKind(obj pipeline.IRObject) string {
+	switch obj.(type) {
+	case *ir.Table:
+		return "table"
+	case *ir.Schema:
+		return "schema"
+	case *ir.View:
+		return "view"
+	case *ir.Function:
+		return "function"
+	}
+	return "object"
 }
 
 // ── SQL identifier helpers ─────────────────────────────────────────────────────
@@ -936,7 +964,7 @@ func diffObject(desired pipeline.IRObject, snap *snapshot.SnapObject) ([]pipelin
 		if snap.Table == nil {
 			return nil, nil
 		}
-		return diffTable(o, snap.Table), nil
+		return diffTable(o, snap.Table)
 	case *ir.View:
 		if snap.View == nil {
 			return nil, nil
@@ -1185,7 +1213,7 @@ func diffType(o *ir.Type, snap *snapshot.SnapType) []pipeline.DiffOp {
 	return ops
 }
 
-func diffTable(o *ir.Table, snap *snapshot.SnapTable) []pipeline.DiffOp {
+func diffTable(o *ir.Table, snap *snapshot.SnapTable) ([]pipeline.DiffOp, error) {
 	var ops []pipeline.DiffOp
 	pos := o.SrcPos
 	tbl := qualIdent(o.Schema, o.Name)
@@ -1220,20 +1248,29 @@ func diffTable(o *ir.Table, snap *snapshot.SnapTable) []pipeline.DiffOp {
 		ops = append(ops, safeOp(fmt.Sprintf("ALTER TABLE %s NO FORCE ROW LEVEL SECURITY;", tbl), pos))
 	}
 
-	colOps, renamedCols, droppedCols := diffColumns(tbl, o, snap)
+	colOps, renamedCols, droppedCols, err := diffColumns(tbl, o, snap)
+	if err != nil {
+		return nil, err
+	}
 	ops = append(ops, colOps...)
 	ops = append(ops, diffConstraints(tbl, o, snap, pos, renamedCols, droppedCols)...)
 	ops = append(ops, diffIndexes(o.Schema, o.Name, o, snap, renamedCols, droppedCols)...)
 	ops = append(ops, diffPolicies(o.Schema, o.Name, o, snap)...)
 	ops = append(ops, diffTriggers(o.Schema, o.Name, o, snap)...)
-	return ops
+	return ops, nil
 }
 
 // diffColumns returns the column DDL ops along with a snap→desired rename map
 // and the set of snapshot columns being dropped. Constraint and index diffing
 // use these so a column rename doesn't fabricate spurious drop/recreate pairs,
 // and so PG-cascaded objects on dropped columns aren't double-emitted.
-func diffColumns(tbl string, o *ir.Table, snap *snapshot.SnapTable) ([]pipeline.DiffOp, map[string]string, map[string]bool) {
+//
+// Per RFC §7.4 step 5, a RENAMED FROM whose source column isn't in the
+// snapshot is a compiler error. Silently treating it as a fresh ADD COLUMN
+// (the prior behaviour) hides typos and means stale rename directives just
+// degrade into add-then-keep, which is exactly what the directive is meant
+// to prevent.
+func diffColumns(tbl string, o *ir.Table, snap *snapshot.SnapTable) ([]pipeline.DiffOp, map[string]string, map[string]bool, error) {
 	var ops []pipeline.DiffOp
 
 	snapByName := make(map[string]*snapshot.SnapColumn, len(snap.Columns))
@@ -1241,19 +1278,33 @@ func diffColumns(tbl string, o *ir.Table, snap *snapshot.SnapTable) ([]pipeline.
 		snapByName[snap.Columns[i].Name] = &snap.Columns[i]
 	}
 
+	desiredHasName := make(map[string]bool, len(o.Columns))
+	for _, col := range o.Columns {
+		desiredHasName[col.Name] = true
+	}
+
 	// Columns renamed in desired: map old→new name.
 	renamedFrom := make(map[string]string) // snapName → desiredName
 	for _, col := range o.Columns {
-		if col.RenamedFrom != nil {
-			if _, ok := snapByName[*col.RenamedFrom]; ok {
-				renamedFrom[*col.RenamedFrom] = col.Name
-				ops = append(ops, safeOp(
-					fmt.Sprintf("ALTER TABLE %s RENAME COLUMN %s TO %s;",
-						tbl, quoteIdent(*col.RenamedFrom), quoteIdent(col.Name)),
-					col.SrcPos,
-				))
-			}
+		if col.RenamedFrom == nil {
+			continue
 		}
+		if _, ok := snapByName[*col.RenamedFrom]; !ok {
+			return nil, nil, nil, pipeline.Errorf(col.SrcPos,
+				"RENAMED FROM %q on column %q in %s does not match the snapshot — no such column exists. Remove RENAMED FROM if this is a genuinely new column.",
+				*col.RenamedFrom, col.Name, tbl)
+		}
+		if desiredHasName[*col.RenamedFrom] {
+			return nil, nil, nil, pipeline.Errorf(col.SrcPos,
+				"RENAMED FROM %q on column %q in %s collides with another column in the desired DDL of the same name. Remove the stale column from the table's ( ) list.",
+				*col.RenamedFrom, col.Name, tbl)
+		}
+		renamedFrom[*col.RenamedFrom] = col.Name
+		ops = append(ops, safeOp(
+			fmt.Sprintf("ALTER TABLE %s RENAME COLUMN %s TO %s;",
+				tbl, quoteIdent(*col.RenamedFrom), quoteIdent(col.Name)),
+			col.SrcPos,
+		))
 	}
 
 	desiredByName := make(map[string]*ir.Column, len(o.Columns))
@@ -1372,7 +1423,7 @@ func diffColumns(tbl string, o *ir.Table, snap *snapshot.SnapTable) ([]pipeline.
 		}
 	}
 
-	return ops, renamedFrom, droppedCols
+	return ops, renamedFrom, droppedCols, nil
 }
 
 func diffConstraints(tbl string, o *ir.Table, snap *snapshot.SnapTable, pos pipeline.SourcePos, renamedCols map[string]string, droppedCols map[string]bool) []pipeline.DiffOp {
