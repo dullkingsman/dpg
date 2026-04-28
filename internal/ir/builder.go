@@ -216,7 +216,9 @@ func (b *Builder) buildTable(cs *pg_query.CreateStmt, block pipeline.BlockAST, p
 	}
 
 	// Merge in the BlockAST.
-	mergeTableBlock(tbl, block)
+	if err := mergeTableBlock(tbl, block); err != nil {
+		return nil, err
+	}
 	return tbl, nil
 }
 
@@ -510,7 +512,7 @@ func buildStorageParams(options []*pg_query.Node) map[string]string {
 	return m
 }
 
-func mergeTableBlock(tbl *Table, block pipeline.BlockAST) {
+func mergeTableBlock(tbl *Table, block pipeline.BlockAST) error {
 	if block.Comment != nil {
 		tbl.Comment = &block.Comment.Value
 	}
@@ -551,7 +553,11 @@ func mergeTableBlock(tbl *Table, block pipeline.BlockAST) {
 		tbl.Revocations = append(tbl.Revocations, blockRevocationToIR(r))
 	}
 
-	// Columns: merge block attributes into existing columns.
+	// Columns: per RFC §7.2, `COLUMN name { }` references an *existing* column
+	// in the DDL. A name that doesn't match is almost always a typo (e.g.
+	// "locality_ids" vs. "locality_id"); silently inventing a phantom column
+	// produces broken SQL downstream (empty type, mismatched FKs), so reject
+	// it at build time with a list of legal names.
 	colMap := make(map[string]*Column, len(tbl.Columns))
 	for _, c := range tbl.Columns {
 		colMap[c.Name] = c
@@ -559,9 +565,9 @@ func mergeTableBlock(tbl *Table, block pipeline.BlockAST) {
 	for _, cb := range block.Columns {
 		col, ok := colMap[cb.Name.Name]
 		if !ok {
-			col = &Column{Name: cb.Name.Name, SrcPos: cb.Pos}
-			tbl.Columns = append(tbl.Columns, col)
-			colMap[col.Name] = col
+			return pipeline.Errorf(cb.Pos,
+				"COLUMN %q is not declared in TABLE %s; the COLUMN block must reference a column listed in the table's ( ) section%s",
+				cb.Name.Name, qualName(tbl.Schema, tbl.Name), suggestColumns(cb.Name.Name, tbl.Columns))
 		}
 		if cb.Comment != nil {
 			col.Comment = &cb.Comment.Value
@@ -612,6 +618,83 @@ func mergeTableBlock(tbl *Table, block pipeline.BlockAST) {
 			})
 		}
 	}
+	return nil
+}
+
+// suggestColumns formats a "; did you mean ..." or "; declared columns are ..."
+// hint for COLUMN-block resolution errors. Returns "" when the table has no
+// columns, so callers can append it unconditionally.
+func suggestColumns(want string, cols []*Column) string {
+	if len(cols) == 0 {
+		return ""
+	}
+	names := make([]string, 0, len(cols))
+	for _, c := range cols {
+		names = append(names, c.Name)
+	}
+	if best, ok := nearestColumn(want, names); ok {
+		return fmt.Sprintf("; did you mean %q?", best)
+	}
+	return "; declared columns: " + strings.Join(names, ", ")
+}
+
+// nearestColumn returns the column name within edit distance 2 of want, or
+// false if none qualify. Edit distance 2 catches typos like a single dropped
+// or doubled char ("locality_ids" → "locality_id") without matching unrelated
+// names — which would be more confusing than helpful.
+func nearestColumn(want string, names []string) (string, bool) {
+	const maxDist = 2
+	best, bestDist := "", maxDist+1
+	for _, n := range names {
+		d := levenshtein(want, n)
+		if d < bestDist {
+			best, bestDist = n, d
+		}
+	}
+	if bestDist <= maxDist {
+		return best, true
+	}
+	return "", false
+}
+
+// levenshtein returns the edit distance between a and b. Small dedicated
+// implementation — pulling in a dependency for one suggestion message is
+// disproportionate.
+func levenshtein(a, b string) int {
+	la, lb := len(a), len(b)
+	if la == 0 {
+		return lb
+	}
+	if lb == 0 {
+		return la
+	}
+	prev := make([]int, lb+1)
+	curr := make([]int, lb+1)
+	for j := 0; j <= lb; j++ {
+		prev[j] = j
+	}
+	for i := 1; i <= la; i++ {
+		curr[0] = i
+		for j := 1; j <= lb; j++ {
+			cost := 1
+			if a[i-1] == b[j-1] {
+				cost = 0
+			}
+			del := prev[j] + 1
+			ins := curr[j-1] + 1
+			sub := prev[j-1] + cost
+			m := del
+			if ins < m {
+				m = ins
+			}
+			if sub < m {
+				m = sub
+			}
+			curr[j] = m
+		}
+		prev, curr = curr, prev
+	}
+	return prev[lb]
 }
 
 // ── View ──────────────────────────────────────────────────────────────────────

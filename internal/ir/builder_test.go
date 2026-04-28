@@ -1,6 +1,7 @@
 package ir_test
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/dullkingsman/dpg/internal/blockparser"
@@ -272,6 +273,56 @@ func TestTypeRefBuiltIn(t *testing.T) {
 	}
 	if n.Type.Name != "bigint" {
 		t.Errorf("type name: got %q", n.Type.Name)
+	}
+}
+
+// TestBuildTableRejectsUnknownColumnBlock guards the RFC §7.2 contract: a
+// COLUMN block must reference a column that exists in the DDL. Silently
+// inventing one (the prior behaviour) leads to malformed migrations like an
+// `ALTER COLUMN ... TYPE ` with an empty type when the phantom flows into diff.
+func TestBuildTableRejectsUnknownColumnBlock(t *testing.T) {
+	p := pgparser.New()
+	pgResult, err := p.Parse(pipeline.KindTable,
+		`groups (
+			id          BIGINT,
+			locality_id BIGINT
+		)`, zeroPos)
+	if err != nil {
+		t.Fatalf("pg parse: %v", err)
+	}
+	bp := blockparser.New()
+	// "locality_ids" — note the trailing s — does not match any DDL column.
+	blockAST, err := bp.Parse(pipeline.KindTable,
+		`COLUMN locality_ids { RENAMED FROM locale_id; }`, zeroPos)
+	if err != nil {
+		t.Fatalf("block parse: %v", err)
+	}
+	_, err = ir.NewBuilder().Build(pgResult, blockAST)
+	if err == nil {
+		t.Fatal("expected build error for unknown COLUMN block target, got nil")
+	}
+	msg := err.Error()
+	for _, want := range []string{`"locality_ids"`, "locality_id"} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("expected error to mention %s, got: %s", want, msg)
+		}
+	}
+}
+
+// TestBuildTableAcceptsKnownColumnBlock is the positive case: when the COLUMN
+// block names a real DDL column, the build succeeds and merges the attributes.
+func TestBuildTableAcceptsKnownColumnBlock(t *testing.T) {
+	obj := buildObject(t, pipeline.KindTable,
+		`groups (
+			id          BIGINT,
+			locality_id BIGINT
+		)`,
+		`COLUMN locality_id { COMMENT "geo locality"; }`,
+	)
+	tbl := obj.(*ir.Table)
+	col := findCol(tbl.Columns, "locality_id")
+	if col == nil || col.Comment == nil || *col.Comment != "geo locality" {
+		t.Fatalf("expected locality_id with comment, got %+v", col)
 	}
 }
 
