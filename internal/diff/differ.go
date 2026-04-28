@@ -1220,15 +1220,20 @@ func diffTable(o *ir.Table, snap *snapshot.SnapTable) []pipeline.DiffOp {
 		ops = append(ops, safeOp(fmt.Sprintf("ALTER TABLE %s NO FORCE ROW LEVEL SECURITY;", tbl), pos))
 	}
 
-	ops = append(ops, diffColumns(tbl, o, snap)...)
-	ops = append(ops, diffConstraints(tbl, o, snap, pos)...)
-	ops = append(ops, diffIndexes(o.Schema, o.Name, o, snap)...)
+	colOps, renamedCols, droppedCols := diffColumns(tbl, o, snap)
+	ops = append(ops, colOps...)
+	ops = append(ops, diffConstraints(tbl, o, snap, pos, renamedCols, droppedCols)...)
+	ops = append(ops, diffIndexes(o.Schema, o.Name, o, snap, renamedCols, droppedCols)...)
 	ops = append(ops, diffPolicies(o.Schema, o.Name, o, snap)...)
 	ops = append(ops, diffTriggers(o.Schema, o.Name, o, snap)...)
 	return ops
 }
 
-func diffColumns(tbl string, o *ir.Table, snap *snapshot.SnapTable) []pipeline.DiffOp {
+// diffColumns returns the column DDL ops along with a snap→desired rename map
+// and the set of snapshot columns being dropped. Constraint and index diffing
+// use these so a column rename doesn't fabricate spurious drop/recreate pairs,
+// and so PG-cascaded objects on dropped columns aren't double-emitted.
+func diffColumns(tbl string, o *ir.Table, snap *snapshot.SnapTable) ([]pipeline.DiffOp, map[string]string, map[string]bool) {
 	var ops []pipeline.DiffOp
 
 	snapByName := make(map[string]*snapshot.SnapColumn, len(snap.Columns))
@@ -1257,11 +1262,13 @@ func diffColumns(tbl string, o *ir.Table, snap *snapshot.SnapTable) []pipeline.D
 	}
 
 	// Drop columns absent from desired (and not just renamed).
+	droppedCols := make(map[string]bool)
 	for _, sc := range snap.Columns {
 		if _, ok := renamedFrom[sc.Name]; ok {
 			continue // renamed away
 		}
 		if _, ok := desiredByName[sc.Name]; !ok {
+			droppedCols[sc.Name] = true
 			ops = append(ops, destructiveOp(
 				fmt.Sprintf("ALTER TABLE %s DROP COLUMN %s;", tbl, quoteIdent(sc.Name)),
 				pipeline.SourcePos{},
@@ -1365,15 +1372,18 @@ func diffColumns(tbl string, o *ir.Table, snap *snapshot.SnapTable) []pipeline.D
 		}
 	}
 
-	return ops
+	return ops, renamedFrom, droppedCols
 }
 
-func diffConstraints(tbl string, o *ir.Table, snap *snapshot.SnapTable, pos pipeline.SourcePos) []pipeline.DiffOp {
+func diffConstraints(tbl string, o *ir.Table, snap *snapshot.SnapTable, pos pipeline.SourcePos, renamedCols map[string]string, droppedCols map[string]bool) []pipeline.DiffOp {
 	var ops []pipeline.DiffOp
 
 	// Inline constraints (e.g. `id BIGINT PRIMARY KEY`) have no user-supplied
 	// name, so matching by name alone would treat them as new on every run.
-	// Fall back to a signature derived from type + normalized expression.
+	// Fall back to a signature derived from type + normalized expression. The
+	// snapshot expression still references pre-rename column names, so apply
+	// the rename map first — otherwise a plain RENAMED FROM would surface as a
+	// spurious drop+recreate of every constraint touching the renamed column.
 	key := func(name, typ, expr string) string {
 		if name != "" {
 			return "n:" + name
@@ -1384,7 +1394,7 @@ func diffConstraints(tbl string, o *ir.Table, snap *snapshot.SnapTable, pos pipe
 	snapByKey := make(map[string]*snapshot.SnapConstraint, len(snap.Constraints))
 	for i := range snap.Constraints {
 		sc := &snap.Constraints[i]
-		snapByKey[key(sc.Name, sc.Type, sc.Expr)] = sc
+		snapByKey[key(sc.Name, sc.Type, translateConstraintExpr(sc.Expr, renamedCols))] = sc
 	}
 	desiredByKey := make(map[string]*ir.Constraint, len(o.Constraints))
 	for _, c := range o.Constraints {
@@ -1393,7 +1403,13 @@ func diffConstraints(tbl string, o *ir.Table, snap *snapshot.SnapTable, pos pipe
 
 	for i := range snap.Constraints {
 		sc := &snap.Constraints[i]
-		if _, ok := desiredByKey[key(sc.Name, sc.Type, sc.Expr)]; ok {
+		if _, ok := desiredByKey[key(sc.Name, sc.Type, translateConstraintExpr(sc.Expr, renamedCols))]; ok {
+			continue
+		}
+		// PG cascades constraint removal when the underlying column is dropped.
+		// If every local column referenced by this constraint is being dropped,
+		// skip emitting anything — DROP COLUMN already handles it.
+		if cols := localConstraintCols(sc.Expr); allDropped(cols, droppedCols) {
 			continue
 		}
 		if sc.Name == "" {
@@ -1430,7 +1446,7 @@ func diffConstraints(tbl string, o *ir.Table, snap *snapshot.SnapTable, pos pipe
 	return ops
 }
 
-func diffIndexes(schema, table string, o *ir.Table, snap *snapshot.SnapTable) []pipeline.DiffOp {
+func diffIndexes(schema, table string, o *ir.Table, snap *snapshot.SnapTable, renamedCols map[string]string, droppedCols map[string]bool) []pipeline.DiffOp {
 	var ops []pipeline.DiffOp
 
 	snapByName := make(map[string]*snapshot.SnapIndex, len(snap.Indexes))
@@ -1443,12 +1459,21 @@ func diffIndexes(schema, table string, o *ir.Table, snap *snapshot.SnapTable) []
 	}
 
 	for _, si := range snap.Indexes {
-		if _, ok := desiredByName[si.Name]; !ok {
-			ops = append(ops, cautionOp(
-				fmt.Sprintf("DROP INDEX IF EXISTS %s;", quoteIdent(si.Name)),
-				pipeline.SourcePos{},
-			))
+		if _, ok := desiredByName[si.Name]; ok {
+			continue
 		}
+		// Indexes are matched by name. If a column was renamed via RENAMED FROM
+		// and the index name is unchanged, PG keeps the index transparently.
+		// Apply the rename map before deciding whether the snap index has truly
+		// disappeared from desired (i.e. its only columns were dropped).
+		cols := translateIndexCols(si.Columns, renamedCols)
+		if allDropped(cols, droppedCols) {
+			continue // DROP COLUMN cascade handles it.
+		}
+		ops = append(ops, cautionOp(
+			fmt.Sprintf("DROP INDEX IF EXISTS %s;", quoteIdent(si.Name)),
+			pipeline.SourcePos{},
+		))
 	}
 	for _, idx := range o.Indexes {
 		if _, exists := snapByName[idx.Name]; !exists {
@@ -1456,6 +1481,129 @@ func diffIndexes(schema, table string, o *ir.Table, snap *snapshot.SnapTable) []
 		}
 	}
 	return ops
+}
+
+// translateConstraintExpr rewrites quoted column identifiers inside a
+// constraint's local-column list (or, for CHECK, the entire expression) so a
+// snapshot expression captured before a RENAMED FROM matches the desired one.
+// For PRIMARY KEY / UNIQUE / FOREIGN KEY only the first parenthesized group is
+// touched — substituting globally would also rewrite remote-column refs after
+// REFERENCES if a renamed name happened to collide.
+func translateConstraintExpr(expr string, renamedCols map[string]string) string {
+	if len(renamedCols) == 0 || expr == "" {
+		return expr
+	}
+	upper := strings.ToUpper(strings.TrimSpace(expr))
+	switch {
+	case strings.HasPrefix(upper, "PRIMARY KEY"),
+		strings.HasPrefix(upper, "UNIQUE"),
+		strings.HasPrefix(upper, "FOREIGN KEY"):
+		open, close := firstParenGroup(expr)
+		if open == -1 {
+			return expr
+		}
+		return expr[:open] + replaceQuotedIdents(expr[open:close+1], renamedCols) + expr[close+1:]
+	case strings.HasPrefix(upper, "CHECK"):
+		return replaceQuotedIdents(expr, renamedCols)
+	}
+	return expr
+}
+
+// localConstraintCols returns the unquoted local column names referenced in
+// the first parenthesized group of a constraint expression. Used to decide
+// whether a snapshot constraint's columns are entirely being dropped.
+func localConstraintCols(expr string) []string {
+	open, close := firstParenGroup(expr)
+	if open == -1 {
+		return nil
+	}
+	inside := expr[open+1 : close]
+	var names []string
+	for _, part := range strings.Split(inside, ",") {
+		part = strings.TrimSpace(part)
+		// Strip optional sort/nulls suffixes that may appear on PK/UNIQUE.
+		if sp := strings.IndexAny(part, " \t"); sp != -1 {
+			part = part[:sp]
+		}
+		if len(part) >= 2 && part[0] == '"' && part[len(part)-1] == '"' {
+			part = part[1 : len(part)-1]
+		}
+		if part != "" {
+			names = append(names, part)
+		}
+	}
+	return names
+}
+
+// translateIndexCols applies the rename map to a SnapIndex.Columns field
+// (a comma-separated list of column names or `(expression)` entries) and
+// returns the resulting plain column names. Expression entries are returned
+// as empty strings so they don't accidentally appear "dropped".
+func translateIndexCols(cols string, renamedCols map[string]string) []string {
+	if cols == "" {
+		return nil
+	}
+	parts := strings.Split(cols, ",")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		if strings.HasPrefix(p, "(") {
+			out = append(out, "")
+			continue
+		}
+		if newName, ok := renamedCols[p]; ok {
+			p = newName
+		}
+		out = append(out, p)
+	}
+	return out
+}
+
+// firstParenGroup returns the byte indices of the matching '(' and ')' that
+// open and close the first balanced parenthesized group, or (-1, -1).
+func firstParenGroup(s string) (int, int) {
+	open := strings.IndexByte(s, '(')
+	if open == -1 {
+		return -1, -1
+	}
+	depth := 0
+	for i := open; i < len(s); i++ {
+		switch s[i] {
+		case '(':
+			depth++
+		case ')':
+			depth--
+			if depth == 0 {
+				return open, i
+			}
+		}
+	}
+	return -1, -1
+}
+
+// replaceQuotedIdents substitutes "old" → "new" for every old name in the
+// rename map, matching only fully quoted identifiers so unquoted keywords
+// (e.g. ASC, DESC) aren't touched.
+func replaceQuotedIdents(s string, renamedCols map[string]string) string {
+	for old, newName := range renamedCols {
+		s = strings.ReplaceAll(s, `"`+old+`"`, `"`+newName+`"`)
+	}
+	return s
+}
+
+// allDropped reports whether the given column names are non-empty and every
+// one is a member of the dropped set. Empty input returns false so we don't
+// suppress drops for constraints/indexes whose columns we couldn't parse.
+func allDropped(cols []string, droppedCols map[string]bool) bool {
+	if len(cols) == 0 || len(droppedCols) == 0 {
+		return false
+	}
+	for _, c := range cols {
+		if c == "" || !droppedCols[c] {
+			return false
+		}
+	}
+	return true
 }
 
 func diffPolicies(schema, table string, o *ir.Table, snap *snapshot.SnapTable) []pipeline.DiffOp {

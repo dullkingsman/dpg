@@ -458,6 +458,117 @@ func TestDiffRegistration(t *testing.T) {
 	}
 }
 
+// TestDiffColumnRenameKeepsConstraints verifies that a RENAMED FROM directive
+// doesn't manufacture a spurious drop+recreate of constraints whose snapshot
+// expression still references the pre-rename column name.
+func TestDiffColumnRenameKeepsConstraints(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("iam.groups", &snapshot.SnapObject{
+		Kind: "table",
+		Table: &snapshot.SnapTable{
+			Schema: "iam",
+			Name:   "groups",
+			Columns: []snapshot.SnapColumn{
+				{Name: "id", Type: "bigint"},
+				{Name: "locality_id", Type: "bigint"},
+			},
+			Constraints: []snapshot.SnapConstraint{
+				{Name: "", Type: "FOREIGN KEY",
+					Expr: `FOREIGN KEY ("locality_id") REFERENCES "iam"."localities" ("id")`},
+			},
+		},
+	})
+
+	old := "locality_id"
+	desired := []pipeline.IRObject{
+		&ir.Table{
+			Schema: "iam",
+			Name:   "groups",
+			Columns: []*ir.Column{
+				{Name: "id", Type: ir.TypeRef{Name: "bigint"}},
+				{Name: "locale_id", Type: ir.TypeRef{Name: "bigint"}, RenamedFrom: &old},
+			},
+			Constraints: []*ir.Constraint{
+				{Type: "FOREIGN KEY",
+					Expr: `FOREIGN KEY ("locale_id") REFERENCES "iam"."localities" ("id")`},
+			},
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, o := range ops {
+		sql := o.SQL()
+		if strings.Contains(sql, "WARNING") {
+			t.Errorf("did not expect a constraint WARNING after RENAMED FROM, got: %s", sql)
+		}
+		if strings.Contains(sql, "ADD") && strings.Contains(sql, "FOREIGN KEY") {
+			t.Errorf("did not expect FK to be re-added after RENAMED FROM, got: %s", sql)
+		}
+		if strings.Contains(sql, "DROP CONSTRAINT") {
+			t.Errorf("did not expect DROP CONSTRAINT after RENAMED FROM, got: %s", sql)
+		}
+	}
+}
+
+// TestDiffColumnDropSuppressesCascadedConstraint verifies that when a column
+// is dropped (no RENAMED FROM), an unnamed constraint on that column doesn't
+// surface as a manual-drop warning — DROP COLUMN cascades to it in PG.
+func TestDiffColumnDropSuppressesCascadedConstraint(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("iam.groups", &snapshot.SnapObject{
+		Kind: "table",
+		Table: &snapshot.SnapTable{
+			Schema: "iam",
+			Name:   "groups",
+			Columns: []snapshot.SnapColumn{
+				{Name: "id", Type: "bigint"},
+				{Name: "locality_id", Type: "bigint"},
+			},
+			Constraints: []snapshot.SnapConstraint{
+				{Name: "", Type: "FOREIGN KEY",
+					Expr: `FOREIGN KEY ("locality_id") REFERENCES "iam"."localities" ("id")`},
+			},
+			Indexes: []snapshot.SnapIndex{
+				{Name: "groups_locality_id_idx", Method: "btree", Columns: "locality_id"},
+			},
+		},
+	})
+
+	desired := []pipeline.IRObject{
+		&ir.Table{
+			Schema: "iam",
+			Name:   "groups",
+			Columns: []*ir.Column{
+				{Name: "id", Type: ir.TypeRef{Name: "bigint"}},
+			},
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var sawDropCol bool
+	for _, o := range ops {
+		sql := o.SQL()
+		if strings.Contains(sql, "DROP COLUMN") && strings.Contains(sql, `"locality_id"`) {
+			sawDropCol = true
+		}
+		if strings.Contains(sql, "WARNING") {
+			t.Errorf("expected no WARNING for cascaded constraint, got: %s", sql)
+		}
+		if strings.Contains(sql, "DROP INDEX") && strings.Contains(sql, "groups_locality_id_idx") {
+			t.Errorf("expected no DROP INDEX for index whose only column is dropped, got: %s", sql)
+		}
+	}
+	if !sawDropCol {
+		t.Fatalf("expected DROP COLUMN locality_id, got: %v", sqlList(ops))
+	}
+}
+
 func sqlList(ops []pipeline.DiffOp) []string {
 	out := make([]string, len(ops))
 	for i, o := range ops {
