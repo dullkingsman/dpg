@@ -43,8 +43,15 @@ type Cluster struct {
 	// ObjectsDir is the absolute path to the cluster-level objects directory
 	// (roles, tablespaces, FDWs). May not exist yet.
 	ObjectsDir string
-	Databases  []*Database
+	// SourceFiles is the ordered list of .dpg files found in ObjectsDir.
+	// Empty when ObjectsDir does not exist yet.
+	SourceFiles []string
+	Databases   []*Database
 }
+
+// ClusterSnapshotKey returns the snapshot store key for cluster-level objects.
+// The leading underscore ensures it never collides with a real database name.
+func (c *Cluster) ClusterSnapshotKey() string { return "_cluster" }
 
 // Name returns the cluster name from config.
 func (c *Cluster) Name() string { return c.Config.Cluster.Name }
@@ -177,11 +184,16 @@ func loadCluster(clusterDir, cfgPath string) (*Cluster, error) {
 		return nil, fmt.Errorf("cluster %q: %w", cfg.Cluster.Name, err)
 	}
 
+	// Collect cluster-level .dpg source files; ignore error when ObjectsDir
+	// does not exist yet (first run before any dump or manual creation).
+	clusterFiles, _ := collectSourceFiles(objectsDir)
+
 	return &Cluster{
-		Dir:        clusterDir,
-		Config:     cfg,
-		ObjectsDir: objectsDir,
-		Databases:  databases,
+		Dir:         clusterDir,
+		Config:      cfg,
+		ObjectsDir:  objectsDir,
+		SourceFiles: clusterFiles,
+		Databases:   databases,
 	}, nil
 }
 

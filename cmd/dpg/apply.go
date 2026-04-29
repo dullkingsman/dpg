@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"strings"
 	"time"
@@ -13,6 +14,7 @@ import (
 	"github.com/dullkingsman/dpg/internal/compiler"
 	"github.com/dullkingsman/dpg/internal/emit"
 	"github.com/dullkingsman/dpg/internal/executor"
+	"github.com/dullkingsman/dpg/internal/ir"
 	"github.com/dullkingsman/dpg/internal/pipeline"
 	"github.com/dullkingsman/dpg/internal/project"
 	snapshotpkg "github.com/dullkingsman/dpg/internal/snapshot"
@@ -77,6 +79,13 @@ Partition strategy changes additionally require --approve-partition-rebuild.`,
 			}
 
 			for _, cl := range clusters {
+				// Apply cluster-level objects (roles) before databases.
+				if len(cl.SourceFiles) > 0 {
+					if err := runClusterApply(cl, store, differ, emitter, applyExec, secretResolver, opts); err != nil {
+						return fmt.Errorf("%s (cluster): %w", cl.Name(), err)
+					}
+				}
+
 				databases, err := resolveDatabases(cl, databaseName)
 				if err != nil {
 					return err
@@ -150,6 +159,9 @@ func runApply(
 		ui.PrintInfo(os.Stdout, cl.Name()+"/"+db.Name(), "already up to date", color)
 		return nil
 	}
+
+	// Warn about new tables being created without a primary key.
+	warnMissingPK(os.Stderr, desired, snap, errColor)
 
 	if !opts.allowDestructive {
 		for _, op := range ops {
@@ -236,4 +248,146 @@ func runApply(
 	}
 	ui.PrintSuccess(os.Stdout, "Applied", detail, color)
 	return nil
+}
+
+// runClusterApply applies cluster-level objects (roles, tablespaces, etc.).
+func runClusterApply(
+	cl *project.Cluster,
+	store pipeline.SnapshotStore,
+	differ pipeline.Differ,
+	emitter pipeline.Emitter,
+	applyExec pipeline.ApplyExecutor,
+	secretResolver pipeline.SecretResolver,
+	opts applyOptions,
+) error {
+	ctx := context.Background()
+	color := ui.IsColorEnabled(os.Stdout)
+	errColor := ui.IsColorEnabled(os.Stderr)
+
+	desired, err := compiler.Compile(cl.SourceFiles, cl.ObjectsDir, pipeline.Default)
+	if err != nil {
+		return err
+	}
+
+	snap, err := store.Load(cl.Name(), cl.ClusterSnapshotKey())
+	if err != nil {
+		return fmt.Errorf("snapshot load: %w", err)
+	}
+
+	ops, err := differ.Diff(desired, snap)
+	if err != nil {
+		return err
+	}
+	if len(ops) == 0 {
+		ui.PrintInfo(os.Stdout, cl.Name()+" (cluster)", "already up to date", color)
+		return nil
+	}
+
+	if !opts.allowDestructive {
+		for _, op := range ops {
+			if op.Safety() == pipeline.Destructive {
+				return fmt.Errorf("cluster migration contains destructive operations; re-run with --allow-destructive\n  first: %s", op.SQL())
+			}
+		}
+	}
+
+	rev, _ := gitRevision()
+	migration, err := emitter.Emit(ops, pipeline.MigrationMeta{
+		GeneratedAt:    time.Now().UTC(),
+		SourceRevision: rev,
+		Cluster:        cl.Name(),
+		Database:       cl.ClusterSnapshotKey(),
+	})
+	if err != nil {
+		return err
+	}
+
+	var sqlBuf strings.Builder
+	if err := emit.Render(&sqlBuf, migration, emit.DefaultRenderOptions()); err != nil {
+		return err
+	}
+
+	if err := emit.Render(os.Stdout, migration, emit.RenderOptions{
+		ShowSafety:    true,
+		ShowSourcePos: true,
+		Color:         color,
+	}); err != nil {
+		return err
+	}
+
+	if !opts.yes {
+		fmt.Printf("\n%s [y/N] ", ui.Bold("Apply cluster changes?", color))
+		scanner := bufio.NewScanner(os.Stdin)
+		if !scanner.Scan() || !strings.EqualFold(strings.TrimSpace(scanner.Text()), "y") {
+			ui.PrintInfo(os.Stdout, "", "Aborted.", color)
+			return nil
+		}
+	}
+
+	connStr := cl.ConnectionString()
+	if connStr == "" {
+		return fmt.Errorf("cluster %q has no connection configured", cl.Name())
+	}
+	if cl.IsLink() {
+		connStr, err = secretResolver.Resolve(connStr)
+		if err != nil {
+			return ui.WrapDB(fmt.Errorf("resolve connection secret: %w", err))
+		}
+	}
+
+	conn, err := executor.Connect(ctx, connStr)
+	if err != nil {
+		return ui.WrapDB(err)
+	}
+	defer conn.Close(ctx)
+
+	if err := applyExec.Apply(ctx, migration, conn); err != nil {
+		return ui.WrapDB(err)
+	}
+
+	migPath, err := snapshotpkg.SaveMigration(opts.migrationsDir, cl.Name(), cl.ClusterSnapshotKey(), sqlBuf.String())
+	if err != nil {
+		ui.PrintInfo(os.Stderr, "warn", "could not archive cluster migration: "+err.Error(), errColor)
+	}
+
+	newSnap := &pipeline.Snapshot{}
+	if err := snapshotpkg.Populate(newSnap, desired); err != nil {
+		return fmt.Errorf("build cluster snapshot: %w", err)
+	}
+	if err := store.Save(cl.Name(), cl.ClusterSnapshotKey(), newSnap); err != nil {
+		return fmt.Errorf("save cluster snapshot: %w", err)
+	}
+
+	detail := cl.Name() + " (cluster) — snapshot updated"
+	if migPath != "" {
+		detail += "\n         " + ui.Dim(migPath, color)
+	}
+	ui.PrintSuccess(os.Stdout, "Applied", detail, color)
+	return nil
+}
+
+// warnMissingPK writes a bold warning for every table that is being newly
+// created (absent from snap) and has no PRIMARY KEY constraint.
+func warnMissingPK(w io.Writer, desired []pipeline.IRObject, snap *pipeline.Snapshot, color bool) {
+	for _, obj := range desired {
+		tbl, ok := obj.(*ir.Table)
+		if !ok {
+			continue
+		}
+		// Only warn for new tables — existing ones are the user's responsibility.
+		if _, exists := snap.Objects[tbl.QualifiedName()]; exists {
+			continue
+		}
+		hasPK := false
+		for _, cst := range tbl.Constraints {
+			if cst.Type == "PRIMARY KEY" {
+				hasPK = true
+				break
+			}
+		}
+		if !hasPK {
+			fmt.Fprintf(w, "%s  table %s has no PRIMARY KEY — consider adding one\n",
+				ui.Bold("WARNING", color), tbl.QualifiedName())
+		}
+	}
 }

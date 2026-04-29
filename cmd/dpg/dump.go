@@ -9,6 +9,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/dullkingsman/dpg/internal/compiler"
 	"github.com/dullkingsman/dpg/internal/executor"
 	"github.com/dullkingsman/dpg/internal/ir"
 	"github.com/dullkingsman/dpg/internal/pipeline"
@@ -119,20 +120,26 @@ func runDump(
 		return fmt.Errorf("create output directory: %w", err)
 	}
 
+	// Separate schema-scoped (DB-level) from cluster-level objects (roles).
 	schemaFiles := map[string]*strings.Builder{}
-	var globalFile strings.Builder
+	var clusterFile strings.Builder
+	var dbObjects, clusterObjects []pipeline.IRObject
 	for _, obj := range objects {
 		schema := objectSchema(obj)
 		if schema == "" {
-			renderObjectDPG(&globalFile, obj)
+			renderObjectDPG(&clusterFile, obj)
+			clusterObjects = append(clusterObjects, obj)
 			continue
 		}
 		if _, ok := schemaFiles[schema]; !ok {
 			schemaFiles[schema] = &strings.Builder{}
 		}
 		renderObjectDPG(schemaFiles[schema], obj)
+		dbObjects = append(dbObjects, obj)
 	}
 
+	// Write DB-level schema files.
+	var dpgFiles []string
 	for schema, content := range schemaFiles {
 		schemaDir := filepath.Join(outDir, "schemas", schema)
 		if err := os.MkdirAll(schemaDir, 0o755); err != nil {
@@ -142,25 +149,57 @@ func runDump(
 		if err := os.WriteFile(path, []byte(content.String()), 0o644); err != nil {
 			return err
 		}
+		dpgFiles = append(dpgFiles, path)
 		ui.PrintInfo(os.Stdout, "wrote", path, color)
 	}
 
-	if globalFile.Len() > 0 {
-		path := filepath.Join(outDir, "roles.dpg")
-		if err := os.WriteFile(path, []byte(globalFile.String()), 0o644); err != nil {
+	// Write cluster-level roles file to the cluster objects directory.
+	var clusterDPGFiles []string
+	if clusterFile.Len() > 0 {
+		if err := os.MkdirAll(cl.ObjectsDir, 0o755); err != nil {
+			return fmt.Errorf("create cluster objects directory: %w", err)
+		}
+		path := filepath.Join(cl.ObjectsDir, "roles.dpg")
+		if err := os.WriteFile(path, []byte(clusterFile.String()), 0o644); err != nil {
 			return err
 		}
+		clusterDPGFiles = append(clusterDPGFiles, path)
 		ui.PrintInfo(os.Stdout, "wrote", path, color)
 	}
 
-	snap := &pipeline.Snapshot{}
-	if err := snapshot.Populate(snap, objects); err != nil {
+	// Build DB snapshot from compiled source (ensures plan produces no diff).
+	dbSnapObjects := dbObjects
+	if len(dpgFiles) > 0 {
+		if compiled, compileErr := compiler.Compile(dpgFiles, outDir, pipeline.Default); compileErr == nil {
+			dbSnapObjects = compiled
+		}
+	}
+	dbSnap := &pipeline.Snapshot{}
+	if err := snapshot.Populate(dbSnap, dbSnapObjects); err != nil {
 		return fmt.Errorf("build snapshot: %w", err)
 	}
-	if err := store.Save(cl.Name(), db.Name(), snap); err != nil {
+	if err := store.Save(cl.Name(), db.Name(), dbSnap); err != nil {
 		return fmt.Errorf("save snapshot: %w", err)
 	}
-	ui.PrintSuccess(os.Stdout, "Snapshot written", cl.Name()+"/"+db.Name(), color)
+	ui.PrintSuccess(os.Stdout, "DB snapshot written", cl.Name()+"/"+db.Name(), color)
+
+	// Build cluster snapshot (roles). Written once per cluster; safe to repeat.
+	if len(clusterObjects) > 0 {
+		clusterSnapObjects := clusterObjects
+		if len(clusterDPGFiles) > 0 {
+			if compiled, compileErr := compiler.Compile(clusterDPGFiles, cl.ObjectsDir, pipeline.Default); compileErr == nil {
+				clusterSnapObjects = compiled
+			}
+		}
+		clusterSnap := &pipeline.Snapshot{}
+		if err := snapshot.Populate(clusterSnap, clusterSnapObjects); err != nil {
+			return fmt.Errorf("build cluster snapshot: %w", err)
+		}
+		if err := store.Save(cl.Name(), cl.ClusterSnapshotKey(), clusterSnap); err != nil {
+			return fmt.Errorf("save cluster snapshot: %w", err)
+		}
+		ui.PrintSuccess(os.Stdout, "Cluster snapshot written", cl.Name(), color)
+	}
 	return nil
 }
 
@@ -185,24 +224,52 @@ func objectSchema(obj pipeline.IRObject) string {
 func renderObjectDPG(b *strings.Builder, obj pipeline.IRObject) {
 	switch o := obj.(type) {
 	case *ir.Table:
+		// Split constraints into inline (single-column PK/UNIQUE/FK) and table-level.
+		// Inline constraints are rendered without a CONSTRAINT name clause — PostgreSQL
+		// auto-generates names, and the snapshot is rebuilt from compiled source so the
+		// name absence does not cause spurious plan diffs.
+		inlinedByCol := map[string][]string{} // col → list of inline clauses
+		var tableLevelCSTs []*ir.Constraint
+		for _, cst := range o.Constraints {
+			if len(cst.Columns) == 1 && isInlineable(cst.Type) {
+				inlinedByCol[cst.Columns[0]] = append(inlinedByCol[cst.Columns[0]], inlineConstraintClause(cst))
+			} else {
+				tableLevelCSTs = append(tableLevelCSTs, cst)
+			}
+		}
+
 		fmt.Fprintf(b, "\nTABLE %s (\n", o.Name)
 		for i, col := range o.Columns {
 			sep := ","
-			if i == len(o.Columns)-1 && len(o.Constraints) == 0 {
+			if i == len(o.Columns)-1 && len(tableLevelCSTs) == 0 {
 				sep = ""
 			}
 			fmt.Fprintf(b, "    %s %s", col.Name, col.Type.String())
-			if col.NotNull {
+			// Identity columns are implicitly NOT NULL; skip the redundant clause.
+			if col.NotNull && col.Identity == nil {
 				fmt.Fprintf(b, " NOT NULL")
 			}
 			if col.Default != nil {
 				fmt.Fprintf(b, " DEFAULT %s", *col.Default)
 			}
+			if col.Identity != nil {
+				if col.Identity.Always {
+					fmt.Fprintf(b, " GENERATED ALWAYS AS IDENTITY")
+				} else {
+					fmt.Fprintf(b, " GENERATED BY DEFAULT AS IDENTITY")
+				}
+			}
+			if col.Generated != nil {
+				fmt.Fprintf(b, " GENERATED ALWAYS AS (%s) STORED", col.Generated.Expr)
+			}
+			for _, clause := range inlinedByCol[col.Name] {
+				fmt.Fprintf(b, " %s", clause)
+			}
 			fmt.Fprintf(b, "%s\n", sep)
 		}
-		for i, cst := range o.Constraints {
+		for i, cst := range tableLevelCSTs {
 			sep := ","
-			if i == len(o.Constraints)-1 {
+			if i == len(tableLevelCSTs)-1 {
 				sep = ""
 			}
 			if cst.Name != "" {
@@ -256,6 +323,36 @@ func renderObjectDPG(b *strings.Builder, obj pipeline.IRObject) {
 	case *ir.Role:
 		fmt.Fprintf(b, "\nROLE %s;\n", o.Name)
 	}
+}
+
+// isInlineable reports whether a constraint type can be written as a column-level clause.
+func isInlineable(typ string) bool {
+	switch typ {
+	case "PRIMARY KEY", "UNIQUE", "FOREIGN KEY":
+		return true
+	}
+	return false
+}
+
+// inlineConstraintClause returns the bare inline column-level clause for a
+// single-column constraint: "PRIMARY KEY", "UNIQUE", or "REFERENCES t(c) ...".
+// Constraint names are intentionally omitted; PostgreSQL auto-generates them.
+func inlineConstraintClause(cst *ir.Constraint) string {
+	switch cst.Type {
+	case "PRIMARY KEY":
+		return "PRIMARY KEY"
+	case "UNIQUE":
+		return "UNIQUE"
+	case "FOREIGN KEY":
+		// pg_get_constraintdef: "FOREIGN KEY (col) REFERENCES tbl(col) [actions]"
+		// Strip the "FOREIGN KEY (col) " prefix, leaving "REFERENCES ...".
+		upper := strings.ToUpper(cst.Expr)
+		if idx := strings.Index(upper, " REFERENCES "); idx >= 0 {
+			return strings.TrimSpace(cst.Expr[idx+1:])
+		}
+		return cst.Expr
+	}
+	return cst.Expr
 }
 
 // renderIndex writes one INDEX entry for a table's {} block.

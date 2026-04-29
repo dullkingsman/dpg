@@ -82,6 +82,26 @@ Safe, Caution, Destructive, and Manual operations are labelled in the output.`,
 			}
 
 			for _, cl := range clusters {
+				// Cluster-level plan (roles, tablespaces, etc.)
+				if len(cl.SourceFiles) > 0 {
+					var clusterSnap *pipeline.Snapshot
+					if live {
+						// For --live, cluster-level objects come from the same introspect.
+						clusterSnap, err = introspectClusterSnapshot(cmd.Context(), cl, secretResolver, introspector)
+						if err != nil {
+							return fmt.Errorf("%s (cluster): %w", cl.Name(), err)
+						}
+					} else {
+						clusterSnap, err = store.Load(cl.Name(), cl.ClusterSnapshotKey())
+						if err != nil {
+							return fmt.Errorf("%s (cluster): snapshot: %w", cl.Name(), err)
+						}
+					}
+					if err := runClusterPlan(cl, clusterSnap, differ, emitter); err != nil {
+						return fmt.Errorf("%s (cluster): %w", cl.Name(), err)
+					}
+				}
+
 				databases, err := resolveDatabases(cl, databaseName)
 				if err != nil {
 					return err
@@ -193,6 +213,83 @@ func runPlan(
 		ShowSourcePos: true,
 		Color:         color,
 	})
+}
+
+// runClusterPlan plans cluster-level objects (roles, tablespaces, etc.).
+func runClusterPlan(
+	cl *project.Cluster,
+	snap *pipeline.Snapshot,
+	differ pipeline.Differ,
+	emitter pipeline.Emitter,
+) error {
+	color := ui.IsColorEnabled(os.Stdout)
+
+	desired, err := compiler.Compile(cl.SourceFiles, cl.ObjectsDir, pipeline.Default)
+	if err != nil {
+		return err
+	}
+
+	ops, err := differ.Diff(desired, snap)
+	if err != nil {
+		return err
+	}
+
+	rev, _ := gitRevision()
+	migration, err := emitter.Emit(ops, pipeline.MigrationMeta{
+		GeneratedAt:    time.Now().UTC(),
+		SourceRevision: rev,
+		Cluster:        cl.Name(),
+		Database:       cl.ClusterSnapshotKey(),
+	})
+	if err != nil {
+		return err
+	}
+
+	return emit.Render(os.Stdout, migration, emit.RenderOptions{
+		ShowSafety:    true,
+		ShowSourcePos: true,
+		Color:         color,
+	})
+}
+
+// introspectClusterSnapshot connects to the cluster and returns a snapshot
+// containing only cluster-level objects (roles).
+func introspectClusterSnapshot(ctx context.Context, cl *project.Cluster, secretResolver pipeline.SecretResolver, introspector pipeline.Introspector) (*pipeline.Snapshot, error) {
+	connStr := cl.ConnectionString()
+	if connStr == "" {
+		return nil, fmt.Errorf("cluster %q has no connection configured", cl.Name())
+	}
+	if cl.IsLink() {
+		var err error
+		connStr, err = secretResolver.Resolve(connStr)
+		if err != nil {
+			return nil, ui.WrapDB(fmt.Errorf("resolve connection secret: %w", err))
+		}
+	}
+	conn, err := executor.Connect(ctx, connStr)
+	if err != nil {
+		return nil, ui.WrapDB(err)
+	}
+	defer conn.Close(ctx)
+
+	allObjects, err := introspector.Introspect(ctx, conn)
+	if err != nil {
+		return nil, ui.WrapDB(fmt.Errorf("introspect: %w", err))
+	}
+
+	// Keep only cluster-level (schema-less) objects.
+	var clusterObjects []pipeline.IRObject
+	for _, obj := range allObjects {
+		if objectSchema(obj) == "" {
+			clusterObjects = append(clusterObjects, obj)
+		}
+	}
+
+	snap := &pipeline.Snapshot{}
+	if err := snapshotpkg.Populate(snap, clusterObjects); err != nil {
+		return nil, fmt.Errorf("build cluster snapshot: %w", err)
+	}
+	return snap, nil
 }
 
 // gitRevision returns the current HEAD short hash, or "" if git is unavailable.
