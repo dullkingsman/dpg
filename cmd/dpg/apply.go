@@ -15,7 +15,7 @@ import (
 	"github.com/dullkingsman/dpg/internal/executor"
 	"github.com/dullkingsman/dpg/internal/pipeline"
 	"github.com/dullkingsman/dpg/internal/project"
-	"github.com/dullkingsman/dpg/internal/snapshot"
+	snapshotpkg "github.com/dullkingsman/dpg/internal/snapshot"
 	"github.com/dullkingsman/dpg/internal/ui"
 )
 
@@ -67,6 +67,7 @@ Partition strategy changes additionally require --approve-partition-rebuild.`,
 			opts := applyOptions{
 				yes:              yes,
 				allowDestructive: allowDestructive,
+				migrationsDir:    proj.MigrationsDir(),
 			}
 
 			for _, cl := range proj.Clusters {
@@ -99,6 +100,7 @@ Partition strategy changes additionally require --approve-partition-rebuild.`,
 type applyOptions struct {
 	yes              bool
 	allowDestructive bool
+	migrationsDir    string
 }
 
 func runApply(
@@ -165,7 +167,16 @@ func runApply(
 		return err
 	}
 
-	// Print the plan.
+	// Render the migration for display and for the archive file.
+	// Render plain SQL (no colour) to a buffer — used for both stdout (with
+	// colour applied separately) and the on-disk migration file.
+	var sqlBuf strings.Builder
+	if err := emit.Render(&sqlBuf, migration, emit.DefaultRenderOptions()); err != nil {
+		return err
+	}
+	plainSQL := sqlBuf.String()
+
+	// Print the plan with colour to stdout.
 	if err := emit.Render(os.Stdout, migration, emit.RenderOptions{
 		ShowSafety:    true,
 		ShowSourcePos: true,
@@ -206,15 +217,26 @@ func runApply(
 		return ui.WrapDB(err)
 	}
 
+	// Archive the migration SQL file before updating the snapshot, so that if
+	// the snapshot write fails we still have a record of what was applied.
+	migPath, err := snapshotpkg.SaveMigration(opts.migrationsDir, cl.Name(), db.Name(), plainSQL)
+	if err != nil {
+		ui.PrintInfo(os.Stderr, "warn", "could not archive migration file: "+err.Error(), errColor)
+	}
+
 	// Update snapshot.
 	newSnap := &pipeline.Snapshot{}
-	if err := snapshot.Populate(newSnap, desired); err != nil {
+	if err := snapshotpkg.Populate(newSnap, desired); err != nil {
 		return fmt.Errorf("build snapshot: %w", err)
 	}
 	if err := store.Save(cl.Name(), db.Name(), newSnap); err != nil {
 		return fmt.Errorf("save snapshot: %w", err)
 	}
 
-	ui.PrintSuccess(os.Stdout, "Applied", cl.Name()+"/"+db.Name()+" — snapshot updated", color)
+	detail := cl.Name() + "/" + db.Name() + " — snapshot updated"
+	if migPath != "" {
+		detail += "\n         " + ui.Dim(migPath, color)
+	}
+	ui.PrintSuccess(os.Stdout, "Applied", detail, color)
 	return nil
 }

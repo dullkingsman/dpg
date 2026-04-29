@@ -16,9 +16,23 @@ type Project struct {
 	Clusters   []*Cluster
 }
 
+// DPGDir returns the absolute path to the project's .dpg working directory.
+func (p *Project) DPGDir() string {
+	return filepath.Join(p.RootDir, ".dpg")
+}
+
 // SnapshotDir returns the absolute path to the snapshot directory.
 func (p *Project) SnapshotDir() string {
 	return filepath.Join(p.RootDir, p.RootConfig.Snapshots.Directory)
+}
+
+// MigrationsDir returns the absolute path to the migrations archive directory.
+// Returns "" when migration archiving is disabled (directory = "").
+func (p *Project) MigrationsDir() string {
+	if p.RootConfig.Migrations.Directory == "" {
+		return ""
+	}
+	return filepath.Join(p.RootDir, p.RootConfig.Migrations.Directory)
 }
 
 // Cluster represents a single PostgreSQL cluster within the project.
@@ -113,7 +127,7 @@ func isRootConfig(path string) bool {
 	if err != nil {
 		return false
 	}
-	for _, line := range strings.Split(string(data), "\n") {
+	for line := range strings.SplitSeq(string(data), "\n") {
 		t := strings.TrimSpace(line)
 		if t == "[cluster]" || strings.HasPrefix(t, "[cluster.") || t == "[database]" {
 			return false

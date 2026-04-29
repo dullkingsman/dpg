@@ -9,9 +9,10 @@ import (
 
 // RootConfig represents the contents of dpg.toml at the project root.
 type RootConfig struct {
-	Compiler  CompilerConfig  `toml:"compiler"`
-	Linter    LinterConfig    `toml:"linter"`
-	Snapshots SnapshotsConfig `toml:"snapshots"`
+	Compiler   CompilerConfig   `toml:"compiler"`
+	Linter     LinterConfig     `toml:"linter"`
+	Snapshots  SnapshotsConfig  `toml:"snapshots"`
+	Migrations MigrationsConfig `toml:"migrations"`
 }
 
 // CompilerConfig holds compiler-wide defaults.
@@ -40,6 +41,14 @@ type SnapshotsConfig struct {
 	Directory string `toml:"directory"`
 }
 
+// MigrationsConfig controls where applied migration SQL files are archived.
+type MigrationsConfig struct {
+	// Directory is the path (relative to the project root) where applied
+	// migration SQL files are written. Default: ".dpg/migrations".
+	// Set to "" to disable migration file archiving.
+	Directory string `toml:"directory"`
+}
+
 // DefaultRootConfig returns a RootConfig populated with the RFC defaults.
 func DefaultRootConfig() RootConfig {
 	return RootConfig{
@@ -56,6 +65,9 @@ func DefaultRootConfig() RootConfig {
 		},
 		Snapshots: SnapshotsConfig{
 			Directory: ".dpg/snapshots",
+		},
+		Migrations: MigrationsConfig{
+			Directory: ".dpg/migrations",
 		},
 	}
 }

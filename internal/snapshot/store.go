@@ -21,9 +21,9 @@ func init() {
 const Version = "0.1.0"
 
 // FileStore implements pipeline.SnapshotStore using JSON files on disk.
+// Each snapshot is stored at Dir/<cluster>/<database>.json, mirroring the
+// cluster/database hierarchy of the project layout.
 type FileStore struct {
-	// Dir is the directory where snapshot files are stored.
-	// Each snapshot is written as <cluster>.<database>.json.
 	Dir string
 }
 
@@ -73,7 +73,7 @@ func (s *FileStore) Save(cluster, database string, snap *pipeline.Snapshot) erro
 }
 
 func (s *FileStore) path(cluster, database string) string {
-	return filepath.Join(s.Dir, cluster+"."+database+".json")
+	return filepath.Join(s.Dir, cluster, database+".json")
 }
 
 // Ensure FileStore implements pipeline.SnapshotStore.
