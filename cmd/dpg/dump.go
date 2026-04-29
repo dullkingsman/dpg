@@ -14,6 +14,7 @@ import (
 	"github.com/dullkingsman/dpg/internal/pipeline"
 	"github.com/dullkingsman/dpg/internal/project"
 	"github.com/dullkingsman/dpg/internal/snapshot"
+	"github.com/dullkingsman/dpg/internal/ui"
 )
 
 func newDumpCmd() *cobra.Command {
@@ -91,6 +92,7 @@ func runDump(
 	secretResolver pipeline.SecretResolver,
 ) error {
 	ctx := context.Background()
+	color := ui.IsColorEnabled(os.Stdout)
 
 	connStr := cl.ConnectionString()
 	if connStr == "" {
@@ -100,19 +102,19 @@ func runDump(
 		var err error
 		connStr, err = secretResolver.Resolve(connStr)
 		if err != nil {
-			return fmt.Errorf("resolve connection secret: %w", err)
+			return ui.WrapDB(fmt.Errorf("resolve connection secret: %w", err))
 		}
 	}
 
 	conn, err := executor.Connect(ctx, connStr)
 	if err != nil {
-		return err
+		return ui.WrapDB(err)
 	}
 	defer conn.Close(ctx)
 
 	objects, err := introspector.Introspect(ctx, conn)
 	if err != nil {
-		return fmt.Errorf("introspect: %w", err)
+		return ui.WrapDB(fmt.Errorf("introspect: %w", err))
 	}
 
 	if err := os.MkdirAll(outDir, 0o755); err != nil {
@@ -141,7 +143,7 @@ func runDump(
 		if err := os.WriteFile(path, []byte(content.String()), 0o644); err != nil {
 			return err
 		}
-		fmt.Printf("wrote %s\n", path)
+		ui.PrintInfo(os.Stdout, "wrote", path, color)
 	}
 
 	// Write snapshot.
@@ -152,7 +154,7 @@ func runDump(
 	if err := store.Save(cl.Name(), dbName, snap); err != nil {
 		return fmt.Errorf("save snapshot: %w", err)
 	}
-	fmt.Printf("snapshot written for %s/%s\n", cl.Name(), dbName)
+	ui.PrintSuccess(os.Stdout, "Snapshot written", cl.Name()+"/"+dbName, color)
 	return nil
 }
 

@@ -11,6 +11,7 @@ import (
 	"github.com/dullkingsman/dpg/internal/emit"
 	"github.com/dullkingsman/dpg/internal/pipeline"
 	"github.com/dullkingsman/dpg/internal/project"
+	"github.com/dullkingsman/dpg/internal/ui"
 )
 
 var defaultLinterConfig = pipeline.LinterConfig{
@@ -60,7 +61,7 @@ labelled in the output.`,
 					continue
 				}
 				if len(cl.Databases) == 0 {
-					fmt.Fprintf(os.Stderr, "warn: cluster %q has no databases\n", cl.Name())
+					ui.PrintInfo(os.Stderr, cl.Name(), "no databases configured", ui.IsColorEnabled(os.Stderr))
 					continue
 				}
 				for _, db := range cl.Databases {
@@ -96,27 +97,21 @@ func runPlan(
 	differ pipeline.Differ,
 	emitter pipeline.Emitter,
 ) error {
+	color := ui.IsColorEnabled(os.Stdout)
+	errColor := ui.IsColorEnabled(os.Stderr)
+
 	desired, err := compiler.Compile(db.SourceFiles, pipeline.Default)
 	if err != nil {
-		return fmt.Errorf("compile: %w", err)
+		return err
 	}
 
 	if linter, ok := pipeline.Resolve[pipeline.Linter](pipeline.Default, pipeline.KeyLinter); ok {
 		diags, lintErr := linter.Lint(desired, defaultLinterConfig)
 		if lintErr != nil {
-			return fmt.Errorf("lint: %w", lintErr)
+			return lintErr
 		}
-		hasErrors := false
-		for _, d := range diags {
-			if d.IsError {
-				fmt.Fprintf(os.Stderr, "error [%s] %s\n", d.Rule, d.Message)
-				hasErrors = true
-			} else {
-				fmt.Fprintf(os.Stderr, "warn  [%s] %s\n", d.Rule, d.Message)
-			}
-		}
-		if hasErrors {
-			return fmt.Errorf("lint: %d error(s) found", countErrors(diags))
+		if ui.PrintLintDiagnostics(os.Stderr, diags, errColor) {
+			return ui.ErrSilent
 		}
 	}
 
@@ -127,7 +122,7 @@ func runPlan(
 
 	ops, err := differ.Diff(desired, snap)
 	if err != nil {
-		return fmt.Errorf("diff: %w", err)
+		return err
 	}
 
 	rev, _ := gitRevision()
@@ -141,17 +136,11 @@ func runPlan(
 		return err
 	}
 
-	return emit.Render(os.Stdout, migration, emit.DefaultRenderOptions())
-}
-
-func countErrors(diags []pipeline.LintDiagnostic) int {
-	n := 0
-	for _, d := range diags {
-		if d.IsError {
-			n++
-		}
-	}
-	return n
+	return emit.Render(os.Stdout, migration, emit.RenderOptions{
+		ShowSafety:    true,
+		ShowSourcePos: true,
+		Color:         color,
+	})
 }
 
 // gitRevision returns the current HEAD short hash, or "" if git is unavailable.

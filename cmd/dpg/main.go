@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -10,6 +11,7 @@ import (
 	"github.com/dullkingsman/dpg/internal/pipeline"
 	"github.com/dullkingsman/dpg/internal/project"
 	snapshotpkg "github.com/dullkingsman/dpg/internal/snapshot"
+	"github.com/dullkingsman/dpg/internal/ui"
 	"github.com/dullkingsman/dpg/internal/version"
 
 	// Import default pipeline implementations to trigger their init() registration.
@@ -32,7 +34,11 @@ import (
 var projectDir string
 
 func main() {
-	if err := newRootCmd().Execute(); err != nil {
+	root := newRootCmd()
+	if err := root.Execute(); err != nil {
+		if !errors.Is(err, ui.ErrSilent) {
+			ui.PrintError(os.Stderr, err, ui.IsColorEnabled(os.Stderr))
+		}
 		os.Exit(1)
 	}
 }
@@ -47,7 +53,8 @@ to idiomatic PG DDL. Describe what your database should be; DPG figures
 out what needs to change.
 
 Source: https://github.com/dullkingsman/dpg`,
-		SilenceUsage: true,
+		SilenceUsage:  true,
+		SilenceErrors: true,
 	}
 
 	root.PersistentFlags().StringVarP(

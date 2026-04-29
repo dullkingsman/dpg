@@ -12,6 +12,7 @@ import (
 	"github.com/dullkingsman/dpg/internal/emit"
 	"github.com/dullkingsman/dpg/internal/pipeline"
 	"github.com/dullkingsman/dpg/internal/snapshot"
+	"github.com/dullkingsman/dpg/internal/ui"
 )
 
 func newDiffCmd() *cobra.Command {
@@ -83,7 +84,11 @@ No snapshot or database connection is required.`,
 				return err
 			}
 
-			return emit.Render(os.Stdout, migration, emit.DefaultRenderOptions())
+			return emit.Render(os.Stdout, migration, emit.RenderOptions{
+				ShowSafety:    true,
+				ShowSourcePos: true,
+				Color:         ui.IsColorEnabled(os.Stdout),
+			})
 		},
 	}
 

@@ -2,11 +2,13 @@ package main
 
 import (
 	"fmt"
+	"os"
 
 	"github.com/spf13/cobra"
 
 	"github.com/dullkingsman/dpg/internal/compiler"
 	"github.com/dullkingsman/dpg/internal/pipeline"
+	"github.com/dullkingsman/dpg/internal/ui"
 )
 
 func newPortabilityCmd() *cobra.Command {
@@ -34,6 +36,8 @@ This command never blocks compilation or apply.`,
 				return err
 			}
 
+			color := ui.IsColorEnabled(os.Stdout)
+
 			for _, cl := range proj.Clusters {
 				if clusterName != "" && cl.Name() != clusterName {
 					continue
@@ -44,24 +48,23 @@ This command never blocks compilation or apply.`,
 					}
 					objects, err := compiler.Compile(db.SourceFiles, pipeline.Default)
 					if err != nil {
-						return fmt.Errorf("%s/%s: compile: %w", cl.Name(), db.Name(), err)
+						return fmt.Errorf("%s/%s: %w", cl.Name(), db.Name(), err)
 					}
 					issues, err := analyzer.Analyze(objects)
 					if err != nil {
 						return fmt.Errorf("%s/%s: analyze: %w", cl.Name(), db.Name(), err)
 					}
+					context := cl.Name() + "/" + db.Name()
 					if len(issues) == 0 {
-						fmt.Printf("-- %s/%s: no portability issues found\n", cl.Name(), db.Name())
+						ui.PrintInfo(os.Stdout, context, "no portability issues found", color)
 						continue
 					}
-					fmt.Printf("-- %s/%s: %d portability issue(s)\n\n", cl.Name(), db.Name(), len(issues))
+					fmt.Fprintf(os.Stdout, "%s  %s\n\n",
+						ui.DimCyan(context, color),
+						fmt.Sprintf("%d portability issue(s)", len(issues)),
+					)
 					for _, iss := range issues {
-						if iss.Pos.File != "" {
-							fmt.Printf("  [%s:%d] %s\n", iss.Pos.File, iss.Pos.Line, iss.Construct)
-						} else {
-							fmt.Printf("  %s\n", iss.Construct)
-						}
-						fmt.Printf("    → %s\n\n", iss.Alternative)
+						ui.PrintPortabilityIssue(os.Stdout, iss.Pos, iss.Construct, iss.Alternative, color)
 					}
 				}
 			}

@@ -12,6 +12,7 @@ import (
 	"github.com/dullkingsman/dpg/internal/pipeline"
 	"github.com/dullkingsman/dpg/internal/project"
 	"github.com/dullkingsman/dpg/internal/snapshot"
+	"github.com/dullkingsman/dpg/internal/ui"
 )
 
 func newVerifyCmd() *cobra.Command {
@@ -97,6 +98,7 @@ func runVerify(
 	secretResolver pipeline.SecretResolver,
 ) (bool, error) {
 	ctx := context.Background()
+	errColor := ui.IsColorEnabled(os.Stderr)
 
 	// Load the committed snapshot (what DPG last applied).
 	snap, err := store.Load(cl.Name(), db.Name())
@@ -112,20 +114,20 @@ func runVerify(
 	if cl.IsLink() {
 		connStr, err = secretResolver.Resolve(connStr)
 		if err != nil {
-			return false, fmt.Errorf("resolve connection secret: %w", err)
+			return false, ui.WrapDB(fmt.Errorf("resolve connection secret: %w", err))
 		}
 	}
 
 	conn, err := executor.Connect(ctx, connStr)
 	if err != nil {
-		return false, err
+		return false, ui.WrapDB(err)
 	}
 	defer conn.Close(ctx)
 
 	// Introspect the live catalog.
 	liveObjects, err := introspector.Introspect(ctx, conn)
 	if err != nil {
-		return false, fmt.Errorf("introspect: %w", err)
+		return false, ui.WrapDB(fmt.Errorf("introspect: %w", err))
 	}
 
 	// Build a synthetic snapshot from the live state and diff it against the
@@ -135,24 +137,29 @@ func runVerify(
 		return false, fmt.Errorf("build live snapshot: %w", err)
 	}
 
-	// Desired = what snapshot says should be there; current = what live catalog has.
-	// We diff desired (from snapshot) against live (as if snap were the "base").
-	// Build desired slice from snapshot objects via a synthetic diff.
 	ops, err := differ.Diff(liveObjects, snap)
 	if err != nil {
 		return false, fmt.Errorf("diff: %w", err)
 	}
 
 	if len(ops) == 0 {
-		fmt.Printf("-- %s/%s: no drift detected\n", cl.Name(), db.Name())
+		ui.PrintInfo(os.Stdout, cl.Name()+"/"+db.Name(), "no drift detected", ui.IsColorEnabled(os.Stdout))
 		return false, nil
 	}
 
-	fmt.Fprintf(os.Stderr, "DRIFT DETECTED in %s/%s:\n", cl.Name(), db.Name())
+	// Drift found — print the corrective migration to stderr.
+	fmt.Fprintf(os.Stderr, "%s  %s\n\n",
+		ui.Red("drift detected", errColor),
+		ui.Cyan(cl.Name()+"/"+db.Name(), errColor),
+	)
 	migration, _ := emitter.Emit(ops, pipeline.MigrationMeta{
 		Cluster:  cl.Name(),
 		Database: db.Name(),
 	})
-	_ = emit.Render(os.Stderr, migration, emit.DefaultRenderOptions())
+	_ = emit.Render(os.Stderr, migration, emit.RenderOptions{
+		ShowSafety:    true,
+		ShowSourcePos: true,
+		Color:         errColor,
+	})
 	return true, nil
 }

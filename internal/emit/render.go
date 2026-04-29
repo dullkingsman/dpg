@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/dullkingsman/dpg/internal/pipeline"
+	"github.com/dullkingsman/dpg/internal/ui"
 )
 
 // RenderOptions controls what the renderer writes.
@@ -15,49 +16,61 @@ type RenderOptions struct {
 	ShowSafety bool
 	// ShowSourcePos annotates each statement with its source location.
 	ShowSourcePos bool
+	// Color enables ANSI colour output.
+	Color bool
 }
 
-// DefaultRenderOptions returns options matching the RFC §20.2 format.
+// DefaultRenderOptions returns options matching the RFC §20.2 format (no colour).
 func DefaultRenderOptions() RenderOptions {
 	return RenderOptions{ShowSafety: true, ShowSourcePos: true}
 }
 
+// ColoredRenderOptions returns options with colour output enabled.
+func ColoredRenderOptions() RenderOptions {
+	return RenderOptions{ShowSafety: true, ShowSourcePos: true, Color: true}
+}
+
 // Render writes a Migration to w in the RFC §20.2 SQL format.
 func Render(w io.Writer, m pipeline.Migration, opts RenderOptions) error {
-	// Header comment.
+	c := opts.Color
+	dim := func(s string) string { return ui.Dim(s, c) }
+	cyan := func(s string) string { return ui.Cyan(s, c) }
+
 	genAt := m.Meta.GeneratedAt
 	if genAt.IsZero() {
 		genAt = time.Now().UTC()
 	}
-	fmt.Fprintf(w, "-- DPG Migration\n")
-	fmt.Fprintf(w, "-- Generated:       %s\n", genAt.UTC().Format(time.RFC3339))
+
+	// Header block.
+	fmt.Fprintf(w, "%s\n", dim("-- DPG Migration"))
+	fmt.Fprintf(w, "%s %s\n", dim("-- Generated:      "), genAt.UTC().Format(time.RFC3339))
 	if m.Meta.SourceRevision != "" {
-		fmt.Fprintf(w, "-- Source revision: %s\n", m.Meta.SourceRevision)
+		fmt.Fprintf(w, "%s %s\n", dim("-- Source revision:"), m.Meta.SourceRevision)
 	}
 	if m.Meta.Cluster != "" {
-		fmt.Fprintf(w, "-- Cluster:         %s\n", m.Meta.Cluster)
+		fmt.Fprintf(w, "%s %s\n", dim("-- Cluster:        "), cyan(m.Meta.Cluster))
 	}
 	if m.Meta.Database != "" {
-		fmt.Fprintf(w, "-- Database:        %s\n", m.Meta.Database)
+		fmt.Fprintf(w, "%s %s\n", dim("-- Database:       "), cyan(m.Meta.Database))
 	}
 
 	if len(m.Transactional) == 0 && len(m.NonTransactional) == 0 {
-		fmt.Fprintf(w, "\n-- (no changes)\n")
+		fmt.Fprintf(w, "\n%s\n", dim("-- (no changes)"))
 		return nil
 	}
 
 	// Transactional block.
 	if len(m.Transactional) > 0 {
-		fmt.Fprintf(w, "\nBEGIN;\n")
+		fmt.Fprintf(w, "\n%s\n", ui.HighlightSQL("BEGIN;", c))
 		for _, op := range m.Transactional {
 			writeOp(w, op, opts)
 		}
-		fmt.Fprintf(w, "\nCOMMIT;\n")
+		fmt.Fprintf(w, "\n%s\n", ui.HighlightSQL("COMMIT;", c))
 	}
 
 	// Non-transactional steps.
 	if len(m.NonTransactional) > 0 {
-		fmt.Fprintf(w, "\n-- Non-transactional steps (executed after COMMIT):\n")
+		fmt.Fprintf(w, "\n%s\n", dim("-- Non-transactional steps (run outside transaction):"))
 		for _, op := range m.NonTransactional {
 			writeOp(w, op, opts)
 		}
@@ -67,19 +80,35 @@ func Render(w io.Writer, m pipeline.Migration, opts RenderOptions) error {
 }
 
 func writeOp(w io.Writer, op pipeline.DiffOp, opts RenderOptions) {
-	var annotations []string
+	c := opts.Color
+	var parts []string
+
 	if opts.ShowSourcePos {
 		if pos := op.Pos(); pos.File != "" {
-			annotations = append(annotations, fmt.Sprintf("source: %s:%d", pos.File, pos.Line))
+			posStr := fmt.Sprintf("%s:%d", pos.File, pos.Line)
+			parts = append(parts, "source: "+ui.Magenta(posStr, c))
 		}
 	}
 	if opts.ShowSafety && op.Safety() != pipeline.Safe {
-		annotations = append(annotations, fmt.Sprintf("safety: %s", op.Safety()))
+		parts = append(parts, "safety: "+safetyLabel(op.Safety(), c))
 	}
-	if len(annotations) > 0 {
-		fmt.Fprintf(w, "\n-- [%s]\n", strings.Join(annotations, ", "))
-	} else {
-		fmt.Fprintf(w, "\n")
+
+	fmt.Fprintln(w)
+	if len(parts) > 0 {
+		fmt.Fprintf(w, "%s %s\n", ui.Dim("--", c), strings.Join(parts, ui.Dim(", ", c)))
 	}
-	fmt.Fprintf(w, "%s\n", op.SQL())
+	fmt.Fprintf(w, "%s\n", ui.HighlightSQL(op.SQL(), c))
+}
+
+func safetyLabel(s pipeline.Safety, color bool) string {
+	switch s {
+	case pipeline.Caution:
+		return ui.Yellow(s.String(), color)
+	case pipeline.Destructive:
+		return ui.Red(s.String(), color)
+	case pipeline.Manual:
+		return ui.Blue(s.String(), color)
+	default:
+		return s.String()
+	}
 }

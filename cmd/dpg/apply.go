@@ -16,6 +16,7 @@ import (
 	"github.com/dullkingsman/dpg/internal/pipeline"
 	"github.com/dullkingsman/dpg/internal/project"
 	"github.com/dullkingsman/dpg/internal/snapshot"
+	"github.com/dullkingsman/dpg/internal/ui"
 )
 
 func newApplyCmd() *cobra.Command {
@@ -111,28 +112,21 @@ func runApply(
 	opts applyOptions,
 ) error {
 	ctx := context.Background()
+	color := ui.IsColorEnabled(os.Stdout)
+	errColor := ui.IsColorEnabled(os.Stderr)
 
 	desired, err := compiler.Compile(db.SourceFiles, pipeline.Default)
 	if err != nil {
-		return fmt.Errorf("compile: %w", err)
+		return err
 	}
 
 	if linter, ok := pipeline.Resolve[pipeline.Linter](pipeline.Default, pipeline.KeyLinter); ok {
 		diags, lintErr := linter.Lint(desired, defaultLinterConfig)
 		if lintErr != nil {
-			return fmt.Errorf("lint: %w", lintErr)
+			return lintErr
 		}
-		hasErrors := false
-		for _, d := range diags {
-			if d.IsError {
-				fmt.Fprintf(os.Stderr, "error [%s] %s\n", d.Rule, d.Message)
-				hasErrors = true
-			} else {
-				fmt.Fprintf(os.Stderr, "warn  [%s] %s\n", d.Rule, d.Message)
-			}
-		}
-		if hasErrors {
-			return fmt.Errorf("lint: %d error(s) found", countErrors(diags))
+		if ui.PrintLintDiagnostics(os.Stderr, diags, errColor) {
+			return ui.ErrSilent
 		}
 	}
 
@@ -143,11 +137,11 @@ func runApply(
 
 	ops, err := differ.Diff(desired, snap)
 	if err != nil {
-		return fmt.Errorf("diff: %w", err)
+		return err
 	}
 
 	if len(ops) == 0 {
-		fmt.Printf("-- %s/%s: already up to date\n", cl.Name(), db.Name())
+		ui.PrintInfo(os.Stdout, cl.Name()+"/"+db.Name(), "already up to date", color)
 		return nil
 	}
 
@@ -172,16 +166,20 @@ func runApply(
 	}
 
 	// Print the plan.
-	if err := emit.Render(os.Stdout, migration, emit.DefaultRenderOptions()); err != nil {
+	if err := emit.Render(os.Stdout, migration, emit.RenderOptions{
+		ShowSafety:    true,
+		ShowSourcePos: true,
+		Color:         color,
+	}); err != nil {
 		return err
 	}
 
 	// Prompt for approval.
 	if !opts.yes {
-		fmt.Print("\nApply this migration? [y/N] ")
+		fmt.Printf("\n%s [y/N] ", ui.Bold("Apply this migration?", color))
 		scanner := bufio.NewScanner(os.Stdin)
 		if !scanner.Scan() || !strings.EqualFold(strings.TrimSpace(scanner.Text()), "y") {
-			fmt.Println("Aborted.")
+			ui.PrintInfo(os.Stdout, "", "Aborted.", color)
 			return nil
 		}
 	}
@@ -194,18 +192,18 @@ func runApply(
 	if cl.IsLink() {
 		connStr, err = secretResolver.Resolve(connStr)
 		if err != nil {
-			return fmt.Errorf("resolve connection secret: %w", err)
+			return ui.WrapDB(fmt.Errorf("resolve connection secret: %w", err))
 		}
 	}
 
 	conn, err := executor.Connect(ctx, connStr)
 	if err != nil {
-		return err
+		return ui.WrapDB(err)
 	}
 	defer conn.Close(ctx)
 
 	if err := applyExec.Apply(ctx, migration, conn); err != nil {
-		return fmt.Errorf("execute: %w", err)
+		return ui.WrapDB(err)
 	}
 
 	// Update snapshot.
@@ -217,6 +215,6 @@ func runApply(
 		return fmt.Errorf("save snapshot: %w", err)
 	}
 
-	fmt.Printf("\n✓ Applied and snapshot updated: %s/%s\n", cl.Name(), db.Name())
+	ui.PrintSuccess(os.Stdout, "Applied", cl.Name()+"/"+db.Name()+" — snapshot updated", color)
 	return nil
 }
