@@ -465,12 +465,13 @@ func createObject(obj pipeline.IRObject) ([]pipeline.DiffOp, error) {
 }
 
 // createOpaque emits a CREATE statement from a pre-built Body SQL string.
-// If Body is empty (builder didn't deparse), emits a comment placeholder.
+// Returns an error if Body is empty — the builder failed to capture the source SQL,
+// which would otherwise produce a silent no-op migration.
 func createOpaque(name, body, kind string, pos pipeline.SourcePos) ([]pipeline.DiffOp, error) {
 	if body != "" {
 		return []pipeline.DiffOp{safeOp(body+";", pos)}, nil
 	}
-	return []pipeline.DiffOp{safeOp(fmt.Sprintf("-- TODO: create %s %s (body not captured)", kind, name), pos)}, nil
+	return nil, fmt.Errorf("%s %s: body not captured; define it explicitly in a .dpg source file", kind, name)
 }
 
 func createProcedure(o *ir.Procedure) []pipeline.DiffOp {

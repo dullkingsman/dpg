@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Differ: `createOpaque` now returns an error when a pass-through object body was not captured, instead of silently emitting a SQL comment that would have been a no-op on apply
+
 ## [0.1.0] — 2026-04-29
 
 Initial release.
