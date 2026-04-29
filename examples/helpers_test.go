@@ -40,7 +40,7 @@ import (
 // File paths are relative to the examples/ package directory.
 func compileDPG(t *testing.T, files ...string) []pipeline.IRObject {
 	t.Helper()
-	objects, err := compiler.Compile(files, pipeline.Default)
+	objects, err := compiler.Compile(files, "", pipeline.Default)
 	if err != nil {
 		t.Fatalf("compile %v: %v", files, err)
 	}

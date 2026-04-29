@@ -5,14 +5,20 @@ package compiler
 import (
 	"fmt"
 	"os"
+	"path/filepath"
+	"strings"
 
 	"github.com/dullkingsman/dpg/internal/pipeline"
 )
 
 // Compile reads all source files, runs them through every pipeline stage up to
 // dependency resolution, and returns a sorted slice of fully-resolved IRObjects.
-// All pipeline stage implementations are resolved from the provided registry.
-func Compile(files []string, reg *pipeline.Registry) ([]pipeline.IRObject, error) {
+//
+// dbDir is the database source root directory. Files located under
+// dbDir/schemas/<name>/... have their schema context inferred from the directory
+// name when no explicit SCHEMA block is present. A SCHEMA block inside the
+// schemas/ hierarchy is a compile error.
+func Compile(files []string, dbDir string, reg *pipeline.Registry) ([]pipeline.IRObject, error) {
 	tokenizer, err := pipeline.MustResolve[pipeline.Tokenizer](reg, pipeline.KeyTokenizer)
 	if err != nil {
 		return nil, err
@@ -40,6 +46,8 @@ func Compile(files []string, reg *pipeline.Registry) ([]pipeline.IRObject, error
 
 	var rawObjects []pipeline.RawObject
 	var diags pipeline.Diagnostics
+	// Track unique directory-inferred schemas so we can inject synthetic declarations.
+	dirSchemas := map[string]pipeline.SourcePos{}
 
 	// Stage 1: Tokenize all source files.
 	for _, path := range files {
@@ -55,8 +63,48 @@ func Compile(files []string, reg *pipeline.Registry) ([]pipeline.IRObject, error
 			}
 			return nil, fmt.Errorf("compiler: scanning %s: %w", path, scanErr)
 		}
+
+		dirSchema := inferSchemaFromPath(dbDir, path)
+		for i := range raws {
+			if dirSchema != "" && raws[i].Kind == pipeline.KindSchema {
+				diags = append(diags, pipeline.Errorf(raws[i].Pos,
+					"SCHEMA blocks are not allowed inside the schemas/ directory hierarchy; "+
+						"the schema is inferred from the directory name"))
+				continue
+			}
+			if raws[i].Schema == "" {
+				raws[i].Schema = dirSchema
+			}
+		}
+
+		if dirSchema != "" {
+			if _, seen := dirSchemas[dirSchema]; !seen {
+				pos := pipeline.SourcePos{File: path, Line: 1, Col: 1}
+				dirSchemas[dirSchema] = pos
+			}
+		}
+
 		rawObjects = append(rawObjects, raws...)
 	}
+
+	// Inject one synthetic SCHEMA declaration per directory-inferred schema.
+	// This ensures schemas that exist only as directories appear in the desired
+	// state, so the differ never generates a spurious DROP SCHEMA.
+	// The synthetic raw object goes through the normal pipeline (Reconstruct →
+	// "CREATE SCHEMA <name>" → pg_query → IR builder); the merger deduplicates
+	// it with any explicit SCHEMA block for the same name.
+	// "public" is skipped: it always exists in PostgreSQL and is never managed.
+	for name, pos := range dirSchemas {
+		if name == "public" {
+			continue
+		}
+		rawObjects = append(rawObjects, pipeline.RawObject{
+			Kind:  pipeline.KindSchema,
+			Part1: name,
+			Pos:   pos,
+		})
+	}
+
 	if diags.HasErrors() {
 		return nil, diags
 	}
@@ -110,4 +158,22 @@ func Compile(files []string, reg *pipeline.Registry) ([]pipeline.IRObject, error
 	}
 
 	return sorted, nil
+}
+
+// inferSchemaFromPath returns the schema name inferred from the file's position
+// under dbDir/schemas/<name>/..., or "" if the file is not in that structure.
+func inferSchemaFromPath(dbDir, filePath string) string {
+	if dbDir == "" {
+		return ""
+	}
+	rel, err := filepath.Rel(dbDir, filePath)
+	if err != nil {
+		return ""
+	}
+	// Use forward-slash segments on all platforms.
+	parts := strings.SplitN(filepath.ToSlash(rel), "/", 4)
+	if len(parts) >= 3 && parts[0] == "schemas" && parts[1] != "" {
+		return parts[1]
+	}
+	return ""
 }

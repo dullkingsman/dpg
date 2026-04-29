@@ -31,6 +31,11 @@ This command never blocks compilation or apply.`,
 				return err
 			}
 
+			clusters, err := resolveClusters(proj, clusterName)
+			if err != nil {
+				return err
+			}
+
 			analyzer, err := pipeline.MustResolve[pipeline.PortabilityAnalyzer](pipeline.Default, pipeline.KeyPortabilityAnalyzer)
 			if err != nil {
 				return err
@@ -38,15 +43,13 @@ This command never blocks compilation or apply.`,
 
 			color := ui.IsColorEnabled(os.Stdout)
 
-			for _, cl := range proj.Clusters {
-				if clusterName != "" && cl.Name() != clusterName {
-					continue
+			for _, cl := range clusters {
+				databases, err := resolveDatabases(cl, databaseName)
+				if err != nil {
+					return err
 				}
-				for _, db := range cl.Databases {
-					if databaseName != "" && db.Name() != databaseName {
-						continue
-					}
-					objects, err := compiler.Compile(db.SourceFiles, pipeline.Default)
+				for _, db := range databases {
+					objects, err := compiler.Compile(db.SourceFiles, db.Dir, pipeline.Default)
 					if err != nil {
 						return fmt.Errorf("%s/%s: %w", cl.Name(), db.Name(), err)
 					}
@@ -54,13 +57,13 @@ This command never blocks compilation or apply.`,
 					if err != nil {
 						return fmt.Errorf("%s/%s: analyze: %w", cl.Name(), db.Name(), err)
 					}
-					context := cl.Name() + "/" + db.Name()
+					label := cl.Name() + "/" + db.Name()
 					if len(issues) == 0 {
-						ui.PrintInfo(os.Stdout, context, "no portability issues found", color)
+						ui.PrintInfo(os.Stdout, label, "no portability issues found", color)
 						continue
 					}
 					fmt.Fprintf(os.Stdout, "%s  %s\n\n",
-						ui.DimCyan(context, color),
+						ui.DimCyan(label, color),
 						fmt.Sprintf("%d portability issue(s)", len(issues)),
 					)
 					for _, iss := range issues {
@@ -72,8 +75,8 @@ This command never blocks compilation or apply.`,
 		},
 	}
 
-	cmd.Flags().StringVar(&clusterName, "cluster", "", "cluster name (default: all clusters)")
-	cmd.Flags().StringVar(&databaseName, "database", "", "database name (default: all databases)")
+	cmd.Flags().StringVar(&clusterName, "cluster", "", "cluster to analyze (required when multiple clusters exist)")
+	cmd.Flags().StringVar(&databaseName, "database", "", "database to analyze (required when multiple databases exist)")
 
 	return cmd
 }

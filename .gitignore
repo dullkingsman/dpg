@@ -1,5 +1,18 @@
+# IDE configs
 .idea
 .vscode
+
+# envs
 .env*
+!.env*.example
+
+# builds
+build
+dist
+
+# agent artifacts
+.codex
+.antigravity
+.cursor
 .claude
-I n
+CLAUDE.md

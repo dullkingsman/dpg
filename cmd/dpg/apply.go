@@ -41,6 +41,12 @@ Partition strategy changes additionally require --approve-partition-rebuild.`,
 			if err != nil {
 				return err
 			}
+			loadEnv(proj, envFile)
+
+			clusters, err := resolveClusters(proj, clusterName)
+			if err != nil {
+				return err
+			}
 
 			store, err := pipeline.MustResolve[pipeline.SnapshotStore](pipeline.Default, pipeline.KeySnapshotStore)
 			if err != nil {
@@ -63,21 +69,19 @@ Partition strategy changes additionally require --approve-partition-rebuild.`,
 				return err
 			}
 
-			_ = approvePartitionRebuild // reserved for future use
+			_ = approvePartitionRebuild
 			opts := applyOptions{
 				yes:              yes,
 				allowDestructive: allowDestructive,
 				migrationsDir:    proj.MigrationsDir(),
 			}
 
-			for _, cl := range proj.Clusters {
-				if clusterName != "" && cl.Name() != clusterName {
-					continue
+			for _, cl := range clusters {
+				databases, err := resolveDatabases(cl, databaseName)
+				if err != nil {
+					return err
 				}
-				for _, db := range cl.Databases {
-					if databaseName != "" && db.Name() != databaseName {
-						continue
-					}
+				for _, db := range databases {
 					if err := runApply(cl, db, store, differ, emitter, applyExec, secretResolver, opts); err != nil {
 						return fmt.Errorf("%s/%s: %w", cl.Name(), db.Name(), err)
 					}
@@ -87,8 +91,8 @@ Partition strategy changes additionally require --approve-partition-rebuild.`,
 		},
 	}
 
-	cmd.Flags().StringVar(&clusterName, "cluster", "", "cluster name (default: all clusters)")
-	cmd.Flags().StringVar(&databaseName, "database", "", "database name (default: all databases)")
+	cmd.Flags().StringVar(&clusterName, "cluster", "", "cluster to apply (required when multiple clusters exist)")
+	cmd.Flags().StringVar(&databaseName, "database", "", "database to apply (required when multiple databases exist)")
 	cmd.Flags().BoolVarP(&yes, "yes", "y", false, "skip interactive approval prompt")
 	cmd.Flags().BoolVar(&allowDestructive, "allow-destructive", false, "allow destructive operations")
 	cmd.Flags().BoolVar(&approvePartitionRebuild, "approve-partition-rebuild", false,
@@ -117,7 +121,7 @@ func runApply(
 	color := ui.IsColorEnabled(os.Stdout)
 	errColor := ui.IsColorEnabled(os.Stderr)
 
-	desired, err := compiler.Compile(db.SourceFiles, pipeline.Default)
+	desired, err := compiler.Compile(db.SourceFiles, db.Dir, pipeline.Default)
 	if err != nil {
 		return err
 	}
@@ -147,7 +151,6 @@ func runApply(
 		return nil
 	}
 
-	// Block destructive ops unless explicitly allowed.
 	if !opts.allowDestructive {
 		for _, op := range ops {
 			if op.Safety() == pipeline.Destructive {
@@ -167,16 +170,14 @@ func runApply(
 		return err
 	}
 
-	// Render the migration for display and for the archive file.
-	// Render plain SQL (no colour) to a buffer — used for both stdout (with
-	// colour applied separately) and the on-disk migration file.
+	// Render plain SQL for the archive file.
 	var sqlBuf strings.Builder
 	if err := emit.Render(&sqlBuf, migration, emit.DefaultRenderOptions()); err != nil {
 		return err
 	}
 	plainSQL := sqlBuf.String()
 
-	// Print the plan with colour to stdout.
+	// Print with colour to stdout.
 	if err := emit.Render(os.Stdout, migration, emit.RenderOptions{
 		ShowSafety:    true,
 		ShowSourcePos: true,
@@ -185,7 +186,6 @@ func runApply(
 		return err
 	}
 
-	// Prompt for approval.
 	if !opts.yes {
 		fmt.Printf("\n%s [y/N] ", ui.Bold("Apply this migration?", color))
 		scanner := bufio.NewScanner(os.Stdin)
@@ -195,7 +195,6 @@ func runApply(
 		}
 	}
 
-	// Resolve connection URL.
 	connStr := cl.ConnectionString()
 	if connStr == "" {
 		return fmt.Errorf("cluster %q has no connection configured (set url or link in cluster dpg.toml)", cl.Name())
@@ -217,14 +216,12 @@ func runApply(
 		return ui.WrapDB(err)
 	}
 
-	// Archive the migration SQL file before updating the snapshot, so that if
-	// the snapshot write fails we still have a record of what was applied.
+	// Archive migration file before updating snapshot.
 	migPath, err := snapshotpkg.SaveMigration(opts.migrationsDir, cl.Name(), db.Name(), plainSQL)
 	if err != nil {
 		ui.PrintInfo(os.Stderr, "warn", "could not archive migration file: "+err.Error(), errColor)
 	}
 
-	// Update snapshot.
 	newSnap := &pipeline.Snapshot{}
 	if err := snapshotpkg.Populate(newSnap, desired); err != nil {
 		return fmt.Errorf("build snapshot: %w", err)

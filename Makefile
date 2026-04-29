@@ -1,6 +1,7 @@
 BINARY  := dpg
 MODULE  := github.com/dullkingsman/dpg
 CMD     := ./cmd/dpg
+BUILD   := build
 DIST    := dist
 
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
@@ -18,7 +19,7 @@ LDFLAGS := -X '$(MODULE)/internal/version.Version=$(VERSION)' \
 # ── Build ─────────────────────────────────────────────────────────────────────
 
 build:
-	go build -ldflags "$(LDFLAGS)" -o $(BINARY) $(CMD)
+	go build -ldflags "$(LDFLAGS)" -o $(BUILD)/$(BINARY) $(CMD)
 
 install:
 	go install -ldflags "$(LDFLAGS)" $(CMD)
@@ -84,7 +85,7 @@ release: dist
 # ── Clean ─────────────────────────────────────────────────────────────────────
 
 clean:
-	rm -f $(BINARY)
+	rm -f $(BUILD)/$(BINARY)
 
 clean-dist:
 	rm -rf $(DIST)

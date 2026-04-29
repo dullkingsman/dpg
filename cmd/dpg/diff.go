@@ -55,7 +55,7 @@ No snapshot or database connection is required.`,
 			}
 
 			// Compile the "from" source as the base state.
-			fromObjects, err := compiler.Compile(fromFiles, pipeline.Default)
+			fromObjects, err := compiler.Compile(fromFiles, fromDir, pipeline.Default)
 			if err != nil {
 				return fmt.Errorf("compile --from: %w", err)
 			}
@@ -67,7 +67,7 @@ No snapshot or database connection is required.`,
 			}
 
 			// Compile the "to" source as the desired state.
-			toObjects, err := compiler.Compile(toFiles, pipeline.Default)
+			toObjects, err := compiler.Compile(toFiles, toDir, pipeline.Default)
 			if err != nil {
 				return fmt.Errorf("compile --to: %w", err)
 			}

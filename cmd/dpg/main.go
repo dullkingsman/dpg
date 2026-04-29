@@ -31,7 +31,10 @@ import (
 	_ "github.com/dullkingsman/dpg/internal/snapshot"
 )
 
-var projectDir string
+var (
+	projectDir string
+	envFile    string
+)
 
 func main() {
 	root := newRootCmd()
@@ -60,6 +63,10 @@ Source: https://github.com/dullkingsman/dpg`,
 	root.PersistentFlags().StringVarP(
 		&projectDir, "dir", "C", "",
 		"project root directory (default: current working directory)",
+	)
+	root.PersistentFlags().StringVar(
+		&envFile, "env", "",
+		"path to .env file (default: .env in project root, if present)",
 	)
 
 	root.AddCommand(

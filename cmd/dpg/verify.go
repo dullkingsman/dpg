@@ -35,6 +35,12 @@ not reported (additive grant model).`,
 			if err != nil {
 				return err
 			}
+			loadEnv(proj, envFile)
+
+			clusters, err := resolveClusters(proj, clusterName)
+			if err != nil {
+				return err
+			}
 
 			store, err := pipeline.MustResolve[pipeline.SnapshotStore](pipeline.Default, pipeline.KeySnapshotStore)
 			if err != nil {
@@ -58,14 +64,12 @@ not reported (additive grant model).`,
 			}
 
 			driftFound := false
-			for _, cl := range proj.Clusters {
-				if clusterName != "" && cl.Name() != clusterName {
-					continue
+			for _, cl := range clusters {
+				databases, err := resolveDatabases(cl, databaseName)
+				if err != nil {
+					return err
 				}
-				for _, db := range cl.Databases {
-					if databaseName != "" && db.Name() != databaseName {
-						continue
-					}
+				for _, db := range databases {
 					hasDrift, err := runVerify(cl, db, store, introspector, differ, emitter, secretResolver)
 					if err != nil {
 						return fmt.Errorf("%s/%s: %w", cl.Name(), db.Name(), err)
@@ -82,8 +86,8 @@ not reported (additive grant model).`,
 		},
 	}
 
-	cmd.Flags().StringVar(&clusterName, "cluster", "", "cluster name (default: all clusters)")
-	cmd.Flags().StringVar(&databaseName, "database", "", "database name (default: all databases)")
+	cmd.Flags().StringVar(&clusterName, "cluster", "", "cluster to verify (required when multiple clusters exist)")
+	cmd.Flags().StringVar(&databaseName, "database", "", "database to verify (required when multiple databases exist)")
 
 	return cmd
 }
@@ -100,13 +104,11 @@ func runVerify(
 	ctx := context.Background()
 	errColor := ui.IsColorEnabled(os.Stderr)
 
-	// Load the committed snapshot (what DPG last applied).
 	snap, err := store.Load(cl.Name(), db.Name())
 	if err != nil {
 		return false, fmt.Errorf("load snapshot: %w", err)
 	}
 
-	// Connect to the live database.
 	connStr := cl.ConnectionString()
 	if connStr == "" {
 		return false, fmt.Errorf("cluster %q has no connection configured (set url or link in cluster dpg.toml)", cl.Name())
@@ -124,14 +126,11 @@ func runVerify(
 	}
 	defer conn.Close(ctx)
 
-	// Introspect the live catalog.
 	liveObjects, err := introspector.Introspect(ctx, conn)
 	if err != nil {
 		return false, ui.WrapDB(fmt.Errorf("introspect: %w", err))
 	}
 
-	// Build a synthetic snapshot from the live state and diff it against the
-	// committed snapshot. Any differences represent drift.
 	liveSnap := &pipeline.Snapshot{}
 	if err := snapshot.Populate(liveSnap, liveObjects); err != nil {
 		return false, fmt.Errorf("build live snapshot: %w", err)
@@ -147,7 +146,6 @@ func runVerify(
 		return false, nil
 	}
 
-	// Drift found — print the corrective migration to stderr.
 	fmt.Fprintf(os.Stderr, "%s  %s\n\n",
 		ui.Red("drift detected", errColor),
 		ui.Cyan(cl.Name()+"/"+db.Name(), errColor),

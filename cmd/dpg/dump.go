@@ -31,14 +31,13 @@ func newDumpCmd() *cobra.Command {
 .dpg source files and an initial snapshot to the output directory.
 Use this to bootstrap a DPG project from an existing database.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if clusterName == "" {
-				return fmt.Errorf("--cluster is required")
-			}
-			if databaseName == "" {
-				return fmt.Errorf("--database is required")
-			}
-
 			proj, err := discoverProject()
+			if err != nil {
+				return err
+			}
+			loadEnv(proj, envFile)
+
+			clusters, err := resolveClusters(proj, clusterName)
 			if err != nil {
 				return err
 			}
@@ -56,28 +55,27 @@ Use this to bootstrap a DPG project from an existing database.`,
 				return err
 			}
 
-			var cl *project.Cluster
-			for _, c := range proj.Clusters {
-				if c.Name() == clusterName {
-					cl = c
-					break
+			for _, cl := range clusters {
+				databases, err := resolveDatabases(cl, databaseName)
+				if err != nil {
+					return err
+				}
+				for _, db := range databases {
+					out := outputDir
+					if out == "" {
+						out = filepath.Join(proj.RootDir, cl.Name(), db.Name())
+					}
+					if err := runDump(cl, db, out, introspector, store, secretResolver); err != nil {
+						return fmt.Errorf("%s/%s: %w", cl.Name(), db.Name(), err)
+					}
 				}
 			}
-			if cl == nil {
-				return fmt.Errorf("cluster %q not found in project", clusterName)
-			}
-
-			out := outputDir
-			if out == "" {
-				out = filepath.Join(proj.RootDir, clusterName, databaseName)
-			}
-
-			return runDump(cl, databaseName, out, introspector, store, secretResolver)
+			return nil
 		},
 	}
 
-	cmd.Flags().StringVar(&clusterName, "cluster", "", "cluster name (required)")
-	cmd.Flags().StringVar(&databaseName, "database", "", "database name (required)")
+	cmd.Flags().StringVar(&clusterName, "cluster", "", "cluster to dump (required when multiple clusters exist)")
+	cmd.Flags().StringVar(&databaseName, "database", "", "database to dump (required when multiple databases exist)")
 	cmd.Flags().StringVarP(&outputDir, "output", "o", "", "output directory (default: cluster/database/ within project root)")
 
 	return cmd
@@ -85,7 +83,7 @@ Use this to bootstrap a DPG project from an existing database.`,
 
 func runDump(
 	cl *project.Cluster,
-	dbName string,
+	db *project.Database,
 	outDir string,
 	introspector pipeline.Introspector,
 	store pipeline.SnapshotStore,
@@ -121,11 +119,12 @@ func runDump(
 		return fmt.Errorf("create output directory: %w", err)
 	}
 
-	// Write one .dpg file per schema.
 	schemaFiles := map[string]*strings.Builder{}
+	var globalFile strings.Builder
 	for _, obj := range objects {
 		schema := objectSchema(obj)
 		if schema == "" {
+			renderObjectDPG(&globalFile, obj)
 			continue
 		}
 		if _, ok := schemaFiles[schema]; !ok {
@@ -146,15 +145,22 @@ func runDump(
 		ui.PrintInfo(os.Stdout, "wrote", path, color)
 	}
 
-	// Write snapshot.
+	if globalFile.Len() > 0 {
+		path := filepath.Join(outDir, "roles.dpg")
+		if err := os.WriteFile(path, []byte(globalFile.String()), 0o644); err != nil {
+			return err
+		}
+		ui.PrintInfo(os.Stdout, "wrote", path, color)
+	}
+
 	snap := &pipeline.Snapshot{}
 	if err := snapshot.Populate(snap, objects); err != nil {
 		return fmt.Errorf("build snapshot: %w", err)
 	}
-	if err := store.Save(cl.Name(), dbName, snap); err != nil {
+	if err := store.Save(cl.Name(), db.Name(), snap); err != nil {
 		return fmt.Errorf("save snapshot: %w", err)
 	}
-	ui.PrintSuccess(os.Stdout, "Snapshot written", cl.Name()+"/"+dbName, color)
+	ui.PrintSuccess(os.Stdout, "Snapshot written", cl.Name()+"/"+db.Name(), color)
 	return nil
 }
 
@@ -214,6 +220,9 @@ func renderObjectDPG(b *strings.Builder, obj pipeline.IRObject) {
 			if o.RLSEnabled {
 				b.WriteString("    ENABLE ROW LEVEL SECURITY;\n")
 			}
+			for _, idx := range o.Indexes {
+				renderIndex(b, idx)
+			}
 			b.WriteString("}")
 		}
 		b.WriteString(";\n")
@@ -235,11 +244,51 @@ func renderObjectDPG(b *strings.Builder, obj pipeline.IRObject) {
 				fmt.Fprintf(b, "'%s'", v)
 			}
 			b.WriteString(");\n")
+		case "DOMAIN":
+			fmt.Fprintf(b, "\nDOMAIN %s AS %s;\n", o.Name, o.Body)
 		default:
 			fmt.Fprintf(b, "\n-- type %s (%s) omitted\n", o.Name, o.Variant)
 		}
 
 	case *ir.Sequence:
 		fmt.Fprintf(b, "\nSEQUENCE %s;\n", o.Name)
+
+	case *ir.Role:
+		fmt.Fprintf(b, "\nROLE %s;\n", o.Name)
 	}
+}
+
+// renderIndex writes one INDEX entry for a table's {} block.
+// Format: INDEX name [UNIQUE] (cols) [USING method] [WHERE pred];
+func renderIndex(b *strings.Builder, idx *ir.Index) {
+	fmt.Fprintf(b, "    INDEX %s", idx.Name)
+	if idx.Unique {
+		b.WriteString(" UNIQUE")
+	}
+	b.WriteString(" (")
+	for i, col := range idx.Columns {
+		if i > 0 {
+			b.WriteString(", ")
+		}
+		if col.Expr != nil {
+			b.WriteString(col.Expr.Text)
+		} else {
+			b.WriteString(col.Name)
+		}
+		if col.SortOrder != "" {
+			b.WriteString(" ")
+			b.WriteString(col.SortOrder)
+		}
+		if col.Nulls != "" {
+			fmt.Fprintf(b, " NULLS %s", col.Nulls)
+		}
+	}
+	b.WriteString(")")
+	if idx.Method != "" && idx.Method != "btree" {
+		fmt.Fprintf(b, " USING %s", idx.Method)
+	}
+	if idx.Where != nil {
+		fmt.Fprintf(b, " WHERE %s", *idx.Where)
+	}
+	b.WriteString(";\n")
 }
