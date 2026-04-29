@@ -11,8 +11,17 @@ build
 dist
 
 # agent artifacts
-.codex
-.antigravity
-.cursor
-.claude
+.cursor/
+.clinerules
+.claude/
+.antigravity/
+.codex/
+.continue/
+.copilot/
+.mcp/
+*.local.md
+.cursorrules
 CLAUDE.md
+agent_plans/
+*.agent_trace.log
+.ai_context/
