@@ -22,12 +22,15 @@ Focus: correctness and reliability for the object types already supported.
 
 Focus: canonical formatting for `.dpg` source files.
 
-- [ ] `dpg fmt` — reformat `.dpg` source files in place (or print to stdout with `--check`)
+- [x] `dpg fmt` — reformat `.dpg` source files in place
   - Consistent indentation and spacing
-  - Canonical constraint and column ordering within a table block
   - Normalised keyword casing
   - Idempotent: running twice produces no change
-- [ ] `--check` flag for use in CI — exits non-zero if any file would change
+  - Comment-preserving: line and block comments are re-attached to the nearest node
+- [x] `--check` flag for use in CI — exits non-zero if any file would change
+- [x] `--diff` flag — prints unified diff without writing files
+- [x] `[fmt]` section in `dpg.toml` — `indent` and `keyword_case` options
+- [ ] Canonical column/constraint ordering within a table block (planned for v0.2.x)
 - [ ] Format-on-save integration guide for editors (via a `dpg fmt` shell wrapper)
 
 ---
@@ -36,7 +39,8 @@ Focus: canonical formatting for `.dpg` source files.
 
 Focus: allow third-party tools to integrate with the DPG pipeline without forking.
 
-- [ ] Open `internal/pipeline` — promote the registry and core interfaces to a public, stable API so external packages can register custom differs, emitters, linters, and secret resolvers
+- [x] `pkg/dpg` public API — re-exports all IR types, `Compile`, `Lint`, and `Discover`; `Registry` and `Default` exposed for future extension
+- [ ] Open `internal/pipeline` — promote the registry and core interfaces for external packages to register custom differs, emitters, linters, and secret resolvers
 - [ ] Documented extension points and an example plugin
 - [ ] Stable Go module API (no breaking changes to public packages within the v0.x line)
 

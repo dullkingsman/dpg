@@ -11,8 +11,17 @@ import (
 type RootConfig struct {
 	Compiler   CompilerConfig   `toml:"compiler"`
 	Linter     LinterConfig     `toml:"linter"`
+	Fmt        FmtConfig        `toml:"fmt"`
 	Snapshots  SnapshotsConfig  `toml:"snapshots"`
 	Migrations MigrationsConfig `toml:"migrations"`
+}
+
+// FmtConfig holds formatter settings (dpg fmt).
+type FmtConfig struct {
+	// IndentSize is the number of spaces per indent level. Default: 4.
+	IndentSize int `toml:"indent"`
+	// KeywordCase controls keyword casing: "upper" (default) or "lower".
+	KeywordCase string `toml:"keyword_case"`
 }
 
 // CompilerConfig holds compiler-wide defaults.
@@ -62,6 +71,10 @@ func DefaultRootConfig() RootConfig {
 			ForbidHardcodedPasswords:  true,
 			MaxColumnsPerTable:        50,
 			WarnOnScalarMergeConflict: true,
+		},
+		Fmt: FmtConfig{
+			IndentSize:  4,
+			KeywordCase: "upper",
 		},
 		Snapshots: SnapshotsConfig{
 			Directory: ".dpg/snapshots",
