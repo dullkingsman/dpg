@@ -66,7 +66,7 @@ func renderOpaque(b *strings.Builder, n *OpaqueNode, opts Options, ind string) {
 	b.WriteString(rekeyword(n.RawPart1, opts))
 	if n.RawPart2 != "" {
 		b.WriteString(" {")
-		b.WriteString(n.RawPart2)
+		b.WriteString(sortBlock(n.RawPart2))
 		b.WriteString("}")
 	} else {
 		b.WriteByte(';')
@@ -89,7 +89,8 @@ func renderTable(b *strings.Builder, n *TableNode, opts Options, ind string) {
 	b.WriteString(" (")
 
 	colInd := ind + opts.indent()
-	for i, col := range n.Columns {
+	cols := sortColumns(n.Columns)
+	for i, col := range cols {
 		// Preserve blank line before this column's section block.
 		if col.BlankLineBefore {
 			b.WriteByte('\n')
@@ -103,7 +104,7 @@ func renderTable(b *strings.Builder, n *TableNode, opts Options, ind string) {
 		if col.RawText != "" {
 			b.WriteString(colInd)
 			b.WriteString(rekeyword(col.RawText, opts))
-			if i < len(n.Columns)-1 {
+			if i < len(cols)-1 {
 				b.WriteByte(',')
 			}
 			if col.TrailingComment != "" {
@@ -117,7 +118,7 @@ func renderTable(b *strings.Builder, n *TableNode, opts Options, ind string) {
 	b.WriteByte(')')
 	if n.RawPart2 != "" {
 		b.WriteString(" {")
-		b.WriteString(n.RawPart2)
+		b.WriteString(sortBlock(n.RawPart2))
 		b.WriteString("}")
 	} else {
 		b.WriteByte(';')

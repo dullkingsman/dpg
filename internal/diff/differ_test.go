@@ -1278,6 +1278,413 @@ func TestDiffMaterViewWithNoDataChangedIsManual(t *testing.T) {
 	}
 }
 
+// ── Partitioning ─────────────────────────────────────────────────────────────
+
+func TestDiffCreateTableWithPartitionBy(t *testing.T) {
+	d := New()
+	desired := []pipeline.IRObject{
+		&ir.Table{
+			Schema: "public",
+			Name:   "events",
+			Columns: []*ir.Column{
+				{Name: "id", Type: ir.TypeRef{Name: "bigint"}, NotNull: true},
+			},
+			PartitionBy: &ir.PartitionSpec{Strategy: "RANGE", Columns: []string{"created_at"}},
+		},
+	}
+	ops, err := d.Diff(desired, &pipeline.Snapshot{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsSQL(ops, "PARTITION BY RANGE") {
+		t.Errorf("expected PARTITION BY RANGE in CREATE TABLE, got: %v", sqlList(ops))
+	}
+	if !containsSQL(ops, "created_at") {
+		t.Errorf("expected partition column in CREATE TABLE, got: %v", sqlList(ops))
+	}
+}
+
+func TestDiffCreateTableWithPartitions(t *testing.T) {
+	d := New()
+	desired := []pipeline.IRObject{
+		&ir.Table{
+			Schema: "public",
+			Name:   "events",
+			Columns: []*ir.Column{
+				{Name: "id", Type: ir.TypeRef{Name: "bigint"}, NotNull: true},
+			},
+			PartitionBy: &ir.PartitionSpec{Strategy: "RANGE", Columns: []string{"created_at"}},
+			Partitions: []*ir.Partition{
+				{Name: "events_2024", Bounds: "FOR VALUES FROM ('2024-01-01') TO ('2025-01-01')"},
+			},
+		},
+	}
+	ops, err := d.Diff(desired, &pipeline.Snapshot{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsSQL(ops, "CREATE TABLE") || !containsSQL(ops, "PARTITION OF") {
+		t.Errorf("expected CREATE TABLE … PARTITION OF, got: %v", sqlList(ops))
+	}
+	if !containsSQL(ops, "events_2024") {
+		t.Errorf("expected partition name in output, got: %v", sqlList(ops))
+	}
+	if !containsSQL(ops, "FOR VALUES FROM") {
+		t.Errorf("expected partition bounds in output, got: %v", sqlList(ops))
+	}
+}
+
+func TestDiffPartitionAdded(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.events", &snapshot.SnapObject{
+		Kind: "table",
+		Table: &snapshot.SnapTable{
+			Schema:      "public",
+			Name:        "events",
+			PartitionBy: "RANGE (created_at)",
+			Columns:     []snapshot.SnapColumn{{Name: "id", Type: "bigint"}},
+		},
+	})
+	desired := []pipeline.IRObject{
+		&ir.Table{
+			Schema:      "public",
+			Name:        "events",
+			PartitionBy: &ir.PartitionSpec{Strategy: "RANGE", Columns: []string{"created_at"}},
+			Columns:     []*ir.Column{{Name: "id", Type: ir.TypeRef{Name: "bigint"}}},
+			Partitions: []*ir.Partition{
+				{Name: "events_2024", Bounds: "FOR VALUES FROM ('2024-01-01') TO ('2025-01-01')"},
+			},
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsSQL(ops, "CREATE TABLE") || !containsSQL(ops, "PARTITION OF") {
+		t.Errorf("expected CREATE TABLE … PARTITION OF for new partition, got: %v", sqlList(ops))
+	}
+}
+
+func TestDiffPartitionRemoved(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.events", &snapshot.SnapObject{
+		Kind: "table",
+		Table: &snapshot.SnapTable{
+			Schema:      "public",
+			Name:        "events",
+			PartitionBy: "RANGE (created_at)",
+			Columns:     []snapshot.SnapColumn{{Name: "id", Type: "bigint"}},
+			Partitions: []snapshot.SnapPartition{
+				{Schema: "public", Name: "events_2024", Bound: "FOR VALUES FROM ('2024-01-01') TO ('2025-01-01')"},
+			},
+		},
+	})
+	desired := []pipeline.IRObject{
+		&ir.Table{
+			Schema:      "public",
+			Name:        "events",
+			PartitionBy: &ir.PartitionSpec{Strategy: "RANGE", Columns: []string{"created_at"}},
+			Columns:     []*ir.Column{{Name: "id", Type: ir.TypeRef{Name: "bigint"}}},
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsSQL(ops, "DROP TABLE") {
+		t.Errorf("expected DROP TABLE for removed partition, got: %v", sqlList(ops))
+	}
+}
+
+func TestDiffPartitionBoundChangedDropsAndRecreates(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.events", &snapshot.SnapObject{
+		Kind: "table",
+		Table: &snapshot.SnapTable{
+			Schema:      "public",
+			Name:        "events",
+			PartitionBy: "RANGE (created_at)",
+			Columns:     []snapshot.SnapColumn{{Name: "id", Type: "bigint"}},
+			Partitions: []snapshot.SnapPartition{
+				{Schema: "public", Name: "events_2024", Bound: "FOR VALUES FROM ('2024-01-01') TO ('2025-01-01')"},
+			},
+		},
+	})
+	desired := []pipeline.IRObject{
+		&ir.Table{
+			Schema:      "public",
+			Name:        "events",
+			PartitionBy: &ir.PartitionSpec{Strategy: "RANGE", Columns: []string{"created_at"}},
+			Columns:     []*ir.Column{{Name: "id", Type: ir.TypeRef{Name: "bigint"}}},
+			Partitions: []*ir.Partition{
+				{Name: "events_2024", Bounds: "FOR VALUES FROM ('2024-01-01') TO ('2024-07-01')"},
+			},
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsSQL(ops, "DROP TABLE") {
+		t.Errorf("expected DROP TABLE for bound change, got: %v", sqlList(ops))
+	}
+	if !containsSQL(ops, "CREATE TABLE") {
+		t.Errorf("expected CREATE TABLE for bound change, got: %v", sqlList(ops))
+	}
+}
+
+func TestDiffPartitionStrategyChangedIsManual(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.events", &snapshot.SnapObject{
+		Kind: "table",
+		Table: &snapshot.SnapTable{
+			Schema:      "public",
+			Name:        "events",
+			PartitionBy: "RANGE (created_at)",
+			Columns:     []snapshot.SnapColumn{{Name: "id", Type: "bigint"}},
+		},
+	})
+	desired := []pipeline.IRObject{
+		&ir.Table{
+			Schema:      "public",
+			Name:        "events",
+			PartitionBy: &ir.PartitionSpec{Strategy: "LIST", Columns: []string{"region"}},
+			Columns:     []*ir.Column{{Name: "id", Type: ir.TypeRef{Name: "bigint"}}},
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hasManual := false
+	for _, o := range ops {
+		if o.Safety() == pipeline.Manual {
+			hasManual = true
+		}
+	}
+	if !hasManual {
+		t.Errorf("expected Manual op for partition strategy change, got: %v", sqlList(ops))
+	}
+}
+
+// ── Column-level grant tracking ───────────────────────────────────────────────
+
+func TestDiffCreateTableEmitsColumnGrant(t *testing.T) {
+	d := New()
+	desired := []pipeline.IRObject{
+		&ir.Table{
+			Schema: "public",
+			Name:   "docs",
+			Columns: []*ir.Column{
+				{
+					Name: "body",
+					Type: ir.TypeRef{Name: "text"},
+					Grants: []ir.Grant{
+						{Privileges: []string{"SELECT"}, Roles: []string{"reader"}},
+					},
+				},
+			},
+		},
+	}
+	ops, err := d.Diff(desired, &pipeline.Snapshot{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsSQL(ops, `GRANT SELECT ("body")`) {
+		t.Errorf("expected column-level GRANT SELECT (body), got: %v", sqlList(ops))
+	}
+	if !containsSQL(ops, "ON TABLE") {
+		t.Errorf("expected ON TABLE in column grant, got: %v", sqlList(ops))
+	}
+}
+
+func TestDiffColumnGrantAdded(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.docs", &snapshot.SnapObject{
+		Kind: "table",
+		Table: &snapshot.SnapTable{
+			Schema:  "public",
+			Name:    "docs",
+			Columns: []snapshot.SnapColumn{{Name: "body", Type: "text"}},
+		},
+	})
+	desired := []pipeline.IRObject{
+		&ir.Table{
+			Schema: "public",
+			Name:   "docs",
+			Columns: []*ir.Column{
+				{
+					Name: "body",
+					Type: ir.TypeRef{Name: "text"},
+					Grants: []ir.Grant{
+						{Privileges: []string{"SELECT"}, Roles: []string{"analyst"}},
+					},
+				},
+			},
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsSQL(ops, `GRANT SELECT ("body")`) {
+		t.Errorf("expected column GRANT SELECT, got: %v", sqlList(ops))
+	}
+}
+
+func TestDiffColumnGrantRemoved(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.docs", &snapshot.SnapObject{
+		Kind: "table",
+		Table: &snapshot.SnapTable{
+			Schema: "public",
+			Name:   "docs",
+			Columns: []snapshot.SnapColumn{
+				{
+					Name:   "body",
+					Type:   "text",
+					Grants: []snapshot.SnapGrant{{Privileges: []string{"SELECT"}, Roles: []string{"analyst"}}},
+				},
+			},
+		},
+	})
+	desired := []pipeline.IRObject{
+		&ir.Table{
+			Schema:  "public",
+			Name:    "docs",
+			Columns: []*ir.Column{{Name: "body", Type: ir.TypeRef{Name: "text"}}},
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsSQL(ops, `REVOKE SELECT ("body")`) {
+		t.Errorf("expected column REVOKE SELECT, got: %v", sqlList(ops))
+	}
+}
+
+func TestDiffColumnGrantUnchangedIsNoop(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.docs", &snapshot.SnapObject{
+		Kind: "table",
+		Table: &snapshot.SnapTable{
+			Schema: "public",
+			Name:   "docs",
+			Columns: []snapshot.SnapColumn{
+				{
+					Name:   "body",
+					Type:   "text",
+					Grants: []snapshot.SnapGrant{{Privileges: []string{"SELECT"}, Roles: []string{"analyst"}}},
+				},
+			},
+		},
+	})
+	desired := []pipeline.IRObject{
+		&ir.Table{
+			Schema: "public",
+			Name:   "docs",
+			Columns: []*ir.Column{
+				{
+					Name: "body",
+					Type: ir.TypeRef{Name: "text"},
+					Grants: []ir.Grant{
+						{Privileges: []string{"SELECT"}, Roles: []string{"analyst"}},
+					},
+				},
+			},
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if containsSQL(ops, "GRANT") || containsSQL(ops, "REVOKE") {
+		t.Errorf("expected no grant ops when column grant unchanged, got: %v", sqlList(ops))
+	}
+}
+
+func TestDiffAddColumnEmitsGrant(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.docs", &snapshot.SnapObject{
+		Kind: "table",
+		Table: &snapshot.SnapTable{
+			Schema:  "public",
+			Name:    "docs",
+			Columns: []snapshot.SnapColumn{{Name: "id", Type: "bigint"}},
+		},
+	})
+	desired := []pipeline.IRObject{
+		&ir.Table{
+			Schema: "public",
+			Name:   "docs",
+			Columns: []*ir.Column{
+				{Name: "id", Type: ir.TypeRef{Name: "bigint"}},
+				{
+					Name: "secret",
+					Type: ir.TypeRef{Name: "text"},
+					Grants: []ir.Grant{
+						{Privileges: []string{"SELECT"}, Roles: []string{"admin"}},
+					},
+				},
+			},
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsSQL(ops, "ADD COLUMN") {
+		t.Errorf("expected ADD COLUMN, got: %v", sqlList(ops))
+	}
+	if !containsSQL(ops, `GRANT SELECT ("secret")`) {
+		t.Errorf("expected column grant after ADD COLUMN, got: %v", sqlList(ops))
+	}
+}
+
+func TestDiffPartitionUnchangedIsNoop(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.events", &snapshot.SnapObject{
+		Kind: "table",
+		Table: &snapshot.SnapTable{
+			Schema:      "public",
+			Name:        "events",
+			PartitionBy: "RANGE (created_at)",
+			Columns:     []snapshot.SnapColumn{{Name: "id", Type: "bigint"}},
+			Partitions: []snapshot.SnapPartition{
+				{Schema: "public", Name: "events_2024", Bound: "FOR VALUES FROM ('2024-01-01') TO ('2025-01-01')"},
+			},
+		},
+	})
+	desired := []pipeline.IRObject{
+		&ir.Table{
+			Schema:      "public",
+			Name:        "events",
+			PartitionBy: &ir.PartitionSpec{Strategy: "RANGE", Columns: []string{"created_at"}},
+			Columns:     []*ir.Column{{Name: "id", Type: ir.TypeRef{Name: "bigint"}}},
+			Partitions: []*ir.Partition{
+				{Name: "events_2024", Bounds: "FOR VALUES FROM ('2024-01-01') TO ('2025-01-01')"},
+			},
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if containsSQL(ops, "PARTITION") {
+		t.Errorf("expected no partition ops when unchanged, got: %v", sqlList(ops))
+	}
+}
+
 // ── Materialized view comment uses correct SQL object type ─────────────────
 
 func TestDiffMaterViewCommentUsesCorrectKind(t *testing.T) {

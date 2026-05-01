@@ -513,6 +513,10 @@ func buildStorageParams(options []*pg_query.Node) map[string]string {
 }
 
 func mergeTableBlock(tbl *Table, block pipeline.BlockAST) error {
+	if block.MigrateRemove != nil {
+		return pipeline.Errorf(block.MigrateRemove.Pos,
+			"MIGRATE REMOVE is not supported for TABLE objects; it is only valid for TYPE (ENUM) value removal")
+	}
 	if block.Comment != nil {
 		tbl.Comment = &block.Comment.Value
 	}

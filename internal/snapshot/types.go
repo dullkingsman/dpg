@@ -55,6 +55,8 @@ type SnapTable struct {
 	RLSEnabled  bool             `json:"rls_enabled,omitempty"`
 	RLSForced   bool             `json:"rls_forced,omitempty"`
 	Inherits    []string         `json:"inherits,omitempty"`
+	PartitionBy string           `json:"partition_by,omitempty"` // e.g. "RANGE (created_at)"
+	Partitions  []SnapPartition  `json:"partitions,omitempty"`
 	Columns     []SnapColumn     `json:"columns,omitempty"`
 	Constraints []SnapConstraint `json:"constraints,omitempty"`
 	Indexes     []SnapIndex      `json:"indexes,omitempty"`
@@ -63,19 +65,27 @@ type SnapTable struct {
 	Grants      []SnapGrant      `json:"grants,omitempty"`
 }
 
+// SnapPartition is one partition entry attached to a partitioned table.
+type SnapPartition struct {
+	Schema string `json:"schema,omitempty"`
+	Name   string `json:"name"`
+	Bound  string `json:"bound"` // raw FOR VALUES … expression
+}
+
 type SnapColumn struct {
-	Name        string  `json:"name"`
-	Type        string  `json:"type"`
-	NotNull     bool    `json:"not_null,omitempty"`
-	Default     *string `json:"default,omitempty"`
-	Identity    *string `json:"identity,omitempty"` // "ALWAYS" or "BY DEFAULT"
-	Generated   *string `json:"generated,omitempty"`
-	Comment     *string `json:"comment,omitempty"`
-	Statistics  *int    `json:"statistics,omitempty"`
-	Compression *string `json:"compression,omitempty"`
-	Storage     *string `json:"storage,omitempty"`
-	Deprecated  *string `json:"deprecated,omitempty"`
-	RenamedFrom *string `json:"renamed_from,omitempty"`
+	Name        string      `json:"name"`
+	Type        string      `json:"type"`
+	NotNull     bool        `json:"not_null,omitempty"`
+	Default     *string     `json:"default,omitempty"`
+	Identity    *string     `json:"identity,omitempty"` // "ALWAYS" or "BY DEFAULT"
+	Generated   *string     `json:"generated,omitempty"`
+	Comment     *string     `json:"comment,omitempty"`
+	Statistics  *int        `json:"statistics,omitempty"`
+	Compression *string     `json:"compression,omitempty"`
+	Storage     *string     `json:"storage,omitempty"`
+	Deprecated  *string     `json:"deprecated,omitempty"`
+	RenamedFrom *string     `json:"renamed_from,omitempty"`
+	Grants      []SnapGrant `json:"grants,omitempty"`
 }
 
 type SnapConstraint struct {

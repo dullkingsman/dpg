@@ -704,10 +704,25 @@ func createTable(o *ir.Table) []pipeline.DiffOp {
 		}
 		b.WriteString(cst.Expr)
 	}
-	b.WriteString("\n);")
+	b.WriteString("\n)")
+	if o.PartitionBy != nil && !o.Foreign {
+		b.WriteString(" PARTITION BY ")
+		b.WriteString(o.PartitionBy.Strategy)
+		b.WriteString(" (")
+		b.WriteString(strings.Join(o.PartitionBy.Columns, ", "))
+		b.WriteString(")")
+	}
+	b.WriteString(";")
 
 	var ops []pipeline.DiffOp
 	ops = append(ops, safeOp(b.String(), o.SrcPos))
+	for _, p := range o.Partitions {
+		ops = append(ops, safeOp(
+			fmt.Sprintf("CREATE TABLE %s PARTITION OF %s FOR VALUES %s;",
+				qualIdent(o.Schema, p.Name), qualIdent(o.Schema, o.Name), p.Bounds),
+			p.SrcPos,
+		))
+	}
 
 	if o.Owner != nil {
 		ops = append(ops, safeOp(
@@ -745,8 +760,14 @@ func createTable(o *ir.Table) []pipeline.DiffOp {
 	for _, trg := range o.Triggers {
 		ops = append(ops, createTrigger(o.Schema, o.Name, trg)...)
 	}
+	tblIdent := qualIdent(o.Schema, o.Name)
 	for _, g := range o.Grants {
-		ops = append(ops, tableGrantOp(g, qualIdent(o.Schema, o.Name), o.SrcPos))
+		ops = append(ops, tableGrantOp(g, tblIdent, o.SrcPos))
+	}
+	for _, col := range o.Columns {
+		for _, g := range col.Grants {
+			ops = append(ops, colGrantOp(g, tblIdent, col.Name, col.SrcPos))
+		}
 	}
 	return ops
 }
@@ -876,6 +897,70 @@ func tableGrantOp(g ir.Grant, tblIdent string, pos pipeline.SourcePos) *op {
 	}
 	sql += ";"
 	return safeOp(sql, pos)
+}
+
+func colGrantOp(g ir.Grant, tbl, col string, pos pipeline.SourcePos) pipeline.DiffOp {
+	colIdent := quoteIdent(col)
+	var privParts []string
+	if len(g.Privileges) == 0 {
+		privParts = []string{"ALL (" + colIdent + ")"}
+	} else {
+		for _, p := range g.Privileges {
+			privParts = append(privParts, p+" ("+colIdent+")")
+		}
+	}
+	roles := make([]string, len(g.Roles))
+	for i, r := range g.Roles {
+		roles[i] = quoteIdent(r)
+	}
+	sql := "GRANT " + strings.Join(privParts, ", ") + " ON TABLE " + tbl + " TO " + strings.Join(roles, ", ")
+	if g.WithGrant {
+		sql += " WITH GRANT OPTION"
+	}
+	return safeOp(sql+";", pos)
+}
+
+func colRevokeOp(sg snapshot.SnapGrant, tbl, col string, pos pipeline.SourcePos) pipeline.DiffOp {
+	colIdent := quoteIdent(col)
+	var privParts []string
+	if len(sg.Privileges) == 0 {
+		privParts = []string{"ALL (" + colIdent + ")"}
+	} else {
+		for _, p := range sg.Privileges {
+			privParts = append(privParts, p+" ("+colIdent+")")
+		}
+	}
+	roles := make([]string, len(sg.Roles))
+	for i, r := range sg.Roles {
+		roles[i] = quoteIdent(r)
+	}
+	return safeOp(
+		"REVOKE "+strings.Join(privParts, ", ")+" ON TABLE "+tbl+" FROM "+strings.Join(roles, ", ")+";",
+		pos,
+	)
+}
+
+func diffColGrantSet(tbl, col string, snapGrants []snapshot.SnapGrant, desiredGrants []ir.Grant, pos pipeline.SourcePos) []pipeline.DiffOp {
+	snapKeys := make(map[string]snapshot.SnapGrant, len(snapGrants))
+	for _, g := range snapGrants {
+		snapKeys[grantKey(g.Privileges, g.Roles, g.WithGrant)] = g
+	}
+	desiredKeys := make(map[string]ir.Grant, len(desiredGrants))
+	for _, g := range desiredGrants {
+		desiredKeys[grantKey(g.Privileges, g.Roles, g.WithGrant)] = g
+	}
+	var ops []pipeline.DiffOp
+	for k, sg := range snapKeys {
+		if _, ok := desiredKeys[k]; !ok {
+			ops = append(ops, colRevokeOp(sg, tbl, col, pos))
+		}
+	}
+	for k, g := range desiredKeys {
+		if _, ok := snapKeys[k]; !ok {
+			ops = append(ops, colGrantOp(g, tbl, col, pos))
+		}
+	}
+	return ops
 }
 
 func createView(o *ir.View) []pipeline.DiffOp {
@@ -1399,7 +1484,64 @@ func diffTable(o *ir.Table, snap *snapshot.SnapTable) ([]pipeline.DiffOp, error)
 	ops = append(ops, diffTriggers(o.Schema, o.Name, o, snap)...)
 	ops = append(ops, diffTableInherits(tbl, o, snap, pos)...)
 	ops = append(ops, diffGrantSet(snap.Grants, o.Grants, "TABLE "+tbl, pos)...)
+	ops = append(ops, diffPartitions(tbl, o, snap, pos)...)
 	return ops, nil
+}
+
+func diffPartitions(tbl string, o *ir.Table, snap *snapshot.SnapTable, pos pipeline.SourcePos) []pipeline.DiffOp {
+	var ops []pipeline.DiffOp
+
+	// Partition strategy change cannot be done in-place.
+	desiredPB := ""
+	if o.PartitionBy != nil {
+		desiredPB = o.PartitionBy.Strategy + " (" + strings.Join(o.PartitionBy.Columns, ", ") + ")"
+	}
+	if snap.PartitionBy != desiredPB {
+		ops = append(ops, manualOp(
+			fmt.Sprintf("-- PARTITION BY changed on %s; table must be recreated to alter the partition strategy", tbl),
+			pos,
+		))
+		return ops
+	}
+
+	snapMap := make(map[string]snapshot.SnapPartition, len(snap.Partitions))
+	for _, p := range snap.Partitions {
+		snapMap[p.Name] = p
+	}
+	desiredSet := make(map[string]bool, len(o.Partitions))
+	for _, p := range o.Partitions {
+		desiredSet[p.Name] = true
+	}
+
+	for _, p := range o.Partitions {
+		sp, exists := snapMap[p.Name]
+		partTbl := qualIdent(o.Schema, p.Name)
+		if !exists {
+			ops = append(ops, safeOp(
+				fmt.Sprintf("CREATE TABLE %s PARTITION OF %s FOR VALUES %s;", partTbl, tbl, p.Bounds),
+				p.SrcPos,
+			))
+		} else if sp.Bound != p.Bounds {
+			// PG cannot alter partition bounds; requires DROP + CREATE.
+			ops = append(ops, destructiveOp(
+				fmt.Sprintf("DROP TABLE %s;", partTbl),
+				p.SrcPos,
+			))
+			ops = append(ops, safeOp(
+				fmt.Sprintf("CREATE TABLE %s PARTITION OF %s FOR VALUES %s;", partTbl, tbl, p.Bounds),
+				p.SrcPos,
+			))
+		}
+	}
+	for _, sp := range snap.Partitions {
+		if !desiredSet[sp.Name] {
+			ops = append(ops, destructiveOp(
+				fmt.Sprintf("DROP TABLE %s;", qualIdent(sp.Schema, sp.Name)),
+				pos,
+			))
+		}
+	}
+	return ops
 }
 
 func diffTableInherits(tbl string, o *ir.Table, snap *snapshot.SnapTable, pos pipeline.SourcePos) []pipeline.DiffOp {
@@ -1549,6 +1691,9 @@ func diffColumns(tbl string, o *ir.Table, snap *snapshot.SnapTable) ([]pipeline.
 					col.SrcPos,
 				))
 			}
+			for _, g := range col.Grants {
+				ops = append(ops, colGrantOp(g, tbl, col.Name, col.SrcPos))
+			}
 			continue
 		}
 
@@ -1630,6 +1775,7 @@ func diffColumns(tbl string, o *ir.Table, snap *snapshot.SnapTable) ([]pipeline.
 				col.SrcPos,
 			))
 		}
+		ops = append(ops, diffColGrantSet(tbl, col.Name, sc.Grants, col.Grants, col.SrcPos)...)
 	}
 
 	return ops, renamedFrom, droppedCols, nil

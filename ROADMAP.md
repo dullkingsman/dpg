@@ -32,7 +32,7 @@ Focus: canonical formatting for `.dpg` source files.
 - [x] `--check` flag for use in CI — exits non-zero if any file would change
 - [x] `--diff` flag — prints unified diff without writing files
 - [x] `[fmt]` section in `dpg.toml` — `indent` and `keyword_case` options
-- [ ] Canonical column/constraint ordering within a table block (planned for v0.2.x)
+- [x] Canonical column/constraint ordering within a table block: column defs (source order) → FOREIGN KEY references (alpha) → other constraints (alpha); RENAMED FROM first in `{ }` blocks
 - [ ] Format-on-save integration guide for editors (via a `dpg fmt` shell wrapper)
 
 ---
@@ -58,9 +58,9 @@ Focus: close the gaps in PostgreSQL object support per RFC Appendix A.
 - [x] Replication publications and subscriptions
 - [x] Tablespaces
 - [x] Row-level security policies (`POLICY` inside `{ }` blocks)
-- [ ] Partitioning strategies: `SnapPartition`, differ support, `pg_partitioned_table` introspection, `--approve-partition-rebuild` flag
+- [x] Partitioning strategies: `SnapPartition`, `createTable` PARTITION BY emission, `diffPartitions` (add/remove/bounds-change/strategy-change), `introspectPartitions` via `pg_partitioned_table`
 - [ ] `MIGRATE REMOVE` full implementation — 7-step enum value removal procedure (RFC §20.2)
-- [ ] Column-level grant tracking: `SnapColumn.Grants`, snapshot population, differ support
+- [x] Column-level grant tracking: `SnapColumn.Grants`, snapshot population, differ support, introspection via `information_schema.column_privileges`
 - [ ] Semantic diffing for aggregates (currently body-hash only; any change triggers DROP+CREATE)
 
 ---

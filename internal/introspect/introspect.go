@@ -148,7 +148,8 @@ SELECT c.relname, n.nspname, c.relpersistence::text,
 FROM   pg_class c
 JOIN   pg_namespace n ON n.oid = c.relnamespace
 JOIN   pg_roles r     ON r.oid = c.relowner
-WHERE  c.relkind = 'r'
+WHERE  c.relkind IN ('r', 'p')
+AND    NOT c.relispartition
 AND    n.nspname NOT IN ('pg_catalog','information_schema','pg_toast')
 ORDER  BY n.nspname, c.relname`
 
@@ -198,6 +199,12 @@ ORDER  BY n.nspname, c.relname`
 		return nil, err
 	}
 	if err := introspectTriggers(ctx, conn, tableIdx); err != nil {
+		return nil, err
+	}
+	if err := introspectPartitions(ctx, conn, tableIdx); err != nil {
+		return nil, err
+	}
+	if err := introspectColumnGrants(ctx, conn, tableIdx); err != nil {
 		return nil, err
 	}
 
@@ -916,3 +923,161 @@ ORDER  BY r.rolname`
 }
 
 var _ pipeline.Introspector = (*CatalogIntrospector)(nil)
+
+// introspectColumnGrants reads column-level privileges from the information
+// schema and populates each ir.Column's Grants slice.
+func introspectColumnGrants(ctx context.Context, conn pipeline.Querier, idx map[string]*ir.Table) error {
+	const q = `
+SELECT table_schema, table_name, column_name,
+       grantee, privilege_type, is_grantable
+FROM   information_schema.column_privileges
+WHERE  table_schema NOT IN ('pg_catalog','information_schema','pg_toast')
+AND    grantor <> grantee
+ORDER  BY table_schema, table_name, column_name, grantee, privilege_type`
+
+	rs, err := conn.QueryRows(ctx, q)
+	if err != nil {
+		return fmt.Errorf("introspect column grants: %w", err)
+	}
+	defer rs.Close()
+
+	// Accumulate per-(table, column, grantee) privilege lists, then convert.
+	type colGrantKey struct{ schema, table, col, grantee string }
+	type colGrantEntry struct {
+		privs     []string
+		grantable bool
+	}
+	grants := make(map[colGrantKey]*colGrantEntry)
+	var order []colGrantKey // insertion order for determinism
+
+	for rs.Next() {
+		var schema, table, col, grantee, priv, isGrantable string
+		if err := rs.Scan(&schema, &table, &col, &grantee, &priv, &isGrantable); err != nil {
+			return err
+		}
+		k := colGrantKey{schema, table, col, grantee}
+		e, ok := grants[k]
+		if !ok {
+			e = &colGrantEntry{}
+			grants[k] = e
+			order = append(order, k)
+		}
+		e.privs = append(e.privs, priv)
+		if isGrantable == "YES" {
+			e.grantable = true
+		}
+	}
+	if err := rs.Err(); err != nil {
+		return err
+	}
+
+	for _, k := range order {
+		t, ok := idx[k.schema+"."+k.table]
+		if !ok {
+			continue
+		}
+		e := grants[k]
+		g := ir.Grant{
+			Privileges: e.privs,
+			Roles:      []string{k.grantee},
+			WithGrant:  e.grantable,
+		}
+		for i := range t.Columns {
+			if t.Columns[i].Name == k.col {
+				t.Columns[i].Grants = append(t.Columns[i].Grants, g)
+				break
+			}
+		}
+	}
+	return nil
+}
+
+// introspectPartitions populates PartitionBy and Partitions on partitioned
+// tables. Two queries are used: one for the partition key (pg_get_partkeydef),
+// one for the child partition bounds (pg_get_expr on relpartbound).
+func introspectPartitions(ctx context.Context, conn pipeline.Querier, idx map[string]*ir.Table) error {
+	const keyQ = `
+SELECT n.nspname, c.relname, pg_get_partkeydef(c.oid) AS partkeydef
+FROM   pg_class c
+JOIN   pg_namespace n ON n.oid = c.relnamespace
+WHERE  c.relkind = 'p'
+AND    n.nspname NOT IN ('pg_catalog','information_schema','pg_toast')
+ORDER  BY n.nspname, c.relname`
+
+	rs, err := conn.QueryRows(ctx, keyQ)
+	if err != nil {
+		return fmt.Errorf("introspect partition keys: %w", err)
+	}
+	for rs.Next() {
+		var schema, name, keyDef string
+		if err := rs.Scan(&schema, &name, &keyDef); err != nil {
+			rs.Close()
+			return err
+		}
+		if t, ok := idx[schema+"."+name]; ok {
+			t.PartitionBy = parsePartitionKey(keyDef)
+		}
+	}
+	if err := rs.Err(); err != nil {
+		return err
+	}
+	rs.Close()
+
+	const childQ = `
+SELECT pn.nspname, pc.relname, cn.nspname, cc.relname,
+       pg_get_expr(cc.relpartbound, cc.oid) AS bound
+FROM   pg_class cc
+JOIN   pg_namespace cn  ON cn.oid = cc.relnamespace
+JOIN   pg_inherits i    ON i.inhrelid = cc.oid
+JOIN   pg_class pc      ON pc.oid = i.inhparent
+JOIN   pg_namespace pn  ON pn.oid = pc.relnamespace
+WHERE  cc.relispartition
+AND    pn.nspname NOT IN ('pg_catalog','information_schema','pg_toast')
+ORDER  BY pn.nspname, pc.relname, cc.relname`
+
+	rs2, err := conn.QueryRows(ctx, childQ)
+	if err != nil {
+		return fmt.Errorf("introspect partition children: %w", err)
+	}
+	for rs2.Next() {
+		var parentSchema, parentName, childSchema, childName, bound string
+		if err := rs2.Scan(&parentSchema, &parentName, &childSchema, &childName, &bound); err != nil {
+			rs2.Close()
+			return err
+		}
+		if t, ok := idx[parentSchema+"."+parentName]; ok {
+			t.Partitions = append(t.Partitions, &ir.Partition{
+				Name:   childName,
+				Bounds: bound,
+			})
+		}
+	}
+	if err := rs2.Err(); err != nil {
+		return err
+	}
+	rs2.Close()
+	return nil
+}
+
+// parsePartitionKey converts a pg_get_partkeydef result (e.g. "RANGE (logdate)")
+// into an ir.PartitionSpec.
+func parsePartitionKey(keyDef string) *ir.PartitionSpec {
+	spec := &ir.PartitionSpec{}
+	upper := strings.ToUpper(keyDef)
+	for _, strategy := range []string{"RANGE", "LIST", "HASH"} {
+		if strings.HasPrefix(upper, strategy) {
+			spec.Strategy = strategy
+			rest := strings.TrimSpace(keyDef[len(strategy):])
+			if len(rest) >= 2 && rest[0] == '(' && rest[len(rest)-1] == ')' {
+				rest = rest[1 : len(rest)-1]
+			}
+			for _, col := range strings.Split(rest, ",") {
+				if col = strings.TrimSpace(col); col != "" {
+					spec.Columns = append(spec.Columns, col)
+				}
+			}
+			break
+		}
+	}
+	return spec
+}

@@ -186,6 +186,16 @@ func toSnapTable(o *ir.Table) *SnapTable {
 		RLSForced:   o.RLSForced,
 		Inherits:    append([]string(nil), o.Inherits...),
 	}
+	if o.PartitionBy != nil {
+		t.PartitionBy = o.PartitionBy.Strategy + " (" + strings.Join(o.PartitionBy.Columns, ", ") + ")"
+	}
+	for _, p := range o.Partitions {
+		t.Partitions = append(t.Partitions, SnapPartition{
+			Schema: o.Schema,
+			Name:   p.Name,
+			Bound:  p.Bounds,
+		})
+	}
 	for _, col := range o.Columns {
 		t.Columns = append(t.Columns, toSnapColumn(col))
 	}
@@ -231,6 +241,9 @@ func toSnapColumn(col *ir.Column) SnapColumn {
 	}
 	if col.Generated != nil {
 		sc.Generated = &col.Generated.Expr
+	}
+	for _, g := range col.Grants {
+		sc.Grants = append(sc.Grants, toSnapGrant(g))
 	}
 	return sc
 }

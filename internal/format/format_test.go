@@ -298,3 +298,180 @@ func TestOptions_KeywordDefaultUpper(t *testing.T) {
 		t.Errorf("Keyword default (upper): got %q", opts.Keyword("table"))
 	}
 }
+
+// ── Column ordering ───────────────────────────────────────────────────────────
+
+func TestFormat_ColumnsBeforeReferences(t *testing.T) {
+	// FK constraints (references section) must appear after column defs and
+	// before other constraints.
+	src := `TABLE orders (
+    CONSTRAINT pk_orders      PRIMARY KEY (id),
+    CONSTRAINT fk_orders_user FOREIGN KEY (user_id) REFERENCES users(id),
+    id      BIGINT NOT NULL,
+    user_id BIGINT NOT NULL
+);`
+	out := formatSrc(t, src, defaultOpts)
+	idPos := strings.Index(out, "id ")
+	fkPos := strings.Index(out, "fk_orders_user")
+	pkPos := strings.Index(out, "pk_orders")
+	if idPos < 0 || fkPos < 0 || pkPos < 0 {
+		t.Fatalf("missing expected tokens in output:\n%s", out)
+	}
+	if !(idPos < fkPos && fkPos < pkPos) {
+		t.Errorf("expected column < FK < PK, got positions id=%d fk=%d pk=%d\n%s",
+			idPos, fkPos, pkPos, out)
+	}
+}
+
+func TestFormat_MultipleReferencesAlphabetical(t *testing.T) {
+	src := `TABLE order_items (
+    id         BIGINT NOT NULL,
+    CONSTRAINT fk_items_product FOREIGN KEY (product_id) REFERENCES products(id),
+    CONSTRAINT fk_items_order   FOREIGN KEY (order_id)   REFERENCES orders(id),
+    CONSTRAINT pk_order_items   PRIMARY KEY (id)
+);`
+	out := formatSrc(t, src, defaultOpts)
+	orderPos := strings.Index(out, "fk_items_order")
+	productPos := strings.Index(out, "fk_items_product")
+	if orderPos < 0 || productPos < 0 {
+		t.Fatalf("missing FK constraints in output:\n%s", out)
+	}
+	// fk_items_order < fk_items_product alphabetically
+	if orderPos > productPos {
+		t.Errorf("FKs not alphabetically ordered: order=%d product=%d\n%s",
+			orderPos, productPos, out)
+	}
+}
+
+func TestFormat_GeneratedIdentityColumnPreservesSourceOrder(t *testing.T) {
+	// Generated/identity columns stay in their source position among column defs.
+	src := `TABLE users (
+    id         BIGINT GENERATED ALWAYS AS IDENTITY,
+    email      TEXT NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    CONSTRAINT pk_users PRIMARY KEY (id)
+);`
+	out := formatSrc(t, src, defaultOpts)
+	idPos := strings.Index(out, "id ")
+	emailPos := strings.Index(out, "email")
+	pkPos := strings.Index(out, "pk_users")
+	if idPos < 0 || emailPos < 0 || pkPos < 0 {
+		t.Fatalf("missing tokens in output:\n%s", out)
+	}
+	if !(idPos < emailPos && emailPos < pkPos) {
+		t.Errorf("source order not preserved: id=%d email=%d pk=%d\n%s",
+			idPos, emailPos, pkPos, out)
+	}
+}
+
+func TestFormat_ColumnOrderingIdempotent(t *testing.T) {
+	src := `TABLE order_items (
+    CONSTRAINT pk_order_items   PRIMARY KEY (id),
+    CONSTRAINT fk_items_product FOREIGN KEY (product_id) REFERENCES products(id),
+    CONSTRAINT fk_items_order   FOREIGN KEY (order_id)   REFERENCES orders(id),
+    id         BIGINT NOT NULL,
+    order_id   BIGINT NOT NULL,
+    product_id BIGINT NOT NULL
+);`
+	first := formatSrc(t, src, defaultOpts)
+	second := formatSrc(t, first, defaultOpts)
+	if first != second {
+		t.Errorf("column ordering is not idempotent.\nFirst:\n%s\nSecond:\n%s", first, second)
+	}
+}
+
+// ── Block directive ordering ──────────────────────────────────────────────────
+
+func TestFormat_RenamedFromFirstInBlock(t *testing.T) {
+	src := `TABLE users (
+    id BIGINT NOT NULL
+) {
+    COMMENT "The users table";
+    GRANTS { SELECT TO reader; }
+    RENAMED FROM old_users;
+}`
+	out := formatSrc(t, src, defaultOpts)
+	renamedPos := strings.Index(out, "RENAMED")
+	commentPos := strings.Index(out, "COMMENT")
+	grantPos := strings.Index(out, "GRANTS")
+	if renamedPos < 0 || commentPos < 0 || grantPos < 0 {
+		t.Fatalf("missing directives in output:\n%s", out)
+	}
+	if !(renamedPos < commentPos && commentPos < grantPos) {
+		t.Errorf("expected RENAMED < COMMENT < GRANTS, got %d %d %d\n%s",
+			renamedPos, commentPos, grantPos, out)
+	}
+}
+
+func TestFormat_BlockDirectiveCanonicalOrder(t *testing.T) {
+	// Verify full canonical order: RENAMED, COMMENT, OWNER, GRANTS.
+	src := `TABLE t (id BIGINT NOT NULL) {
+    GRANTS { SELECT TO r; }
+    OWNER TO dba;
+    COMMENT "t";
+    RENAMED FROM old_t;
+}`
+	out := formatSrc(t, src, defaultOpts)
+	rPos := strings.Index(out, "RENAMED")
+	cPos := strings.Index(out, "COMMENT")
+	oPos := strings.Index(out, "OWNER")
+	gPos := strings.Index(out, "GRANTS")
+	if rPos < 0 || cPos < 0 || oPos < 0 || gPos < 0 {
+		t.Fatalf("missing directives:\n%s", out)
+	}
+	if !(rPos < cPos && cPos < oPos && oPos < gPos) {
+		t.Errorf("unexpected block order r=%d c=%d o=%d g=%d\n%s",
+			rPos, cPos, oPos, gPos, out)
+	}
+}
+
+func TestFormat_BlockDirectiveOrderIdempotent(t *testing.T) {
+	src := `TABLE t (id BIGINT NOT NULL) {
+    GRANTS { SELECT TO r; }
+    OWNER TO dba;
+    COMMENT "t";
+    RENAMED FROM old_t;
+}`
+	first := formatSrc(t, src, defaultOpts)
+	second := formatSrc(t, first, defaultOpts)
+	if first != second {
+		t.Errorf("block directive ordering is not idempotent.\nFirst:\n%s\nSecond:\n%s", first, second)
+	}
+}
+
+func TestFormat_BlockDirectiveAlreadySortedIsNoop(t *testing.T) {
+	// When directives are already in canonical order, output should be identical.
+	src := `TABLE t (id BIGINT NOT NULL) {
+    RENAMED FROM old_t;
+    COMMENT "t";
+    GRANTS { SELECT TO r; }
+}`
+	first := formatSrc(t, src, defaultOpts)
+	second := formatSrc(t, first, defaultOpts)
+	if first != second {
+		t.Errorf("not idempotent when already sorted.\nFirst:\n%s\nSecond:\n%s", first, second)
+	}
+	if !strings.Contains(first, "RENAMED") || !strings.Contains(first, "COMMENT") {
+		t.Errorf("directives missing:\n%s", first)
+	}
+}
+
+func TestFormat_OpaqueBlockRenamedFromFirst(t *testing.T) {
+	// Block sorting also applies to opaque (non-table) objects.
+	src := `ROLE analyst NOLOGIN {
+    GRANTS { USAGE ON SCHEMA public TO analyst; }
+    RENAMED FROM old_analyst;
+    COMMENT "Analytics read role";
+}`
+	out := formatSrc(t, src, defaultOpts)
+	renamedPos := strings.Index(out, "RENAMED")
+	commentPos := strings.Index(out, "COMMENT")
+	grantPos := strings.Index(out, "GRANTS")
+	if renamedPos < 0 || commentPos < 0 || grantPos < 0 {
+		t.Fatalf("missing directives:\n%s", out)
+	}
+	if !(renamedPos < commentPos && commentPos < grantPos) {
+		t.Errorf("expected RENAMED < COMMENT < GRANTS in opaque block, got %d %d %d\n%s",
+			renamedPos, commentPos, grantPos, out)
+	}
+}
