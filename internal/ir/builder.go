@@ -877,6 +877,10 @@ func extractFuncAttrs(options []*pg_query.Node) FuncAttrs {
 // ── Enum ─────────────────────────────────────────────────────────────────────
 
 func (b *Builder) buildEnum(cs *pg_query.CreateEnumStmt, block pipeline.BlockAST, pos pipeline.SourcePos) (pipeline.IRObject, error) {
+	if block.MigrateRemove != nil {
+		return nil, pipeline.Errorf(block.MigrateRemove.Pos,
+			"MIGRATE REMOVE is not yet implemented; remove this directive")
+	}
 	t := &Type{
 		Variant: "ENUM",
 		SrcPos:  pos,

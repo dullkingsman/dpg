@@ -7,6 +7,7 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
+	"sort"
 	"strings"
 
 	"github.com/dullkingsman/dpg/internal/ir"
@@ -244,6 +245,81 @@ func ptrStr(s *string) string {
 
 func normalizeWS(s string) string {
 	return strings.Join(strings.Fields(s), " ")
+}
+
+// ── Grant helpers ─────────────────────────────────────────────────────────────
+
+// grantKey returns a canonical string key for a grant entry, allowing grant
+// sets to be compared regardless of ordering in the source file.
+func grantKey(privs []string, roles []string, withGrant bool) string {
+	p := append([]string(nil), privs...)
+	sort.Strings(p)
+	r := append([]string(nil), roles...)
+	sort.Strings(r)
+	if len(p) == 0 {
+		p = []string{"ALL"}
+	}
+	wg := ""
+	if withGrant {
+		wg = "+wg"
+	}
+	return strings.Join(p, ",") + "|" + strings.Join(r, ",") + wg
+}
+
+// privStr returns the SQL privilege list, or ALL for an empty list.
+func privStr(privs []string) string {
+	if len(privs) == 0 {
+		return "ALL"
+	}
+	return strings.Join(privs, ", ")
+}
+
+// roleList quotes and joins a list of role names.
+func roleList(roles []string) string {
+	quoted := make([]string, len(roles))
+	for i, r := range roles {
+		quoted[i] = quoteIdent(r)
+	}
+	return strings.Join(quoted, ", ")
+}
+
+// diffGrantSet diffs two grant lists and emits GRANT/REVOKE ops.
+// onClause is the SQL object specifier after ON, e.g. "TABLE \"public\".\"users\"".
+func diffGrantSet(
+	snapGrants []snapshot.SnapGrant,
+	desiredGrants []ir.Grant,
+	onClause string,
+	pos pipeline.SourcePos,
+) []pipeline.DiffOp {
+	var ops []pipeline.DiffOp
+
+	snapByKey := make(map[string]snapshot.SnapGrant, len(snapGrants))
+	for _, g := range snapGrants {
+		snapByKey[grantKey(g.Privileges, g.Roles, g.WithGrant)] = g
+	}
+	desiredByKey := make(map[string]ir.Grant, len(desiredGrants))
+	for _, g := range desiredGrants {
+		desiredByKey[grantKey(g.Privileges, g.Roles, g.WithGrant)] = g
+	}
+
+	for k, sg := range snapByKey {
+		if _, ok := desiredByKey[k]; !ok {
+			ops = append(ops, safeOp(
+				fmt.Sprintf("REVOKE %s ON %s FROM %s;", privStr(sg.Privileges), onClause, roleList(sg.Roles)),
+				pos,
+			))
+		}
+	}
+	for k, g := range desiredByKey {
+		if _, ok := snapByKey[k]; !ok {
+			sql := fmt.Sprintf("GRANT %s ON %s TO %s", privStr(g.Privileges), onClause, roleList(g.Roles))
+			if g.WithGrant {
+				sql += " WITH GRANT OPTION"
+			}
+			ops = append(ops, safeOp(sql+";", pos))
+		}
+	}
+	return ops
 }
 
 // ── DROP operations ───────────────────────────────────────────────────────────
@@ -813,27 +889,49 @@ func createView(o *ir.View) []pipeline.DiffOp {
 	b.WriteString("VIEW ")
 	b.WriteString(qualIdent(o.Schema, o.Name))
 	b.WriteString(" AS ")
-	b.WriteString(o.Query)
-	if !strings.HasSuffix(strings.TrimSpace(o.Query), ";") {
-		b.WriteString(";")
+	// Strip trailing semicolons from the query — we control the final delimiter.
+	b.WriteString(strings.TrimRight(strings.TrimSpace(o.Query), ";"))
+	if o.Materialized && o.WithNoData {
+		b.WriteString(" WITH NO DATA")
 	}
+	b.WriteString(";")
 	ops := []pipeline.DiffOp{safeOp(b.String(), o.SrcPos)}
+	viewKind := "VIEW"
+	if o.Materialized {
+		viewKind = "MATERIALIZED VIEW"
+	}
 	if o.Comment != nil {
 		ops = append(ops, safeOp(
-			fmt.Sprintf("COMMENT ON VIEW %s IS %s;", qualIdent(o.Schema, o.Name), quoteLit(*o.Comment)),
+			fmt.Sprintf("COMMENT ON %s %s IS %s;", viewKind, qualIdent(o.Schema, o.Name), quoteLit(*o.Comment)),
 			o.SrcPos,
 		))
+	}
+	viewIdent := qualIdent(o.Schema, o.Name)
+	for _, g := range o.Grants {
+		sql := fmt.Sprintf("GRANT %s ON TABLE %s TO %s", privStr(g.Privileges), viewIdent, roleList(g.Roles))
+		if g.WithGrant {
+			sql += " WITH GRANT OPTION"
+		}
+		ops = append(ops, safeOp(sql+";", o.SrcPos))
 	}
 	return ops
 }
 
 func createFunction(o *ir.Function) []pipeline.DiffOp {
 	ops := []pipeline.DiffOp{safeOp(buildFunctionSQL(o), o.SrcPos)}
+	sig := buildFuncSignature(o)
 	if o.Comment != nil {
 		ops = append(ops, safeOp(
-			fmt.Sprintf("COMMENT ON FUNCTION %s IS %s;", buildFuncSignature(o), quoteLit(*o.Comment)),
+			fmt.Sprintf("COMMENT ON FUNCTION %s IS %s;", sig, quoteLit(*o.Comment)),
 			o.SrcPos,
 		))
+	}
+	for _, g := range o.Grants {
+		sql := fmt.Sprintf("GRANT %s ON FUNCTION %s TO %s", privStr(g.Privileges), sig, roleList(g.Roles))
+		if g.WithGrant {
+			sql += " WITH GRANT OPTION"
+		}
+		ops = append(ops, safeOp(sql+";", o.SrcPos))
 	}
 	return ops
 }
@@ -1160,6 +1258,10 @@ func diffView(o *ir.View, snap *snapshot.SnapView) []pipeline.DiffOp {
 	var ops []pipeline.DiffOp
 	pos := o.SrcPos
 	tbl := qualIdent(o.Schema, o.Name)
+	viewKind := "VIEW"
+	if o.Materialized {
+		viewKind = "MATERIALIZED VIEW"
+	}
 
 	if snap.Name != o.Name {
 		ops = append(ops, safeOp(
@@ -1167,34 +1269,57 @@ func diffView(o *ir.View, snap *snapshot.SnapView) []pipeline.DiffOp {
 			pos,
 		))
 	}
+
+	// Recursive flag change or a materialized view query change requires DROP + CREATE
+	// because PG has no in-place ALTER for these.
+	if snap.Recursive != o.Recursive ||
+		(o.Materialized && normalizeWS(o.Query) != normalizeWS(snap.Query)) {
+		ops = append(ops, destructiveOp(fmt.Sprintf("DROP %s IF EXISTS %s;", viewKind, tbl), pos))
+		ops = append(ops, createView(o)...)
+		// createView emits comments and grants; nothing more to do.
+		return ops
+	}
+
 	if normalizeWS(o.Query) != normalizeWS(snap.Query) {
 		ops = append(ops, safeOp(fmt.Sprintf("CREATE OR REPLACE VIEW %s AS %s;", tbl, o.Query), pos))
 	}
+
+	if o.Materialized && snap.WithNoData != o.WithNoData {
+		ops = append(ops, manualOp(
+			fmt.Sprintf("-- WITH NO DATA changed on %s %s; refresh manually: REFRESH MATERIALIZED VIEW %s;",
+				viewKind, tbl, tbl),
+			pos,
+		))
+	}
+
 	if !ptrEq(o.Comment, snap.Comment) {
 		if o.Comment != nil {
-			ops = append(ops, safeOp(fmt.Sprintf("COMMENT ON VIEW %s IS %s;", tbl, quoteLit(*o.Comment)), pos))
+			ops = append(ops, safeOp(fmt.Sprintf("COMMENT ON %s %s IS %s;", viewKind, tbl, quoteLit(*o.Comment)), pos))
 		} else {
-			ops = append(ops, safeOp(fmt.Sprintf("COMMENT ON VIEW %s IS NULL;", tbl), pos))
+			ops = append(ops, safeOp(fmt.Sprintf("COMMENT ON %s %s IS NULL;", viewKind, tbl), pos))
 		}
 	}
+
+	ops = append(ops, diffGrantSet(snap.Grants, o.Grants, "TABLE "+tbl, pos)...)
 	return ops
 }
 
 func diffFunction(o *ir.Function, snap *snapshot.SnapFunction) []pipeline.DiffOp {
 	var ops []pipeline.DiffOp
 	pos := o.SrcPos
+	sig := buildFuncSignature(o)
 
 	if o.BodyHash != snap.BodyHash || o.Attrs.Language != snap.Language || o.Attrs.Volatility != snap.Volatility {
 		ops = append(ops, safeOp(buildFunctionSQL(o), pos))
 	}
 	if !ptrEq(o.Comment, snap.Comment) {
-		sig := buildFuncSignature(o)
 		if o.Comment != nil {
 			ops = append(ops, safeOp(fmt.Sprintf("COMMENT ON FUNCTION %s IS %s;", sig, quoteLit(*o.Comment)), pos))
 		} else {
 			ops = append(ops, safeOp(fmt.Sprintf("COMMENT ON FUNCTION %s IS NULL;", sig), pos))
 		}
 	}
+	ops = append(ops, diffGrantSet(snap.Grants, o.Grants, "FUNCTION "+sig, pos)...)
 	return ops
 }
 
@@ -1272,7 +1397,34 @@ func diffTable(o *ir.Table, snap *snapshot.SnapTable) ([]pipeline.DiffOp, error)
 	ops = append(ops, diffIndexes(o.Schema, o.Name, o, snap, renamedCols, droppedCols)...)
 	ops = append(ops, diffPolicies(o.Schema, o.Name, o, snap)...)
 	ops = append(ops, diffTriggers(o.Schema, o.Name, o, snap)...)
+	ops = append(ops, diffTableInherits(tbl, o, snap, pos)...)
+	ops = append(ops, diffGrantSet(snap.Grants, o.Grants, "TABLE "+tbl, pos)...)
 	return ops, nil
+}
+
+func diffTableInherits(tbl string, o *ir.Table, snap *snapshot.SnapTable, pos pipeline.SourcePos) []pipeline.DiffOp {
+	var ops []pipeline.DiffOp
+
+	snapSet := make(map[string]bool, len(snap.Inherits))
+	for _, p := range snap.Inherits {
+		snapSet[p] = true
+	}
+	desiredSet := make(map[string]bool, len(o.Inherits))
+	for _, p := range o.Inherits {
+		desiredSet[p] = true
+	}
+
+	for _, p := range o.Inherits {
+		if !snapSet[p] {
+			ops = append(ops, safeOp(fmt.Sprintf("ALTER TABLE %s INHERIT %s;", tbl, quoteIdent(p)), pos))
+		}
+	}
+	for _, p := range snap.Inherits {
+		if !desiredSet[p] {
+			ops = append(ops, cautionOp(fmt.Sprintf("ALTER TABLE %s NO INHERIT %s;", tbl, quoteIdent(p)), pos))
+		}
+	}
+	return ops
 }
 
 // diffColumns returns the column DDL ops along with a snap→desired rename map
@@ -1449,6 +1601,34 @@ func diffColumns(tbl string, o *ir.Table, snap *snapshot.SnapTable) ([]pipeline.
 					col.SrcPos,
 				))
 			}
+		}
+		if !ptrEq(col.Storage, sc.Storage) && col.Storage != nil {
+			ops = append(ops, safeOp(
+				fmt.Sprintf("ALTER TABLE %s ALTER COLUMN %s SET STORAGE %s;",
+					tbl, quoteIdent(col.Name), *col.Storage),
+				col.SrcPos,
+			))
+		}
+		if !ptrEq(col.Compression, sc.Compression) && col.Compression != nil {
+			ops = append(ops, safeOp(
+				fmt.Sprintf("ALTER TABLE %s ALTER COLUMN %s SET COMPRESSION %s;",
+					tbl, quoteIdent(col.Name), *col.Compression),
+				col.SrcPos,
+			))
+		}
+		if col.Statistics != nil && (sc.Statistics == nil || *col.Statistics != *sc.Statistics) {
+			ops = append(ops, safeOp(
+				fmt.Sprintf("ALTER TABLE %s ALTER COLUMN %s SET STATISTICS %d;",
+					tbl, quoteIdent(col.Name), *col.Statistics),
+				col.SrcPos,
+			))
+		} else if col.Statistics == nil && sc.Statistics != nil {
+			// Reset to server default (-1 instructs PG to use default_statistics_target).
+			ops = append(ops, safeOp(
+				fmt.Sprintf("ALTER TABLE %s ALTER COLUMN %s SET STATISTICS -1;",
+					tbl, quoteIdent(col.Name)),
+				col.SrcPos,
+			))
 		}
 	}
 

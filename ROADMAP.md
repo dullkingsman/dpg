@@ -13,7 +13,9 @@ Focus: correctness and reliability for the object types already supported.
 - [x] CI pipeline (GitHub Actions) — `go test`, `go vet` on push and PR
 - [x] Release pipeline — cross-platform binaries and checksums on tag push
 - [x] Differ: error instead of silent no-op when a pass-through object body is not captured
-- [ ] Tests for `graph`, `merger`, `compiler`, `introspect`, `project`, `config` packages
+- [x] Tests for `graph`, `merger`, `compiler`, `project`, `config` packages
+- [x] Silent no-op correctness fixes: grant diffing (tables/views/functions), column STORAGE/COMPRESSION/STATISTICS, table INHERITS, materialized view WITH NO DATA, recursive view snapshot tracking, MIGRATE REMOVE fails loudly instead of silently
+- [ ] Tests for `introspect` package (requires live PG; tracked separately as integration tests)
 - [ ] Bug fixes driven by early adopter feedback
 
 ---
@@ -50,13 +52,16 @@ Focus: allow third-party tools to integrate with the DPG pipeline without forkin
 
 Focus: close the gaps in PostgreSQL object support per RFC Appendix A.
 
-- [ ] Triggers (`CREATE TRIGGER` / `DROP TRIGGER`)
-- [ ] Full-text search objects (`TEXT SEARCH CONFIGURATION`, `DICTIONARY`)
-- [ ] Foreign Data Wrappers (`SERVER`, `USER MAPPING`, `FOREIGN TABLE`)
-- [ ] Replication publications and subscriptions
-- [ ] Tablespaces
-- [ ] Row-level security policies (`POLICY` inside `{ }` blocks)
-- [ ] Partitioning strategies and `--approve-partition-rebuild` flag enforcement
+- [x] Triggers (`CREATE TRIGGER` / `DROP TRIGGER`)
+- [x] Full-text search objects (`TEXT SEARCH CONFIGURATION`, `DICTIONARY`, `PARSER`, `TEMPLATE`)
+- [x] Foreign Data Wrappers (`FOREIGN DATA WRAPPER`, `SERVER`, `USER MAPPING`, `FOREIGN TABLE`)
+- [x] Replication publications and subscriptions
+- [x] Tablespaces
+- [x] Row-level security policies (`POLICY` inside `{ }` blocks)
+- [ ] Partitioning strategies: `SnapPartition`, differ support, `pg_partitioned_table` introspection, `--approve-partition-rebuild` flag
+- [ ] `MIGRATE REMOVE` full implementation — 7-step enum value removal procedure (RFC §20.2)
+- [ ] Column-level grant tracking: `SnapColumn.Grants`, snapshot population, differ support
+- [ ] Semantic diffing for aggregates (currently body-hash only; any change triggers DROP+CREATE)
 
 ---
 

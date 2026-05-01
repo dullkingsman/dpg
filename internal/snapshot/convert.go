@@ -184,6 +184,7 @@ func toSnapTable(o *ir.Table) *SnapTable {
 		DropCascade: o.DropCascade,
 		RLSEnabled:  o.RLSEnabled,
 		RLSForced:   o.RLSForced,
+		Inherits:    append([]string(nil), o.Inherits...),
 	}
 	for _, col := range o.Columns {
 		t.Columns = append(t.Columns, toSnapColumn(col))
@@ -299,13 +300,19 @@ func toSnapGrant(g ir.Grant) SnapGrant {
 }
 
 func toSnapView(o *ir.View) *SnapView {
-	return &SnapView{
-		Schema:  o.Schema,
-		Name:    o.Name,
-		Query:   o.Query,
-		Owner:   o.Owner,
-		Comment: o.Comment,
+	sv := &SnapView{
+		Schema:     o.Schema,
+		Name:       o.Name,
+		Query:      o.Query,
+		Owner:      o.Owner,
+		Comment:    o.Comment,
+		Recursive:  o.Recursive,
+		WithNoData: o.WithNoData,
 	}
+	for _, g := range o.Grants {
+		sv.Grants = append(sv.Grants, toSnapGrant(g))
+	}
+	return sv
 }
 
 func toSnapFunction(o *ir.Function) *SnapFunction {
@@ -315,7 +322,7 @@ func toSnapFunction(o *ir.Function) *SnapFunction {
 			parts = append(parts, a.Type.String())
 		}
 	}
-	return &SnapFunction{
+	sf := &SnapFunction{
 		Schema:     o.Schema,
 		Name:       o.Name,
 		Args:       strings.Join(parts, ", "),
@@ -325,6 +332,10 @@ func toSnapFunction(o *ir.Function) *SnapFunction {
 		BodyHash:   o.BodyHash,
 		Comment:    o.Comment,
 	}
+	for _, g := range o.Grants {
+		sf.Grants = append(sf.Grants, toSnapGrant(g))
+	}
+	return sf
 }
 
 func toSnapType(o *ir.Type) *SnapType {

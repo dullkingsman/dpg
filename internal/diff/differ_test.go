@@ -736,3 +736,570 @@ func sqlList(ops []pipeline.DiffOp) []string {
 	}
 	return out
 }
+
+// containsSQL returns true if any op's SQL contains substr.
+func containsSQL(ops []pipeline.DiffOp, substr string) bool {
+	for _, o := range ops {
+		if strings.Contains(o.SQL(), substr) {
+			return true
+		}
+	}
+	return false
+}
+
+// ── Grant diffing ─────────────────────────────────────────────────────────────
+
+func TestDiffTableGrantAdded(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.orders", &snapshot.SnapObject{
+		Kind: "table",
+		Table: &snapshot.SnapTable{
+			Schema:  "public",
+			Name:    "orders",
+			Columns: []snapshot.SnapColumn{{Name: "id", Type: "bigint"}},
+		},
+	})
+	desired := []pipeline.IRObject{
+		&ir.Table{
+			Schema:  "public",
+			Name:    "orders",
+			Columns: []*ir.Column{{Name: "id", Type: ir.TypeRef{Name: "bigint"}}},
+			Grants:  []ir.Grant{{Privileges: []string{"SELECT"}, Roles: []string{"readonly"}}},
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsSQL(ops, "GRANT SELECT ON TABLE") {
+		t.Errorf("expected GRANT SELECT ON TABLE, got: %v", sqlList(ops))
+	}
+	if !containsSQL(ops, `"readonly"`) {
+		t.Errorf("expected quoted role name, got: %v", sqlList(ops))
+	}
+}
+
+func TestDiffTableGrantRemoved(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.orders", &snapshot.SnapObject{
+		Kind: "table",
+		Table: &snapshot.SnapTable{
+			Schema:  "public",
+			Name:    "orders",
+			Columns: []snapshot.SnapColumn{{Name: "id", Type: "bigint"}},
+			Grants:  []snapshot.SnapGrant{{Privileges: []string{"SELECT"}, Roles: []string{"readonly"}}},
+		},
+	})
+	desired := []pipeline.IRObject{
+		&ir.Table{
+			Schema:  "public",
+			Name:    "orders",
+			Columns: []*ir.Column{{Name: "id", Type: ir.TypeRef{Name: "bigint"}}},
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsSQL(ops, "REVOKE SELECT ON TABLE") {
+		t.Errorf("expected REVOKE SELECT ON TABLE, got: %v", sqlList(ops))
+	}
+}
+
+func TestDiffTableGrantUnchangedIsNoop(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.orders", &snapshot.SnapObject{
+		Kind: "table",
+		Table: &snapshot.SnapTable{
+			Schema:  "public",
+			Name:    "orders",
+			Columns: []snapshot.SnapColumn{{Name: "id", Type: "bigint"}},
+			Grants:  []snapshot.SnapGrant{{Privileges: []string{"SELECT"}, Roles: []string{"readonly"}}},
+		},
+	})
+	desired := []pipeline.IRObject{
+		&ir.Table{
+			Schema:  "public",
+			Name:    "orders",
+			Columns: []*ir.Column{{Name: "id", Type: ir.TypeRef{Name: "bigint"}}},
+			Grants:  []ir.Grant{{Privileges: []string{"SELECT"}, Roles: []string{"readonly"}}},
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if containsSQL(ops, "GRANT") || containsSQL(ops, "REVOKE") {
+		t.Errorf("expected no GRANT/REVOKE for unchanged grant, got: %v", sqlList(ops))
+	}
+}
+
+func TestDiffViewGrantAdded(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.v_active", &snapshot.SnapObject{
+		Kind: "view",
+		View: &snapshot.SnapView{
+			Schema: "public",
+			Name:   "v_active",
+			Query:  "SELECT id FROM users WHERE active",
+		},
+	})
+	desired := []pipeline.IRObject{
+		&ir.View{
+			Schema: "public",
+			Name:   "v_active",
+			Query:  "SELECT id FROM users WHERE active",
+			Grants: []ir.Grant{{Privileges: []string{"SELECT"}, Roles: []string{"api"}}},
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsSQL(ops, "GRANT SELECT ON TABLE") {
+		t.Errorf("expected GRANT SELECT ON TABLE for view, got: %v", sqlList(ops))
+	}
+}
+
+func TestDiffViewGrantRemoved(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.v_active", &snapshot.SnapObject{
+		Kind: "view",
+		View: &snapshot.SnapView{
+			Schema: "public",
+			Name:   "v_active",
+			Query:  "SELECT id FROM users WHERE active",
+			Grants: []snapshot.SnapGrant{{Privileges: []string{"SELECT"}, Roles: []string{"api"}}},
+		},
+	})
+	desired := []pipeline.IRObject{
+		&ir.View{
+			Schema: "public",
+			Name:   "v_active",
+			Query:  "SELECT id FROM users WHERE active",
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsSQL(ops, "REVOKE SELECT ON TABLE") {
+		t.Errorf("expected REVOKE SELECT ON TABLE for view, got: %v", sqlList(ops))
+	}
+}
+
+func TestDiffFunctionGrantAdded(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.get_user()", &snapshot.SnapObject{
+		Kind: "function",
+		Function: &snapshot.SnapFunction{
+			Schema:     "public",
+			Name:       "get_user",
+			ReturnType: "void",
+			Language:   "plpgsql",
+			Volatility: "VOLATILE",
+			BodyHash:   "abc",
+		},
+	})
+	desired := []pipeline.IRObject{
+		&ir.Function{
+			Schema:     "public",
+			Name:       "get_user",
+			ReturnType: ir.TypeRef{Name: "void"},
+			BodyHash:   "abc",
+			Attrs:      ir.FuncAttrs{Language: "plpgsql", Volatility: "VOLATILE", Body: "BEGIN END;"},
+			Grants:     []ir.Grant{{Privileges: []string{"EXECUTE"}, Roles: []string{"app"}}},
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsSQL(ops, "GRANT EXECUTE ON FUNCTION") {
+		t.Errorf("expected GRANT EXECUTE ON FUNCTION, got: %v", sqlList(ops))
+	}
+}
+
+func TestDiffFunctionGrantRemoved(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.get_user()", &snapshot.SnapObject{
+		Kind: "function",
+		Function: &snapshot.SnapFunction{
+			Schema:     "public",
+			Name:       "get_user",
+			ReturnType: "void",
+			Language:   "plpgsql",
+			Volatility: "VOLATILE",
+			BodyHash:   "abc",
+			Grants:     []snapshot.SnapGrant{{Privileges: []string{"EXECUTE"}, Roles: []string{"app"}}},
+		},
+	})
+	desired := []pipeline.IRObject{
+		&ir.Function{
+			Schema:     "public",
+			Name:       "get_user",
+			ReturnType: ir.TypeRef{Name: "void"},
+			BodyHash:   "abc",
+			Attrs:      ir.FuncAttrs{Language: "plpgsql", Volatility: "VOLATILE", Body: "BEGIN END;"},
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsSQL(ops, "REVOKE EXECUTE ON FUNCTION") {
+		t.Errorf("expected REVOKE EXECUTE ON FUNCTION, got: %v", sqlList(ops))
+	}
+}
+
+// ── CREATE-time grant emission ────────────────────────────────────────────────
+
+func TestDiffCreateViewEmitsGrant(t *testing.T) {
+	d := New()
+	desired := []pipeline.IRObject{
+		&ir.View{
+			Schema: "public",
+			Name:   "v_summary",
+			Query:  "SELECT 1",
+			Grants: []ir.Grant{{Privileges: []string{"SELECT"}, Roles: []string{"readonly"}}},
+		},
+	}
+	ops, err := d.Diff(desired, &pipeline.Snapshot{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsSQL(ops, "CREATE") {
+		t.Fatal("expected CREATE VIEW")
+	}
+	if !containsSQL(ops, "GRANT SELECT ON TABLE") {
+		t.Errorf("expected GRANT at creation time, got: %v", sqlList(ops))
+	}
+}
+
+func TestDiffCreateFunctionEmitsGrant(t *testing.T) {
+	d := New()
+	desired := []pipeline.IRObject{
+		&ir.Function{
+			Schema:     "public",
+			Name:       "do_work",
+			ReturnType: ir.TypeRef{Name: "void"},
+			BodyHash:   "h",
+			Attrs:      ir.FuncAttrs{Language: "plpgsql", Body: "BEGIN END;"},
+			Grants:     []ir.Grant{{Privileges: []string{"EXECUTE"}, Roles: []string{"worker"}}},
+		},
+	}
+	ops, err := d.Diff(desired, &pipeline.Snapshot{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsSQL(ops, "CREATE OR REPLACE FUNCTION") {
+		t.Fatal("expected CREATE FUNCTION")
+	}
+	if !containsSQL(ops, "GRANT EXECUTE ON FUNCTION") {
+		t.Errorf("expected GRANT at creation time, got: %v", sqlList(ops))
+	}
+}
+
+// ── INHERITS diffing ──────────────────────────────────────────────────────────
+
+func TestDiffTableInheritsAdded(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.logs", &snapshot.SnapObject{
+		Kind: "table",
+		Table: &snapshot.SnapTable{
+			Schema:  "public",
+			Name:    "logs",
+			Columns: []snapshot.SnapColumn{{Name: "id", Type: "bigint"}},
+		},
+	})
+	desired := []pipeline.IRObject{
+		&ir.Table{
+			Schema:   "public",
+			Name:     "logs",
+			Columns:  []*ir.Column{{Name: "id", Type: ir.TypeRef{Name: "bigint"}}},
+			Inherits: []string{"base_logs"},
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsSQL(ops, "ALTER TABLE") || !containsSQL(ops, "INHERIT") {
+		t.Errorf("expected ALTER TABLE ... INHERIT, got: %v", sqlList(ops))
+	}
+	if containsSQL(ops, "NO INHERIT") {
+		t.Errorf("unexpected NO INHERIT, got: %v", sqlList(ops))
+	}
+}
+
+func TestDiffTableInheritsRemoved(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.logs", &snapshot.SnapObject{
+		Kind: "table",
+		Table: &snapshot.SnapTable{
+			Schema:   "public",
+			Name:     "logs",
+			Columns:  []snapshot.SnapColumn{{Name: "id", Type: "bigint"}},
+			Inherits: []string{"base_logs"},
+		},
+	})
+	desired := []pipeline.IRObject{
+		&ir.Table{
+			Schema:  "public",
+			Name:    "logs",
+			Columns: []*ir.Column{{Name: "id", Type: ir.TypeRef{Name: "bigint"}}},
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsSQL(ops, "NO INHERIT") {
+		t.Errorf("expected NO INHERIT, got: %v", sqlList(ops))
+	}
+}
+
+// ── Column attribute diffing ──────────────────────────────────────────────────
+
+func strPtr(s string) *string { return &s }
+func intPtr(n int) *int       { return &n }
+
+func TestDiffColumnStorageChanged(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.docs", &snapshot.SnapObject{
+		Kind: "table",
+		Table: &snapshot.SnapTable{
+			Schema:  "public",
+			Name:    "docs",
+			Columns: []snapshot.SnapColumn{{Name: "body", Type: "text", Storage: strPtr("EXTENDED")}},
+		},
+	})
+	desired := []pipeline.IRObject{
+		&ir.Table{
+			Schema:  "public",
+			Name:    "docs",
+			Columns: []*ir.Column{{Name: "body", Type: ir.TypeRef{Name: "text"}, Storage: strPtr("EXTERNAL")}},
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsSQL(ops, "SET STORAGE EXTERNAL") {
+		t.Errorf("expected SET STORAGE EXTERNAL, got: %v", sqlList(ops))
+	}
+}
+
+func TestDiffColumnCompressionChanged(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.docs", &snapshot.SnapObject{
+		Kind: "table",
+		Table: &snapshot.SnapTable{
+			Schema:  "public",
+			Name:    "docs",
+			Columns: []snapshot.SnapColumn{{Name: "body", Type: "text"}},
+		},
+	})
+	desired := []pipeline.IRObject{
+		&ir.Table{
+			Schema:  "public",
+			Name:    "docs",
+			Columns: []*ir.Column{{Name: "body", Type: ir.TypeRef{Name: "text"}, Compression: strPtr("lz4")}},
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsSQL(ops, "SET COMPRESSION lz4") {
+		t.Errorf("expected SET COMPRESSION lz4, got: %v", sqlList(ops))
+	}
+}
+
+func TestDiffColumnStatisticsSet(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.events", &snapshot.SnapObject{
+		Kind: "table",
+		Table: &snapshot.SnapTable{
+			Schema:  "public",
+			Name:    "events",
+			Columns: []snapshot.SnapColumn{{Name: "ts", Type: "timestamptz"}},
+		},
+	})
+	desired := []pipeline.IRObject{
+		&ir.Table{
+			Schema:  "public",
+			Name:    "events",
+			Columns: []*ir.Column{{Name: "ts", Type: ir.TypeRef{Name: "timestamptz"}, Statistics: intPtr(500)}},
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsSQL(ops, "SET STATISTICS 500") {
+		t.Errorf("expected SET STATISTICS 500, got: %v", sqlList(ops))
+	}
+}
+
+func TestDiffColumnStatisticsReset(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.events", &snapshot.SnapObject{
+		Kind: "table",
+		Table: &snapshot.SnapTable{
+			Schema:  "public",
+			Name:    "events",
+			Columns: []snapshot.SnapColumn{{Name: "ts", Type: "timestamptz", Statistics: intPtr(500)}},
+		},
+	})
+	desired := []pipeline.IRObject{
+		&ir.Table{
+			Schema:  "public",
+			Name:    "events",
+			Columns: []*ir.Column{{Name: "ts", Type: ir.TypeRef{Name: "timestamptz"}}},
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsSQL(ops, "SET STATISTICS -1") {
+		t.Errorf("expected SET STATISTICS -1 (reset), got: %v", sqlList(ops))
+	}
+}
+
+// ── View structural changes ───────────────────────────────────────────────────
+
+func TestDiffViewRecursiveChangedDropsAndRecretes(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.v_tree", &snapshot.SnapObject{
+		Kind: "view",
+		View: &snapshot.SnapView{
+			Schema:    "public",
+			Name:      "v_tree",
+			Query:     "SELECT id FROM nodes",
+			Recursive: false,
+		},
+	})
+	desired := []pipeline.IRObject{
+		&ir.View{
+			Schema:    "public",
+			Name:      "v_tree",
+			Query:     "SELECT id FROM nodes",
+			Recursive: true,
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsSQL(ops, "DROP VIEW IF EXISTS") {
+		t.Errorf("expected DROP VIEW IF EXISTS, got: %v", sqlList(ops))
+	}
+	if !containsSQL(ops, "RECURSIVE") {
+		t.Errorf("expected RECURSIVE in CREATE VIEW, got: %v", sqlList(ops))
+	}
+	for _, o := range ops {
+		if o.Safety() == pipeline.Safe && strings.Contains(o.SQL(), "DROP") {
+			t.Errorf("DROP should be Destructive, got Safe: %s", o.SQL())
+		}
+	}
+}
+
+func TestDiffCreateMaterViewWithNoData(t *testing.T) {
+	d := New()
+	desired := []pipeline.IRObject{
+		&ir.View{
+			Schema:       "public",
+			Name:         "mv_summary",
+			Query:        "SELECT count(*) FROM orders",
+			Materialized: true,
+			WithNoData:   true,
+		},
+	}
+	ops, err := d.Diff(desired, &pipeline.Snapshot{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsSQL(ops, "CREATE MATERIALIZED VIEW") {
+		t.Fatal("expected CREATE MATERIALIZED VIEW")
+	}
+	if !containsSQL(ops, "WITH NO DATA") {
+		t.Errorf("expected WITH NO DATA clause, got: %v", sqlList(ops))
+	}
+}
+
+func TestDiffMaterViewWithNoDataChangedIsManual(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.mv_summary", &snapshot.SnapObject{
+		Kind: "view",
+		View: &snapshot.SnapView{
+			Schema:     "public",
+			Name:       "mv_summary",
+			Query:      "SELECT count(*) FROM orders",
+			WithNoData: false,
+		},
+	})
+	desired := []pipeline.IRObject{
+		&ir.View{
+			Schema:       "public",
+			Name:         "mv_summary",
+			Query:        "SELECT count(*) FROM orders",
+			Materialized: true,
+			WithNoData:   true,
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsSQL(ops, "REFRESH MATERIALIZED VIEW") {
+		t.Errorf("expected REFRESH MATERIALIZED VIEW notice, got: %v", sqlList(ops))
+	}
+	for _, o := range ops {
+		if strings.Contains(o.SQL(), "REFRESH") && o.Safety() != pipeline.Manual {
+			t.Errorf("WITH NO DATA change notice should be Manual, got %s", o.Safety())
+		}
+	}
+}
+
+// ── Materialized view comment uses correct SQL object type ─────────────────
+
+func TestDiffMaterViewCommentUsesCorrectKind(t *testing.T) {
+	d := New()
+	comment := "a summary view"
+	desired := []pipeline.IRObject{
+		&ir.View{
+			Schema:       "public",
+			Name:         "mv_summary",
+			Query:        "SELECT 1",
+			Materialized: true,
+			Comment:      &comment,
+		},
+	}
+	ops, err := d.Diff(desired, &pipeline.Snapshot{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if containsSQL(ops, "COMMENT ON VIEW") {
+		t.Errorf("materialized view comment should use COMMENT ON MATERIALIZED VIEW, got: %v", sqlList(ops))
+	}
+	if !containsSQL(ops, "COMMENT ON MATERIALIZED VIEW") {
+		t.Errorf("expected COMMENT ON MATERIALIZED VIEW, got: %v", sqlList(ops))
+	}
+}

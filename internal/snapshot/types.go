@@ -54,6 +54,7 @@ type SnapTable struct {
 	DropCascade bool             `json:"drop_cascade,omitempty"`
 	RLSEnabled  bool             `json:"rls_enabled,omitempty"`
 	RLSForced   bool             `json:"rls_forced,omitempty"`
+	Inherits    []string         `json:"inherits,omitempty"`
 	Columns     []SnapColumn     `json:"columns,omitempty"`
 	Constraints []SnapConstraint `json:"constraints,omitempty"`
 	Indexes     []SnapIndex      `json:"indexes,omitempty"`
@@ -116,23 +117,26 @@ type SnapGrant struct {
 }
 
 type SnapView struct {
-	Schema  string      `json:"schema"`
-	Name    string      `json:"name"`
-	Query   string      `json:"query"`
-	Owner   *string     `json:"owner,omitempty"`
-	Comment *string     `json:"comment,omitempty"`
-	Grants  []SnapGrant `json:"grants,omitempty"`
+	Schema     string      `json:"schema"`
+	Name       string      `json:"name"`
+	Query      string      `json:"query"`
+	Owner      *string     `json:"owner,omitempty"`
+	Comment    *string     `json:"comment,omitempty"`
+	Recursive  bool        `json:"recursive,omitempty"`
+	WithNoData bool        `json:"with_no_data,omitempty"`
+	Grants     []SnapGrant `json:"grants,omitempty"`
 }
 
 type SnapFunction struct {
-	Schema     string  `json:"schema"`
-	Name       string  `json:"name"`
-	Args       string  `json:"args"` // type-only signature key
-	ReturnType string  `json:"return_type"`
-	Language   string  `json:"language"`
-	Volatility string  `json:"volatility"`
-	BodyHash   string  `json:"body_hash"`
-	Comment    *string `json:"comment,omitempty"`
+	Schema     string      `json:"schema"`
+	Name       string      `json:"name"`
+	Args       string      `json:"args"` // type-only signature key
+	ReturnType string      `json:"return_type"`
+	Language   string      `json:"language"`
+	Volatility string      `json:"volatility"`
+	BodyHash   string      `json:"body_hash"`
+	Comment    *string     `json:"comment,omitempty"`
+	Grants     []SnapGrant `json:"grants,omitempty"`
 }
 
 type SnapType struct {
