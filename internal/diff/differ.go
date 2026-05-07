@@ -108,7 +108,7 @@ func (d *Differ) Diff(desired []pipeline.IRObject, snap *pipeline.Snapshot) ([]p
 		consumed[oldKey] = true
 		// Route to diffObject; individual diff functions emit RENAME when
 		// the snap name differs from the desired name.
-		alterOps, err := diffObject(obj, &oldSnap)
+		alterOps, err := diffObject(obj, &oldSnap, snap)
 		if err != nil {
 			return nil, err
 		}
@@ -149,7 +149,7 @@ func (d *Differ) Diff(desired []pipeline.IRObject, snap *pipeline.Snapshot) ([]p
 			}
 			ops = append(ops, createOps...)
 		} else {
-			alterOps, err := diffObject(obj, &so)
+			alterOps, err := diffObject(obj, &so, snap)
 			if err != nil {
 				return nil, err
 			}
@@ -499,7 +499,7 @@ func createObject(obj pipeline.IRObject) ([]pipeline.DiffOp, error) {
 	case *ir.Procedure:
 		return createProcedure(o), nil
 	case *ir.Aggregate:
-		return createOpaque(o.QualifiedName(), o.Body, "aggregate", o.SrcPos)
+		return createAggregate(o)
 	case *ir.Tablespace:
 		return createOpaque(o.Name, o.Body, "TABLESPACE", o.SrcPos)
 	case *ir.ForeignDataWrapper:
@@ -580,6 +580,85 @@ func createProcedure(o *ir.Procedure) []pipeline.DiffOp {
 		ops = append(ops, safeOp(fmt.Sprintf("COMMENT ON PROCEDURE %s IS %s;", sig+")", quoteLit(*o.Comment)), o.SrcPos))
 	}
 	return ops
+}
+
+func buildAggregateSignature(o *ir.Aggregate) string {
+	args := make([]string, 0, len(o.Args))
+	for _, a := range o.Args {
+		if a.Mode != "OUT" && a.Mode != "TABLE" {
+			args = append(args, a.Type.String())
+		}
+	}
+	return fmt.Sprintf("%s(%s)", qualIdent(o.Schema, o.Name), strings.Join(args, ", "))
+}
+
+func createAggregate(o *ir.Aggregate) ([]pipeline.DiffOp, error) {
+	if o.Body == "" {
+		return nil, fmt.Errorf("aggregate %s: body not captured; define it explicitly in a .dpg source file", o.QualifiedName())
+	}
+	sig := buildAggregateSignature(o)
+	ops := []pipeline.DiffOp{safeOp(o.Body+";", o.SrcPos)}
+	if o.Comment != nil {
+		ops = append(ops, safeOp(
+			fmt.Sprintf("COMMENT ON AGGREGATE %s IS %s;", sig, quoteLit(*o.Comment)),
+			o.SrcPos,
+		))
+	}
+	for _, g := range o.Grants {
+		sql := fmt.Sprintf("GRANT %s ON FUNCTION %s TO %s", privStr(g.Privileges), sig, roleList(g.Roles))
+		if g.WithGrant {
+			sql += " WITH GRANT OPTION"
+		}
+		ops = append(ops, safeOp(sql+";", o.SrcPos))
+	}
+	return ops, nil
+}
+
+func diffAggregate(o *ir.Aggregate, snap *snapshot.SnapOpaque) ([]pipeline.DiffOp, error) {
+	sig := buildAggregateSignature(o)
+	pos := o.SrcPos
+
+	var newHash string
+	if o.Body != "" {
+		sum := sha256.Sum256([]byte(strings.TrimSpace(o.Body)))
+		newHash = fmt.Sprintf("%x", sum)
+	}
+	bodyChanged := newHash != snap.BodyHash
+
+	if bodyChanged {
+		if o.Body == "" {
+			return nil, fmt.Errorf("aggregate %s: body not captured; define it explicitly in a .dpg source file", o.QualifiedName())
+		}
+		ops := []pipeline.DiffOp{
+			destructiveOp(fmt.Sprintf("DROP AGGREGATE IF EXISTS %s;", sig), pos),
+			safeOp(o.Body+";", pos),
+		}
+		if o.Comment != nil {
+			ops = append(ops, safeOp(
+				fmt.Sprintf("COMMENT ON AGGREGATE %s IS %s;", sig, quoteLit(*o.Comment)),
+				pos,
+			))
+		}
+		ops = append(ops, diffGrantSet(nil, o.Grants, "FUNCTION "+sig, pos)...)
+		return ops, nil
+	}
+
+	var ops []pipeline.DiffOp
+	if !ptrEq(o.Comment, snap.Comment) {
+		if o.Comment != nil {
+			ops = append(ops, safeOp(
+				fmt.Sprintf("COMMENT ON AGGREGATE %s IS %s;", sig, quoteLit(*o.Comment)),
+				pos,
+			))
+		} else {
+			ops = append(ops, safeOp(
+				fmt.Sprintf("COMMENT ON AGGREGATE %s IS NULL;", sig),
+				pos,
+			))
+		}
+	}
+	ops = append(ops, diffGrantSet(snap.Grants, o.Grants, "FUNCTION "+sig, pos)...)
+	return ops, nil
 }
 
 func createDefaultPrivileges(o *ir.DefaultPrivileges) []pipeline.DiffOp {
@@ -1151,7 +1230,7 @@ func createRole(o *ir.Role) []pipeline.DiffOp {
 
 // ── DIFF / ALTER operations ───────────────────────────────────────────────────
 
-func diffObject(desired pipeline.IRObject, snap *snapshot.SnapObject) ([]pipeline.DiffOp, error) {
+func diffObject(desired pipeline.IRObject, snap *snapshot.SnapObject, fullSnap *pipeline.Snapshot) ([]pipeline.DiffOp, error) {
 	switch o := desired.(type) {
 	case *ir.Schema:
 		if snap.Schema == nil {
@@ -1177,7 +1256,7 @@ func diffObject(desired pipeline.IRObject, snap *snapshot.SnapObject) ([]pipelin
 		if snap.Type == nil {
 			return nil, nil
 		}
-		return diffType(o, snap.Type), nil
+		return diffType(o, snap.Type, fullSnap)
 	case *ir.Procedure:
 		if snap.Opaque == nil {
 			return nil, nil
@@ -1187,7 +1266,7 @@ func diffObject(desired pipeline.IRObject, snap *snapshot.SnapObject) ([]pipelin
 		if snap.Opaque == nil {
 			return nil, nil
 		}
-		return diffOpaqueIR(o.QualifiedName(), o.Body, o.Comment, snap.Opaque, o.SrcPos)
+		return diffAggregate(o, snap.Opaque)
 	case *ir.Tablespace:
 		if snap.Opaque == nil {
 			return nil, nil
@@ -1408,7 +1487,7 @@ func diffFunction(o *ir.Function, snap *snapshot.SnapFunction) []pipeline.DiffOp
 	return ops
 }
 
-func diffType(o *ir.Type, snap *snapshot.SnapType) []pipeline.DiffOp {
+func diffType(o *ir.Type, snap *snapshot.SnapType, fullSnap *pipeline.Snapshot) ([]pipeline.DiffOp, error) {
 	var ops []pipeline.DiffOp
 	pos := o.SrcPos
 	typeIdent := qualIdent(o.Schema, o.Name)
@@ -1418,9 +1497,25 @@ func diffType(o *ir.Type, snap *snapshot.SnapType) []pipeline.DiffOp {
 		for _, v := range snap.Values {
 			snapVals[v] = true
 		}
+		desiredVals := make(map[string]bool, len(o.EnumValues))
+		for _, v := range o.EnumValues {
+			desiredVals[v] = true
+		}
+
+		// Values removed from the enum require the MIGRATE REMOVE procedure.
+		var removedCount int
+		for v := range snapVals {
+			if !desiredVals[v] {
+				removedCount++
+			}
+		}
+		if removedCount > 0 {
+			return diffEnumRemove(o, snap, fullSnap)
+		}
+
+		// ALTER TYPE ADD VALUE cannot run inside a transaction in PG < 16.
 		for _, v := range o.EnumValues {
 			if !snapVals[v] {
-				// ALTER TYPE ADD VALUE cannot run inside a transaction in PG < 16.
 				ops = append(ops, manualOp(
 					fmt.Sprintf("ALTER TYPE %s ADD VALUE %s;", typeIdent, quoteLit(v)),
 					pos,
@@ -1435,7 +1530,119 @@ func diffType(o *ir.Type, snap *snapshot.SnapType) []pipeline.DiffOp {
 			ops = append(ops, safeOp(fmt.Sprintf("COMMENT ON TYPE %s IS NULL;", typeIdent), pos))
 		}
 	}
-	return ops
+	return ops, nil
+}
+
+// diffEnumRemove implements the 7-step MIGRATE REMOVE procedure for enums.
+// It creates a shadow type, runs the user-supplied DML, verifies no rows
+// carry removed values, alters affected columns, drops the old type, and
+// renames the shadow type back to the original name.
+func diffEnumRemove(o *ir.Type, snap *snapshot.SnapType, fullSnap *pipeline.Snapshot) ([]pipeline.DiffOp, error) {
+	pos := o.SrcPos
+	typeIdent := qualIdent(o.Schema, o.Name)
+	shadowIdent := qualIdent(o.Schema, o.Name+"__dpg_new")
+
+	if o.MigrateRemove == nil {
+		return nil, pipeline.Errorf(pos,
+			"enum %s has removed values but no MIGRATE REMOVE block; add a MIGRATE REMOVE block with DML to migrate existing rows before removing",
+			typeIdent)
+	}
+
+	desiredSet := make(map[string]bool, len(o.EnumValues))
+	for _, v := range o.EnumValues {
+		desiredSet[v] = true
+	}
+	var removed []string
+	for _, v := range snap.Values {
+		if !desiredSet[v] {
+			removed = append(removed, v)
+		}
+	}
+
+	// Find all table columns in the snapshot that reference this enum type.
+	type affectedCol struct{ tableSchema, tableName, colName string }
+	var affected []affectedCol
+	for _, raw := range fullSnap.Objects {
+		var so snapshot.SnapObject
+		if err := json.Unmarshal(raw, &so); err != nil || so.Table == nil {
+			continue
+		}
+		for _, col := range so.Table.Columns {
+			if enumTypeMatch(col.Type, o.Schema, o.Name) {
+				affected = append(affected, affectedCol{so.Table.Schema, so.Table.Name, col.Name})
+			}
+		}
+	}
+
+	var ops []pipeline.DiffOp
+
+	// Step 1: create shadow type with the new (reduced) value set.
+	vals := make([]string, len(o.EnumValues))
+	for i, v := range o.EnumValues {
+		vals[i] = quoteLit(v)
+	}
+	ops = append(ops, safeOp(
+		fmt.Sprintf("CREATE TYPE %s AS ENUM (%s);", shadowIdent, strings.Join(vals, ", ")),
+		pos,
+	))
+
+	// Step 2: execute migration DML (user-supplied).
+	if dml := strings.TrimSpace(o.MigrateRemove.SQL.Text); dml != "" {
+		ops = append(ops, destructiveOp(dml, pos))
+	}
+
+	// Step 3: verify no rows still carry removed values.
+	removedLits := make([]string, len(removed))
+	for i, v := range removed {
+		removedLits[i] = quoteLit(v)
+	}
+	for _, ac := range affected {
+		tblIdent := qualIdent(ac.tableSchema, ac.tableName)
+		colIdent := quoteIdent(ac.colName)
+		ops = append(ops, safeOp(fmt.Sprintf(
+			"DO $$ DECLARE _cnt bigint; BEGIN\n"+
+				"  SELECT count(*) INTO _cnt FROM %s WHERE %s::text = ANY(ARRAY[%s]);\n"+
+				"  IF _cnt > 0 THEN RAISE EXCEPTION 'MIGRATE REMOVE: %% row(s) in %s.%s still carry a removed %s value', _cnt; END IF;\n"+
+				"END; $$;",
+			tblIdent, colIdent, strings.Join(removedLits, ", "),
+			tblIdent, colIdent, typeIdent,
+		), pos))
+	}
+
+	// Step 4: alter affected columns to use the shadow type.
+	for _, ac := range affected {
+		tblIdent := qualIdent(ac.tableSchema, ac.tableName)
+		colIdent := quoteIdent(ac.colName)
+		ops = append(ops, destructiveOp(fmt.Sprintf(
+			"ALTER TABLE %s ALTER COLUMN %s TYPE %s USING %s::text::%s;",
+			tblIdent, colIdent, shadowIdent, colIdent, shadowIdent,
+		), pos))
+	}
+
+	// Step 5: drop the old type.
+	ops = append(ops, destructiveOp(fmt.Sprintf("DROP TYPE %s;", typeIdent), pos))
+
+	// Step 6: rename shadow to the original name.
+	ops = append(ops, safeOp(fmt.Sprintf("ALTER TYPE %s RENAME TO %s;", shadowIdent, quoteIdent(o.Name)), pos))
+
+	// Re-apply comment after the rename.
+	if o.Comment != nil {
+		ops = append(ops, safeOp(fmt.Sprintf("COMMENT ON TYPE %s IS %s;", typeIdent, quoteLit(*o.Comment)), pos))
+	}
+
+	// Step 7: cleanup instruction for manual rollback.
+	ops = append(ops, manualOp(fmt.Sprintf("-- On failure run: DROP TYPE IF EXISTS %s;", shadowIdent), pos))
+
+	return ops, nil
+}
+
+// enumTypeMatch reports whether colType refers to the enum identified by
+// (schema, name). It handles both qualified and unqualified forms, and
+// single-dimension arrays.
+func enumTypeMatch(colType, schema, name string) bool {
+	qn := schema + "." + name
+	return colType == qn || colType == name ||
+		colType == qn+"[]" || colType == name+"[]"
 }
 
 func diffTable(o *ir.Table, snap *snapshot.SnapTable) ([]pipeline.DiffOp, error) {

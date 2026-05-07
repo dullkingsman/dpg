@@ -68,7 +68,7 @@ func (b *Builder) Build(pg pipeline.PGParseResult, block pipeline.BlockAST) (pip
 	case *pg_query.Node_CreateEventTrigStmt:
 		obj, err = b.buildOpaque(node, block, pos, "EVENT TRIGGER")
 	case *pg_query.Node_DefineStmt:
-		obj, err = b.buildDefineStmt(n.DefineStmt, block, pos)
+		obj, err = b.buildDefineStmt(n.DefineStmt, block, pos, rawSQL(node))
 	case *pg_query.Node_CreateDomainStmt:
 		obj, err = b.buildDomain(n.CreateDomainStmt, block, pos, rawSQL(node))
 	case *pg_query.Node_CreateOpClassStmt:
@@ -881,10 +881,6 @@ func extractFuncAttrs(options []*pg_query.Node) FuncAttrs {
 // ── Enum ─────────────────────────────────────────────────────────────────────
 
 func (b *Builder) buildEnum(cs *pg_query.CreateEnumStmt, block pipeline.BlockAST, pos pipeline.SourcePos) (pipeline.IRObject, error) {
-	if block.MigrateRemove != nil {
-		return nil, pipeline.Errorf(block.MigrateRemove.Pos,
-			"MIGRATE REMOVE is not yet implemented; remove this directive")
-	}
 	t := &Type{
 		Variant: "ENUM",
 		SrcPos:  pos,
@@ -905,6 +901,9 @@ func (b *Builder) buildEnum(cs *pg_query.CreateEnumStmt, block pipeline.BlockAST
 	}
 	if block.Deprecated != nil {
 		t.Deprecated = &block.Deprecated.Value
+	}
+	if block.MigrateRemove != nil {
+		t.MigrateRemove = block.MigrateRemove
 	}
 	return t, nil
 }
@@ -1066,7 +1065,7 @@ func (b *Builder) buildStatistics(cs *pg_query.CreateStatsStmt, block pipeline.B
 
 // ── DefineStmt (composite/range/base type, aggregate, operator, collation, TS objects) ──
 
-func (b *Builder) buildDefineStmt(ds *pg_query.DefineStmt, block pipeline.BlockAST, pos pipeline.SourcePos) (pipeline.IRObject, error) {
+func (b *Builder) buildDefineStmt(ds *pg_query.DefineStmt, block pipeline.BlockAST, pos pipeline.SourcePos, rawBody string) (pipeline.IRObject, error) {
 	schema, name := extractTypeName(ds.Defnames)
 	switch ds.Kind {
 	case pg_query.ObjectType_OBJECT_TYPE:
@@ -1101,7 +1100,7 @@ func (b *Builder) buildDefineStmt(ds *pg_query.DefineStmt, block pipeline.BlockA
 		return t, nil
 
 	case pg_query.ObjectType_OBJECT_AGGREGATE:
-		agg := &Aggregate{Schema: schema, Name: name, SrcPos: pos}
+		agg := &Aggregate{Schema: schema, Name: name, Body: rawBody, SrcPos: pos}
 		for _, p := range ds.Args {
 			if fp := p.GetFunctionParameter(); fp != nil {
 				agg.Args = append(agg.Args, buildFuncArg(fp))

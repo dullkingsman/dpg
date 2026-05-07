@@ -59,9 +59,9 @@ Focus: close the gaps in PostgreSQL object support per RFC Appendix A.
 - [x] Tablespaces
 - [x] Row-level security policies (`POLICY` inside `{ }` blocks)
 - [x] Partitioning strategies: `SnapPartition`, `createTable` PARTITION BY emission, `diffPartitions` (add/remove/bounds-change/strategy-change), `introspectPartitions` via `pg_partitioned_table`
-- [ ] `MIGRATE REMOVE` full implementation — 7-step enum value removal procedure (RFC §20.2)
+- [x] `MIGRATE REMOVE` full implementation — shadow type creation, DML passthrough, row verification, column type migration, drop+rename, comment re-apply
 - [x] Column-level grant tracking: `SnapColumn.Grants`, snapshot population, differ support, introspection via `information_schema.column_privileges`
-- [ ] Semantic diffing for aggregates (currently body-hash only; any change triggers DROP+CREATE)
+- [x] Semantic diffing for aggregates: structural changes (SFUNC, STYPE, etc.) emit DROP+CREATE (DESTRUCTIVE); comment/grant changes emit non-destructive ops without DROP
 
 ---
 

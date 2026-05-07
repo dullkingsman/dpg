@@ -20,12 +20,13 @@ type SnapObject struct {
 // ForeignServer, UserMapping, Publication, Subscription, EventTrigger, Collation,
 // Operator, OperatorClass, OperatorFamily, Cast, StatisticsObject, and TS objects.
 type SnapOpaque struct {
-	Kind     string  `json:"kind"` // e.g. "procedure", "tablespace"
-	Schema   string  `json:"schema,omitempty"`
-	Name     string  `json:"name"`
-	Args     string  `json:"args,omitempty"` // type-only arg list (proc/agg identity)
-	BodyHash string  `json:"body_hash,omitempty"`
-	Comment  *string `json:"comment,omitempty"`
+	Kind     string      `json:"kind"` // e.g. "procedure", "tablespace"
+	Schema   string      `json:"schema,omitempty"`
+	Name     string      `json:"name"`
+	Args     string      `json:"args,omitempty"` // type-only arg list (proc/agg identity)
+	BodyHash string      `json:"body_hash,omitempty"`
+	Comment  *string     `json:"comment,omitempty"`
+	Grants   []SnapGrant `json:"grants,omitempty"` // aggregate only
 }
 
 type SnapSchema struct {

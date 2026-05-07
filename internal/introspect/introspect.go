@@ -204,6 +204,12 @@ ORDER  BY n.nspname, c.relname`
 	if err := introspectPartitions(ctx, conn, tableIdx); err != nil {
 		return nil, err
 	}
+	if err := introspectTableInherits(ctx, conn, tableIdx); err != nil {
+		return nil, err
+	}
+	if err := introspectTableGrants(ctx, conn, tableIdx); err != nil {
+		return nil, err
+	}
 	if err := introspectColumnGrants(ctx, conn, tableIdx); err != nil {
 		return nil, err
 	}
@@ -602,7 +608,8 @@ SELECT n.nspname, c.relname,
        r.rolname AS owner,
        pg_get_viewdef(c.oid, true) AS query,
        obj_description(c.oid, 'pg_class') AS comment,
-       c.relkind = 'm' AS materialized
+       c.relkind = 'm' AS materialized,
+       NOT c.relispopulated AS with_no_data
 FROM   pg_class c
 JOIN   pg_namespace n ON n.oid = c.relnamespace
 JOIN   pg_roles r     ON r.oid = c.relowner
@@ -616,24 +623,38 @@ ORDER  BY n.nspname, c.relname`
 	}
 	defer rs.Close()
 
+	viewIdx := make(map[string]*ir.View)
 	var out []pipeline.IRObject
 	for rs.Next() {
 		var schema, name, owner, query string
 		var comment *string
-		var materialized bool
-		if err := rs.Scan(&schema, &name, &owner, &query, &comment, &materialized); err != nil {
+		var materialized, withNoData bool
+		if err := rs.Scan(&schema, &name, &owner, &query, &comment, &materialized, &withNoData); err != nil {
 			return nil, err
 		}
-		out = append(out, &ir.View{
+		q := strings.TrimSpace(query)
+		v := &ir.View{
 			Schema:       schema,
 			Name:         name,
 			Owner:        &owner,
-			Query:        strings.TrimSpace(query),
+			Query:        q,
 			Comment:      comment,
 			Materialized: materialized,
-		})
+			Recursive:    strings.HasPrefix(q, "WITH RECURSIVE"),
+			WithNoData:   materialized && withNoData,
+		}
+		viewIdx[schema+"."+name] = v
+		out = append(out, v)
 	}
-	return out, rs.Err()
+	if err := rs.Err(); err != nil {
+		return nil, err
+	}
+	rs.Close()
+
+	if err := introspectViewGrants(ctx, conn, viewIdx); err != nil {
+		return nil, err
+	}
+	return out, nil
 }
 
 // ── functions ─────────────────────────────────────────────────────────────────
@@ -666,6 +687,7 @@ ORDER  BY n.nspname, p.proname, args`
 	}
 	defer rs.Close()
 
+	funcIdx := make(map[string]*ir.Function)
 	var out []pipeline.IRObject
 	for rs.Next() {
 		var schema, name, args, retType, lang, volatility string
@@ -709,10 +731,19 @@ ORDER  BY n.nspname, p.proname, args`
 					fn.Args = append(fn.Args, ir.FuncArg{Type: ir.TypeRef{Name: strings.TrimSpace(a)}})
 				}
 			}
+			funcIdx[schema+"."+name+"("+args+")"] = fn
 			out = append(out, fn)
 		}
 	}
-	return out, rs.Err()
+	if err := rs.Err(); err != nil {
+		return nil, err
+	}
+	rs.Close()
+
+	if err := introspectFunctionGrants(ctx, conn, funcIdx); err != nil {
+		return nil, err
+	}
+	return out, nil
 }
 
 // ── types ─────────────────────────────────────────────────────────────────────
@@ -923,6 +954,237 @@ ORDER  BY r.rolname`
 }
 
 var _ pipeline.Introspector = (*CatalogIntrospector)(nil)
+
+// introspectTableInherits populates Table.Inherits for every child table in idx.
+func introspectTableInherits(ctx context.Context, conn pipeline.Querier, idx map[string]*ir.Table) error {
+	const q = `
+SELECT cn.nspname, cc.relname, pn.nspname AS parent_schema, pc.relname AS parent_name
+FROM   pg_inherits i
+JOIN   pg_class cc      ON cc.oid = i.inhrelid
+JOIN   pg_namespace cn  ON cn.oid = cc.relnamespace
+JOIN   pg_class pc      ON pc.oid = i.inhparent
+JOIN   pg_namespace pn  ON pn.oid = pc.relnamespace
+WHERE  NOT cc.relispartition
+AND    cn.nspname NOT IN ('pg_catalog','information_schema','pg_toast')
+ORDER  BY cn.nspname, cc.relname, pn.nspname, pc.relname`
+
+	rs, err := conn.QueryRows(ctx, q)
+	if err != nil {
+		return fmt.Errorf("introspect table inherits: %w", err)
+	}
+	defer rs.Close()
+
+	for rs.Next() {
+		var schema, name, parentSchema, parentName string
+		if err := rs.Scan(&schema, &name, &parentSchema, &parentName); err != nil {
+			return err
+		}
+		t, ok := idx[schema+"."+name]
+		if !ok {
+			continue
+		}
+		parent := parentSchema + "." + parentName
+		t.Inherits = append(t.Inherits, parent)
+	}
+	return rs.Err()
+}
+
+// introspectTableGrants populates Table.Grants for every table in idx using
+// aclexplode on pg_class.relacl.
+func introspectTableGrants(ctx context.Context, conn pipeline.Querier, idx map[string]*ir.Table) error {
+	const q = `
+SELECT n.nspname, c.relname,
+       CASE WHEN a.grantee = 0 THEN 'PUBLIC' ELSE pg_get_userbyid(a.grantee) END AS grantee,
+       a.privilege_type, a.is_grantable
+FROM   pg_class c
+JOIN   pg_namespace n ON n.oid = c.relnamespace,
+       LATERAL aclexplode(COALESCE(c.relacl, '{}')) a
+WHERE  c.relkind IN ('r', 'p')
+AND    NOT c.relispartition
+AND    n.nspname NOT IN ('pg_catalog','information_schema','pg_toast')
+ORDER  BY n.nspname, c.relname, grantee, a.privilege_type`
+
+	rs, err := conn.QueryRows(ctx, q)
+	if err != nil {
+		return fmt.Errorf("introspect table grants: %w", err)
+	}
+	defer rs.Close()
+
+	type grantKey struct{ schema, name, grantee string }
+	type grantEntry struct {
+		privs     []string
+		grantable bool
+	}
+	grants := make(map[grantKey]*grantEntry)
+	var order []grantKey
+
+	for rs.Next() {
+		var schema, name, grantee, priv string
+		var grantable bool
+		if err := rs.Scan(&schema, &name, &grantee, &priv, &grantable); err != nil {
+			return err
+		}
+		k := grantKey{schema, name, grantee}
+		e, ok := grants[k]
+		if !ok {
+			e = &grantEntry{}
+			grants[k] = e
+			order = append(order, k)
+		}
+		e.privs = append(e.privs, priv)
+		if grantable {
+			e.grantable = true
+		}
+	}
+	if err := rs.Err(); err != nil {
+		return err
+	}
+
+	for _, k := range order {
+		t, ok := idx[k.schema+"."+k.name]
+		if !ok {
+			continue
+		}
+		e := grants[k]
+		t.Grants = append(t.Grants, ir.Grant{
+			Privileges: e.privs,
+			Roles:      []string{k.grantee},
+			WithGrant:  e.grantable,
+		})
+	}
+	return nil
+}
+
+// introspectViewGrants populates View.Grants for every view in idx using
+// aclexplode on pg_class.relacl.
+func introspectViewGrants(ctx context.Context, conn pipeline.Querier, idx map[string]*ir.View) error {
+	const q = `
+SELECT n.nspname, c.relname,
+       CASE WHEN a.grantee = 0 THEN 'PUBLIC' ELSE pg_get_userbyid(a.grantee) END AS grantee,
+       a.privilege_type, a.is_grantable
+FROM   pg_class c
+JOIN   pg_namespace n ON n.oid = c.relnamespace,
+       LATERAL aclexplode(COALESCE(c.relacl, '{}')) a
+WHERE  c.relkind IN ('v', 'm')
+AND    n.nspname NOT IN ('pg_catalog','information_schema','pg_toast')
+ORDER  BY n.nspname, c.relname, grantee, a.privilege_type`
+
+	rs, err := conn.QueryRows(ctx, q)
+	if err != nil {
+		return fmt.Errorf("introspect view grants: %w", err)
+	}
+	defer rs.Close()
+
+	type grantKey struct{ schema, name, grantee string }
+	type grantEntry struct {
+		privs     []string
+		grantable bool
+	}
+	grants := make(map[grantKey]*grantEntry)
+	var order []grantKey
+
+	for rs.Next() {
+		var schema, name, grantee, priv string
+		var grantable bool
+		if err := rs.Scan(&schema, &name, &grantee, &priv, &grantable); err != nil {
+			return err
+		}
+		k := grantKey{schema, name, grantee}
+		e, ok := grants[k]
+		if !ok {
+			e = &grantEntry{}
+			grants[k] = e
+			order = append(order, k)
+		}
+		e.privs = append(e.privs, priv)
+		if grantable {
+			e.grantable = true
+		}
+	}
+	if err := rs.Err(); err != nil {
+		return err
+	}
+
+	for _, k := range order {
+		v, ok := idx[k.schema+"."+k.name]
+		if !ok {
+			continue
+		}
+		e := grants[k]
+		v.Grants = append(v.Grants, ir.Grant{
+			Privileges: e.privs,
+			Roles:      []string{k.grantee},
+			WithGrant:  e.grantable,
+		})
+	}
+	return nil
+}
+
+// introspectFunctionGrants populates Function.Grants for every function in idx
+// using aclexplode on pg_proc.proacl. The idx key is "schema.name(args)".
+func introspectFunctionGrants(ctx context.Context, conn pipeline.Querier, idx map[string]*ir.Function) error {
+	const q = `
+SELECT n.nspname, p.proname,
+       pg_get_function_identity_arguments(p.oid) AS args,
+       CASE WHEN a.grantee = 0 THEN 'PUBLIC' ELSE pg_get_userbyid(a.grantee) END AS grantee,
+       a.privilege_type, a.is_grantable
+FROM   pg_proc p
+JOIN   pg_namespace n ON n.oid = p.pronamespace,
+       LATERAL aclexplode(COALESCE(p.proacl, '{}')) a
+WHERE  p.prokind = 'f'
+AND    n.nspname NOT IN ('pg_catalog','information_schema','pg_toast')
+ORDER  BY n.nspname, p.proname, args, grantee, a.privilege_type`
+
+	rs, err := conn.QueryRows(ctx, q)
+	if err != nil {
+		return fmt.Errorf("introspect function grants: %w", err)
+	}
+	defer rs.Close()
+
+	type grantKey struct{ schema, name, args, grantee string }
+	type grantEntry struct {
+		privs     []string
+		grantable bool
+	}
+	grants := make(map[grantKey]*grantEntry)
+	var order []grantKey
+
+	for rs.Next() {
+		var schema, name, args, grantee, priv string
+		var grantable bool
+		if err := rs.Scan(&schema, &name, &args, &grantee, &priv, &grantable); err != nil {
+			return err
+		}
+		k := grantKey{schema, name, args, grantee}
+		e, ok := grants[k]
+		if !ok {
+			e = &grantEntry{}
+			grants[k] = e
+			order = append(order, k)
+		}
+		e.privs = append(e.privs, priv)
+		if grantable {
+			e.grantable = true
+		}
+	}
+	if err := rs.Err(); err != nil {
+		return err
+	}
+
+	for _, k := range order {
+		fn, ok := idx[k.schema+"."+k.name+"("+k.args+")"]
+		if !ok {
+			continue
+		}
+		e := grants[k]
+		fn.Grants = append(fn.Grants, ir.Grant{
+			Privileges: e.privs,
+			Roles:      []string{k.grantee},
+			WithGrant:  e.grantable,
+		})
+	}
+	return nil
+}
 
 // introspectColumnGrants reads column-level privileges from the information
 // schema and populates each ir.Column's Grants slice.

@@ -312,15 +312,16 @@ func (a *Aggregate) irObject()               {}
 
 // Type covers ENUM, COMPOSITE, RANGE, DOMAIN, and BASE types.
 type Type struct {
-	Schema     string
-	Name       string
-	Variant    string   // "ENUM", "COMPOSITE", "RANGE", "DOMAIN", "BASE"
-	EnumValues []string // ENUM only
-	Body       string   // raw Part1 for composite/range/domain/base (opaque for now)
-	Comment    *string
-	Owner      *string
-	Deprecated *string
-	SrcPos     pipeline.SourcePos
+	Schema        string
+	Name          string
+	Variant       string   // "ENUM", "COMPOSITE", "RANGE", "DOMAIN", "BASE"
+	EnumValues    []string // ENUM only
+	Body          string   // raw Part1 for composite/range/domain/base (opaque for now)
+	Comment       *string
+	Owner         *string
+	Deprecated    *string
+	MigrateRemove *pipeline.MigrateRemoveBlock // ENUM only: MIGRATE REMOVE { } block
+	SrcPos        pipeline.SourcePos
 }
 
 func (t *Type) QualifiedName() string   { return qualName(t.Schema, t.Name) }

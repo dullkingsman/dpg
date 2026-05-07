@@ -70,10 +70,14 @@ func toSnapObject(obj pipeline.IRObject) *SnapObject {
 			Args: procArgsKey(o.Args), BodyHash: hash, Comment: o.Comment,
 		}}
 	case *ir.Aggregate:
-		return &SnapObject{Kind: "aggregate", Opaque: &SnapOpaque{
+		so := &SnapOpaque{
 			Kind: "aggregate", Schema: o.Schema, Name: o.Name,
 			Args: procArgsKey(o.Args), BodyHash: hashBodyStr(o.Body), Comment: o.Comment,
-		}}
+		}
+		for _, g := range o.Grants {
+			so.Grants = append(so.Grants, toSnapGrant(g))
+		}
+		return &SnapObject{Kind: "aggregate", Opaque: so}
 	case *ir.Tablespace:
 		return &SnapObject{Kind: "tablespace", Opaque: &SnapOpaque{
 			Kind: "tablespace", Name: o.Name, BodyHash: hashBodyStr(o.Body), Comment: o.Comment,

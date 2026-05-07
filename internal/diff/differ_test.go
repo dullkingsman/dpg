@@ -1,6 +1,8 @@
 package diff
 
 import (
+	"crypto/sha256"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -8,6 +10,10 @@ import (
 	"github.com/dullkingsman/dpg/internal/pipeline"
 	"github.com/dullkingsman/dpg/internal/snapshot"
 )
+
+func sha256Sum(s string) [32]byte {
+	return sha256.Sum256([]byte(strings.TrimSpace(s)))
+}
 
 func TestDiffEmptyDesiredEmptySnap(t *testing.T) {
 	d := New()
@@ -1685,7 +1691,420 @@ func TestDiffPartitionUnchangedIsNoop(t *testing.T) {
 	}
 }
 
+// ── MIGRATE REMOVE ─────────────────────────────────────────────────────────
+
+func TestDiffEnumRemoveRequiresMigrateRemoveBlock(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.status", &snapshot.SnapObject{
+		Kind: "type",
+		Type: &snapshot.SnapType{Schema: "public", Name: "status", Variant: "ENUM",
+			Values: []string{"active", "inactive", "cancelled"}},
+	})
+	desired := []pipeline.IRObject{
+		&ir.Type{Schema: "public", Name: "status", Variant: "ENUM",
+			EnumValues: []string{"active", "inactive"}},
+	}
+	_, err := d.Diff(desired, snap)
+	if err == nil {
+		t.Fatal("expected error when MIGRATE REMOVE block is absent")
+	}
+	if !strings.Contains(err.Error(), "MIGRATE REMOVE") {
+		t.Errorf("expected MIGRATE REMOVE in error, got: %s", err)
+	}
+}
+
+func TestDiffEnumRemoveEmitsShadowTypeAndDrop(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.status", &snapshot.SnapObject{
+		Kind: "type",
+		Type: &snapshot.SnapType{Schema: "public", Name: "status", Variant: "ENUM",
+			Values: []string{"active", "inactive", "cancelled"}},
+	})
+	desired := []pipeline.IRObject{
+		&ir.Type{
+			Schema: "public", Name: "status", Variant: "ENUM",
+			EnumValues: []string{"active", "inactive"},
+			MigrateRemove: &pipeline.MigrateRemoveBlock{
+				SQL: pipeline.RawExpr{Text: "UPDATE orders SET status = 'active' WHERE status = 'cancelled';"},
+			},
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sqls := sqlList(ops)
+	if !containsSQL(ops, "CREATE TYPE") || !containsSQL(ops, "__dpg_new") {
+		t.Errorf("expected shadow type creation, got: %v", sqls)
+	}
+	if !containsSQL(ops, "UPDATE orders") {
+		t.Errorf("expected DML passthrough, got: %v", sqls)
+	}
+	if !containsSQL(ops, "DROP TYPE") {
+		t.Errorf("expected DROP TYPE, got: %v", sqls)
+	}
+	if !containsSQL(ops, "RENAME TO") {
+		t.Errorf("expected RENAME TO, got: %v", sqls)
+	}
+}
+
+func TestDiffEnumRemoveAltersAffectedColumns(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.status", &snapshot.SnapObject{
+		Kind: "type",
+		Type: &snapshot.SnapType{Schema: "public", Name: "status", Variant: "ENUM",
+			Values: []string{"open", "closed", "archived"}},
+	})
+	_ = snap.SetObject("public.tickets", &snapshot.SnapObject{
+		Kind: "table",
+		Table: &snapshot.SnapTable{
+			Schema: "public", Name: "tickets",
+			Columns: []snapshot.SnapColumn{
+				{Name: "id", Type: "bigint"},
+				{Name: "state", Type: "public.status"},
+			},
+		},
+	})
+	desired := []pipeline.IRObject{
+		&ir.Type{
+			Schema: "public", Name: "status", Variant: "ENUM",
+			EnumValues: []string{"open", "closed"},
+			MigrateRemove: &pipeline.MigrateRemoveBlock{
+				SQL: pipeline.RawExpr{Text: "UPDATE tickets SET state = 'closed' WHERE state = 'archived';"},
+			},
+		},
+		&ir.Table{
+			Schema:  "public",
+			Name:    "tickets",
+			Columns: []*ir.Column{{Name: "id", Type: ir.TypeRef{Name: "bigint"}}, {Name: "state", Type: ir.TypeRef{Schema: "public", Name: "status"}}},
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sqls := sqlList(ops)
+	if !containsSQL(ops, "ALTER TABLE") || !containsSQL(ops, "ALTER COLUMN") || !containsSQL(ops, "TYPE") {
+		t.Errorf("expected ALTER COLUMN TYPE for affected column, got: %v", sqls)
+	}
+	if !containsSQL(ops, "tickets") {
+		t.Errorf("expected affected table tickets in ops, got: %v", sqls)
+	}
+	if !containsSQL(ops, "RAISE EXCEPTION") {
+		t.Errorf("expected verification DO block, got: %v", sqls)
+	}
+}
+
+func TestDiffEnumRemoveNoAffectedColumnsSkipsAlter(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.color", &snapshot.SnapObject{
+		Kind: "type",
+		Type: &snapshot.SnapType{Schema: "public", Name: "color", Variant: "ENUM",
+			Values: []string{"red", "green", "blue"}},
+	})
+	desired := []pipeline.IRObject{
+		&ir.Type{
+			Schema: "public", Name: "color", Variant: "ENUM",
+			EnumValues: []string{"red", "green"},
+			MigrateRemove: &pipeline.MigrateRemoveBlock{
+				SQL: pipeline.RawExpr{Text: "DELETE FROM palette WHERE color = 'blue';"},
+			},
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if containsSQL(ops, "ALTER TABLE") {
+		t.Errorf("expected no ALTER TABLE when no columns reference the type, got: %v", sqlList(ops))
+	}
+	// Shadow type and rename must still be emitted.
+	if !containsSQL(ops, "__dpg_new") {
+		t.Errorf("expected shadow type, got: %v", sqlList(ops))
+	}
+}
+
+func TestDiffEnumRemovePreservesComment(t *testing.T) {
+	d := New()
+	comment := "order lifecycle"
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.order_status", &snapshot.SnapObject{
+		Kind: "type",
+		Type: &snapshot.SnapType{Schema: "public", Name: "order_status", Variant: "ENUM",
+			Values: []string{"pending", "shipped", "cancelled"}},
+	})
+	desired := []pipeline.IRObject{
+		&ir.Type{
+			Schema: "public", Name: "order_status", Variant: "ENUM",
+			EnumValues: []string{"pending", "shipped"},
+			Comment:    &comment,
+			MigrateRemove: &pipeline.MigrateRemoveBlock{
+				SQL: pipeline.RawExpr{Text: "UPDATE orders SET status = 'shipped' WHERE status = 'cancelled';"},
+			},
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsSQL(ops, "COMMENT ON TYPE") {
+		t.Errorf("expected COMMENT ON TYPE after rename, got: %v", sqlList(ops))
+	}
+}
+
+func TestDiffEnumAddValueUnchangedByMigrateRemove(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.status", &snapshot.SnapObject{
+		Kind: "type",
+		Type: &snapshot.SnapType{Schema: "public", Name: "status", Variant: "ENUM",
+			Values: []string{"active", "inactive"}},
+	})
+	desired := []pipeline.IRObject{
+		&ir.Type{Schema: "public", Name: "status", Variant: "ENUM",
+			EnumValues: []string{"active", "inactive", "pending"}},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsSQL(ops, "ADD VALUE") {
+		t.Errorf("expected ADD VALUE for added enum value, got: %v", sqlList(ops))
+	}
+	if containsSQL(ops, "__dpg_new") {
+		t.Errorf("ADD VALUE should not trigger MIGRATE REMOVE procedure, got: %v", sqlList(ops))
+	}
+}
+
 // ── Materialized view comment uses correct SQL object type ─────────────────
+
+// ── Aggregate semantic diffing ────────────────────────────────────────────────
+
+func TestDiffCreateAggregateEmitsBody(t *testing.T) {
+	d := New()
+	desired := []pipeline.IRObject{
+		&ir.Aggregate{
+			Schema: "public",
+			Name:   "my_agg",
+			Args:   []ir.FuncArg{{Type: ir.TypeRef{Name: "numeric"}}},
+			Body:   "CREATE AGGREGATE public.my_agg(numeric) (SFUNC = numeric_add, STYPE = numeric)",
+		},
+	}
+	ops, err := d.Diff(desired, &pipeline.Snapshot{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsSQL(ops, "CREATE AGGREGATE") {
+		t.Errorf("expected CREATE AGGREGATE, got: %v", sqlList(ops))
+	}
+	if containsSQL(ops, "DROP AGGREGATE") {
+		t.Errorf("unexpected DROP AGGREGATE on create, got: %v", sqlList(ops))
+	}
+}
+
+func TestDiffCreateAggregateEmitsComment(t *testing.T) {
+	d := New()
+	comment := "sums numerics"
+	desired := []pipeline.IRObject{
+		&ir.Aggregate{
+			Schema:  "public",
+			Name:    "my_agg",
+			Args:    []ir.FuncArg{{Type: ir.TypeRef{Name: "numeric"}}},
+			Body:    "CREATE AGGREGATE public.my_agg(numeric) (SFUNC = numeric_add, STYPE = numeric)",
+			Comment: &comment,
+		},
+	}
+	ops, err := d.Diff(desired, &pipeline.Snapshot{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsSQL(ops, "COMMENT ON AGGREGATE") {
+		t.Errorf("expected COMMENT ON AGGREGATE, got: %v", sqlList(ops))
+	}
+}
+
+func TestDiffCreateAggregateEmitsGrant(t *testing.T) {
+	d := New()
+	desired := []pipeline.IRObject{
+		&ir.Aggregate{
+			Schema: "public",
+			Name:   "my_agg",
+			Args:   []ir.FuncArg{{Type: ir.TypeRef{Name: "numeric"}}},
+			Body:   "CREATE AGGREGATE public.my_agg(numeric) (SFUNC = numeric_add, STYPE = numeric)",
+			Grants: []ir.Grant{{Privileges: []string{"EXECUTE"}, Roles: []string{"analyst"}}},
+		},
+	}
+	ops, err := d.Diff(desired, &pipeline.Snapshot{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsSQL(ops, "GRANT EXECUTE ON FUNCTION") {
+		t.Errorf("expected GRANT EXECUTE ON FUNCTION, got: %v", sqlList(ops))
+	}
+}
+
+func TestDiffAggregateBodyChangedDropsAndRecreates(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	oldHash := fmt.Sprintf("%x", sha256Sum("CREATE AGGREGATE public.my_agg(numeric) (SFUNC = numeric_add, STYPE = numeric)"))
+	_ = snap.SetObject(`public.my_agg(numeric)`, &snapshot.SnapObject{
+		Kind: "aggregate",
+		Opaque: &snapshot.SnapOpaque{
+			Kind: "aggregate", Schema: "public", Name: "my_agg", Args: "numeric", BodyHash: oldHash,
+		},
+	})
+	newBody := "CREATE AGGREGATE public.my_agg(numeric) (SFUNC = float8_accum, STYPE = float8[])"
+	desired := []pipeline.IRObject{
+		&ir.Aggregate{
+			Schema: "public",
+			Name:   "my_agg",
+			Args:   []ir.FuncArg{{Type: ir.TypeRef{Name: "numeric"}}},
+			Body:   newBody,
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsSQL(ops, "DROP AGGREGATE IF EXISTS") {
+		t.Errorf("expected DROP AGGREGATE IF EXISTS, got: %v", sqlList(ops))
+	}
+	if !containsSQL(ops, "CREATE AGGREGATE") {
+		t.Errorf("expected CREATE AGGREGATE, got: %v", sqlList(ops))
+	}
+}
+
+func TestDiffAggregateBodyChangedDropIsDestructive(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	oldHash := fmt.Sprintf("%x", sha256Sum("CREATE AGGREGATE public.my_agg(numeric) (SFUNC = numeric_add, STYPE = numeric)"))
+	_ = snap.SetObject(`public.my_agg(numeric)`, &snapshot.SnapObject{
+		Kind: "aggregate",
+		Opaque: &snapshot.SnapOpaque{
+			Kind: "aggregate", Schema: "public", Name: "my_agg", Args: "numeric", BodyHash: oldHash,
+		},
+	})
+	desired := []pipeline.IRObject{
+		&ir.Aggregate{
+			Schema: "public",
+			Name:   "my_agg",
+			Args:   []ir.FuncArg{{Type: ir.TypeRef{Name: "numeric"}}},
+			Body:   "CREATE AGGREGATE public.my_agg(numeric) (SFUNC = float8_accum, STYPE = float8[])",
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, o := range ops {
+		if strings.Contains(o.SQL(), "DROP AGGREGATE") {
+			if o.Safety() != pipeline.Destructive {
+				t.Errorf("expected Destructive safety for DROP AGGREGATE, got %s", o.Safety())
+			}
+			return
+		}
+	}
+	t.Error("DROP AGGREGATE op not found")
+}
+
+func TestDiffAggregateCommentOnlyChange(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	body := "CREATE AGGREGATE public.my_agg(numeric) (SFUNC = numeric_add, STYPE = numeric)"
+	bodyHash := fmt.Sprintf("%x", sha256Sum(body))
+	oldComment := "old comment"
+	_ = snap.SetObject(`public.my_agg(numeric)`, &snapshot.SnapObject{
+		Kind: "aggregate",
+		Opaque: &snapshot.SnapOpaque{
+			Kind: "aggregate", Schema: "public", Name: "my_agg", Args: "numeric",
+			BodyHash: bodyHash, Comment: &oldComment,
+		},
+	})
+	newComment := "updated comment"
+	desired := []pipeline.IRObject{
+		&ir.Aggregate{
+			Schema:  "public",
+			Name:    "my_agg",
+			Args:    []ir.FuncArg{{Type: ir.TypeRef{Name: "numeric"}}},
+			Body:    body,
+			Comment: &newComment,
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if containsSQL(ops, "DROP AGGREGATE") {
+		t.Errorf("unexpected DROP AGGREGATE for comment-only change, got: %v", sqlList(ops))
+	}
+	if !containsSQL(ops, "COMMENT ON AGGREGATE") {
+		t.Errorf("expected COMMENT ON AGGREGATE, got: %v", sqlList(ops))
+	}
+}
+
+func TestDiffAggregateGrantAdded(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	body := "CREATE AGGREGATE public.my_agg(numeric) (SFUNC = numeric_add, STYPE = numeric)"
+	bodyHash := fmt.Sprintf("%x", sha256Sum(body))
+	_ = snap.SetObject(`public.my_agg(numeric)`, &snapshot.SnapObject{
+		Kind: "aggregate",
+		Opaque: &snapshot.SnapOpaque{
+			Kind: "aggregate", Schema: "public", Name: "my_agg", Args: "numeric", BodyHash: bodyHash,
+		},
+	})
+	desired := []pipeline.IRObject{
+		&ir.Aggregate{
+			Schema: "public",
+			Name:   "my_agg",
+			Args:   []ir.FuncArg{{Type: ir.TypeRef{Name: "numeric"}}},
+			Body:   body,
+			Grants: []ir.Grant{{Privileges: []string{"EXECUTE"}, Roles: []string{"analyst"}}},
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if containsSQL(ops, "DROP AGGREGATE") {
+		t.Errorf("unexpected DROP AGGREGATE for grant-only change, got: %v", sqlList(ops))
+	}
+	if !containsSQL(ops, "GRANT EXECUTE ON FUNCTION") {
+		t.Errorf("expected GRANT EXECUTE ON FUNCTION, got: %v", sqlList(ops))
+	}
+}
+
+func TestDiffAggregateUnchangedIsNoop(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	body := "CREATE AGGREGATE public.my_agg(numeric) (SFUNC = numeric_add, STYPE = numeric)"
+	bodyHash := fmt.Sprintf("%x", sha256Sum(body))
+	_ = snap.SetObject(`public.my_agg(numeric)`, &snapshot.SnapObject{
+		Kind: "aggregate",
+		Opaque: &snapshot.SnapOpaque{
+			Kind: "aggregate", Schema: "public", Name: "my_agg", Args: "numeric", BodyHash: bodyHash,
+		},
+	})
+	desired := []pipeline.IRObject{
+		&ir.Aggregate{
+			Schema: "public",
+			Name:   "my_agg",
+			Args:   []ir.FuncArg{{Type: ir.TypeRef{Name: "numeric"}}},
+			Body:   body,
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ops) != 0 {
+		t.Errorf("expected no ops for unchanged aggregate, got: %v", sqlList(ops))
+	}
+}
 
 func TestDiffMaterViewCommentUsesCorrectKind(t *testing.T) {
 	d := New()
