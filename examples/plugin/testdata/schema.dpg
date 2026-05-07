@@ -1,0 +1,15 @@
+-- users has no COMMENT — the custom linter should flag it.
+TABLE users (
+  id    SERIAL PRIMARY KEY,
+  email TEXT   NOT NULL
+)
+{}
+
+-- logs has a COMMENT — the custom linter should pass it.
+TABLE logs (
+  id      SERIAL PRIMARY KEY,
+  message TEXT   NOT NULL
+)
+{
+  COMMENT "Application event log";
+}

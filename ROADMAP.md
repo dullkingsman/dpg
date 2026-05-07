@@ -41,9 +41,9 @@ Focus: canonical formatting for `.dpg` source files.
 
 Focus: allow third-party tools to integrate with the DPG pipeline without forking.
 
-- [x] `pkg/dpg` public API — re-exports all IR types, `Compile`, `Lint`, and `Discover`; `Registry` and `Default` exposed for future extension
-- [ ] Open `internal/pipeline` — promote the registry and core interfaces for external packages to register custom differs, emitters, linters, and secret resolvers
-- [ ] Documented extension points and an example plugin
+- [x] `pkg/dpg` public API — re-exports all IR types, `Compile`, `Lint`, `Diff`, and `Discover`; `Registry` and `Default` exposed for extension
+- [x] Open `internal/pipeline` — `pkg/dpg` re-exports `Linter`, `Differ`, `Emitter`, `SecretResolver` interfaces, `DiffOp`/`Safety`/`Migration`/`MigrationMeta` types, all registry key constants, `NewRegistry`, `ResolveLinter`, `NewChainLinter`, and registers `diff`/`emit` built-ins on import
+- [x] Documented extension points and an example plugin (`examples/plugin/`) — custom `tableCommentLinter` implementing `dpg.Linter`, showing both replace and chain patterns; imports only `pkg/dpg`
 - [ ] Stable Go module API (no breaking changes to public packages within the v0.x line)
 
 ---
