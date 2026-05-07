@@ -46,7 +46,7 @@ Use --format json for machine-readable output.`,
 			hasError := false
 			for _, cl := range clusters {
 				if len(cl.SourceFiles) > 0 {
-					errored, err := runValidate(cl.Name(), cl.ClusterSnapshotKey(), cl.SourceFiles, cl.ObjectsDir, linter, lintCfg, format)
+					errored, err := runValidate(cl.Name(), "(cluster)", cl.SourceFiles, cl.ObjectsDir, linter, lintCfg, format)
 					if err != nil {
 						return err
 					}

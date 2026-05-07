@@ -15,7 +15,7 @@ Focus: correctness and reliability for the object types already supported.
 - [x] Differ: error instead of silent no-op when a pass-through object body is not captured
 - [x] Tests for `graph`, `merger`, `compiler`, `project`, `config` packages
 - [x] Silent no-op correctness fixes: grant diffing (tables/views/functions), column STORAGE/COMPRESSION/STATISTICS, table INHERITS, materialized view WITH NO DATA, recursive view snapshot tracking, MIGRATE REMOVE fails loudly instead of silently
-- [ ] Tests for `introspect` package (requires live PG; tracked separately as integration tests)
+- [x] Tests for `introspect` package — integration test suite (`-tags integration`) using testcontainers; covers introspect, executor, and full compile→plan→apply→verify roundtrip
 - [ ] Bug fixes driven by early adopter feedback
 
 ---

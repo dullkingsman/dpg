@@ -1,0 +1,295 @@
+//go:build integration
+
+// Package integration runs end-to-end tests against a live PostgreSQL instance
+// managed by testcontainers. The full DPG pipeline — compile → plan → apply →
+// introspect → verify zero drift — is exercised for each scenario.
+package integration
+
+import (
+	"context"
+	"encoding/json"
+	"os"
+	"path/filepath"
+	"runtime"
+	"testing"
+
+	"github.com/dullkingsman/dpg/internal/compiler"
+	"github.com/dullkingsman/dpg/internal/diff"
+	"github.com/dullkingsman/dpg/internal/emit"
+	"github.com/dullkingsman/dpg/internal/executor"
+	"github.com/dullkingsman/dpg/internal/introspect"
+	"github.com/dullkingsman/dpg/internal/pipeline"
+	"github.com/dullkingsman/dpg/internal/snapshot"
+	"github.com/dullkingsman/dpg/internal/testpg"
+
+	_ "github.com/dullkingsman/dpg/internal/blockparser"
+	_ "github.com/dullkingsman/dpg/internal/graph"
+	_ "github.com/dullkingsman/dpg/internal/ir"
+	_ "github.com/dullkingsman/dpg/internal/merger"
+	_ "github.com/dullkingsman/dpg/internal/pgparser"
+	_ "github.com/dullkingsman/dpg/internal/scanner"
+)
+
+// testdataFile returns the absolute path to a file under integration/testdata/.
+func testdataFile(name string) string {
+	_, file, _, _ := runtime.Caller(0)
+	return filepath.Join(filepath.Dir(file), "testdata", name)
+}
+
+// memStore is a trivial in-memory SnapshotStore used in tests to avoid
+// touching the filesystem.
+type memStore struct {
+	snaps map[string]*pipeline.Snapshot
+}
+
+func newMemStore() *memStore { return &memStore{snaps: map[string]*pipeline.Snapshot{}} }
+
+func (m *memStore) Load(cluster, database string) (*pipeline.Snapshot, error) {
+	if s, ok := m.snaps[cluster+"/"+database]; ok {
+		// Deep-copy via JSON so callers can't mutate stored state.
+		data, _ := json.Marshal(s)
+		var out pipeline.Snapshot
+		_ = json.Unmarshal(data, &out)
+		return &out, nil
+	}
+	return &pipeline.Snapshot{}, nil
+}
+
+func (m *memStore) Save(cluster, database string, snap *pipeline.Snapshot) error {
+	data, err := json.Marshal(snap)
+	if err != nil {
+		return err
+	}
+	var out pipeline.Snapshot
+	if err := json.Unmarshal(data, &out); err != nil {
+		return err
+	}
+	m.snaps[cluster+"/"+database] = &out
+	return nil
+}
+
+var _ pipeline.SnapshotStore = (*memStore)(nil)
+
+// TestRoundtrip compiles the testdata/schema.dpg fixture, applies it to a
+// fresh Postgres database, introspects the live catalog, then verifies that
+// diffing the desired IR against the live snapshot produces zero operations.
+func TestRoundtrip(t *testing.T) {
+	connStr := testpg.Start(t)
+	ctx := context.Background()
+
+	differ := diff.New()
+	emitter := emit.New()
+	applyExec := executor.New()
+	ci := introspect.New()
+	store := newMemStore()
+
+	schemaFile := testdataFile("schema.dpg")
+	schemaDir := filepath.Dir(schemaFile)
+
+	// ── Step 1: Compile desired state ────────────────────────────────────────
+	desired, err := compiler.Compile([]string{schemaFile}, schemaDir, pipeline.Default)
+	if err != nil {
+		t.Fatalf("compile: %v", err)
+	}
+
+	// ── Step 2: Plan against empty snapshot ──────────────────────────────────
+	emptySnap, _ := store.Load("test", "dpgtest")
+	ops, err := differ.Diff(desired, emptySnap)
+	if err != nil {
+		t.Fatalf("diff (initial): %v", err)
+	}
+	if len(ops) == 0 {
+		t.Fatal("expected ops against empty snapshot, got none")
+	}
+	for _, op := range ops {
+		if op.Safety() == pipeline.Destructive {
+			t.Errorf("initial plan contains unexpected DESTRUCTIVE op: %s", op.SQL())
+		}
+	}
+
+	// ── Step 3: Apply to the container DB ────────────────────────────────────
+	migration, err := emitter.Emit(ops, pipeline.MigrationMeta{Cluster: "test", Database: "dpgtest"})
+	if err != nil {
+		t.Fatalf("emit: %v", err)
+	}
+
+	conn, err := executor.Connect(ctx, connStr)
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	defer conn.Close(ctx)
+
+	if err := applyExec.Apply(ctx, migration, conn); err != nil {
+		t.Fatalf("apply: %v", err)
+	}
+
+	// Persist snapshot representing the applied state.
+	appliedSnap := &pipeline.Snapshot{}
+	if err := snapshot.Populate(appliedSnap, desired); err != nil {
+		t.Fatalf("populate snapshot: %v", err)
+	}
+	if err := store.Save("test", "dpgtest", appliedSnap); err != nil {
+		t.Fatalf("save snapshot: %v", err)
+	}
+
+	// ── Step 4: Introspect live DB ────────────────────────────────────────────
+	liveObjects, err := ci.Introspect(ctx, conn)
+	if err != nil {
+		t.Fatalf("introspect: %v", err)
+	}
+
+	liveSnap := &pipeline.Snapshot{}
+	if err := snapshot.Populate(liveSnap, liveObjects); err != nil {
+		t.Fatalf("populate live snapshot: %v", err)
+	}
+
+	// ── Step 5: Diff desired vs live — must be zero ops ───────────────────────
+	driftOps, err := differ.Diff(desired, liveSnap)
+	if err != nil {
+		t.Fatalf("drift diff: %v", err)
+	}
+	if len(driftOps) != 0 {
+		t.Errorf("drift detected after apply (%d ops):", len(driftOps))
+		for _, op := range driftOps {
+			t.Errorf("  [%s] %s", op.Safety(), op.SQL())
+		}
+	}
+}
+
+// TestRoundtripAddColumn verifies that adding a column to an already-applied
+// schema produces only SAFE ops, applies cleanly, and leaves zero drift.
+func TestRoundtripAddColumn(t *testing.T) {
+	connStr := testpg.Start(t)
+	ctx := context.Background()
+
+	differ := diff.New()
+	emitter := emit.New()
+	applyExec := executor.New()
+	ci := introspect.New()
+	store := newMemStore()
+
+	schemaFile := testdataFile("schema.dpg")
+	schemaDir := filepath.Dir(schemaFile)
+
+	conn, err := executor.Connect(ctx, connStr)
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	defer conn.Close(ctx)
+
+	// Apply the base schema.
+	applyFixture(t, ctx, conn, []string{schemaFile}, schemaDir, differ, emitter, applyExec, store)
+
+	// Write an extended schema with an extra column added to users.
+	extendedSchema := `TYPE status AS ENUM ('active', 'inactive', 'pending');
+
+TABLE users (
+    id          bigint GENERATED ALWAYS AS IDENTITY,
+    name        text NOT NULL,
+    email       text NOT NULL,
+    status      status NOT NULL DEFAULT 'active',
+    created_at  timestamptz NOT NULL DEFAULT now(),
+    CONSTRAINT users_pkey PRIMARY KEY (id),
+    CONSTRAINT users_email_key UNIQUE (email)
+) {
+    INDEX idx_users_status (status);
+};
+
+VIEW active_users AS
+    SELECT id, name, email FROM users WHERE status = 'active';
+`
+	dir := t.TempDir()
+	extFile := filepath.Join(dir, "schema.dpg")
+	if err := os.WriteFile(extFile, []byte(extendedSchema), 0o644); err != nil {
+		t.Fatalf("write extended schema: %v", err)
+	}
+
+	desired2, err := compiler.Compile([]string{extFile}, dir, pipeline.Default)
+	if err != nil {
+		t.Fatalf("compile extended: %v", err)
+	}
+
+	snap, _ := store.Load("test", "dpgtest")
+	ops, err := differ.Diff(desired2, snap)
+	if err != nil {
+		t.Fatalf("diff (add column): %v", err)
+	}
+	if len(ops) == 0 {
+		t.Fatal("expected ops for added column, got none")
+	}
+	for _, op := range ops {
+		if op.Safety() == pipeline.Destructive {
+			t.Errorf("add-column plan contains DESTRUCTIVE op: %s", op.SQL())
+		}
+	}
+
+	migration2, err := emitter.Emit(ops, pipeline.MigrationMeta{Cluster: "test", Database: "dpgtest"})
+	if err != nil {
+		t.Fatalf("emit: %v", err)
+	}
+	if err := applyExec.Apply(ctx, migration2, conn); err != nil {
+		t.Fatalf("apply (add column): %v", err)
+	}
+
+	// Zero drift after add-column apply.
+	liveObjects, err := ci.Introspect(ctx, conn)
+	if err != nil {
+		t.Fatalf("introspect: %v", err)
+	}
+	liveSnap := &pipeline.Snapshot{}
+	if err := snapshot.Populate(liveSnap, liveObjects); err != nil {
+		t.Fatalf("populate live snapshot: %v", err)
+	}
+	driftOps, err := differ.Diff(desired2, liveSnap)
+	if err != nil {
+		t.Fatalf("drift diff: %v", err)
+	}
+	if len(driftOps) != 0 {
+		t.Errorf("drift after add-column apply (%d ops):", len(driftOps))
+		for _, op := range driftOps {
+			t.Errorf("  [%s] %s", op.Safety(), op.SQL())
+		}
+	}
+}
+
+// applyFixture compiles files, diffs against the current store snapshot, and
+// applies the resulting migration. The store snapshot is updated on success.
+func applyFixture(
+	t *testing.T,
+	ctx context.Context,
+	conn *executor.PgxConn,
+	files []string, dbDir string,
+	differ pipeline.Differ,
+	emitter pipeline.Emitter,
+	applyExec pipeline.ApplyExecutor,
+	store *memStore,
+) {
+	t.Helper()
+
+	desired, err := compiler.Compile(files, dbDir, pipeline.Default)
+	if err != nil {
+		t.Fatalf("compile: %v", err)
+	}
+
+	base, _ := store.Load("test", "dpgtest")
+	ops, err := differ.Diff(desired, base)
+	if err != nil {
+		t.Fatalf("diff: %v", err)
+	}
+
+	migration, err := emitter.Emit(ops, pipeline.MigrationMeta{Cluster: "test", Database: "dpgtest"})
+	if err != nil {
+		t.Fatalf("emit: %v", err)
+	}
+	if err := applyExec.Apply(ctx, migration, conn); err != nil {
+		t.Fatalf("apply fixture: %v", err)
+	}
+
+	snap := &pipeline.Snapshot{}
+	if err := snapshot.Populate(snap, desired); err != nil {
+		t.Fatalf("populate snapshot: %v", err)
+	}
+	if err := store.Save("test", "dpgtest", snap); err != nil {
+		t.Fatalf("save snapshot: %v", err)
+	}
+}

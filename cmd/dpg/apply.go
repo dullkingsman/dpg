@@ -71,12 +71,12 @@ Partition strategy changes additionally require --approve-partition-rebuild.`,
 				return err
 			}
 
-			_ = approvePartitionRebuild
 			opts := applyOptions{
-				yes:              yes,
-				allowDestructive: allowDestructive,
-				migrationsDir:    proj.MigrationsDir(),
-				lintCfg:          linterConfigFrom(proj.RootConfig.Linter),
+				yes:                     yes,
+				allowDestructive:        allowDestructive,
+				approvePartitionRebuild: approvePartitionRebuild,
+				migrationsDir:           proj.MigrationsDir(),
+				lintCfg:                 linterConfigFrom(proj.RootConfig.Linter),
 			}
 
 			for _, cl := range clusters {
@@ -112,10 +112,19 @@ Partition strategy changes additionally require --approve-partition-rebuild.`,
 }
 
 type applyOptions struct {
-	yes              bool
-	allowDestructive bool
-	migrationsDir    string
-	lintCfg          pipeline.LinterConfig
+	yes                     bool
+	allowDestructive        bool
+	approvePartitionRebuild bool
+	migrationsDir           string
+	lintCfg                 pipeline.LinterConfig
+}
+
+// isInstructionOp reports whether op is a comment-only Manual op that
+// describes a manual step rather than executable SQL (e.g. partition strategy
+// change, WITH NO DATA change). These ops are shown in the plan but must never
+// be sent to the executor.
+func isInstructionOp(op pipeline.DiffOp) bool {
+	return op.Safety() == pipeline.Manual && len(op.SQL()) > 0 && op.SQL()[0] == '-'
 }
 
 func runApply(
@@ -173,7 +182,25 @@ func runApply(
 		}
 	}
 
+	// Gate instruction-only Manual ops (e.g. partition strategy changes) behind
+	// --approve-partition-rebuild. These ops are shown in the plan but must not
+	// be sent to the executor — they describe steps the operator must perform
+	// manually outside of DPG.
+	var instructionOps []pipeline.DiffOp
+	var executableOps []pipeline.DiffOp
+	for _, op := range ops {
+		if isInstructionOp(op) {
+			instructionOps = append(instructionOps, op)
+		} else {
+			executableOps = append(executableOps, op)
+		}
+	}
+	if len(instructionOps) > 0 && !opts.approvePartitionRebuild {
+		return fmt.Errorf("migration requires manual steps (partition strategy change or similar);\nre-run with --approve-partition-rebuild to acknowledge and proceed\n  first: %s", instructionOps[0].SQL())
+	}
+
 	rev, _ := gitRevision()
+	// Emit the full op list so the printed plan includes the instruction ops.
 	migration, err := emitter.Emit(ops, pipeline.MigrationMeta{
 		GeneratedAt:    time.Now().UTC(),
 		SourceRevision: rev,
@@ -226,7 +253,18 @@ func runApply(
 	}
 	defer conn.Close(ctx)
 
-	if err := applyExec.Apply(ctx, migration, conn); err != nil {
+	// Execute only non-instruction ops. Instruction ops are manual steps the
+	// operator must perform outside DPG; they must not be sent to the executor.
+	execMigration, err := emitter.Emit(executableOps, pipeline.MigrationMeta{
+		GeneratedAt:    time.Now().UTC(),
+		SourceRevision: rev,
+		Cluster:        cl.Name(),
+		Database:       db.Name(),
+	})
+	if err != nil {
+		return err
+	}
+	if err := applyExec.Apply(ctx, execMigration, conn); err != nil {
 		return ui.WrapDB(err)
 	}
 
@@ -303,6 +341,19 @@ func runClusterApply(
 		}
 	}
 
+	var instructionOps []pipeline.DiffOp
+	var executableOps []pipeline.DiffOp
+	for _, op := range ops {
+		if isInstructionOp(op) {
+			instructionOps = append(instructionOps, op)
+		} else {
+			executableOps = append(executableOps, op)
+		}
+	}
+	if len(instructionOps) > 0 && !opts.approvePartitionRebuild {
+		return fmt.Errorf("cluster migration requires manual steps (partition strategy change or similar);\nre-run with --approve-partition-rebuild to acknowledge and proceed\n  first: %s", instructionOps[0].SQL())
+	}
+
 	rev, _ := gitRevision()
 	migration, err := emitter.Emit(ops, pipeline.MigrationMeta{
 		GeneratedAt:    time.Now().UTC(),
@@ -353,7 +404,16 @@ func runClusterApply(
 	}
 	defer conn.Close(ctx)
 
-	if err := applyExec.Apply(ctx, migration, conn); err != nil {
+	execMigration, err := emitter.Emit(executableOps, pipeline.MigrationMeta{
+		GeneratedAt:    time.Now().UTC(),
+		SourceRevision: rev,
+		Cluster:        cl.Name(),
+		Database:       cl.ClusterSnapshotKey(),
+	})
+	if err != nil {
+		return err
+	}
+	if err := applyExec.Apply(ctx, execMigration, conn); err != nil {
 		return ui.WrapDB(err)
 	}
 
