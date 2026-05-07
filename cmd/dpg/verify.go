@@ -65,6 +65,16 @@ not reported (additive grant model).`,
 
 			driftFound := false
 			for _, cl := range clusters {
+				if len(cl.SourceFiles) > 0 {
+					hasDrift, err := runVerifyCluster(cl, store, introspector, differ, emitter, secretResolver)
+					if err != nil {
+						return fmt.Errorf("%s (cluster): %w", cl.Name(), err)
+					}
+					if hasDrift {
+						driftFound = true
+					}
+				}
+
 				databases, err := resolveDatabases(cl, databaseName)
 				if err != nil {
 					return err
@@ -153,6 +163,80 @@ func runVerify(
 	migration, _ := emitter.Emit(ops, pipeline.MigrationMeta{
 		Cluster:  cl.Name(),
 		Database: db.Name(),
+	})
+	_ = emit.Render(os.Stderr, migration, emit.RenderOptions{
+		ShowSafety:    true,
+		ShowSourcePos: true,
+		Color:         errColor,
+	})
+	return true, nil
+}
+
+// runVerifyCluster checks cluster-level objects (roles, tablespaces) for drift.
+func runVerifyCluster(
+	cl *project.Cluster,
+	store pipeline.SnapshotStore,
+	introspector pipeline.Introspector,
+	differ pipeline.Differ,
+	emitter pipeline.Emitter,
+	secretResolver pipeline.SecretResolver,
+) (bool, error) {
+	ctx := context.Background()
+	errColor := ui.IsColorEnabled(os.Stderr)
+
+	snap, err := store.Load(cl.Name(), cl.ClusterSnapshotKey())
+	if err != nil {
+		return false, fmt.Errorf("load snapshot: %w", err)
+	}
+
+	connStr := cl.ConnectionString()
+	if connStr == "" {
+		return false, fmt.Errorf("cluster %q has no connection configured (set url or link in cluster dpg.toml)", cl.Name())
+	}
+	if cl.IsLink() {
+		connStr, err = secretResolver.Resolve(connStr)
+		if err != nil {
+			return false, ui.WrapDB(fmt.Errorf("resolve connection secret: %w", err))
+		}
+	}
+
+	conn, err := executor.Connect(ctx, connStr)
+	if err != nil {
+		return false, ui.WrapDB(err)
+	}
+	defer conn.Close(ctx)
+
+	allObjects, err := introspector.Introspect(ctx, conn)
+	if err != nil {
+		return false, ui.WrapDB(fmt.Errorf("introspect: %w", err))
+	}
+
+	// Retain only cluster-level (schema-less) objects.
+	var clusterObjects []pipeline.IRObject
+	for _, obj := range allObjects {
+		if objectSchema(obj) == "" {
+			clusterObjects = append(clusterObjects, obj)
+		}
+	}
+
+	ops, err := differ.Diff(clusterObjects, snap)
+	if err != nil {
+		return false, fmt.Errorf("diff: %w", err)
+	}
+
+	label := cl.Name() + " (cluster)"
+	if len(ops) == 0 {
+		ui.PrintInfo(os.Stdout, label, "no drift detected", ui.IsColorEnabled(os.Stdout))
+		return false, nil
+	}
+
+	fmt.Fprintf(os.Stderr, "%s  %s\n\n",
+		ui.Red("drift detected", errColor),
+		ui.Cyan(label, errColor),
+	)
+	migration, _ := emitter.Emit(ops, pipeline.MigrationMeta{
+		Cluster:  cl.Name(),
+		Database: cl.ClusterSnapshotKey(),
 	})
 	_ = emit.Render(os.Stderr, migration, emit.RenderOptions{
 		ShowSafety:    true,

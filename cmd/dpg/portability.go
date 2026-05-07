@@ -44,6 +44,29 @@ This command never blocks compilation or apply.`,
 			color := ui.IsColorEnabled(os.Stdout)
 
 			for _, cl := range clusters {
+				if len(cl.SourceFiles) > 0 {
+					objects, err := compiler.Compile(cl.SourceFiles, cl.ObjectsDir, pipeline.Default)
+					if err != nil {
+						return fmt.Errorf("%s (cluster): %w", cl.Name(), err)
+					}
+					issues, err := analyzer.Analyze(objects)
+					if err != nil {
+						return fmt.Errorf("%s (cluster): analyze: %w", cl.Name(), err)
+					}
+					label := cl.Name() + " (cluster)"
+					if len(issues) == 0 {
+						ui.PrintInfo(os.Stdout, label, "no portability issues found", color)
+					} else {
+						fmt.Fprintf(os.Stdout, "%s  %s\n\n",
+							ui.DimCyan(label, color),
+							fmt.Sprintf("%d portability issue(s)", len(issues)),
+						)
+						for _, iss := range issues {
+							ui.PrintPortabilityIssue(os.Stdout, iss.Pos, iss.Construct, iss.Alternative, color)
+						}
+					}
+				}
+
 				databases, err := resolveDatabases(cl, databaseName)
 				if err != nil {
 					return err

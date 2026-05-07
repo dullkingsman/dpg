@@ -76,6 +76,7 @@ Partition strategy changes additionally require --approve-partition-rebuild.`,
 				yes:              yes,
 				allowDestructive: allowDestructive,
 				migrationsDir:    proj.MigrationsDir(),
+				lintCfg:          linterConfigFrom(proj.RootConfig.Linter),
 			}
 
 			for _, cl := range clusters {
@@ -114,6 +115,7 @@ type applyOptions struct {
 	yes              bool
 	allowDestructive bool
 	migrationsDir    string
+	lintCfg          pipeline.LinterConfig
 }
 
 func runApply(
@@ -136,7 +138,7 @@ func runApply(
 	}
 
 	if linter, ok := pipeline.Resolve[pipeline.Linter](pipeline.Default, pipeline.KeyLinter); ok {
-		diags, lintErr := linter.Lint(desired, defaultLinterConfig)
+		diags, lintErr := linter.Lint(desired, opts.lintCfg)
 		if lintErr != nil {
 			return lintErr
 		}
@@ -267,6 +269,16 @@ func runClusterApply(
 	desired, err := compiler.Compile(cl.SourceFiles, cl.ObjectsDir, pipeline.Default)
 	if err != nil {
 		return err
+	}
+
+	if linter, ok := pipeline.Resolve[pipeline.Linter](pipeline.Default, pipeline.KeyLinter); ok {
+		diags, lintErr := linter.Lint(desired, opts.lintCfg)
+		if lintErr != nil {
+			return lintErr
+		}
+		if ui.PrintLintDiagnostics(os.Stderr, diags, errColor) {
+			return ui.ErrSilent
+		}
 	}
 
 	snap, err := store.Load(cl.Name(), cl.ClusterSnapshotKey())

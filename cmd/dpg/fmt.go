@@ -184,35 +184,102 @@ func countChanged(files []string, opts format.Options) int {
 	return n
 }
 
-// printUnifiedDiff writes a minimal unified diff of old vs new to w.
+// printUnifiedDiff writes a unified diff of old vs new to w, with @@ hunk
+// markers and 3 lines of context around each changed region.
 func printUnifiedDiff(w *os.File, name, old, new string) {
+	const ctx = 3
+
 	oldLines := strings.Split(old, "\n")
 	newLines := strings.Split(new, "\n")
+
+	// Build an edit list: pairs of (oldIdx, newIdx, kind) where kind is ' ',
+	// '-', or '+'. We use a simple O(n) scan assuming lines align by index,
+	// which is correct for formatting changes (whitespace/case only).
+	type edit struct {
+		kind    byte
+		oldLine int // 1-based
+		newLine int
+		text    string
+	}
+	var edits []edit
+	oi, ni := 0, 0
+	for oi < len(oldLines) || ni < len(newLines) {
+		switch {
+		case oi >= len(oldLines):
+			edits = append(edits, edit{'+', oi + 1, ni + 1, newLines[ni]})
+			ni++
+		case ni >= len(newLines):
+			edits = append(edits, edit{'-', oi + 1, ni + 1, oldLines[oi]})
+			oi++
+		case oldLines[oi] == newLines[ni]:
+			edits = append(edits, edit{' ', oi + 1, ni + 1, oldLines[oi]})
+			oi++
+			ni++
+		default:
+			edits = append(edits, edit{'-', oi + 1, ni + 1, oldLines[oi]})
+			edits = append(edits, edit{'+', oi + 1, ni + 1, newLines[ni]})
+			oi++
+			ni++
+		}
+	}
+
+	// Collect changed edit indices.
+	var changed []int
+	for i, e := range edits {
+		if e.kind != ' ' {
+			changed = append(changed, i)
+		}
+	}
+	if len(changed) == 0 {
+		return
+	}
 
 	fmt.Fprintf(w, "--- %s\n", name)
 	fmt.Fprintf(w, "+++ %s\n", name)
 
-	// Simple line-by-line diff: show all changed lines without context.
-	maxLen := len(oldLines)
-	if len(newLines) > maxLen {
-		maxLen = len(newLines)
+	// Group changed lines into hunks separated by more than 2*ctx unchanged lines.
+	type hunk struct{ start, end int }
+	var hunks []hunk
+	hunkStart := max(0, changed[0]-ctx)
+	hunkEnd := min(len(edits)-1, changed[0]+ctx)
+	for _, ci := range changed[1:] {
+		if ci-ctx <= hunkEnd {
+			hunkEnd = min(len(edits)-1, ci+ctx)
+		} else {
+			hunks = append(hunks, hunk{hunkStart, hunkEnd})
+			hunkStart = max(0, ci-ctx)
+			hunkEnd = min(len(edits)-1, ci+ctx)
+		}
 	}
-	for i := 0; i < maxLen; i++ {
-		oldLine := ""
-		newLine := ""
-		if i < len(oldLines) {
-			oldLine = oldLines[i]
-		}
-		if i < len(newLines) {
-			newLine = newLines[i]
-		}
-		if oldLine != newLine {
-			if i < len(oldLines) {
-				fmt.Fprintf(w, "-%s\n", oldLine)
+	hunks = append(hunks, hunk{hunkStart, hunkEnd})
+
+	for _, h := range hunks {
+		// Count old and new lines in the hunk.
+		oldCount, newCount := 0, 0
+		oldStart, newStart := 0, 0
+		for i, e := range edits[h.start : h.end+1] {
+			if e.kind != '+' {
+				oldCount++
+				if i == 0 {
+					oldStart = e.oldLine
+				}
 			}
-			if i < len(newLines) {
-				fmt.Fprintf(w, "+%s\n", newLine)
+			if e.kind != '-' {
+				newCount++
+				if i == 0 {
+					newStart = e.newLine
+				}
 			}
+		}
+		if oldStart == 0 {
+			oldStart = edits[h.start].oldLine
+		}
+		if newStart == 0 {
+			newStart = edits[h.start].newLine
+		}
+		fmt.Fprintf(w, "@@ -%d,%d +%d,%d @@\n", oldStart, oldCount, newStart, newCount)
+		for _, e := range edits[h.start : h.end+1] {
+			fmt.Fprintf(w, "%c%s\n", e.kind, e.text)
 		}
 	}
 }

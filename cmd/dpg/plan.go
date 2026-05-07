@@ -9,6 +9,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/dullkingsman/dpg/internal/compiler"
+	"github.com/dullkingsman/dpg/internal/config"
 	"github.com/dullkingsman/dpg/internal/emit"
 	"github.com/dullkingsman/dpg/internal/executor"
 	"github.com/dullkingsman/dpg/internal/pipeline"
@@ -17,10 +18,33 @@ import (
 	"github.com/dullkingsman/dpg/internal/ui"
 )
 
-var defaultLinterConfig = pipeline.LinterConfig{
-	WarnOnDeprecated:         true,
-	RequireColumnComments:    false,
-	ForbidHardcodedPasswords: true,
+// planJSON is the machine-readable form of a single database plan.
+type planJSON struct {
+	Cluster        string   `json:"cluster"`
+	Database       string   `json:"database"`
+	GeneratedAt    string   `json:"generated_at"`
+	SourceRevision string   `json:"source_revision,omitempty"`
+	Ops            []opJSON `json:"ops"`
+	Empty          bool     `json:"empty"`
+}
+
+type opJSON struct {
+	SQL    string `json:"sql"`
+	Safety string `json:"safety"`
+	File   string `json:"file,omitempty"`
+	Line   int    `json:"line,omitempty"`
+}
+
+// linterConfigFrom converts a config.LinterConfig (from dpg.toml) to the
+// pipeline.LinterConfig used by Linter.Lint.
+func linterConfigFrom(c config.LinterConfig) pipeline.LinterConfig {
+	return pipeline.LinterConfig{
+		WarnOnDeprecated:          c.WarnOnDeprecated,
+		RequireColumnComments:     c.RequireColumnComments,
+		ForbidHardcodedPasswords:  c.ForbidHardcodedPasswords,
+		MaxColumnsPerTable:        c.MaxColumnsPerTable,
+		WarnOnScalarMergeConflict: c.WarnOnScalarMergeConflict,
+	}
 }
 
 func newPlanCmd() *cobra.Command {
@@ -28,7 +52,97 @@ func newPlanCmd() *cobra.Command {
 		clusterName  string
 		databaseName string
 		live         bool
+		format       string
+		watch        bool
 	)
+
+	runOnce := func(cmd *cobra.Command) error {
+		proj, err := discoverProject()
+		if err != nil {
+			return err
+		}
+
+		clusters, err := resolveClusters(proj, clusterName)
+		if err != nil {
+			return err
+		}
+
+		lintCfg := linterConfigFrom(proj.RootConfig.Linter)
+
+		differ, err := pipeline.MustResolve[pipeline.Differ](pipeline.Default, pipeline.KeyDiffer)
+		if err != nil {
+			return err
+		}
+		emitter, err := pipeline.MustResolve[pipeline.Emitter](pipeline.Default, pipeline.KeyEmitter)
+		if err != nil {
+			return err
+		}
+
+		var (
+			introspector   pipeline.Introspector
+			secretResolver pipeline.SecretResolver
+			store          pipeline.SnapshotStore
+		)
+		if live {
+			loadEnv(proj, envFile)
+			introspector, err = pipeline.MustResolve[pipeline.Introspector](pipeline.Default, pipeline.KeyIntrospector)
+			if err != nil {
+				return err
+			}
+			secretResolver, err = pipeline.MustResolve[pipeline.SecretResolver](pipeline.Default, pipeline.KeySecretResolver)
+			if err != nil {
+				return err
+			}
+		} else {
+			store, err = pipeline.MustResolve[pipeline.SnapshotStore](pipeline.Default, pipeline.KeySnapshotStore)
+			if err != nil {
+				return err
+			}
+		}
+
+		for _, cl := range clusters {
+			if len(cl.SourceFiles) > 0 {
+				var clusterSnap *pipeline.Snapshot
+				if live {
+					clusterSnap, err = introspectClusterSnapshot(cmd.Context(), cl, secretResolver, introspector)
+					if err != nil {
+						return fmt.Errorf("%s (cluster): %w", cl.Name(), err)
+					}
+				} else {
+					clusterSnap, err = store.Load(cl.Name(), cl.ClusterSnapshotKey())
+					if err != nil {
+						return fmt.Errorf("%s (cluster): snapshot: %w", cl.Name(), err)
+					}
+				}
+				if err := runClusterPlan(cl, clusterSnap, differ, emitter, lintCfg, format); err != nil {
+					return fmt.Errorf("%s (cluster): %w", cl.Name(), err)
+				}
+			}
+
+			databases, err := resolveDatabases(cl, databaseName)
+			if err != nil {
+				return err
+			}
+			for _, db := range databases {
+				var snap *pipeline.Snapshot
+				if live {
+					snap, err = introspectSnapshot(cmd.Context(), cl, secretResolver, introspector)
+					if err != nil {
+						return fmt.Errorf("%s/%s: %w", cl.Name(), db.Name(), err)
+					}
+				} else {
+					snap, err = store.Load(cl.Name(), db.Name())
+					if err != nil {
+						return fmt.Errorf("%s/%s: snapshot: %w", cl.Name(), db.Name(), err)
+					}
+				}
+				if err := runPlan(cl, db, snap, differ, emitter, lintCfg, format); err != nil {
+					return fmt.Errorf("%s/%s: %w", cl.Name(), db.Name(), err)
+				}
+			}
+		}
+		return nil
+	}
 
 	cmd := &cobra.Command{
 		Use:   "plan",
@@ -37,100 +151,23 @@ func newPlanCmd() *cobra.Command {
 database with --live) and print the minimal SQL required to reach the
 desired state. No database connection is required unless --live is set.
 
-Safe, Caution, Destructive, and Manual operations are labelled in the output.`,
+Safe, Caution, Destructive, and Manual operations are labelled in the output.
+
+Use --format json for machine-readable output suitable for CI or tooling.
+Use --watch to re-run automatically whenever source files change.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			proj, err := discoverProject()
-			if err != nil {
-				return err
+			if watch {
+				return runWatch(cmd, func() error { return runOnce(cmd) })
 			}
-
-			clusters, err := resolveClusters(proj, clusterName)
-			if err != nil {
-				return err
-			}
-
-			differ, err := pipeline.MustResolve[pipeline.Differ](pipeline.Default, pipeline.KeyDiffer)
-			if err != nil {
-				return err
-			}
-			emitter, err := pipeline.MustResolve[pipeline.Emitter](pipeline.Default, pipeline.KeyEmitter)
-			if err != nil {
-				return err
-			}
-
-			// --live resolvers (only needed when live mode is active)
-			var (
-				introspector   pipeline.Introspector
-				secretResolver pipeline.SecretResolver
-				store          pipeline.SnapshotStore
-			)
-			if live {
-				loadEnv(proj, envFile)
-				introspector, err = pipeline.MustResolve[pipeline.Introspector](pipeline.Default, pipeline.KeyIntrospector)
-				if err != nil {
-					return err
-				}
-				secretResolver, err = pipeline.MustResolve[pipeline.SecretResolver](pipeline.Default, pipeline.KeySecretResolver)
-				if err != nil {
-					return err
-				}
-			} else {
-				store, err = pipeline.MustResolve[pipeline.SnapshotStore](pipeline.Default, pipeline.KeySnapshotStore)
-				if err != nil {
-					return err
-				}
-			}
-
-			for _, cl := range clusters {
-				// Cluster-level plan (roles, tablespaces, etc.)
-				if len(cl.SourceFiles) > 0 {
-					var clusterSnap *pipeline.Snapshot
-					if live {
-						// For --live, cluster-level objects come from the same introspect.
-						clusterSnap, err = introspectClusterSnapshot(cmd.Context(), cl, secretResolver, introspector)
-						if err != nil {
-							return fmt.Errorf("%s (cluster): %w", cl.Name(), err)
-						}
-					} else {
-						clusterSnap, err = store.Load(cl.Name(), cl.ClusterSnapshotKey())
-						if err != nil {
-							return fmt.Errorf("%s (cluster): snapshot: %w", cl.Name(), err)
-						}
-					}
-					if err := runClusterPlan(cl, clusterSnap, differ, emitter); err != nil {
-						return fmt.Errorf("%s (cluster): %w", cl.Name(), err)
-					}
-				}
-
-				databases, err := resolveDatabases(cl, databaseName)
-				if err != nil {
-					return err
-				}
-				for _, db := range databases {
-					var snap *pipeline.Snapshot
-					if live {
-						snap, err = introspectSnapshot(cmd.Context(), cl, secretResolver, introspector)
-						if err != nil {
-							return fmt.Errorf("%s/%s: %w", cl.Name(), db.Name(), err)
-						}
-					} else {
-						snap, err = store.Load(cl.Name(), db.Name())
-						if err != nil {
-							return fmt.Errorf("%s/%s: snapshot: %w", cl.Name(), db.Name(), err)
-						}
-					}
-					if err := runPlan(cl, db, snap, differ, emitter); err != nil {
-						return fmt.Errorf("%s/%s: %w", cl.Name(), db.Name(), err)
-					}
-				}
-			}
-			return nil
+			return runOnce(cmd)
 		},
 	}
 
 	cmd.Flags().StringVar(&clusterName, "cluster", "", "cluster to plan (required when multiple clusters exist)")
 	cmd.Flags().StringVar(&databaseName, "database", "", "database to plan (required when multiple databases exist)")
 	cmd.Flags().BoolVar(&live, "live", false, "diff against the live database instead of the stored snapshot")
+	cmd.Flags().StringVar(&format, "format", "text", "output format: text or json")
+	cmd.Flags().BoolVar(&watch, "watch", false, "re-run whenever source files change (polls every 500ms)")
 
 	return cmd
 }
@@ -173,6 +210,8 @@ func runPlan(
 	snap *pipeline.Snapshot,
 	differ pipeline.Differ,
 	emitter pipeline.Emitter,
+	lintCfg pipeline.LinterConfig,
+	format string,
 ) error {
 	color := ui.IsColorEnabled(os.Stdout)
 	errColor := ui.IsColorEnabled(os.Stderr)
@@ -183,7 +222,7 @@ func runPlan(
 	}
 
 	if linter, ok := pipeline.Resolve[pipeline.Linter](pipeline.Default, pipeline.KeyLinter); ok {
-		diags, lintErr := linter.Lint(desired, defaultLinterConfig)
+		diags, lintErr := linter.Lint(desired, lintCfg)
 		if lintErr != nil {
 			return lintErr
 		}
@@ -198,21 +237,47 @@ func runPlan(
 	}
 
 	rev, _ := gitRevision()
-	migration, err := emitter.Emit(ops, pipeline.MigrationMeta{
+	meta := pipeline.MigrationMeta{
 		GeneratedAt:    time.Now().UTC(),
 		SourceRevision: rev,
 		Cluster:        cl.Name(),
 		Database:       db.Name(),
-	})
+	}
+
+	if format == "json" {
+		return renderPlanJSON(ops, meta)
+	}
+
+	migration, err := emitter.Emit(ops, meta)
 	if err != nil {
 		return err
 	}
-
 	return emit.Render(os.Stdout, migration, emit.RenderOptions{
 		ShowSafety:    true,
 		ShowSourcePos: true,
 		Color:         color,
 	})
+}
+
+func renderPlanJSON(ops []pipeline.DiffOp, meta pipeline.MigrationMeta) error {
+	out := planJSON{
+		Cluster:        meta.Cluster,
+		Database:       meta.Database,
+		GeneratedAt:    meta.GeneratedAt.Format(time.RFC3339),
+		SourceRevision: meta.SourceRevision,
+		Ops:            make([]opJSON, 0, len(ops)),
+		Empty:          len(ops) == 0,
+	}
+	for _, o := range ops {
+		pos := o.Pos()
+		oj := opJSON{SQL: o.SQL(), Safety: o.Safety().String()}
+		if pos.File != "" {
+			oj.File = pos.File
+			oj.Line = pos.Line
+		}
+		out.Ops = append(out.Ops, oj)
+	}
+	return writeJSON(out)
 }
 
 // runClusterPlan plans cluster-level objects (roles, tablespaces, etc.).
@@ -221,12 +286,25 @@ func runClusterPlan(
 	snap *pipeline.Snapshot,
 	differ pipeline.Differ,
 	emitter pipeline.Emitter,
+	lintCfg pipeline.LinterConfig,
+	format string,
 ) error {
 	color := ui.IsColorEnabled(os.Stdout)
+	errColor := ui.IsColorEnabled(os.Stderr)
 
 	desired, err := compiler.Compile(cl.SourceFiles, cl.ObjectsDir, pipeline.Default)
 	if err != nil {
 		return err
+	}
+
+	if linter, ok := pipeline.Resolve[pipeline.Linter](pipeline.Default, pipeline.KeyLinter); ok {
+		diags, lintErr := linter.Lint(desired, lintCfg)
+		if lintErr != nil {
+			return lintErr
+		}
+		if ui.PrintLintDiagnostics(os.Stderr, diags, errColor) {
+			return ui.ErrSilent
+		}
 	}
 
 	ops, err := differ.Diff(desired, snap)
@@ -235,16 +313,21 @@ func runClusterPlan(
 	}
 
 	rev, _ := gitRevision()
-	migration, err := emitter.Emit(ops, pipeline.MigrationMeta{
+	meta := pipeline.MigrationMeta{
 		GeneratedAt:    time.Now().UTC(),
 		SourceRevision: rev,
 		Cluster:        cl.Name(),
 		Database:       cl.ClusterSnapshotKey(),
-	})
+	}
+
+	if format == "json" {
+		return renderPlanJSON(ops, meta)
+	}
+
+	migration, err := emitter.Emit(ops, meta)
 	if err != nil {
 		return err
 	}
-
 	return emit.Render(os.Stdout, migration, emit.RenderOptions{
 		ShowSafety:    true,
 		ShowSourcePos: true,

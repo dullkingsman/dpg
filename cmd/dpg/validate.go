@@ -1,0 +1,182 @@
+package main
+
+import (
+	"encoding/json"
+	"fmt"
+	"os"
+
+	"github.com/spf13/cobra"
+
+	"github.com/dullkingsman/dpg/internal/compiler"
+	"github.com/dullkingsman/dpg/internal/pipeline"
+	"github.com/dullkingsman/dpg/internal/ui"
+)
+
+func newValidateCmd() *cobra.Command {
+	var (
+		clusterName  string
+		databaseName string
+		format       string
+	)
+
+	cmd := &cobra.Command{
+		Use:   "validate",
+		Short: "Validate .dpg source files offline without diffing",
+		Long: `Parse and compile all .dpg source files and run the linter. No database
+connection or snapshot is required.
+
+Exits 0 when there are no errors. Lint warnings do not cause a non-zero exit
+unless --strict is passed to the linter (see dpg.toml [linter] settings).
+
+Use --format json for machine-readable output.`,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			proj, err := discoverProject()
+			if err != nil {
+				return err
+			}
+
+			clusters, err := resolveClusters(proj, clusterName)
+			if err != nil {
+				return err
+			}
+
+			linter, _ := pipeline.Resolve[pipeline.Linter](pipeline.Default, pipeline.KeyLinter)
+			lintCfg := linterConfigFrom(proj.RootConfig.Linter)
+
+			hasError := false
+			for _, cl := range clusters {
+				if len(cl.SourceFiles) > 0 {
+					errored, err := runValidate(cl.Name(), cl.ClusterSnapshotKey(), cl.SourceFiles, cl.ObjectsDir, linter, lintCfg, format)
+					if err != nil {
+						return err
+					}
+					if errored {
+						hasError = true
+					}
+				}
+
+				databases, err := resolveDatabases(cl, databaseName)
+				if err != nil {
+					return err
+				}
+				for _, db := range databases {
+					errored, err := runValidate(cl.Name(), db.Name(), db.SourceFiles, db.Dir, linter, lintCfg, format)
+					if err != nil {
+						return err
+					}
+					if errored {
+						hasError = true
+					}
+				}
+			}
+
+			if hasError {
+				return ui.ErrSilent
+			}
+			return nil
+		},
+	}
+
+	cmd.Flags().StringVar(&clusterName, "cluster", "", "cluster to validate (default: all)")
+	cmd.Flags().StringVar(&databaseName, "database", "", "database to validate (default: all)")
+	cmd.Flags().StringVar(&format, "format", "text", "output format: text or json")
+	return cmd
+}
+
+type validateJSON struct {
+	Cluster  string          `json:"cluster"`
+	Database string          `json:"database"`
+	Objects  int             `json:"objects"`
+	Errors   []diagnosticOut `json:"errors"`
+	Warnings []diagnosticOut `json:"warnings"`
+}
+
+type diagnosticOut struct {
+	Rule    string `json:"rule"`
+	Message string `json:"message"`
+	File    string `json:"file,omitempty"`
+	Line    int    `json:"line,omitempty"`
+	Col     int    `json:"col,omitempty"`
+}
+
+// runValidate compiles and lints one database or cluster scope. Returns (hasError, err).
+func runValidate(
+	clusterName, dbName string,
+	files []string, dbDir string,
+	linter pipeline.Linter,
+	lintCfg pipeline.LinterConfig,
+	format string,
+) (bool, error) {
+	color := ui.IsColorEnabled(os.Stderr)
+
+	desired, err := compiler.Compile(files, dbDir, pipeline.Default)
+	if err != nil {
+		if format == "json" {
+			out := validateJSON{
+				Cluster:  clusterName,
+				Database: dbName,
+				Errors:   []diagnosticOut{{Message: err.Error()}},
+				Warnings: []diagnosticOut{},
+			}
+			return true, writeJSON(out)
+		}
+		return true, err
+	}
+
+	var diags []pipeline.LintDiagnostic
+	if linter != nil {
+		diags, err = linter.Lint(desired, lintCfg)
+		if err != nil {
+			return true, err
+		}
+	}
+
+	if format == "json" {
+		return emitValidateJSON(clusterName, dbName, len(desired), diags)
+	}
+
+	// Text output.
+	hasError := false
+	if len(diags) == 0 {
+		fmt.Fprintf(os.Stdout, "%s/%s: %d object(s) — OK\n", clusterName, dbName, len(desired))
+	} else {
+		fmt.Fprintf(os.Stdout, "%s/%s: %d object(s)\n", clusterName, dbName, len(desired))
+		if ui.PrintLintDiagnostics(os.Stderr, diags, color) {
+			hasError = true
+		}
+	}
+	return hasError, nil
+}
+
+func emitValidateJSON(cluster, database string, objectCount int, diags []pipeline.LintDiagnostic) (bool, error) {
+	out := validateJSON{
+		Cluster:  cluster,
+		Database: database,
+		Objects:  objectCount,
+		Errors:   []diagnosticOut{},
+		Warnings: []diagnosticOut{},
+	}
+	hasError := false
+	for _, d := range diags {
+		entry := diagnosticOut{
+			Rule:    d.Rule,
+			Message: d.Message,
+			File:    d.Pos.File,
+			Line:    d.Pos.Line,
+			Col:     d.Pos.Col,
+		}
+		if d.IsError {
+			hasError = true
+			out.Errors = append(out.Errors, entry)
+		} else {
+			out.Warnings = append(out.Warnings, entry)
+		}
+	}
+	return hasError, writeJSON(out)
+}
+
+func writeJSON(v any) error {
+	enc := json.NewEncoder(os.Stdout)
+	enc.SetIndent("", "  ")
+	return enc.Encode(v)
+}

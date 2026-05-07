@@ -33,7 +33,7 @@ Focus: canonical formatting for `.dpg` source files.
 - [x] `--diff` flag — prints unified diff without writing files
 - [x] `[fmt]` section in `dpg.toml` — `indent` and `keyword_case` options
 - [x] Canonical column/constraint ordering within a table block: column defs (source order) → FOREIGN KEY references (alpha) → other constraints (alpha); RENAMED FROM first in `{ }` blocks
-- [ ] Format-on-save integration guide for editors (via a `dpg fmt` shell wrapper)
+- [x] Format-on-save integration guide for editors (`docs/editor-integration.md`) — VS Code (Run on Save), Neovim (autocmd), Helix (formatter wrapper), JetBrains (File Watchers), CI gate (`--check`)
 
 ---
 
@@ -69,11 +69,11 @@ Focus: close the gaps in PostgreSQL object support per RFC Appendix A.
 
 Focus: quality-of-life improvements for day-to-day use.
 
-- [ ] `dpg init` — scaffold a new project interactively
-- [ ] `dpg validate` — offline schema validation without diffing (syntax, type resolution, constraint sanity)
-- [ ] Watch mode for `dpg plan` — re-run on source file changes
-- [ ] JSON / machine-readable output flag for all commands
-- [ ] Shell completion (Bash, Zsh, Fish) via Cobra
+- [x] `dpg init` — scaffold a new project with standard layout; flags for cluster/database/schema/url; skips existing files
+- [x] `dpg validate` — offline compile + lint without diffing; `--format json` for machine-readable output; exits non-zero on errors
+- [x] Watch mode for `dpg plan --watch` — polls source file mtimes every 500 ms, re-runs on any change; exits on SIGINT/SIGTERM
+- [x] JSON output via `--format json` on `dpg plan` and `dpg validate`
+- [x] Shell completion (Bash, Zsh, Fish, PowerShell) via Cobra — `dpg completion <shell>`; documented in `docs/reference/commands.md`
 
 ---
 

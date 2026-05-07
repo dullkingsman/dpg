@@ -77,6 +77,8 @@ Source: https://github.com/dullkingsman/dpg`,
 		newDiffCmd(),
 		newFmtCmd(),
 		newPortabilityCmd(),
+		newValidateCmd(),
+		newInitCmd(),
 	)
 
 	return root
