@@ -79,6 +79,7 @@ Source: https://github.com/dullkingsman/dpg`,
 		newPortabilityCmd(),
 		newValidateCmd(),
 		newInitCmd(),
+		newDocsCmd(),
 	)
 
 	return root

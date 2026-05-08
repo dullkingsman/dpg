@@ -1,12 +1,13 @@
 baseURL = "https://dullkingsman.github.io/dpg/"
 title = "DPG — Declarative PG"
 enableRobotsTXT = true
+publishDir = "../internal/docssite/public"
 
 [outputs]
   home = ["HTML", "RSS", "JSON"]
 
 [module]
-  proxy = "direct"
+  proxy = "https://proxy.golang.org,direct"
   [[module.imports]]
     path = "github.com/google/docsy"
   [[module.imports]]

@@ -32,7 +32,7 @@ jobs:
 
       - uses: peaceiris/actions-hugo@v3
         with:
-          hugo-version: "0.128.0"
+          hugo-version: "0.147.0"
           extended: true
 
       - uses: actions/cache@v4
@@ -42,7 +42,7 @@ jobs:
           restore-keys: hugo-
 
       - name: Download Hugo modules (Docsy)
-        run: hugo mod download
+        run: hugo mod get github.com/google/docsy@v0.15.0
         working-directory: website
 
       - uses: actions/setup-node@v4
@@ -62,7 +62,7 @@ jobs:
       - uses: actions/configure-pages@v4
       - uses: actions/upload-pages-artifact@v3
         with:
-          path: website/public
+          path: internal/docssite/public
 
   deploy:
     environment:

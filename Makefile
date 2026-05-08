@@ -14,18 +14,30 @@ LDFLAGS := -X '$(MODULE)/internal/version.Version=$(VERSION)' \
 
 WEBSITE_DIR := website
 
-.PHONY: build install test test-verbose test-integration test-examples vet lint \
+.PHONY: build build-full install install-full \
+        test test-verbose test-integration test-examples vet lint \
         dist dist-linux dist-darwin dist-windows \
         clean clean-dist clean-all version release \
         docs-cli docs-site docs-serve
 
 # ── Build ─────────────────────────────────────────────────────────────────────
+# Fast development build — documentation is NOT embedded.
+# dpg docs will print an error in binaries built this way.
 
 build:
 	go build -ldflags "$(LDFLAGS)" -o $(BUILD)/$(BINARY) $(CMD)
 
 install:
 	go install -ldflags "$(LDFLAGS)" $(CMD)
+
+# Full build — builds the Hugo documentation site first, then embeds it.
+# Requires Hugo (extended), Node.js, and npm to be on PATH.
+
+build-full: docs-site
+	go build -tags embeddata -ldflags "$(LDFLAGS)" -o $(BUILD)/$(BINARY) $(CMD)
+
+install-full: docs-site
+	go install -tags embeddata -ldflags "$(LDFLAGS)" $(CMD)
 
 # ── Test ──────────────────────────────────────────────────────────────────────
 
@@ -50,28 +62,29 @@ lint:
 	staticcheck ./...
 
 # ── Distribution ──────────────────────────────────────────────────────────────
+# All dist targets embed the documentation site; run docs-site first.
 
-dist: dist-linux dist-darwin dist-windows
+dist: docs-site dist-linux dist-darwin dist-windows
 
 dist-linux:
 	@mkdir -p $(DIST)
 	GOOS=linux GOARCH=amd64 \
-		go build -ldflags "$(LDFLAGS)" -o $(DIST)/$(BINARY)-linux-amd64 $(CMD)
+		go build -tags embeddata -ldflags "$(LDFLAGS)" -o $(DIST)/$(BINARY)-linux-amd64 $(CMD)
 	GOOS=linux GOARCH=arm64 CGO_ENABLED=1 \
 		CC="zig cc -target aarch64-linux-musl" \
-		go build -ldflags "$(LDFLAGS)" -o $(DIST)/$(BINARY)-linux-arm64 $(CMD)
+		go build -tags embeddata -ldflags "$(LDFLAGS)" -o $(DIST)/$(BINARY)-linux-arm64 $(CMD)
 
 dist-darwin:
 	@mkdir -p $(DIST)
 	GOOS=darwin GOARCH=amd64 \
-		go build -ldflags "$(LDFLAGS)" -o $(DIST)/$(BINARY)-darwin-amd64 $(CMD)
+		go build -tags embeddata -ldflags "$(LDFLAGS)" -o $(DIST)/$(BINARY)-darwin-amd64 $(CMD)
 	GOOS=darwin GOARCH=arm64 \
-		go build -ldflags "$(LDFLAGS)" -o $(DIST)/$(BINARY)-darwin-arm64 $(CMD)
+		go build -tags embeddata -ldflags "$(LDFLAGS)" -o $(DIST)/$(BINARY)-darwin-arm64 $(CMD)
 
 dist-windows:
 	@mkdir -p $(DIST)
 	GOOS=windows GOARCH=amd64 \
-		go build -ldflags "$(LDFLAGS)" -o $(DIST)/$(BINARY)-windows-amd64.exe $(CMD)
+		go build -tags embeddata -ldflags "$(LDFLAGS)" -o $(DIST)/$(BINARY)-windows-amd64.exe $(CMD)
 
 # ── Version ───────────────────────────────────────────────────────────────────
 
@@ -95,10 +108,10 @@ docs-cli:
 	go run ./tools/gendocs --output $(WEBSITE_DIR)/content/docs/cli
 
 docs-site: docs-cli
-	cd $(WEBSITE_DIR) && npm ci && hugo --minify
+	cd $(WEBSITE_DIR) && npm install && hugo --minify
 
 docs-serve: docs-cli
-	cd $(WEBSITE_DIR) && npm ci && hugo serve --disableFastRender
+	cd $(WEBSITE_DIR) && npm install && hugo serve --disableFastRender
 
 # ── Clean ─────────────────────────────────────────────────────────────────────
 

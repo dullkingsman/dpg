@@ -25,5 +25,6 @@ The `dpg` CLI is the primary interface to the DPG compiler and migration engine.
 | [dpg portability](dpg_portability/) | Report PostgreSQL-specific constructs in use |
 | [dpg init](dpg_init/) | Scaffold a new DPG project |
 | [dpg completion](dpg_completion/) | Generate shell autocompletion scripts |
+| [dpg docs](dpg_docs/) | Serve the embedded documentation locally |
 
 The pages in this section are auto-generated from the CLI source via `make docs-cli`.

@@ -9,9 +9,63 @@ permissions:
   contents: write
 
 jobs:
+  # Build the Hugo documentation site once; all platform builds download and embed it.
+  prepare-docs:
+    name: Build documentation site
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Generate CLI documentation
+        run: go run ./tools/gendocs --output website/content/docs/cli
+
+      - uses: peaceiris/actions-hugo@v3
+        with:
+          hugo-version: "0.147.0"
+          extended: true
+
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cache/hugo_cache
+          key: hugo-${{ hashFiles('website/go.mod') }}
+          restore-keys: hugo-
+
+      - name: Download Hugo modules (Docsy)
+        run: hugo mod get github.com/google/docsy@v0.15.0
+        working-directory: website
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install PostCSS dependencies
+        run: npm install
+        working-directory: website
+
+      - name: Build Hugo site
+        run: hugo --minify
+        working-directory: website
+        env:
+          HUGO_BASEURL: "https://dullkingsman.github.io/dpg/"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: docssite
+          path: internal/docssite/public/
+          if-no-files-found: error
+
   build:
     name: Build ${{ matrix.goos }}/${{ matrix.goarch }}
     runs-on: ${{ matrix.runner }}
+    needs: prepare-docs
 
     strategy:
       fail-fast: false
@@ -51,6 +105,12 @@ jobs:
           go-version-file: go.mod
           cache: true
 
+      - name: Download documentation site
+        uses: actions/download-artifact@v4
+        with:
+          name: docssite
+          path: internal/docssite/public/
+
       - name: Set up Zig (linux/arm64 cross-compilation)
         if: matrix.use_zig
         uses: mlugg/setup-zig@v1
@@ -70,7 +130,7 @@ jobs:
             -X 'github.com/dullkingsman/dpg/internal/version.Version=${{ github.ref_name }}' \
             -X 'github.com/dullkingsman/dpg/internal/version.Commit=${GITHUB_SHA:0:7}' \
             -X 'github.com/dullkingsman/dpg/internal/version.Date=$(date -u +%Y-%m-%dT%H:%M:%SZ)'"
-          go build -trimpath -ldflags "$LDFLAGS" -o dist/dpg ./cmd/dpg
+          go build -tags embeddata -trimpath -ldflags "$LDFLAGS" -o dist/dpg ./cmd/dpg
           cd dist && tar czf ${{ matrix.archive }} dpg
 
       - name: Build (Windows)
@@ -86,7 +146,7 @@ jobs:
             -X 'github.com/dullkingsman/dpg/internal/version.Version=${{ github.ref_name }}' \
             -X 'github.com/dullkingsman/dpg/internal/version.Commit=${GITHUB_SHA:0:7}' \
             -X 'github.com/dullkingsman/dpg/internal/version.Date=$(date -u +%Y-%m-%dT%H:%M:%SZ)'"
-          go build -trimpath -ldflags "$LDFLAGS" -o dist/dpg.exe ./cmd/dpg
+          go build -tags embeddata -trimpath -ldflags "$LDFLAGS" -o dist/dpg.exe ./cmd/dpg
           cd dist && 7z a ${{ matrix.archive }} dpg.exe
 
       - uses: actions/upload-artifact@v4
@@ -105,6 +165,7 @@ jobs:
         with:
           path: dist
           merge-multiple: true
+          pattern: 'dpg-*'
 
       - name: Checksums
         run: |

@@ -82,6 +82,7 @@ Source: https://github.com/dullkingsman/dpg`,
 		portabilityCmd(),
 		validateCmd(),
 		initCmd(),
+		docsCmd(),
 	)
 	root.InitDefaultCompletionCmd()
 	return root
@@ -221,6 +222,22 @@ Use --format json for machine-readable output.`,
 	cmd.Flags().String("cluster", "", "cluster to validate (default: all)")
 	cmd.Flags().String("database", "", "database to validate (default: all)")
 	cmd.Flags().String("format", "text", "output format: text or json")
+	return cmd
+}
+
+func docsCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "docs",
+		Short: "Serve the DPG documentation locally",
+		Long: `Start a local HTTP server and serve the embedded DPG documentation.
+
+The documentation site is compiled into the binary at release build time.
+Development builds (make build) do not embed the documentation; use a
+release binary or build with: make build-full`,
+		RunE: noop,
+	}
+	cmd.Flags().IntP("port", "p", 6060, "port to serve on")
+	cmd.Flags().Bool("open", false, "open the browser automatically")
 	return cmd
 }
 
