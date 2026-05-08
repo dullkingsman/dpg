@@ -4,7 +4,7 @@ enableRobotsTXT = true
 publishDir = "../internal/docssite/public"
 
 [outputs]
-  home = ["HTML", "RSS", "JSON"]
+  home = ["HTML", "RSS"]
 
 [module]
   proxy = "https://proxy.golang.org,direct"

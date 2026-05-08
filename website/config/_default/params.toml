@@ -14,7 +14,7 @@ sidebar_menu_compact = true
 sidebar_menu_foldable = true
 breadcrumb_disable = false
 taxonomy_breadcrumb_disable = true
-footer_about_disable = true
+footer_about_enable = false
 
 [ui.readingtime]
 enable = false

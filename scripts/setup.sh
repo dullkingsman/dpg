@@ -24,7 +24,6 @@ HUGO_VERSION="0.147.0"
 NODE_MIN_VERSION="20"
 STATICCHECK_VERSION="latest"
 ZIG_VERSION="0.14.0"
-POSTGRES_IMAGE="postgres:16-alpine"   # used by integration tests via Docker
 
 # Derived from go.mod so it never drifts.
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -39,9 +38,9 @@ SKIP_ZIG=false
 
 for arg in "$@"; do
   case "$arg" in
-    --check)    CHECK_ONLY=true ;;
-    --no-docs)  SKIP_DOCS=true ;;
-    --no-zig)   SKIP_ZIG=true ;;
+    --check)   CHECK_ONLY=true ;;
+    --no-docs) SKIP_DOCS=true ;;
+    --no-zig)  SKIP_ZIG=true ;;
     --help|-h)
       sed -n '/^# setup.sh/,/^$/p' "$0" | sed 's/^# \?//'
       exit 0
@@ -79,25 +78,61 @@ case "$OS" in
 esac
 
 case "$ARCH_RAW" in
-  x86_64)  ARCH="amd64" ;;
+  x86_64)        ARCH="amd64" ;;
   aarch64|arm64) ARCH="arm64" ;;
-  *)       die "Unsupported architecture: $ARCH_RAW" ;;
+  *)             die "Unsupported architecture: $ARCH_RAW" ;;
 esac
 
-# Linux distro detection.
-DISTRO=""
 PKG_MGR=""
 if [[ "$PLATFORM" == "linux" ]]; then
-  if command -v apt-get &>/dev/null; then
-    DISTRO="debian"; PKG_MGR="apt"
-  elif command -v dnf &>/dev/null; then
-    DISTRO="fedora"; PKG_MGR="dnf"
-  elif command -v pacman &>/dev/null; then
-    DISTRO="arch"; PKG_MGR="pacman"
-  else
-    die "Unsupported Linux distribution. Install dependencies manually — see docs/development.md"
+  if   command -v apt-get &>/dev/null; then PKG_MGR="apt"
+  elif command -v dnf     &>/dev/null; then PKG_MGR="dnf"
+  elif command -v pacman  &>/dev/null; then PKG_MGR="pacman"
+  else die "Unsupported Linux distribution. Install dependencies manually — see docs/development.md"
   fi
 fi
+
+# ── Sudo / privilege detection ───────────────────────────────────────────────
+# When sudo is unavailable without a password, binaries are installed to
+# ~/.local/bin instead of /usr/local/bin. System packages (apt/dnf/pacman)
+# still need sudo; those installers print a manual instruction instead of
+# failing the script.
+
+HAS_SUDO=false
+if sudo -n true 2>/dev/null; then
+  HAS_SUDO=true
+fi
+
+# Directory for user-local binaries (no sudo required).
+USER_BIN="${HOME}/.local/bin"
+
+# Resolve the directory to install a standalone binary into.
+# Uses /usr/local/bin when sudo is available, ~/.local/bin otherwise.
+install_bin_dir() {
+  if $HAS_SUDO; then echo "/usr/local/bin"; else echo "$USER_BIN"; fi
+}
+
+# Ensure USER_BIN is on PATH for this session and persisted to shell profiles.
+ensure_user_bin_on_path() {
+  mkdir -p "$USER_BIN"
+  if [[ ":$PATH:" != *":${USER_BIN}:"* ]]; then
+    export PATH="${USER_BIN}:${PATH}"
+  fi
+  local line="export PATH=\"\${HOME}/.local/bin:\${PATH}\""
+  for rc in "$HOME/.bashrc" "$HOME/.zshrc" "$HOME/.profile"; do
+    if [[ -f "$rc" ]] && ! grep -qF '.local/bin' "$rc"; then
+      echo "$line" >> "$rc"
+      ok "Added ~/.local/bin to PATH in $rc"
+    fi
+  done
+}
+
+# Run a command with sudo when available, otherwise run it directly.
+# For commands that genuinely need root (apt, systemctl) this will fail
+# gracefully and print a manual instruction.
+maybe_sudo() {
+  if $HAS_SUDO; then sudo "$@"; else "$@"; fi
+}
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -108,6 +143,10 @@ version_gte() {
 
 pkg_install() {
   if $CHECK_ONLY; then return 0; fi
+  if ! $HAS_SUDO; then
+    warn "sudo not available — cannot run package manager. Install manually: $*"
+    return 1
+  fi
   case "$PKG_MGR" in
     apt)    sudo apt-get install -y -qq "$@" ;;
     dnf)    sudo dnf install -y -q "$@" ;;
@@ -115,7 +154,7 @@ pkg_install() {
   esac
 }
 
-# ── Checks ────────────────────────────────────────────────────────────────────
+# ── Version checks ────────────────────────────────────────────────────────────
 
 MISSING=()
 
@@ -125,37 +164,29 @@ check_go() {
     local installed
     installed="$(go version | awk '{print $3}' | sed 's/go//')"
     if version_gte "$installed" "$GO_VERSION"; then
-      found "go$installed"
-      return 0
-    else
-      echo "${YELLOW}outdated${RESET} (have $installed, need $GO_VERSION)"
+      found "go$installed"; return 0
     fi
+    echo "${YELLOW}outdated${RESET} (have $installed, need $GO_VERSION)"
   else
     missing
   fi
-  MISSING+=("go")
-  return 1
+  MISSING+=("go"); return 1
 }
 
 check_cgo() {
   checking "C compiler (CGo)"
   if command -v gcc &>/dev/null; then
-    found "gcc $(gcc --version | head -1 | grep -oE '[0-9]+\.[0-9]+' | head -1)"
-    return 0
+    found "gcc $(gcc --version | head -1 | grep -oE '[0-9]+\.[0-9]+' | head -1)"; return 0
   elif command -v clang &>/dev/null; then
-    found "clang $(clang --version | head -1 | grep -oE '[0-9]+\.[0-9]+' | head -1)"
-    return 0
+    found "clang $(clang --version | head -1 | grep -oE '[0-9]+\.[0-9]+' | head -1)"; return 0
   fi
-  missing
-  MISSING+=("gcc")
-  return 1
+  missing; MISSING+=("gcc"); return 1
 }
 
 check_git() {
   checking "Git"
   if command -v git &>/dev/null; then
-    found "$(git --version | awk '{print $3}')"
-    return 0
+    found "$(git --version | awk '{print $3}')"; return 0
   fi
   missing; MISSING+=("git"); return 1
 }
@@ -163,8 +194,7 @@ check_git() {
 check_docker() {
   checking "Docker (integration tests)"
   if command -v docker &>/dev/null && docker info &>/dev/null 2>&1; then
-    found "$(docker --version | awk '{print $3}' | tr -d ',')"
-    return 0
+    found "$(docker --version | awk '{print $3}' | tr -d ',')"; return 0
   elif command -v docker &>/dev/null; then
     warn "Docker installed but daemon not running. Start Docker before running integration tests."
     return 0
@@ -175,24 +205,20 @@ check_docker() {
 check_hugo() {
   checking "Hugo extended ${HUGO_VERSION}"
   if command -v hugo &>/dev/null; then
-    local ver
+    local ver ext
     ver="$(hugo version | grep -oE 'v[0-9]+\.[0-9]+\.[0-9]+' | head -1 | tr -d v)"
-    local ext
     ext="$(hugo version | grep -c 'extended' || true)"
     if version_gte "$ver" "$HUGO_VERSION" && [[ "$ext" -gt 0 ]]; then
-      found "v$ver extended"
-      return 0
+      found "v$ver extended"; return 0
     elif version_gte "$ver" "$HUGO_VERSION"; then
       echo "${YELLOW}not extended${RESET} (Docsy requires Hugo extended for Sass)"
-      MISSING+=("hugo-extended")
-      return 1
     else
-      echo "${YELLOW}outdated${RESET} (have v$ver, need v$HUGO_VERSION extended)"
-      MISSING+=("hugo-extended")
-      return 1
+      echo "${YELLOW}outdated${RESET} (have v$ver, need v${HUGO_VERSION} extended)"
     fi
+  else
+    missing
   fi
-  missing; MISSING+=("hugo-extended"); return 1
+  MISSING+=("hugo-extended"); return 1
 }
 
 check_node() {
@@ -201,11 +227,9 @@ check_node() {
     local ver
     ver="$(node --version | tr -d 'v' | cut -d. -f1)"
     if [[ "$ver" -ge "$NODE_MIN_VERSION" ]]; then
-      found "$(node --version)"
-      return 0
-    else
-      echo "${YELLOW}outdated${RESET} (have v$ver, need v$NODE_MIN_VERSION+)"
+      found "$(node --version)"; return 0
     fi
+    echo "${YELLOW}outdated${RESET} (have v$ver, need v${NODE_MIN_VERSION}+)"
   else
     missing
   fi
@@ -215,8 +239,7 @@ check_node() {
 check_staticcheck() {
   checking "staticcheck"
   if command -v staticcheck &>/dev/null; then
-    found "$(staticcheck -version 2>&1 | awk '{print $2}')"
-    return 0
+    found "$(staticcheck -version 2>&1 | awk '{print $2}')"; return 0
   fi
   missing; MISSING+=("staticcheck"); return 1
 }
@@ -224,8 +247,7 @@ check_staticcheck() {
 check_zig() {
   checking "Zig ${ZIG_VERSION} (cross-compilation, optional)"
   if command -v zig &>/dev/null; then
-    found "$(zig version)"
-    return 0
+    found "$(zig version)"; return 0
   fi
   missing; MISSING+=("zig"); return 1
 }
@@ -237,36 +259,44 @@ install_go() {
   info "Installing Go ${GO_VERSION}"
   local tarball="go${GO_VERSION}.${PLATFORM}-${ARCH}.tar.gz"
   local url="https://go.dev/dl/${tarball}"
-  local tmp
-  tmp="$(mktemp -d)"
-  curl -fsSL "$url" -o "${tmp}/${tarball}"
-  sudo rm -rf /usr/local/go
-  sudo tar -C /usr/local -xzf "${tmp}/${tarball}"
+  local tmp; tmp="$(mktemp -d)"
+  curl -fsSL --progress-bar "$url" -o "${tmp}/${tarball}"
+
+  if $HAS_SUDO; then
+    sudo rm -rf /usr/local/go
+    sudo tar -C /usr/local -xzf "${tmp}/${tarball}"
+    local go_bin="/usr/local/go/bin"
+  else
+    mkdir -p "${HOME}/.local/go"
+    rm -rf "${HOME}/.local/go"
+    tar -C "${HOME}/.local" -xzf "${tmp}/${tarball}"
+    mv "${HOME}/.local/go" "${HOME}/.local/go-${GO_VERSION}"
+    # Symlink so `go` is accessible without version suffix.
+    mkdir -p "$USER_BIN"
+    ln -sf "${HOME}/.local/go-${GO_VERSION}/bin/go"   "${USER_BIN}/go"
+    ln -sf "${HOME}/.local/go-${GO_VERSION}/bin/gofmt" "${USER_BIN}/gofmt"
+    local go_bin="$USER_BIN"
+    ensure_user_bin_on_path
+  fi
   rm -rf "$tmp"
 
-  # Ensure /usr/local/go/bin is on PATH for this session and subsequent shells.
-  export PATH="/usr/local/go/bin:$PATH"
-
-  # Persist for bash/zsh if not already present.
-  local profile_line='export PATH="/usr/local/go/bin:$PATH"'
+  export PATH="${go_bin}:${PATH}"
+  local profile_line="export PATH=\"${go_bin}:\${PATH}\""
   for rc in "$HOME/.bashrc" "$HOME/.zshrc" "$HOME/.profile"; do
-    if [[ -f "$rc" ]] && ! grep -qF '/usr/local/go/bin' "$rc"; then
+    if [[ -f "$rc" ]] && ! grep -qF "$go_bin" "$rc"; then
       echo "$profile_line" >> "$rc"
-      ok "Added Go to PATH in $rc"
+      ok "Added $go_bin to PATH in $rc"
     fi
   done
-  ok "Go ${GO_VERSION} installed to /usr/local/go"
+  ok "Go ${GO_VERSION} installed ($(command -v go))"
 }
 
 install_cgo_linux() {
   if $CHECK_ONLY; then return; fi
   info "Installing C compiler"
   case "$PKG_MGR" in
-    apt)
-      sudo apt-get update -qq
-      pkg_install gcc build-essential
-      ;;
-    dnf) pkg_install gcc gcc-c++ make ;;
+    apt)    sudo apt-get update -qq && pkg_install gcc build-essential ;;
+    dnf)    pkg_install gcc gcc-c++ make ;;
     pacman) pkg_install gcc base-devel ;;
   esac
   ok "C compiler installed"
@@ -281,10 +311,9 @@ install_cgo_macos() {
 
 install_brew() {
   if $CHECK_ONLY; then return; fi
-  if command -v brew &>/dev/null; then return; fi
+  command -v brew &>/dev/null && return
   info "Installing Homebrew"
   /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
-  # Add brew to PATH for Apple Silicon.
   if [[ "$ARCH" == "arm64" ]]; then
     eval "$(/opt/homebrew/bin/brew shellenv)"
     echo 'eval "$(/opt/homebrew/bin/brew shellenv)"' >> "$HOME/.zprofile"
@@ -294,6 +323,11 @@ install_brew() {
 
 install_docker_linux() {
   if $CHECK_ONLY; then return; fi
+  if ! $HAS_SUDO; then
+    warn "sudo not available — cannot install Docker automatically."
+    warn "Install Docker manually: https://docs.docker.com/engine/install/"
+    return
+  fi
   info "Installing Docker"
   case "$PKG_MGR" in
     apt)
@@ -343,30 +377,41 @@ install_docker_macos() {
 install_hugo() {
   if $CHECK_ONLY; then return; fi
   info "Installing Hugo extended ${HUGO_VERSION}"
-  local os_name="linux"
-  [[ "$PLATFORM" == "macos" ]] && os_name="darwin"
-  local arch_name="$ARCH"
-  local tarball="hugo_extended_${HUGO_VERSION}_${os_name}-${arch_name}.tar.gz"
+  local os_name; [[ "$PLATFORM" == "macos" ]] && os_name="darwin" || os_name="linux"
+  local tarball="hugo_extended_${HUGO_VERSION}_${os_name}-${ARCH}.tar.gz"
   local url="https://github.com/gohugoio/hugo/releases/download/v${HUGO_VERSION}/${tarball}"
-  local tmp
-  tmp="$(mktemp -d)"
-  curl -fsSL "$url" -o "${tmp}/${tarball}"
+  local dest; dest="$(install_bin_dir)"
+  local tmp; tmp="$(mktemp -d)"
+
+  curl -fsSL --progress-bar "$url" -o "${tmp}/${tarball}"
   tar -xzf "${tmp}/${tarball}" -C "${tmp}" hugo
-  sudo mv "${tmp}/hugo" /usr/local/bin/hugo
-  sudo chmod +x /usr/local/bin/hugo
+  rm -rf "$tmp/${tarball}"
+
+  if $HAS_SUDO; then
+    sudo mv "${tmp}/hugo" "${dest}/hugo"
+    sudo chmod +x "${dest}/hugo"
+  else
+    ensure_user_bin_on_path
+    mv "${tmp}/hugo" "${dest}/hugo"
+    chmod +x "${dest}/hugo"
+  fi
   rm -rf "$tmp"
-  ok "Hugo ${HUGO_VERSION} extended installed to /usr/local/bin/hugo"
+  ok "Hugo ${HUGO_VERSION} extended installed to ${dest}/hugo"
 }
 
 install_node_linux() {
   if $CHECK_ONLY; then return; fi
-  info "Installing Node.js ${NODE_MIN_VERSION} (via NodeSource)"
+  info "Installing Node.js ${NODE_MIN_VERSION}"
+  if ! $HAS_SUDO; then
+    warn "sudo not available — install Node.js via nvm instead:"
+    warn "  curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.0/install.sh | bash"
+    warn "  nvm install ${NODE_MIN_VERSION}"
+    return
+  fi
   curl -fsSL "https://deb.nodesource.com/setup_${NODE_MIN_VERSION}.x" | sudo -E bash -
   case "$PKG_MGR" in
-    apt) pkg_install nodejs ;;
-    dnf)
-      sudo dnf module install -y "nodejs:${NODE_MIN_VERSION}/common"
-      ;;
+    apt)    pkg_install nodejs ;;
+    dnf)    sudo dnf module install -y "nodejs:${NODE_MIN_VERSION}/common" ;;
     pacman) pkg_install nodejs npm ;;
   esac
   ok "Node.js installed"
@@ -384,26 +429,35 @@ install_node_macos() {
 install_staticcheck() {
   if $CHECK_ONLY; then return; fi
   info "Installing staticcheck"
-  go install honnef.co/go/tools/cmd/staticcheck@${STATICCHECK_VERSION}
-  ok "staticcheck installed to $(go env GOPATH)/bin/staticcheck"
-  warn "Ensure \$(go env GOPATH)/bin is on your PATH."
+  go install "honnef.co/go/tools/cmd/staticcheck@${STATICCHECK_VERSION}"
+  local gobin; gobin="$(go env GOPATH)/bin"
+  ok "staticcheck installed to ${gobin}/staticcheck"
+  if [[ ":$PATH:" != *":${gobin}:"* ]]; then
+    warn "Add \$(go env GOPATH)/bin to your PATH to use staticcheck."
+    warn "  echo 'export PATH=\"\$(go env GOPATH)/bin:\$PATH\"' >> ~/.bashrc"
+  fi
 }
 
 install_zig() {
   if $CHECK_ONLY; then return; fi
   info "Installing Zig ${ZIG_VERSION}"
-  local os_name="linux"
-  local ext="tar.xz"
-  [[ "$PLATFORM" == "macos" ]] && { os_name="macos"; ext="tar.xz"; }
-  local pkg="zig-${os_name}-${ARCH_RAW}-${ZIG_VERSION}.${ext}"
+  local os_name; [[ "$PLATFORM" == "macos" ]] && os_name="macos" || os_name="linux"
+  local pkg="zig-${os_name}-${ARCH_RAW}-${ZIG_VERSION}.tar.xz"
   local url="https://ziglang.org/download/${ZIG_VERSION}/${pkg}"
-  local tmp
-  tmp="$(mktemp -d)"
-  curl -fsSL "$url" -o "${tmp}/${pkg}"
+  local dest; dest="$(install_bin_dir)"
+  local tmp; tmp="$(mktemp -d)"
+
+  curl -fsSL --progress-bar "$url" -o "${tmp}/${pkg}"
   tar -xf "${tmp}/${pkg}" -C "${tmp}"
-  sudo mv "${tmp}/zig-${os_name}-${ARCH_RAW}-${ZIG_VERSION}/zig" /usr/local/bin/zig
+
+  if $HAS_SUDO; then
+    sudo mv "${tmp}/zig-${os_name}-${ARCH_RAW}-${ZIG_VERSION}/zig" "${dest}/zig"
+  else
+    ensure_user_bin_on_path
+    mv "${tmp}/zig-${os_name}-${ARCH_RAW}-${ZIG_VERSION}/zig" "${dest}/zig"
+  fi
   rm -rf "$tmp"
-  ok "Zig ${ZIG_VERSION} installed to /usr/local/bin/zig"
+  ok "Zig ${ZIG_VERSION} installed to ${dest}/zig"
 }
 
 # ── Final verification ────────────────────────────────────────────────────────
@@ -412,7 +466,7 @@ verify_build() {
   if $CHECK_ONLY; then return; fi
   info "Verifying build"
   cd "$REPO_ROOT"
-  go mod download
+  go mod download -x 2>/dev/null | grep -E '^(go: downloading|done)' || true
   go build ./... && ok "go build ./... — all packages compile"
   go vet   ./... && ok "go vet ./...   — no issues"
   go test  ./... && ok "go test ./...  — unit tests pass"
@@ -426,6 +480,7 @@ main() {
   echo "Platform : ${PLATFORM} / ${ARCH}"
   echo "Repo     : ${REPO_ROOT}"
   echo "Go needed: ${GO_VERSION}"
+  echo "Sudo     : $($HAS_SUDO && echo "available (system-wide install)" || echo "not available (user-local install: ${USER_BIN})")"
   echo
 
   if $CHECK_ONLY; then
@@ -436,13 +491,13 @@ main() {
   # ── Mandatory tools ─────────────────────────────────────────────────────────
 
   info "Checking mandatory dependencies"
-  check_git   || {
+  check_git || {
     [[ "$PLATFORM" == "linux" ]] && pkg_install git
     [[ "$PLATFORM" == "macos" ]] && { install_brew; brew install git; }
     ok "git installed"
   }
-  check_go    || install_go
-  check_cgo   || {
+  check_go  || install_go
+  check_cgo || {
     [[ "$PLATFORM" == "linux" ]] && install_cgo_linux
     [[ "$PLATFORM" == "macos" ]] && install_cgo_macos
   }
@@ -457,8 +512,8 @@ main() {
   if ! $SKIP_DOCS; then
     echo
     info "Checking documentation dependencies"
-    check_hugo  || install_hugo
-    check_node  || {
+    check_hugo || install_hugo
+    check_node || {
       [[ "$PLATFORM" == "linux" ]] && install_node_linux
       [[ "$PLATFORM" == "macos" ]] && install_node_macos
     }
@@ -478,10 +533,15 @@ main() {
   # ── Build verification ────────────────────────────────────────────────────────
 
   echo
-  if [[ ${#MISSING[@]} -gt 0 ]] && $CHECK_ONLY; then
-    echo "${YELLOW}${BOLD}Missing tools:${RESET} ${MISSING[*]}"
-    echo "Run ${BOLD}bash scripts/setup.sh${RESET} to install them."
-    exit 1
+  if $CHECK_ONLY; then
+    if [[ ${#MISSING[@]} -gt 0 ]]; then
+      echo "${YELLOW}${BOLD}Missing or outdated:${RESET} ${MISSING[*]}"
+      echo "Run ${BOLD}bash scripts/setup.sh${RESET} to install them."
+      exit 1
+    else
+      echo "${GREEN}${BOLD}All tools present.${RESET}"
+      exit 0
+    fi
   fi
 
   verify_build
