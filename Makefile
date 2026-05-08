@@ -74,9 +74,14 @@ dist-linux:
 	@mkdir -p $(DIST)
 	GOOS=linux GOARCH=amd64 \
 		go build -tags embeddata -ldflags "$(LDFLAGS)" -o $(DIST)/$(BINARY)-linux-amd64 $(CMD)
-	GOOS=linux GOARCH=arm64 CGO_ENABLED=1 \
-		CC="zig cc -target aarch64-linux-musl" \
-		go build -tags embeddata -ldflags "$(LDFLAGS)" -o $(DIST)/$(BINARY)-linux-arm64 $(CMD)
+	@# linux/arm64 requires a native ARM64 host (CGo via pg_query_go prevents cross-compilation).
+	@# Build it on an arm64 machine or let the release CI handle it (ubuntu-24.04-arm runner).
+	@if [ "$$(uname -m)" = "aarch64" ] || [ "$$(uname -m)" = "arm64" ]; then \
+		GOOS=linux GOARCH=arm64 \
+			go build -tags embeddata -ldflags "$(LDFLAGS)" -o $(DIST)/$(BINARY)-linux-arm64 $(CMD); \
+	else \
+		echo "  skipping linux/arm64 (not on ARM64 host; CI builds it natively)"; \
+	fi
 
 dist-darwin:
 	@mkdir -p $(DIST)

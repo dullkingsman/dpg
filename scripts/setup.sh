@@ -13,7 +13,6 @@
 #   bash scripts/setup.sh          # install everything
 #   bash scripts/setup.sh --check  # check only, no installs
 #   bash scripts/setup.sh --no-docs   # skip Hugo + Node (docs not needed)
-#   bash scripts/setup.sh --no-zig    # skip Zig (cross-compilation not needed)
 
 set -euo pipefail
 IFS=$'\n\t'
@@ -23,7 +22,6 @@ IFS=$'\n\t'
 HUGO_VERSION="0.147.0"
 NODE_MIN_VERSION="20"
 STATICCHECK_VERSION="latest"
-ZIG_VERSION="0.14.0"
 
 # Derived from go.mod so it never drifts.
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -34,13 +32,11 @@ GO_VERSION="$(grep '^go ' "${REPO_ROOT}/go.mod" | awk '{print $2}')"
 
 CHECK_ONLY=false
 SKIP_DOCS=false
-SKIP_ZIG=false
 
 for arg in "$@"; do
   case "$arg" in
     --check)   CHECK_ONLY=true ;;
     --no-docs) SKIP_DOCS=true ;;
-    --no-zig)  SKIP_ZIG=true ;;
     --help|-h)
       sed -n '/^# setup.sh/,/^$/p' "$0" | sed 's/^# \?//'
       exit 0
@@ -250,13 +246,6 @@ check_staticcheck() {
   missing; MISSING+=("staticcheck"); return 1
 }
 
-check_zig() {
-  checking "Zig ${ZIG_VERSION} (cross-compilation, optional)"
-  if command -v zig &>/dev/null; then
-    found "$(zig version)"; return 0
-  fi
-  missing; MISSING+=("zig"); return 1
-}
 
 # ── Installers ────────────────────────────────────────────────────────────────
 
@@ -444,27 +433,6 @@ install_staticcheck() {
   fi
 }
 
-install_zig() {
-  if $CHECK_ONLY; then return; fi
-  info "Installing Zig ${ZIG_VERSION}"
-  local os_name; [[ "$PLATFORM" == "macos" ]] && os_name="macos" || os_name="linux"
-  local pkg="zig-${os_name}-${ARCH_RAW}-${ZIG_VERSION}.tar.xz"
-  local url="https://ziglang.org/download/${ZIG_VERSION}/${pkg}"
-  local dest; dest="$(install_bin_dir)"
-  local tmp; tmp="$(mktemp -d)"
-
-  curl -fsSL --progress-bar "$url" -o "${tmp}/${pkg}"
-  tar -xf "${tmp}/${pkg}" -C "${tmp}"
-
-  if $HAS_SUDO; then
-    sudo mv "${tmp}/zig-${os_name}-${ARCH_RAW}-${ZIG_VERSION}/zig" "${dest}/zig"
-  else
-    ensure_user_bin_on_path
-    mv "${tmp}/zig-${os_name}-${ARCH_RAW}-${ZIG_VERSION}/zig" "${dest}/zig"
-  fi
-  rm -rf "$tmp"
-  ok "Zig ${ZIG_VERSION} installed to ${dest}/zig"
-}
 
 # ── Final verification ────────────────────────────────────────────────────────
 
@@ -522,17 +490,6 @@ main() {
     check_node || {
       [[ "$PLATFORM" == "linux" ]] && install_node_linux
       [[ "$PLATFORM" == "macos" ]] && install_node_macos
-    }
-  fi
-
-  # ── Optional: Zig ────────────────────────────────────────────────────────────
-
-  if ! $SKIP_ZIG; then
-    echo
-    info "Checking optional dependencies"
-    check_zig || {
-      warn "Zig not found. Install it to enable linux/arm64 cross-compilation (make dist-linux)."
-      warn "  Run this script again without --no-zig, or see https://ziglang.org/download/"
     }
   fi
 

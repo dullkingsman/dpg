@@ -21,9 +21,8 @@ Everything needed to build, test, and contribute to DPG.
 | Node.js | 20+ | Docs site | PostCSS dependency for Docsy theme |
 | npm | 10+ | Docs site | Ships with Node.js |
 | staticcheck | latest | `make lint` | `go install honnef.co/go/tools/cmd/staticcheck@latest` |
-| Zig | 0.14.0 | Cross-compile | Optional; only needed for `make dist-linux` (linux/arm64) |
 
-> **Why CGo?** `pg_query_go` wraps libpg_query — the real PostgreSQL C parser extracted into a standalone library. DPG uses it so that every `.dpg` file is parsed by the exact same grammar as PostgreSQL itself. This rules out a pure-Go cross-compile; each target platform must be built natively or with a CGo cross-compiler (Zig).
+> **Why CGo?** `pg_query_go` wraps libpg_query — the real PostgreSQL C parser extracted into a standalone library. DPG uses it so that every `.dpg` file is parsed by the exact same grammar as PostgreSQL itself. This rules out pure-Go cross-compilation; each target platform must be built natively on that architecture. The release CI uses platform-matched runners (`ubuntu-24.04-arm` for linux/arm64, `macos-latest` for darwin/arm64).
 
 ---
 
@@ -42,7 +41,6 @@ bash scripts/setup.sh
 ```bash
 bash scripts/setup.sh --check      # check versions, install nothing
 bash scripts/setup.sh --no-docs    # skip Hugo + Node (schema tooling only)
-bash scripts/setup.sh --no-zig     # skip Zig (local dev, no cross-compilation)
 ```
 
 ---
@@ -220,13 +218,15 @@ make install-full   # go install with embedded docs
 
 ```bash
 make dist           # All platforms with embedded docs → dist/
-make dist-linux     # linux/amd64 + linux/arm64 (arm64 needs Zig)
+make dist-linux     # linux/amd64 (arm64 skipped unless running on ARM64 host)
 make dist-darwin    # darwin/amd64 + darwin/arm64
 make dist-windows   # windows/amd64
 make release        # make dist + tar/zip archives
 ```
 
 All `dist` targets run `make docs-site` first, then compile with `-tags embeddata`.
+
+`linux/arm64` requires a native ARM64 host due to the CGo dependency. Locally it is skipped on non-ARM64 machines; the release CI builds it on `ubuntu-24.04-arm`.
 
 ### About `make build` vs `make build-full`
 
@@ -391,16 +391,6 @@ The dev build (`make build`) intentionally does not embed docs. Use:
 ```bash
 make build-full   # embeds docs, requires Hugo + Node
 # or use a release binary from GitHub releases
-```
-
-### `zig cc: command not found` during `make dist-linux`
-
-Zig is only required for `linux/arm64` cross-compilation. Either install it or build natively on an ARM64 machine. `linux/amd64` does not use Zig.
-
-```bash
-ZIG_VER=0.14.0
-curl -fsSL "https://ziglang.org/download/${ZIG_VER}/zig-linux-x86_64-${ZIG_VER}.tar.xz" \
-  | sudo tar -xJ -C /usr/local/bin --strip-components=1 "zig-linux-x86_64-${ZIG_VER}/zig"
 ```
 
 ---
