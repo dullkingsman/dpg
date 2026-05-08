@@ -336,8 +336,8 @@ require (
 ```yaml
 name: CI
 on:
-  push:    { branches: [main] }
-  pull_request: { branches: [main] }
+  push:    { branches: [master] }
+  pull_request: { branches: [master] }
 jobs:
   test:
     runs-on: ubuntu-latest
