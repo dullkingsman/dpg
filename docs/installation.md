@@ -21,7 +21,7 @@ cd dpg
 ### Build for Current Platform
 
 ```bash
-make build          # produces ./dpg in project root
+make build          # produces build/dpg
 make install        # installs to $(go env GOPATH)/bin
 ```
 
@@ -29,10 +29,11 @@ make install        # installs to $(go env GOPATH)/bin
 
 | Target | Description |
 |---|---|
-| `make build` | Compile for the current OS/arch, output `./dpg` |
+| `make build` | Compile for the current OS/arch, output `build/dpg` |
 | `make install` | `go install` to `$GOPATH/bin` |
-| `make test` | `go test ./...` |
+| `make test` | `go test ./...` — unit tests only, no Docker required |
 | `make test-verbose` | `go test ./... -v` |
+| `make test-integration` | `go test -tags integration -count=1 -timeout 5m ./...` — requires Docker |
 | `make test-examples` | `go test ./examples/... -v` — runs runnable pipeline examples |
 | `make vet` | `go vet ./...` |
 | `make lint` | `staticcheck ./...` (requires `staticcheck` on PATH) |
@@ -101,8 +102,15 @@ Available Commands:
 ## Running Tests
 
 ```bash
-make test            # unit + integration tests (no live database required)
+make test            # unit tests (no live database required)
 make test-examples   # pipeline examples (compilation, diffing, linting, portability)
 ```
 
-The full test suite runs without a live PostgreSQL connection. All diffing and compilation tests use in-memory state or fixture files.
+Integration tests use [testcontainers-go](https://testcontainers.com) to spin up a real PostgreSQL container. They require Docker to be running:
+
+```bash
+make test-integration
+# equivalent to: go test -tags integration -count=1 -timeout 5m ./...
+```
+
+Unit tests run without any external dependencies. Integration tests cover the full compile → plan → apply → introspect → zero-drift roundtrip against a live PostgreSQL 16 instance.

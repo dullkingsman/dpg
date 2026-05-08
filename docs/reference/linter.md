@@ -1,6 +1,6 @@
 # Linter
 
-The linter runs automatically as part of `dpg plan` and `dpg apply`. It runs over the merged IR (compiled object graph) and produces diagnostics before any SQL is generated. Lint **errors** abort the command. Lint **warnings** are printed to stderr but do not block.
+The linter runs automatically as part of `dpg plan`, `dpg apply`, and `dpg validate`. It runs over the merged IR (compiled object graph) and produces diagnostics before any SQL is generated. Lint **errors** abort the command. Lint **warnings** are printed to stderr but do not block.
 
 ## Configuration
 
@@ -169,4 +169,4 @@ error [hardcoded-password] column public.service_accounts.password default may c
 warn  [security-definer-search-path] SECURITY DEFINER function public.unsafe_auth should set search_path
 ```
 
-Errors cause `dpg plan` and `dpg apply` to exit non-zero before any SQL is generated.
+Errors cause `dpg plan`, `dpg apply`, and `dpg validate` to exit non-zero before any SQL is generated.

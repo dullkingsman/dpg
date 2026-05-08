@@ -39,8 +39,9 @@ myproject/
 │
 └── .dpg/
     └── snapshots/
-        ├── production.myapp.json      # Committed snapshot: production/myapp
-        └── production.analytics_db.json
+        └── production/
+            ├── myapp.json             # Committed snapshot: production/myapp
+            └── analytics_db.json
 ```
 
 **Rules:**
@@ -142,7 +143,7 @@ default_schema = "public"
 
 When any `dpg` command runs, it:
 
-1. Walks up from the working directory (or `--project-dir`) until it finds a `dpg.toml` containing root-level configuration. That directory is the project root.
+1. Walks up from the working directory (or `--dir`) until it finds a `dpg.toml` containing root-level configuration. That directory is the project root.
 2. Scans immediate subdirectories of the project root. Any subdirectory containing a `dpg.toml` is a cluster.
 3. For each cluster, scans its immediate subdirectories. Any subdirectory containing a `dpg.toml` that is not the cluster objects directory is a database.
 4. Collects all `.dpg` files recursively within each database directory as that database's source files.

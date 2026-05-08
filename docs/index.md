@@ -59,7 +59,9 @@ make install
 # Start from an existing database
 dpg dump --cluster prod --database myapp
 
-# Or create project structure manually and run
+# Or scaffold a new project and run
+dpg init                        # scaffold project layout and dpg.toml files
+dpg validate                    # compile + lint offline (no DB required)
 dpg plan                        # diff source vs snapshot (no DB required)
 dpg apply                       # run the migration, update snapshot
 dpg verify                      # check live DB for drift
@@ -74,7 +76,7 @@ dpg portability                 # report PG-specific constructs
 | [Project Structure](reference/project.md) | Directory layout, `dpg.toml`, cluster and database config files |
 | [Language Reference](reference/language.md) | Two-part syntax model, no-verb mandate, semicolons, dollar-quoting, schema scoping, merge rules, dependency ordering |
 | [Object Reference](reference/objects.md) | Every object type: tables, views, functions, types, sequences, roles, grants, indexes, RLS, triggers, FTS, replication, advanced PG objects |
-| [CLI Reference](reference/commands.md) | All six commands (`plan`, `apply`, `verify`, `dump`, `diff`, `portability`) with every flag |
+| [CLI Reference](reference/commands.md) | All commands (`plan`, `apply`, `verify`, `dump`, `diff`, `validate`, `portability`, `init`, `fmt`, `completion`) with every flag |
 | [Linter](reference/linter.md) | All lint rules, configuration keys, error vs warning classification |
 | [Portability Analysis](reference/portability.md) | All flagged constructs, standard SQL alternatives |
 | [Lifecycle Directives](reference/lifecycle.md) | `RENAMED FROM`, `DEPRECATED`, `PROTECTED`, `DROP CASCADE`, `MIGRATE REMOVE` |

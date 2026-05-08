@@ -9,10 +9,8 @@ DPG resolves secret values at connection time, never at parse time or in compile
 Reads the value from an environment variable at runtime.
 
 ```toml
-[[cluster.nodes]]
-name = "primary-1"
+[cluster]
 link = "env:PRIMARY_DB_URL"
-role = "primary"
 ```
 
 ```
@@ -23,7 +21,7 @@ ROLE app_service {
 }
 ```
 
-`env:PRIMARY_DB_URL` resolves to the value of the `PRIMARY_DB_URL` environment variable at the time `dpg apply` or `dpg verify` runs. If the variable is not set, the command errors with a clear message.
+`env:PRIMARY_DB_URL` resolves to the value of the `PRIMARY_DB_URL` environment variable at the time `dpg apply`, `dpg verify`, or `dpg dump` runs. If the variable is not set, the command errors with a clear message.
 
 ### `link:...`
 
@@ -34,10 +32,8 @@ A secrets-provider URI resolved by an external secrets backend. The `link:` sche
 A value that does not begin with `env:` or `link:` is returned as-is. This is valid for `url` fields (inline connection strings):
 
 ```toml
-[[cluster.nodes]]
-name = "primary-1"
-url  = "postgresql://pguser@primary.prod.internal:5432/postgres"
-role = "primary"
+[cluster]
+url = "postgresql://pguser@primary.prod.internal:5432/postgres"
 ```
 
 Plain-value passwords in `ROLE` declarations are rejected by the `forbid_hardcoded_passwords` linter rule when the column/role name matches a password-like pattern.
@@ -46,8 +42,8 @@ Plain-value passwords in `ROLE` declarations are rejected by the `forbid_hardcod
 
 | Location | Field | Description |
 |---|---|---|
-| Cluster config | `link` | Full connection string URI |
-| Cluster config | `url` | Plain connection string (not a secret resolver) |
+| `[cluster]` in `<cluster>/dpg.toml` | `link` | Full connection string URI resolved at runtime |
+| `[cluster]` in `<cluster>/dpg.toml` | `url` | Plain connection string (not a secret resolver) |
 | Role declaration | `PASSWORD 'env:VAR'` | Role password |
 | User mapping | `OPTIONS (password 'env:VAR')` | FDW user mapping credential |
 
@@ -64,8 +60,8 @@ Plain-value passwords in `ROLE` declarations are rejected by the `forbid_hardcod
 # production/dpg.toml
 
 [cluster]
-name = "production"
-link = "env:PROD_PRIMARY_URL"
+name        = "production"
+link        = "env:PROD_PRIMARY_URL"
 ```
 
 ```

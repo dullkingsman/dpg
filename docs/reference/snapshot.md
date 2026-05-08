@@ -5,7 +5,7 @@ The snapshot is the source of truth for offline diffing. It represents the last 
 ## Location
 
 ```
-.dpg/snapshots/<cluster>.<database>.json
+.dpg/snapshots/<cluster>/<database>.json
 ```
 
 Configured via `dpg.toml`:
@@ -30,7 +30,7 @@ directory = ".dpg/snapshots"   # default
 
 ```json
 {
-  "dpg_version": "0.8.0",
+  "dpg_version": "0.1.0",
   "cluster": "production",
   "database": "myapp",
   "applied_at": "2025-09-15T14:32:00Z",
@@ -115,13 +115,15 @@ This means every commit that changes schema simultaneously updates the snapshot.
 
 ## Multi-Database Projects
 
-Each database gets its own snapshot file:
+Each database gets its own snapshot file, organized under a per-cluster subdirectory:
 
 ```
 .dpg/snapshots/
-├── production.myapp.json
-├── production.analytics_db.json
-└── staging.myapp.json
+├── production/
+│   ├── myapp.json
+│   └── analytics_db.json
+└── staging/
+    └── myapp.json
 ```
 
 Running `dpg apply` updates only the snapshot for the cluster/database being applied.

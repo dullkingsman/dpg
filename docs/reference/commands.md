@@ -4,7 +4,7 @@
 
 | Flag | Description |
 |---|---|
-| `-C, --project-dir <dir>` | Project root directory. Default: current working directory. |
+| `-C, --dir <dir>` | Project root directory. Default: current working directory. |
 | `--version` | Print version, commit, and build date. |
 | `--help` | Print help. |
 
@@ -15,7 +15,7 @@ Compares `.dpg` source files against the committed snapshot and prints the minim
 The linter runs automatically before diffing. Lint errors abort the command; lint warnings are printed to stderr and do not block.
 
 ```
-dpg plan [--cluster <name>] [--database <name>] [--format text|json] [--watch] [-C <dir>]
+dpg plan [--cluster <name>] [--database <name>] [--format text|json] [--watch] [--live] [-C <dir>]
 ```
 
 | Flag | Description |
@@ -24,6 +24,7 @@ dpg plan [--cluster <name>] [--database <name>] [--format text|json] [--watch] [
 | `--database <name>` | Limit to one database. Default: all databases. |
 | `--format text\|json` | Output format. Default: `text`. Use `json` for machine-readable output. |
 | `--watch` | Re-run automatically whenever source files change (polls every 500 ms). |
+| `--live` | Diff against the live database instead of the stored snapshot. Requires a database connection. |
 
 **Output:**
 
@@ -68,7 +69,7 @@ dpg apply [--cluster <name>] [--database <name>] [--yes] [--allow-destructive]
 | `--database <name>` | Limit to one database. |
 | `-y, --yes` | Skip the interactive approval prompt. |
 | `--allow-destructive` | Allow `DESTRUCTIVE` operations. Default: blocked. |
-| `--approve-partition-rebuild` | Allow partition strategy rebuilds (implies `--allow-destructive` for partition ops). |
+| `--approve-partition-rebuild` | Acknowledge partition strategy changes. Required when the plan contains a partition strategy change (e.g. `PARTITION BY` method changed). These operations are shown in the plan but are never executed automatically — they require manual operator action outside DPG. |
 
 **Approval prompt:**
 
@@ -78,7 +79,7 @@ Apply this migration? [y/N]
 
 If the user answers anything other than `y` or `Y`, the migration is aborted and the snapshot is not updated.
 
-**Snapshot update:** If execution succeeds, the snapshot file at `.dpg/snapshots/<cluster>.<database>.json` is rewritten to reflect the new state. This file should be committed to version control.
+**Snapshot update:** If execution succeeds, the snapshot file at `.dpg/snapshots/<cluster>/<database>.json` is rewritten to reflect the new state. This file should be committed to version control.
 
 **Destructive operations:** Any operation classified `DESTRUCTIVE` causes `apply` to abort with an error unless `--allow-destructive` is passed. The error message names the first destructive statement encountered.
 
@@ -115,8 +116,8 @@ dpg dump --cluster <name> --database <name> [--output <dir>] [-C <dir>]
 
 | Flag | Description |
 |---|---|
-| `--cluster <name>` | Cluster name. **Required.** |
-| `--database <name>` | Database name. **Required.** |
+| `--cluster <name>` | Cluster to dump. Required when multiple clusters exist. |
+| `--database <name>` | Database to dump. Required when multiple databases exist. |
 | `-o, --output <dir>` | Output directory. Default: `<project-root>/<cluster>/<database>/`. |
 
 **Output structure:**
@@ -132,7 +133,7 @@ dpg dump --cluster <name> --database <name> [--output <dir>] [-C <dir>]
 
 One `.dpg` file is written per schema. Functions are output as stubs with a comment noting the body is omitted — retrieve function bodies from `pg_proc.prosrc` manually and paste them in.
 
-The snapshot is written to `.dpg/snapshots/<cluster>.<database>.json` automatically.
+The snapshot is written to `.dpg/snapshots/<cluster>/<database>.json` automatically.
 
 ---
 
@@ -179,8 +180,11 @@ dpg validate [--cluster <name>] [--database <name>] [--format text|json] [-C <di
 
 **Text output:**
 ```
+production/(cluster): 3 object(s) — OK
 production/myapp: 12 object(s) — OK
 ```
+
+Cluster-level objects (roles, tablespaces, FDWs) are reported under the `(cluster)` scope before per-database results.
 
 **JSON output (`--format json`):**
 ```json
@@ -282,7 +286,7 @@ Every generated SQL statement is assigned one of four safety classes:
 | `SAFE` | No data loss possible | Applied automatically |
 | `CAUTION` | Locks acquired; performance impact possible | Applied with warning logged |
 | `DESTRUCTIVE` | Data loss possible (DROP TABLE, DROP COLUMN, etc.) | Blocked unless `--allow-destructive` |
-| `MANUAL` | Cannot run inside a transaction (concurrent index creation) | Emitted after `COMMIT` as a non-transactional step |
+| `MANUAL` | Cannot run inside a transaction (concurrent index creation), or describes a manual operator step (partition strategy change) | Executable `MANUAL` ops are emitted after `COMMIT` as non-transactional steps. Instruction-only `MANUAL` ops (shown with a `--` comment, e.g. partition strategy changes) are displayed in the plan but **never executed** — the operator must perform them manually outside DPG. `--approve-partition-rebuild` is required to acknowledge these. |
 
 Examples:
 - `CREATE TABLE` → SAFE

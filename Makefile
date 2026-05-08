@@ -12,7 +12,7 @@ LDFLAGS := -X '$(MODULE)/internal/version.Version=$(VERSION)' \
            -X '$(MODULE)/internal/version.Commit=$(COMMIT)'   \
            -X '$(MODULE)/internal/version.Date=$(DATE)'
 
-.PHONY: build install test test-verbose test-examples vet lint \
+.PHONY: build install test test-verbose test-integration test-examples vet lint \
         dist dist-linux dist-darwin dist-windows \
         clean clean-dist clean-all version release
 
@@ -31,6 +31,9 @@ test:
 
 test-verbose:
 	go test ./... -v
+
+test-integration:
+	go test -tags integration -count=1 -timeout 5m ./...
 
 test-examples:
 	go test ./examples/... -v
