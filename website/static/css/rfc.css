@@ -1,0 +1,44 @@
+.rfc-header {
+  margin: 1.5rem 0 2rem;
+}
+
+.rfc-meta {
+  border-collapse: collapse;
+  font-size: 0.9rem;
+}
+
+.rfc-meta th,
+.rfc-meta td {
+  padding: 0.35rem 1rem 0.35rem 0;
+  vertical-align: top;
+}
+
+.rfc-meta th {
+  font-weight: 600;
+  white-space: nowrap;
+  color: var(--td-gray-600, #555);
+}
+
+.rfc-status {
+  display: inline-block;
+  padding: 0.1rem 0.5rem;
+  border-radius: 3px;
+  font-size: 0.8rem;
+  font-weight: 600;
+  text-transform: uppercase;
+}
+
+.rfc-status--draft {
+  background: #fff3cd;
+  color: #856404;
+}
+
+.rfc-status--accepted {
+  background: #d4edda;
+  color: #155724;
+}
+
+.rfc-status--superseded {
+  background: #f8d7da;
+  color: #721c24;
+}

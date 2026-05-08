@@ -1,0 +1,24 @@
+[[main]]
+  name = "Docs"
+  url = "/docs/"
+  weight = 1
+
+[[main]]
+  name = "CLI Reference"
+  url = "/docs/cli/"
+  weight = 2
+
+[[main]]
+  name = "Plugin API"
+  url = "/docs/extending/"
+  weight = 3
+
+[[main]]
+  name = "RFC"
+  url = "/rfc/"
+  weight = 4
+
+[[main]]
+  name = "GitHub"
+  url = "https://github.com/dullkingsman/dpg"
+  weight = 5

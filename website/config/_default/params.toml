@@ -1,0 +1,18 @@
+github_repo = "https://github.com/dullkingsman/dpg"
+github_project_repo = "https://github.com/dullkingsman/dpg"
+github_branch = "main"
+
+# Offline search via Lunr.js (no Algolia required)
+offlineSearch = true
+offlineSearchSummaryLength = 200
+offlineSearchMaxResults = 25
+
+# Sidebar settings
+ui.sidebar_menu_compact = true
+ui.sidebar_menu_foldable = true
+ui.breadcrumb_disable = false
+ui.taxonomy_breadcrumb_disable = true
+ui.footer_about_disable = true
+ui.readingtime.enable = false
+
+description = "DPG is a declarative, state-based superset of PostgreSQL SQL that compiles to idiomatic PG DDL."

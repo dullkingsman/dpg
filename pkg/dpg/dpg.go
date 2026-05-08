@@ -19,13 +19,22 @@ import (
 
 // ── Source positions ──────────────────────────────────────────────────────────
 
+// SourcePos is a source location (file path, line, column) attached to
+// CompilerErrors and LintDiagnostics.
 type SourcePos = pipeline.SourcePos
 
 // ── IR interface and object kinds ─────────────────────────────────────────────
 
+// IRObject is the common interface implemented by every compiled DPG object
+// (Table, View, Function, Role, …). Use a type assertion to obtain the
+// concrete type and access object-specific fields.
 type IRObject = pipeline.IRObject
+
+// ObjectKind is an enumeration that identifies the type of an IRObject without
+// requiring a type assertion. Use obj.Kind() to retrieve it.
 type ObjectKind = pipeline.ObjectKind
 
+// ObjectKind constants — one per supported PostgreSQL object type.
 const (
 	KindUnknown           = pipeline.KindUnknown
 	KindSchema            = pipeline.KindSchema
@@ -68,50 +77,165 @@ const (
 
 // ── Concrete IR object types ──────────────────────────────────────────────────
 
+// Schema is a compiled SCHEMA declaration. It may nest tables, views,
+// functions, and other schema-scoped objects within its source block.
 type Schema = ir.Schema
+
+// Extension is a compiled EXTENSION declaration (CREATE EXTENSION).
 type Extension = ir.Extension
+
+// Table is a compiled TABLE, UNLOGGED TABLE, or FOREIGN TABLE declaration.
+// Columns, constraints, indexes, policies, triggers, and grants are
+// accessible as slices on this struct.
 type Table = ir.Table
+
+// View is a compiled VIEW or MATERIALIZED VIEW declaration.
 type View = ir.View
+
+// Function is a compiled FUNCTION declaration. The body is stored as a
+// SHA-256 hash (BodyHash) for change detection; the raw text is not retained
+// after compilation.
 type Function = ir.Function
+
+// Procedure is a compiled PROCEDURE declaration. Follows the same model as
+// Function.
 type Procedure = ir.Procedure
+
+// Aggregate is a compiled AGGREGATE declaration with two parenthesised
+// argument groups per PostgreSQL syntax.
 type Aggregate = ir.Aggregate
+
+// Type is a compiled composite TYPE, ENUM, range type, domain, or base type
+// declaration. The Variant field identifies which PostgreSQL type category
+// this object represents.
 type Type = ir.Type
+
+// Sequence is a compiled SEQUENCE declaration.
 type Sequence = ir.Sequence
+
+// Role is a compiled ROLE declaration. Roles are cluster-level objects and
+// are compiled from the cluster objects directory.
 type Role = ir.Role
+
+// Tablespace is a compiled TABLESPACE declaration. Tablespaces are
+// cluster-level objects.
 type Tablespace = ir.Tablespace
+
+// ForeignDataWrapper is a compiled FOREIGN DATA WRAPPER declaration for a
+// custom C-implemented FDW. Cluster-level object.
 type ForeignDataWrapper = ir.ForeignDataWrapper
+
+// ForeignServer is a compiled SERVER declaration for a foreign data wrapper.
+// Database-level object.
 type ForeignServer = ir.ForeignServer
+
+// UserMapping is a compiled USER MAPPING declaration associating a local
+// role with credentials on a foreign server.
 type UserMapping = ir.UserMapping
+
+// Publication is a compiled PUBLICATION declaration for logical replication.
 type Publication = ir.Publication
+
+// Subscription is a compiled SUBSCRIPTION declaration for logical replication.
 type Subscription = ir.Subscription
+
+// EventTrigger is a compiled EVENT TRIGGER declaration.
 type EventTrigger = ir.EventTrigger
+
+// Collation is a compiled COLLATION declaration.
 type Collation = ir.Collation
+
+// Operator is a compiled OPERATOR declaration.
 type Operator = ir.Operator
+
+// OperatorClass is a compiled OPERATOR CLASS declaration for an index
+// access method.
 type OperatorClass = ir.OperatorClass
+
+// OperatorFamily is a compiled OPERATOR FAMILY declaration.
 type OperatorFamily = ir.OperatorFamily
+
+// Cast is a compiled CAST declaration defining an implicit or assignment cast
+// between two types.
 type Cast = ir.Cast
+
+// StatisticsObject is a compiled extended STATISTICS declaration for
+// multi-column query planning statistics.
 type StatisticsObject = ir.StatisticsObject
+
+// TSConfig is a compiled TEXT SEARCH CONFIGURATION declaration.
 type TSConfig = ir.TSConfig
+
+// TSDict is a compiled TEXT SEARCH DICTIONARY declaration.
 type TSDict = ir.TSDict
+
+// TSParser is a compiled TEXT SEARCH PARSER declaration.
 type TSParser = ir.TSParser
+
+// TSTemplate is a compiled TEXT SEARCH TEMPLATE declaration.
 type TSTemplate = ir.TSTemplate
+
+// DefaultPrivileges is a compiled DEFAULT PRIVILEGES declaration (ALTER
+// DEFAULT PRIVILEGES FOR ROLE ...).
 type DefaultPrivileges = ir.DefaultPrivileges
 
 // ── IR sub-types ──────────────────────────────────────────────────────────────
 
+// Column is a single column in a table, view, or composite type. It includes
+// type information, nullability, defaults, generated/identity specs, storage
+// attributes, and column-level grants.
 type Column = ir.Column
+
+// TypeRef is a SQL type reference with optional schema qualification, type
+// modifiers (e.g. VARCHAR(255), NUMERIC(10,2)), and array dimensions.
 type TypeRef = ir.TypeRef
+
+// Index is a CREATE INDEX definition attached to a table. Concurrent creation,
+// partial predicates, expression columns, and covering columns are represented
+// as fields.
 type Index = ir.Index
+
+// Constraint is a table-level or column-level constraint (PRIMARY KEY, UNIQUE,
+// FOREIGN KEY, CHECK, EXCLUSION). The NOT VALID lifecycle flag is tracked here.
 type Constraint = ir.Constraint
+
+// Policy is a row-level security policy definition attached to a table.
 type Policy = ir.Policy
+
+// Trigger is a trigger definition attached to a table. The trigger function is
+// referenced by name; it must be declared as a separate Function object.
 type Trigger = ir.Trigger
+
+// Grant is a single GRANT directive declaring a privilege on an object for a
+// role. Table-level and column-level grants both use this type.
 type Grant = ir.Grant
+
+// Revocation is a single REVOKE directive. Add explicit Revocation entries to
+// remove privileges that were previously granted outside DPG.
 type Revocation = ir.Revocation
+
+// FuncArg is one argument in a Function or Procedure signature, including name,
+// type, mode (IN/OUT/INOUT/VARIADIC), and optional default expression.
 type FuncArg = ir.FuncArg
+
+// FuncAttrs holds the attribute flags of a function or procedure: volatility,
+// strictness, security model, parallel safety, cost, and GUC settings.
 type FuncAttrs = ir.FuncAttrs
+
+// PartitionSpec describes the partitioning strategy of a partitioned table:
+// the partition method (RANGE, LIST, HASH) and the partition key expression.
 type PartitionSpec = ir.PartitionSpec
+
+// Partition is one partition entry in a PARTITIONS { } block: its name and
+// the FOR VALUES clause that defines its boundaries.
 type Partition = ir.Partition
+
+// Generated holds the GENERATED ALWAYS AS (expr) STORED definition of a
+// generated column.
 type Generated = ir.Generated
+
+// Identity holds the GENERATED ALWAYS AS IDENTITY or GENERATED BY DEFAULT AS
+// IDENTITY definition of an identity column.
 type Identity = ir.Identity
 
 // ── Pipeline AST sub-types (appear in IR field types) ────────────────────────
@@ -143,17 +267,34 @@ type MigrateRemoveBlock = pipeline.MigrateRemoveBlock
 
 // ── Linter types ──────────────────────────────────────────────────────────────
 
+// LintDiagnostic is a single diagnostic produced by a Linter. IsError true
+// means the check is a hard error that aborts the command; false is a warning.
 type LintDiagnostic = pipeline.LintDiagnostic
+
+// LinterConfig holds configuration knobs for the built-in linter. All fields
+// correspond directly to the [linter] section of dpg.toml.
 type LinterConfig = pipeline.LinterConfig
 
 // ── Snapshot ──────────────────────────────────────────────────────────────────
 
+// Snapshot is the JSON-serialisable representation of the last successfully
+// applied database state. It is committed to version control alongside source
+// files and read by Diff to compute incremental migrations.
 type Snapshot = pipeline.Snapshot
 
 // ── Project structure ─────────────────────────────────────────────────────────
 
+// Project is the fully-resolved DPG project discovered from a directory tree.
+// It holds all clusters and their databases, each with source file lists.
 type Project = project.Project
+
+// Cluster is one PostgreSQL cluster within a project. It holds a connection
+// string (URL or Link), cluster-level source files (roles, tablespaces), and
+// a slice of Database objects.
 type Cluster = project.Cluster
+
+// Database is one PostgreSQL database within a cluster. It holds the database
+// name, default schema, and the list of .dpg source files to compile.
 type Database = project.Database
 
 // ── Plugin registry ───────────────────────────────────────────────────────────
@@ -172,21 +313,37 @@ func NewRegistry() *Registry { return pipeline.NewRegistry() }
 // picked up by Compile, Lint, and Diff.
 var Default = pipeline.Default
 
-// Well-known registry keys — pass to Register / ResolveLinter etc.
+// Well-known registry keys. Pass these to Default.Register / ResolveLinter etc.
+// All keys are stable across minor versions within the v0.x line.
 const (
-	KeyTokenizer          = pipeline.KeyTokenizer
-	KeyPGSQLParser        = pipeline.KeyPGSQLParser
-	KeyBlockParser        = pipeline.KeyBlockParser
-	KeyIRBuilder          = pipeline.KeyIRBuilder
-	KeyMerger             = pipeline.KeyMerger
+	// KeyTokenizer is the registry key for the source file tokenizer stage.
+	KeyTokenizer = pipeline.KeyTokenizer
+	// KeyPGSQLParser is the registry key for the PostgreSQL SQL parser stage.
+	KeyPGSQLParser = pipeline.KeyPGSQLParser
+	// KeyBlockParser is the registry key for the DPG { } block parser stage.
+	KeyBlockParser = pipeline.KeyBlockParser
+	// KeyIRBuilder is the registry key for the IR builder stage.
+	KeyIRBuilder = pipeline.KeyIRBuilder
+	// KeyMerger is the registry key for the block merger stage.
+	KeyMerger = pipeline.KeyMerger
+	// KeyDependencyResolver is the registry key for the topological sort stage.
 	KeyDependencyResolver = pipeline.KeyDependencyResolver
-	KeySnapshotStore      = pipeline.KeySnapshotStore
-	KeyDiffer             = pipeline.KeyDiffer
-	KeyEmitter            = pipeline.KeyEmitter
-	KeyApplyExecutor      = pipeline.KeyApplyExecutor
-	KeyIntrospector       = pipeline.KeyIntrospector
-	KeyLinter             = pipeline.KeyLinter
-	KeySecretResolver     = pipeline.KeySecretResolver
+	// KeySnapshotStore is the registry key for the snapshot store.
+	// Replace with a custom SnapshotStore to use an alternative persistence backend.
+	KeySnapshotStore = pipeline.KeySnapshotStore
+	// KeyDiffer is the registry key for the differ extension point.
+	KeyDiffer = pipeline.KeyDiffer
+	// KeyEmitter is the registry key for the emitter extension point.
+	KeyEmitter = pipeline.KeyEmitter
+	// KeyApplyExecutor is the registry key for the apply executor extension point.
+	KeyApplyExecutor = pipeline.KeyApplyExecutor
+	// KeyIntrospector is the registry key for the live catalog introspector.
+	KeyIntrospector = pipeline.KeyIntrospector
+	// KeyLinter is the registry key for the linter extension point.
+	// Replace with a custom Linter or use NewChainLinter to augment the built-in.
+	KeyLinter = pipeline.KeyLinter
+	// KeySecretResolver is the registry key for the secret resolver extension point.
+	KeySecretResolver = pipeline.KeySecretResolver
 )
 
 // ── Extension interfaces ──────────────────────────────────────────────────────
@@ -204,35 +361,59 @@ type Differ = pipeline.Differ
 // Implement and register with Default.Register(KeyEmitter, myEmitter).
 type Emitter = pipeline.Emitter
 
-// SecretResolver resolves secret URI strings to plaintext connection values.
-// Implement and register with Default.Register(KeySecretResolver, myResolver).
+// SecretResolver resolves secret URI strings (env:VAR, link:...) to plaintext
+// connection values at runtime. Implement and register with
+// Default.Register(KeySecretResolver, myResolver).
 type SecretResolver = pipeline.SecretResolver
+
+// SnapshotStore reads and writes the committed schema snapshot. The built-in
+// implementation persists snapshots as JSON files under .dpg/snapshots/.
+// Implement and register with Default.Register(KeySnapshotStore, myStore) to
+// use an alternative backend (database, object storage, etc.).
+type SnapshotStore = pipeline.SnapshotStore
+
+// ApplyExecutor executes a compiled Migration against a live database connection.
+// Implement and register with Default.Register(KeyApplyExecutor, myExec) to
+// intercept or wrap migration execution (dry-run mode, audit logging, etc.).
+type ApplyExecutor = pipeline.ApplyExecutor
 
 // ── Types needed to implement the extension interfaces ────────────────────────
 
-// DiffOp is a single migration operation produced by a Differ.
+// DiffOp is a single migration operation produced by a Differ. It exposes
+// the SQL text and the safety classification of the operation.
 type DiffOp = pipeline.DiffOp
 
-// Safety classifies the risk of a migration operation.
+// Safety classifies the risk level of a migration operation.
 type Safety = pipeline.Safety
 
 const (
-	Safe        = pipeline.Safe
-	Caution     = pipeline.Caution
+	// Safe indicates no data loss or locking risk. Applied automatically.
+	Safe = pipeline.Safe
+	// Caution indicates the operation acquires locks or may impact performance.
+	Caution = pipeline.Caution
+	// Destructive indicates possible data loss. Blocked by default; requires
+	// --allow-destructive on dpg apply.
 	Destructive = pipeline.Destructive
-	Manual      = pipeline.Manual
+	// Manual indicates a non-transactional operation (e.g. CREATE INDEX
+	// CONCURRENTLY) or an instruction-only step that must be performed by the
+	// operator outside DPG. Shown in plan output but never executed automatically.
+	Manual = pipeline.Manual
 )
 
-// Migration is the output of an Emitter.
+// Migration is the complete output of an Emitter: ordered SQL statements
+// grouped into transactional and non-transactional sections.
 type Migration = pipeline.Migration
 
-// MigrationMeta holds header metadata written into every migration output.
+// MigrationMeta holds the header metadata written into every migration output:
+// generation timestamp, source Git revision, cluster name, and database name.
 type MigrationMeta = pipeline.MigrationMeta
 
-// CompilerError is a structured error with source position from any pipeline stage.
+// CompilerError is a structured error produced by any pipeline stage. It
+// includes a source position (file, line, column) when available.
 type CompilerError = pipeline.CompilerError
 
-// Diagnostics is an ordered collection of CompilerErrors.
+// Diagnostics is an ordered collection of CompilerErrors returned when
+// compilation encounters multiple errors in a single pass.
 type Diagnostics = pipeline.Diagnostics
 
 // ── Registry helpers ──────────────────────────────────────────────────────────

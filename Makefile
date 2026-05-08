@@ -12,9 +12,12 @@ LDFLAGS := -X '$(MODULE)/internal/version.Version=$(VERSION)' \
            -X '$(MODULE)/internal/version.Commit=$(COMMIT)'   \
            -X '$(MODULE)/internal/version.Date=$(DATE)'
 
+WEBSITE_DIR := website
+
 .PHONY: build install test test-verbose test-integration test-examples vet lint \
         dist dist-linux dist-darwin dist-windows \
-        clean clean-dist clean-all version release
+        clean clean-dist clean-all version release \
+        docs-cli docs-site docs-serve
 
 # ── Build ─────────────────────────────────────────────────────────────────────
 
@@ -84,6 +87,18 @@ release: dist
 		tar czf $$f.tar.gz -C $(DIST) $$(basename $$f) && \
 		echo "archived $$f.tar.gz"; \
 	done
+
+# ── Docs ──────────────────────────────────────────────────────────────────────
+
+docs-cli:
+	@mkdir -p $(WEBSITE_DIR)/content/docs/cli
+	go run ./tools/gendocs --output $(WEBSITE_DIR)/content/docs/cli
+
+docs-site: docs-cli
+	cd $(WEBSITE_DIR) && npm ci && hugo --minify
+
+docs-serve: docs-cli
+	cd $(WEBSITE_DIR) && npm ci && hugo serve --disableFastRender
 
 # ── Clean ─────────────────────────────────────────────────────────────────────
 

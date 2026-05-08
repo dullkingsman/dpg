@@ -1,0 +1,24 @@
+{{ define "main" }}
+<div class="td-content">
+  <h1>{{ .Title }}</h1>
+  <div class="rfc-header">
+    <table class="rfc-meta">
+      <tbody>
+        <tr>
+          <th>RFC</th><td>{{ .Params.rfc_number }}</td>
+          <th>Status</th><td><span class="rfc-status rfc-status--{{ lower .Params.rfc_status }}">{{ .Params.rfc_status }}</span></td>
+        </tr>
+        <tr>
+          <th>Version</th><td>{{ .Params.rfc_version }}</td>
+          <th>Target</th><td>{{ .Params.rfc_target }}</td>
+        </tr>
+        <tr>
+          <th>Date</th><td>{{ .Params.rfc_date }}</td>
+          <th>Authors</th><td>{{ .Params.rfc_authors | default "DPG Contributors" }}</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+  {{ .Content }}
+</div>
+{{ end }}
