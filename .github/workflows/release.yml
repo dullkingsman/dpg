@@ -38,9 +38,6 @@ jobs:
           key: hugo-${{ hashFiles('website/go.sum') }}
           restore-keys: hugo-
 
-      - name: Download Hugo modules
-        run: hugo mod download
-        working-directory: website
 
       - uses: actions/setup-node@v4
         with:
