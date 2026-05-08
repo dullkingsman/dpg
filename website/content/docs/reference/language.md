@@ -2,6 +2,7 @@
 title: "Language Reference"
 generated: false
 weight: 1
+description: "Two-part syntax model, no-verb mandate, structural scoping, and merge rules for DPG declarations."
 ---
 
 

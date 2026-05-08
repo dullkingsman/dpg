@@ -2,6 +2,7 @@
 title: "Snapshot Format"
 generated: false
 weight: 5
+description: "Snapshot format, storage location, VCS commit strategy, and how dpg apply updates it."
 ---
 
 

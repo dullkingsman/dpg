@@ -2,6 +2,7 @@
 title: "Linter"
 generated: false
 weight: 4
+description: "Built-in static analysis rules, configuration keys, and severity classification."
 ---
 
 

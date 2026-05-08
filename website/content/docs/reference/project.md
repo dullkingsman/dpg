@@ -2,6 +2,7 @@
 title: "Project Structure and Configuration"
 generated: false
 weight: 8
+description: "dpg.toml configuration, cluster and database discovery algorithm, and directory layout."
 ---
 
 

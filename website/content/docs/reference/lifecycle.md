@@ -2,6 +2,7 @@
 title: "Lifecycle Directives"
 generated: false
 weight: 3
+description: "RENAMED FROM, DEPRECATED, PROTECTED, DROP CASCADE, and MIGRATE REMOVE lifecycle directives."
 ---
 
 

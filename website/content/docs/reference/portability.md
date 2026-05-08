@@ -2,6 +2,7 @@
 title: "Portability Analysis"
 generated: false
 weight: 7
+description: "PostgreSQL-specific construct reporting and standard SQL alternatives."
 ---
 
 

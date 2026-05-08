@@ -7,12 +7,14 @@ offlineSearch = true
 offlineSearchSummaryLength = 200
 offlineSearchMaxResults = 25
 
-# Sidebar settings
-ui.sidebar_menu_compact = true
-ui.sidebar_menu_foldable = true
-ui.breadcrumb_disable = false
-ui.taxonomy_breadcrumb_disable = true
-ui.footer_about_disable = true
-ui.readingtime.enable = false
-
 description = "DPG is a declarative, state-based superset of PostgreSQL SQL that compiles to idiomatic PG DDL."
+
+[ui]
+sidebar_menu_compact = true
+sidebar_menu_foldable = true
+breadcrumb_disable = false
+taxonomy_breadcrumb_disable = true
+footer_about_disable = true
+
+[ui.readingtime]
+enable = false

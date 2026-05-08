@@ -2,6 +2,7 @@
 title: "Object Reference"
 generated: false
 weight: 2
+description: "Complete reference for every PostgreSQL object type DPG can declare: tables, views, functions, types, roles, and more."
 ---
 
 

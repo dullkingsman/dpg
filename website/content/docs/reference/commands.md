@@ -2,6 +2,7 @@
 title: "CLI Reference"
 generated: false
 weight: 9
+description: "All dpg CLI commands with flags, output formats, and examples."
 ---
 
 

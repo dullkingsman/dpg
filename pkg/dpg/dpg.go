@@ -342,6 +342,9 @@ const (
 	// KeyLinter is the registry key for the linter extension point.
 	// Replace with a custom Linter or use NewChainLinter to augment the built-in.
 	KeyLinter = pipeline.KeyLinter
+	// KeyPortabilityAnalyzer is the registry key for the portability analyzer.
+	// Replace to customize which PostgreSQL-specific constructs are reported.
+	KeyPortabilityAnalyzer = pipeline.KeyPortabilityAnalyzer
 	// KeySecretResolver is the registry key for the secret resolver extension point.
 	KeySecretResolver = pipeline.KeySecretResolver
 )
@@ -375,7 +378,33 @@ type SnapshotStore = pipeline.SnapshotStore
 // ApplyExecutor executes a compiled Migration against a live database connection.
 // Implement and register with Default.Register(KeyApplyExecutor, myExec) to
 // intercept or wrap migration execution (dry-run mode, audit logging, etc.).
+// The conn parameter satisfies the Conn interface exported by this package.
 type ApplyExecutor = pipeline.ApplyExecutor
+
+// PortabilityAnalyzer walks the compiled IR and reports PostgreSQL-specific
+// constructs. Implement and register with
+// Default.Register(KeyPortabilityAnalyzer, myAnalyzer).
+type PortabilityAnalyzer = pipeline.PortabilityAnalyzer
+
+// PortabilityIssue is a single finding from a PortabilityAnalyzer: the
+// PG-specific construct, the source location, and the standard SQL alternative
+// if one exists.
+type PortabilityIssue = pipeline.PortabilityIssue
+
+// ── Database connection interfaces ────────────────────────────────────────────
+
+// Conn abstracts a live database connection. It is the type of the conn
+// parameter in ApplyExecutor.Apply. The built-in implementation wraps pgx.Conn;
+// custom ApplyExecutor implementations receive this interface.
+type Conn = pipeline.Conn
+
+// Tx abstracts a database transaction started via Conn.Begin.
+type Tx = pipeline.Tx
+
+// Querier extends Conn with row-returning query support. It is the type
+// passed to Introspector.Introspect. Custom Introspector implementations
+// receive this interface.
+type Querier = pipeline.Querier
 
 // ── Types needed to implement the extension interfaces ────────────────────────
 

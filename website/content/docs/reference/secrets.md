@@ -2,6 +2,7 @@
 title: "Secrets"
 generated: false
 weight: 6
+description: "Secret URI resolution (env:, link:) and where secrets appear in dpg.toml."
 ---
 
 
