@@ -35,11 +35,11 @@ jobs:
       - uses: actions/cache@v4
         with:
           path: ~/.cache/hugo_cache
-          key: hugo-${{ hashFiles('website/go.mod') }}
+          key: hugo-${{ hashFiles('website/go.sum') }}
           restore-keys: hugo-
 
-      - name: Download Hugo modules (Docsy)
-        run: hugo mod get github.com/google/docsy@v0.15.0
+      - name: Download Hugo modules
+        run: hugo mod download
         working-directory: website
 
       - uses: actions/setup-node@v4
