@@ -209,6 +209,57 @@ Cluster-level objects (roles, tablespaces, FDWs) are reported under the `(cluste
 
 ---
 
+## `dpg fmt`
+
+Reformat `.dpg` source files to the canonical DPG style. Without arguments, formats all source files in the current project.
+
+```
+dpg fmt [files or dirs...] [--check] [--diff] [-C <dir>]
+```
+
+| Flag | Description |
+|---|---|
+| `--check` | Exit 1 if any file would change; no files are written. |
+| `--diff` | Print a unified diff of proposed changes; no files are written. |
+
+**Examples:**
+
+```bash
+dpg fmt                       # format all .dpg files in the project
+dpg fmt schemas/public/       # format all .dpg files under a directory
+dpg fmt schemas/public/users.dpg  # format a single file
+
+# CI gate — block unformatted files from merging:
+dpg fmt --check
+```
+
+**Exit codes:** `0` if all files are already formatted (or after formatting). With `--check`: `0` if no changes, `1` if any file would change.
+
+---
+
+## `dpg docs`
+
+Start a local HTTP server and serve the embedded DPG documentation site. The site is compiled into the binary at release build time; development builds (`make build`) return an error — use `make build-full` or a release binary.
+
+```
+dpg docs [--port <port>] [--open]
+```
+
+| Flag | Description |
+|---|---|
+| `-p, --port <port>` | Port to serve on. Default: `6060`. |
+| `--open` | Open the browser automatically after the server starts. |
+
+**Examples:**
+
+```bash
+dpg docs                  # serve on http://localhost:6060
+dpg docs --port 8080      # serve on http://localhost:8080
+dpg docs --open           # serve and open browser
+```
+
+---
+
 ## `dpg init`
 
 Scaffold a new DPG project with the standard directory layout and minimal configuration files.

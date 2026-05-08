@@ -381,6 +381,12 @@ type SnapshotStore = pipeline.SnapshotStore
 // The conn parameter satisfies the Conn interface exported by this package.
 type ApplyExecutor = pipeline.ApplyExecutor
 
+// Introspector reads a live PostgreSQL catalog and returns an IRObject slice
+// representing the live database state. Used by verify and dump commands.
+// Implement and register with Default.Register(KeyIntrospector, myIntrospector).
+// The conn parameter satisfies the Querier interface exported by this package.
+type Introspector = pipeline.Introspector
+
 // PortabilityAnalyzer walks the compiled IR and reports PostgreSQL-specific
 // constructs. Implement and register with
 // Default.Register(KeyPortabilityAnalyzer, myAnalyzer).
@@ -465,6 +471,26 @@ func ResolveEmitter(r *Registry) (Emitter, bool) {
 // ResolveSecretResolver returns the SecretResolver registered in r, or (nil, false) if none.
 func ResolveSecretResolver(r *Registry) (SecretResolver, bool) {
 	return pipeline.Resolve[pipeline.SecretResolver](r, pipeline.KeySecretResolver)
+}
+
+// ResolveSnapshotStore returns the SnapshotStore registered in r, or (nil, false) if none.
+func ResolveSnapshotStore(r *Registry) (SnapshotStore, bool) {
+	return pipeline.Resolve[pipeline.SnapshotStore](r, pipeline.KeySnapshotStore)
+}
+
+// ResolveApplyExecutor returns the ApplyExecutor registered in r, or (nil, false) if none.
+func ResolveApplyExecutor(r *Registry) (ApplyExecutor, bool) {
+	return pipeline.Resolve[pipeline.ApplyExecutor](r, pipeline.KeyApplyExecutor)
+}
+
+// ResolveIntrospector returns the Introspector registered in r, or (nil, false) if none.
+func ResolveIntrospector(r *Registry) (Introspector, bool) {
+	return pipeline.Resolve[pipeline.Introspector](r, pipeline.KeyIntrospector)
+}
+
+// ResolvePortabilityAnalyzer returns the PortabilityAnalyzer registered in r, or (nil, false) if none.
+func ResolvePortabilityAnalyzer(r *Registry) (PortabilityAnalyzer, bool) {
+	return pipeline.Resolve[pipeline.PortabilityAnalyzer](r, pipeline.KeyPortabilityAnalyzer)
 }
 
 // NewChainLinter returns a Linter that runs each provided linter in order and

@@ -8,13 +8,13 @@ description: "A declarative, state-based superset of PostgreSQL SQL that compile
 DPG is a schema compiler and migration tool for PostgreSQL. You describe what your database **should be**; DPG figures out what needs to change and generates the minimal, safe SQL migration.
 
 ```sql
-CREATE TABLE users (
+TABLE users (
     id   BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     name TEXT NOT NULL,
     email TEXT NOT NULL
 ) {
     UNIQUE INDEX users_email_idx ON (email);
-    GRANT SELECT, INSERT ON users TO app_role;
+    GRANTS { SELECT, INSERT ON users TO app_role; }
 }
 ```
 
