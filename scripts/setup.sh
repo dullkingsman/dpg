@@ -106,6 +106,12 @@ fi
 # Directory for user-local binaries (no sudo required).
 USER_BIN="${HOME}/.local/bin"
 
+# Prepend USER_BIN unconditionally so checks later in this script find
+# previously-installed user-local binaries before system-wide ones.
+# This prevents false "outdated" reports when both locations contain
+# the tool (e.g. system hugo 0.128 vs user-local hugo 0.147).
+export PATH="${USER_BIN}:${PATH}"
+
 # Resolve the directory to install a standalone binary into.
 # Uses /usr/local/bin when sudo is available, ~/.local/bin otherwise.
 install_bin_dir() {

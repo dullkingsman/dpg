@@ -14,6 +14,10 @@ LDFLAGS := -X '$(MODULE)/internal/version.Version=$(VERSION)' \
 
 WEBSITE_DIR := website
 
+# Resolve hugo binary: prefer user-local installs (~/.local/bin) over system-
+# wide ones so that `make docs-site` uses the same binary setup.sh installs.
+HUGO := $(shell PATH="$(HOME)/.local/bin:$(PATH)" sh -c 'command -v hugo 2>/dev/null || echo hugo')
+
 .PHONY: build build-full install install-full \
         test test-verbose test-integration test-examples vet lint \
         dist dist-linux dist-darwin dist-windows \
@@ -108,10 +112,10 @@ docs-cli:
 	go run ./tools/gendocs --output $(WEBSITE_DIR)/content/docs/cli
 
 docs-site: docs-cli
-	cd $(WEBSITE_DIR) && npm install && hugo --minify
+	cd $(WEBSITE_DIR) && npm install && $(HUGO) --minify
 
 docs-serve: docs-cli
-	cd $(WEBSITE_DIR) && npm install && hugo serve --disableFastRender
+	cd $(WEBSITE_DIR) && npm install && $(HUGO) serve --disableFastRender
 
 # ── Clean ─────────────────────────────────────────────────────────────────────
 
