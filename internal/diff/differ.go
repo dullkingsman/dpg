@@ -236,6 +236,21 @@ func ptrEq(a, b *string) bool {
 	return *a == *b
 }
 
+// compositeAttrsChanged returns true if the composite type attribute list has
+// changed compared to the snapshot. Any addition, removal, or type change
+// counts as a change (PG requires DROP + CREATE for attribute changes).
+func compositeAttrsChanged(attrs []*ir.Column, snap []snapshot.SnapColumn) bool {
+	if len(attrs) != len(snap) {
+		return true
+	}
+	for i, attr := range attrs {
+		if attr.Name != snap[i].Name || attr.Type.String() != snap[i].Type {
+			return true
+		}
+	}
+	return false
+}
+
 func ptrStr(s *string) string {
 	if s == nil {
 		return ""
@@ -623,12 +638,12 @@ func diffAggregate(o *ir.Aggregate, snap *snapshot.SnapOpaque) ([]pipeline.DiffO
 		sum := sha256.Sum256([]byte(strings.TrimSpace(o.Body)))
 		newHash = fmt.Sprintf("%x", sum)
 	}
-	bodyChanged := newHash != snap.BodyHash
+	// Skip body comparison when either side has no hash: the live snapshot
+	// (introspected) cannot reconstruct the aggregate body, so we only diff
+	// body when both sides have a hash (offline plan against committed snapshot).
+	bodyChanged := newHash != "" && snap.BodyHash != "" && newHash != snap.BodyHash
 
 	if bodyChanged {
-		if o.Body == "" {
-			return nil, fmt.Errorf("aggregate %s: body not captured; define it explicitly in a .dpg source file", o.QualifiedName())
-		}
 		ops := []pipeline.DiffOp{
 			destructiveOp(fmt.Sprintf("DROP AGGREGATE IF EXISTS %s;", sig), pos),
 			safeOp(o.Body+";", pos),
@@ -1169,6 +1184,8 @@ func createType(o *ir.Type) []pipeline.DiffOp {
 		}
 		b.WriteString(");")
 		ops = append(ops, safeOp(b.String(), o.SrcPos))
+	case "COMPOSITE":
+		ops = append(ops, safeOp(buildCompositeTypeSQL(o), o.SrcPos))
 	case "DOMAIN":
 		body := o.Body
 		// rawSQL produces "CREATE DOMAIN unqualname AS ..."; qualify the name when schema is set.
@@ -1202,17 +1219,60 @@ func createType(o *ir.Type) []pipeline.DiffOp {
 	return ops
 }
 
-func createSequence(o *ir.Sequence) []pipeline.DiffOp {
-	ops := []pipeline.DiffOp{
-		safeOp(fmt.Sprintf("CREATE SEQUENCE IF NOT EXISTS %s;", qualIdent(o.Schema, o.Name)), o.SrcPos),
+func buildCompositeTypeSQL(o *ir.Type) string {
+	var b strings.Builder
+	b.WriteString("CREATE TYPE ")
+	b.WriteString(qualIdent(o.Schema, o.Name))
+	b.WriteString(" AS (")
+	for i, attr := range o.CompositeAttrs {
+		if i > 0 {
+			b.WriteString(", ")
+		}
+		b.WriteString(quoteIdent(attr.Name))
+		b.WriteString(" ")
+		b.WriteString(attr.Type.String())
 	}
+	b.WriteString(");")
+	return b.String()
+}
+
+func createSequence(o *ir.Sequence) []pipeline.DiffOp {
+	ident := qualIdent(o.Schema, o.Name)
+	var b strings.Builder
+	b.WriteString("CREATE SEQUENCE IF NOT EXISTS ")
+	b.WriteString(ident)
+	writeSeqParams(&b, o)
+	b.WriteString(";")
+	ops := []pipeline.DiffOp{safeOp(b.String(), o.SrcPos)}
 	if o.Comment != nil {
 		ops = append(ops, safeOp(
-			fmt.Sprintf("COMMENT ON SEQUENCE %s IS %s;", qualIdent(o.Schema, o.Name), quoteLit(*o.Comment)),
+			fmt.Sprintf("COMMENT ON SEQUENCE %s IS %s;", ident, quoteLit(*o.Comment)),
 			o.SrcPos,
 		))
 	}
 	return ops
+}
+
+// writeSeqParams appends explicit sequence parameters to b for any non-nil fields.
+func writeSeqParams(b *strings.Builder, o *ir.Sequence) {
+	if o.IncrementBy != nil {
+		fmt.Fprintf(b, " INCREMENT BY %d", *o.IncrementBy)
+	}
+	if o.MinValue != nil {
+		fmt.Fprintf(b, " MINVALUE %d", *o.MinValue)
+	}
+	if o.MaxValue != nil {
+		fmt.Fprintf(b, " MAXVALUE %d", *o.MaxValue)
+	}
+	if o.StartValue != nil {
+		fmt.Fprintf(b, " START WITH %d", *o.StartValue)
+	}
+	if o.Cache != nil {
+		fmt.Fprintf(b, " CACHE %d", *o.Cache)
+	}
+	if o.Cycle {
+		b.WriteString(" CYCLE")
+	}
 }
 
 func createRole(o *ir.Role) []pipeline.DiffOp {
@@ -1232,6 +1292,21 @@ func createRole(o *ir.Role) []pipeline.DiffOp {
 
 func diffObject(desired pipeline.IRObject, snap *snapshot.SnapObject, fullSnap *pipeline.Snapshot) ([]pipeline.DiffOp, error) {
 	switch o := desired.(type) {
+	case *ir.Extension:
+		if snap.Extension == nil {
+			return nil, nil
+		}
+		return diffExtension(o, snap.Extension), nil
+	case *ir.Sequence:
+		if snap.Sequence == nil {
+			return nil, nil
+		}
+		return diffSequence(o, snap.Sequence), nil
+	case *ir.Role:
+		if snap.Role == nil {
+			return nil, nil
+		}
+		return diffRole(o, snap.Role), nil
 	case *ir.Schema:
 		if snap.Schema == nil {
 			return nil, nil
@@ -1378,11 +1453,79 @@ func diffOpaqueIR(name, body string, _ *string, snap *snapshot.SnapOpaque, pos p
 }
 
 func diffProcedure(o *ir.Procedure, snap *snapshot.SnapOpaque) ([]pipeline.DiffOp, error) {
-	if o.BodyHash != snap.BodyHash || o.Attrs.Language != "" {
+	// Skip body comparison when either side has no hash (introspected live snap
+	// produced a hash but desired IR may not, or vice versa for live-only runs).
+	if o.BodyHash != "" && snap.BodyHash != "" && o.BodyHash != snap.BodyHash {
 		ops := createProcedure(o)
 		return ops, nil
 	}
 	return nil, nil
+}
+
+func diffExtension(o *ir.Extension, snap *snapshot.SnapExtension) []pipeline.DiffOp {
+	pos := o.SrcPos
+	if !ptrEq(o.Version, snap.Version) && o.Version != nil {
+		return []pipeline.DiffOp{safeOp(
+			fmt.Sprintf("ALTER EXTENSION %s UPDATE TO %s;", quoteIdent(o.Name), quoteLit(*o.Version)),
+			pos,
+		)}
+	}
+	return nil
+}
+
+func diffSequence(o *ir.Sequence, snap *snapshot.SnapSequence) []pipeline.DiffOp {
+	var ops []pipeline.DiffOp
+	pos := o.SrcPos
+	ident := qualIdent(o.Schema, o.Name)
+
+	// Check if any explicitly-specified sequence params differ from the snapshot.
+	// Only compare params that the user set (non-nil in desired IR).
+	paramsChanged := (o.IncrementBy != nil && !int64PtrEq(o.IncrementBy, snap.IncrementBy)) ||
+		(o.MinValue != nil && !int64PtrEq(o.MinValue, snap.MinValue)) ||
+		(o.MaxValue != nil && !int64PtrEq(o.MaxValue, snap.MaxValue)) ||
+		(o.StartValue != nil && !int64PtrEq(o.StartValue, snap.StartValue)) ||
+		(o.Cache != nil && !int64PtrEq(o.Cache, snap.Cache)) ||
+		(o.IncrementBy != nil && o.Cycle != snap.Cycle)
+	if paramsChanged {
+		var b strings.Builder
+		b.WriteString("ALTER SEQUENCE ")
+		b.WriteString(ident)
+		writeSeqParams(&b, o)
+		b.WriteString(";")
+		ops = append(ops, safeOp(b.String(), pos))
+	}
+
+	if !ptrEq(o.Comment, snap.Comment) {
+		if o.Comment != nil {
+			ops = append(ops, safeOp(fmt.Sprintf("COMMENT ON SEQUENCE %s IS %s;", ident, quoteLit(*o.Comment)), pos))
+		} else {
+			ops = append(ops, safeOp(fmt.Sprintf("COMMENT ON SEQUENCE %s IS NULL;", ident), pos))
+		}
+	}
+	return ops
+}
+
+func int64PtrEq(a, b *int64) bool {
+	if a == nil && b == nil {
+		return true
+	}
+	if a == nil || b == nil {
+		return false
+	}
+	return *a == *b
+}
+
+func diffRole(o *ir.Role, snap *snapshot.SnapRole) []pipeline.DiffOp {
+	var ops []pipeline.DiffOp
+	pos := o.SrcPos
+	if !ptrEq(o.Comment, snap.Comment) {
+		if o.Comment != nil {
+			ops = append(ops, safeOp(fmt.Sprintf("COMMENT ON ROLE %s IS %s;", quoteIdent(o.Name), quoteLit(*o.Comment)), pos))
+		} else {
+			ops = append(ops, safeOp(fmt.Sprintf("COMMENT ON ROLE %s IS NULL;", quoteIdent(o.Name)), pos))
+		}
+	}
+	return ops
 }
 
 func diffSchema(o *ir.Schema, snap *snapshot.SnapSchema) []pipeline.DiffOp {
@@ -1491,6 +1634,25 @@ func diffType(o *ir.Type, snap *snapshot.SnapType, fullSnap *pipeline.Snapshot) 
 	var ops []pipeline.DiffOp
 	pos := o.SrcPos
 	typeIdent := qualIdent(o.Schema, o.Name)
+
+	if o.Variant == "COMPOSITE" && snap.Variant == "COMPOSITE" {
+		if compositeAttrsChanged(o.CompositeAttrs, snap.CompositeAttrs) {
+			// PG has no in-place ALTER TYPE … ALTER ATTRIBUTE for type changes;
+			// DROP + recreate is required.
+			ops = append(ops,
+				destructiveOp(fmt.Sprintf("DROP TYPE IF EXISTS %s;", typeIdent), pos),
+			)
+			ops = append(ops, safeOp(buildCompositeTypeSQL(o), pos))
+		}
+		if !ptrEq(o.Comment, snap.Comment) {
+			if o.Comment != nil {
+				ops = append(ops, safeOp(fmt.Sprintf("COMMENT ON TYPE %s IS %s;", typeIdent, quoteLit(*o.Comment)), pos))
+			} else {
+				ops = append(ops, safeOp(fmt.Sprintf("COMMENT ON TYPE %s IS NULL;", typeIdent), pos))
+			}
+		}
+		return ops, nil
+	}
 
 	if o.Variant == "ENUM" && snap.Variant == "ENUM" {
 		snapVals := make(map[string]bool, len(snap.Values))

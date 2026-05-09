@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -381,9 +383,19 @@ func gitRevision() (string, error) {
 	if err != nil {
 		return "", nil
 	}
-	ref := string(data)
-	if len(ref) >= 7 && len(ref) < 10 {
-		return ref[:7], nil
+	head := strings.TrimSpace(string(data))
+	// .git/HEAD contains either a ref pointer ("ref: refs/heads/main") or a bare
+	// commit hash when in detached HEAD state.
+	if strings.HasPrefix(head, "ref: ") {
+		refPath := filepath.Join(".git", filepath.FromSlash(strings.TrimPrefix(head, "ref: ")))
+		data, err = os.ReadFile(refPath)
+		if err != nil {
+			return "", nil
+		}
+		head = strings.TrimSpace(string(data))
+	}
+	if len(head) >= 7 {
+		return head[:7], nil
 	}
 	return "", nil
 }

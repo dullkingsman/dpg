@@ -774,7 +774,7 @@ func (b *Builder) buildFunction(cfs *pg_query.CreateFunctionStmt, pg pipeline.PG
 
 	// Body hash from the Part1 raw text (we can recover it via deparse or from raw).
 	body := fn.Attrs.Body
-	fn.BodyHash = hashBody(body)
+	fn.BodyHash = HashBody(body)
 
 	if block.Comment != nil {
 		fn.Comment = &block.Comment.Value
@@ -802,7 +802,7 @@ func (b *Builder) buildProcedure(cfs *pg_query.CreateFunctionStmt, _ *pg_query.P
 		}
 	}
 	proc.Attrs = extractFuncAttrs(cfs.Options)
-	proc.BodyHash = hashBody(proc.Attrs.Body)
+	proc.BodyHash = HashBody(proc.Attrs.Body)
 	if block.Comment != nil {
 		proc.Comment = &block.Comment.Value
 	}
@@ -995,7 +995,50 @@ func (b *Builder) buildSequence(cs *pg_query.CreateSeqStmt, block pipeline.Block
 	for _, g := range block.Grants {
 		s.Grants = append(s.Grants, blockGrantToIR(g))
 	}
+	for _, opt := range cs.Options {
+		de := opt.GetDefElem()
+		if de == nil {
+			continue
+		}
+		v := seqOptionInt(de)
+		switch de.Defname {
+		case "increment":
+			s.IncrementBy = v
+		case "start":
+			s.StartValue = v
+		case "minvalue":
+			s.MinValue = v
+		case "maxvalue":
+			s.MaxValue = v
+		case "cache":
+			s.Cache = v
+		case "cycle":
+			if v != nil {
+				s.Cycle = *v != 0
+			}
+		}
+	}
 	return s, nil
+}
+
+// seqOptionInt extracts an int64 value from a sequence DefElem node.
+// pg_query represents integer sequence options as either a pg_query.Integer
+// or an A_Const Integer node.
+func seqOptionInt(de *pg_query.DefElem) *int64 {
+	if de.Arg == nil {
+		return nil
+	}
+	if ic := de.Arg.GetInteger(); ic != nil {
+		v := int64(ic.Ival)
+		return &v
+	}
+	if ac := de.Arg.GetAConst(); ac != nil {
+		if ic2 := ac.GetIval(); ic2 != nil {
+			v := int64(ic2.Ival)
+			return &v
+		}
+	}
+	return nil
 }
 
 // ── Role ──────────────────────────────────────────────────────────────────────
@@ -1107,6 +1150,21 @@ func (b *Builder) buildDefineStmt(ds *pg_query.DefineStmt, block pipeline.BlockA
 			t.Variant = "RANGE"
 		} else if isComposite {
 			t.Variant = "COMPOSITE"
+			for _, de := range ds.Definition {
+				elem := de.GetDefElem()
+				if elem == nil || elem.Defname != "column" {
+					continue
+				}
+				cd := elem.Arg.GetColumnDef()
+				if cd == nil {
+					continue
+				}
+				col := &Column{Name: cd.Colname}
+				if cd.TypeName != nil {
+					col.Type = typeNameToRef(cd.TypeName)
+				}
+				t.CompositeAttrs = append(t.CompositeAttrs, col)
+			}
 		} else {
 			t.Variant = "BASE"
 		}

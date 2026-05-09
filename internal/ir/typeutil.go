@@ -117,10 +117,12 @@ func typmodString(typeName string, mods []*pg_query.Node) string {
 	return ""
 }
 
-// hashBody returns the SHA-256 of a normalised function body.
+// HashBody returns the SHA-256 of a normalised function/procedure body.
 // Normalisation: trim leading/trailing whitespace; collapse internal
-// whitespace runs to a single space.
-func hashBody(body string) string {
+// whitespace runs to a single space. Used by both the IR builder and the
+// introspect package (which hashes prosrc from pg_proc to produce a
+// comparable digest without dollar-quote delimiters).
+func HashBody(body string) string {
 	normalised := strings.Join(strings.Fields(strings.TrimSpace(body)), " ")
 	sum := sha256.Sum256([]byte(normalised))
 	return fmt.Sprintf("%x", sum)

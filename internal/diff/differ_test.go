@@ -2129,3 +2129,150 @@ func TestDiffMaterViewCommentUsesCorrectKind(t *testing.T) {
 		t.Errorf("expected COMMENT ON MATERIALIZED VIEW, got: %v", sqlList(ops))
 	}
 }
+
+// ── Extension diff ────────────────────────────────────────────────────────────
+
+func TestDiffExtensionUnchangedIsNoop(t *testing.T) {
+	d := New()
+	ver := "1.0"
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("pgcrypto", &snapshot.SnapObject{
+		Kind:      "extension",
+		Extension: &snapshot.SnapExtension{Name: "pgcrypto", Version: &ver},
+	})
+	desired := []pipeline.IRObject{
+		&ir.Extension{Name: "pgcrypto", Version: &ver},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ops) != 0 {
+		t.Errorf("expected no ops for unchanged extension, got: %v", sqlList(ops))
+	}
+}
+
+func TestDiffExtensionVersionUpdated(t *testing.T) {
+	d := New()
+	old, new_ := "1.0", "1.1"
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("pgcrypto", &snapshot.SnapObject{
+		Kind:      "extension",
+		Extension: &snapshot.SnapExtension{Name: "pgcrypto", Version: &old},
+	})
+	desired := []pipeline.IRObject{
+		&ir.Extension{Name: "pgcrypto", Version: &new_},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsSQL(ops, "ALTER EXTENSION") || !containsSQL(ops, "UPDATE TO") || !containsSQL(ops, "'1.1'") {
+		t.Errorf("expected ALTER EXTENSION ... UPDATE TO '1.1', got: %v", sqlList(ops))
+	}
+	if ops[0].Safety() != pipeline.Safe {
+		t.Errorf("expected Safe, got %s", ops[0].Safety())
+	}
+}
+
+// ── Sequence diff ─────────────────────────────────────────────────────────────
+
+func TestDiffSequenceUnchangedIsNoop(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.seq_id", &snapshot.SnapObject{
+		Kind:     "sequence",
+		Sequence: &snapshot.SnapSequence{Schema: "public", Name: "seq_id"},
+	})
+	desired := []pipeline.IRObject{
+		&ir.Sequence{Schema: "public", Name: "seq_id"},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ops) != 0 {
+		t.Errorf("expected no ops for unchanged sequence, got: %v", sqlList(ops))
+	}
+}
+
+func TestDiffSequenceCommentAdded(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.seq_id", &snapshot.SnapObject{
+		Kind:     "sequence",
+		Sequence: &snapshot.SnapSequence{Schema: "public", Name: "seq_id"},
+	})
+	comment := "order id sequence"
+	desired := []pipeline.IRObject{
+		&ir.Sequence{Schema: "public", Name: "seq_id", Comment: &comment},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsSQL(ops, "COMMENT ON SEQUENCE") || !containsSQL(ops, "'order id sequence'") {
+		t.Errorf("expected COMMENT ON SEQUENCE with new comment, got: %v", sqlList(ops))
+	}
+}
+
+func TestDiffSequenceCommentRemoved(t *testing.T) {
+	d := New()
+	old := "old comment"
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.seq_id", &snapshot.SnapObject{
+		Kind:     "sequence",
+		Sequence: &snapshot.SnapSequence{Schema: "public", Name: "seq_id", Comment: &old},
+	})
+	desired := []pipeline.IRObject{
+		&ir.Sequence{Schema: "public", Name: "seq_id"},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsSQL(ops, "COMMENT ON SEQUENCE") || !containsSQL(ops, "IS NULL") {
+		t.Errorf("expected COMMENT ON SEQUENCE ... IS NULL, got: %v", sqlList(ops))
+	}
+}
+
+// ── Role diff ─────────────────────────────────────────────────────────────────
+
+func TestDiffRoleUnchangedIsNoop(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("app_role", &snapshot.SnapObject{
+		Kind: "role",
+		Role: &snapshot.SnapRole{Name: "app_role"},
+	})
+	desired := []pipeline.IRObject{
+		&ir.Role{Name: "app_role"},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ops) != 0 {
+		t.Errorf("expected no ops for unchanged role, got: %v", sqlList(ops))
+	}
+}
+
+func TestDiffRoleCommentAdded(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("app_role", &snapshot.SnapObject{
+		Kind: "role",
+		Role: &snapshot.SnapRole{Name: "app_role"},
+	})
+	comment := "application role"
+	desired := []pipeline.IRObject{
+		&ir.Role{Name: "app_role", Comment: &comment},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsSQL(ops, "COMMENT ON ROLE") || !containsSQL(ops, "'application role'") {
+		t.Errorf("expected COMMENT ON ROLE with new comment, got: %v", sqlList(ops))
+	}
+}

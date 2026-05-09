@@ -47,11 +47,26 @@ func TestResolveEnvEmptyName(t *testing.T) {
 	}
 }
 
-func TestResolveLinkStub(t *testing.T) {
+func TestResolveLinkPlain(t *testing.T) {
 	r := New()
-	_, err := r.Resolve("link:vault/secret/db")
-	if err == nil {
-		t.Fatal("expected error for link: URI stub")
+	got, err := r.Resolve("link:postgres://localhost/mydb")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "postgres://localhost/mydb" {
+		t.Errorf("expected plain value via link:, got %q", got)
+	}
+}
+
+func TestResolveLinkEnv(t *testing.T) {
+	r := New()
+	t.Setenv("DPG_LINK_TARGET", "s3cr3t")
+	got, err := r.Resolve("link:env:DPG_LINK_TARGET")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "s3cr3t" {
+		t.Errorf("expected s3cr3t via link:env:, got %q", got)
 	}
 }
 

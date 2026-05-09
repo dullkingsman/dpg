@@ -77,7 +77,56 @@ func (ci *CatalogIntrospector) Introspect(ctx context.Context, conn pipeline.Que
 	}
 	all = append(all, roles...)
 
+	aggregates, err := introspectAggregates(ctx, conn)
+	if err != nil {
+		return nil, err
+	}
+	all = append(all, aggregates...)
+
 	return all, nil
+}
+
+// ── aggregates ────────────────────────────────────────────────────────────────
+
+func introspectAggregates(ctx context.Context, conn pipeline.Querier) ([]pipeline.IRObject, error) {
+	const q = `
+SELECT n.nspname, p.proname,
+       pg_get_function_identity_arguments(p.oid) AS args,
+       obj_description(p.oid, 'pg_proc') AS comment
+FROM   pg_proc p
+JOIN   pg_namespace n ON n.oid = p.pronamespace
+WHERE  p.prokind = 'a'
+AND    n.nspname NOT IN ('pg_catalog','information_schema','pg_toast')
+ORDER  BY n.nspname, p.proname, args`
+
+	rs, err := conn.QueryRows(ctx, q)
+	if err != nil {
+		return nil, fmt.Errorf("introspect aggregates: %w", err)
+	}
+	defer rs.Close()
+
+	var out []pipeline.IRObject
+	for rs.Next() {
+		var schema, name, args string
+		var comment *string
+		if err := rs.Scan(&schema, &name, &args, &comment); err != nil {
+			return nil, err
+		}
+		agg := &ir.Aggregate{
+			Schema:  schema,
+			Name:    name,
+			Comment: comment,
+			// Body is intentionally empty: we cannot reconstruct DDL from catalog.
+			// diffAggregate skips the body check when Body == "".
+		}
+		if args != "" {
+			for a := range strings.SplitSeq(args, ", ") {
+				agg.Args = append(agg.Args, ir.FuncArg{Type: ir.TypeRef{Name: strings.TrimSpace(a)}})
+			}
+		}
+		out = append(out, agg)
+	}
+	return out, rs.Err()
 }
 
 // ── schemas ───────────────────────────────────────────────────────────────────
@@ -679,7 +728,8 @@ SELECT n.nspname, p.proname,
        p.prosecdef,
        p.proisstrict,
        obj_description(p.oid, 'pg_proc') AS comment,
-       p.prokind::text
+       p.prokind::text,
+       p.prosrc
 FROM   pg_proc p
 JOIN   pg_namespace n ON n.oid = p.pronamespace
 JOIN   pg_language  l ON l.oid = p.prolang
@@ -699,16 +749,16 @@ ORDER  BY n.nspname, p.proname, args`
 		var schema, name, args, retType, lang, volatility string
 		var secDef, strict bool
 		var comment *string
-		var prokind string
-		if err := rs.Scan(&schema, &name, &args, &retType, &lang, &volatility, &secDef, &strict, &comment, &prokind); err != nil {
+		var prokind, prosrc string
+		if err := rs.Scan(&schema, &name, &args, &retType, &lang, &volatility, &secDef, &strict, &comment, &prokind, &prosrc); err != nil {
 			return nil, err
 		}
 		if prokind == "p" {
-			// Procedure
 			proc := &ir.Procedure{
-				Schema:  schema,
-				Name:    name,
-				Comment: comment,
+				Schema:   schema,
+				Name:     name,
+				Comment:  comment,
+				BodyHash: ir.HashBody(prosrc),
 				Attrs: ir.FuncAttrs{
 					Language: lang,
 				},
@@ -725,6 +775,7 @@ ORDER  BY n.nspname, p.proname, args`
 				Name:       name,
 				ReturnType: ir.TypeRef{Name: retType},
 				Comment:    comment,
+				BodyHash:   ir.HashBody(prosrc),
 				Attrs: ir.FuncAttrs{
 					Language:    lang,
 					Volatility:  volatility,
@@ -798,7 +849,53 @@ ORDER  BY n.nspname, t.typname`
 	if err := introspectDomainBodies(ctx, conn, out); err != nil {
 		return nil, err
 	}
+	if err := introspectCompositeAttrs(ctx, conn, out); err != nil {
+		return nil, err
+	}
 	return out, nil
+}
+
+func introspectCompositeAttrs(ctx context.Context, conn pipeline.Querier, types []pipeline.IRObject) error {
+	const q = `
+SELECT n.nspname, t.typname,
+       a.attname,
+       pg_catalog.format_type(a.atttypid, a.atttypmod) AS attr_type
+FROM   pg_type t
+JOIN   pg_namespace n   ON n.oid = t.typnamespace
+JOIN   pg_class c       ON c.oid = t.typrelid
+JOIN   pg_attribute a   ON a.attrelid = c.oid
+WHERE  t.typtype = 'c'
+AND    c.relkind = 'c'
+AND    a.attnum > 0
+AND    NOT a.attisdropped
+AND    n.nspname NOT IN ('pg_catalog','information_schema','pg_toast')
+ORDER  BY n.nspname, t.typname, a.attnum`
+
+	rs, err := conn.QueryRows(ctx, q)
+	if err != nil {
+		return fmt.Errorf("introspect composite attrs: %w", err)
+	}
+	defer rs.Close()
+
+	typeIdx := map[string]*ir.Type{}
+	for _, obj := range types {
+		if t, ok := obj.(*ir.Type); ok && t.Variant == "COMPOSITE" {
+			typeIdx[t.Schema+"."+t.Name] = t
+		}
+	}
+	for rs.Next() {
+		var schema, name, attrName, attrType string
+		if err := rs.Scan(&schema, &name, &attrName, &attrType); err != nil {
+			return err
+		}
+		if t, ok := typeIdx[schema+"."+name]; ok {
+			t.CompositeAttrs = append(t.CompositeAttrs, &ir.Column{
+				Name: attrName,
+				Type: ir.TypeRef{Name: attrType},
+			})
+		}
+	}
+	return rs.Err()
 }
 
 func introspectDomainBodies(ctx context.Context, conn pipeline.Querier, types []pipeline.IRObject) error {
@@ -900,10 +997,12 @@ func introspectSequences(ctx context.Context, conn pipeline.Querier) ([]pipeline
 	const q = `
 SELECT n.nspname, c.relname,
        r.rolname AS owner,
-       obj_description(c.oid, 'pg_class') AS comment
+       obj_description(c.oid, 'pg_class') AS comment,
+       s.seqincrement, s.seqmin, s.seqmax, s.seqstart, s.seqcache, s.seqcycle
 FROM   pg_class c
-JOIN   pg_namespace n ON n.oid = c.relnamespace
-JOIN   pg_roles r     ON r.oid = c.relowner
+JOIN   pg_namespace n  ON n.oid = c.relnamespace
+JOIN   pg_roles r      ON r.oid = c.relowner
+JOIN   pg_sequence s   ON s.seqrelid = c.oid
 WHERE  c.relkind = 'S'
 AND    n.nspname NOT IN ('pg_catalog','information_schema','pg_toast')
 AND    NOT EXISTS (
@@ -924,10 +1023,24 @@ ORDER  BY n.nspname, c.relname`
 	for rs.Next() {
 		var schema, name, owner string
 		var comment *string
-		if err := rs.Scan(&schema, &name, &owner, &comment); err != nil {
+		var increment, min, max, start, cache int64
+		var cycle bool
+		if err := rs.Scan(&schema, &name, &owner, &comment, &increment, &min, &max, &start, &cache, &cycle); err != nil {
 			return nil, err
 		}
-		out = append(out, &ir.Sequence{Schema: schema, Name: name, Owner: &owner, Comment: comment})
+		seq := &ir.Sequence{
+			Schema:      schema,
+			Name:        name,
+			Owner:       &owner,
+			Comment:     comment,
+			IncrementBy: &increment,
+			MinValue:    &min,
+			MaxValue:    &max,
+			StartValue:  &start,
+			Cache:       &cache,
+			Cycle:       cycle,
+		}
+		out = append(out, seq)
 	}
 	return out, rs.Err()
 }

@@ -226,6 +226,10 @@ func objectSchema(obj pipeline.IRObject) string {
 		return o.Schema
 	case *ir.Function:
 		return o.Schema
+	case *ir.Procedure:
+		return o.Schema
+	case *ir.Aggregate:
+		return o.Schema
 	case *ir.Type:
 		return o.Schema
 	case *ir.Sequence:

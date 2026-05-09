@@ -356,20 +356,30 @@ func toSnapFunction(o *ir.Function) *SnapFunction {
 }
 
 func toSnapType(o *ir.Type) *SnapType {
-	return &SnapType{
+	st := &SnapType{
 		Schema:  o.Schema,
 		Name:    o.Name,
 		Variant: o.Variant,
 		Values:  o.EnumValues,
 		Comment: o.Comment,
 	}
+	for _, attr := range o.CompositeAttrs {
+		st.CompositeAttrs = append(st.CompositeAttrs, toSnapColumn(attr))
+	}
+	return st
 }
 
 func toSnapSequence(o *ir.Sequence) *SnapSequence {
 	return &SnapSequence{
-		Schema:  o.Schema,
-		Name:    o.Name,
-		Comment: o.Comment,
+		Schema:      o.Schema,
+		Name:        o.Name,
+		Comment:     o.Comment,
+		IncrementBy: o.IncrementBy,
+		MinValue:    o.MinValue,
+		MaxValue:    o.MaxValue,
+		StartValue:  o.StartValue,
+		Cache:       o.Cache,
+		Cycle:       o.Cycle,
 	}
 }
 

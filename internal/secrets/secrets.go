@@ -39,7 +39,8 @@ func (r *EnvResolver) Resolve(uri string) (string, error) {
 		return val, nil
 
 	case strings.HasPrefix(uri, "link:"):
-		return "", fmt.Errorf("secrets: link: URIs require vault integration (not yet implemented)")
+		// Recursively resolve the target URI (allows chaining env: or plain values).
+		return r.Resolve(strings.TrimPrefix(uri, "link:"))
 
 	default:
 		// Plain value: return as-is (not a URI).

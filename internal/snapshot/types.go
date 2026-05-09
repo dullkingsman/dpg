@@ -151,17 +151,24 @@ type SnapFunction struct {
 }
 
 type SnapType struct {
-	Schema  string   `json:"schema"`
-	Name    string   `json:"name"`
-	Variant string   `json:"variant"`          // ENUM, COMPOSITE, RANGE, DOMAIN, BASE
-	Values  []string `json:"values,omitempty"` // ENUM only
-	Comment *string  `json:"comment,omitempty"`
+	Schema         string       `json:"schema"`
+	Name           string       `json:"name"`
+	Variant        string       `json:"variant"`                   // ENUM, COMPOSITE, RANGE, DOMAIN, BASE
+	Values         []string     `json:"values,omitempty"`          // ENUM only
+	CompositeAttrs []SnapColumn `json:"composite_attrs,omitempty"` // COMPOSITE only
+	Comment        *string      `json:"comment,omitempty"`
 }
 
 type SnapSequence struct {
-	Schema  string  `json:"schema"`
-	Name    string  `json:"name"`
-	Comment *string `json:"comment,omitempty"`
+	Schema      string  `json:"schema"`
+	Name        string  `json:"name"`
+	Comment     *string `json:"comment,omitempty"`
+	IncrementBy *int64  `json:"increment_by,omitempty"`
+	MinValue    *int64  `json:"min_value,omitempty"`
+	MaxValue    *int64  `json:"max_value,omitempty"`
+	StartValue  *int64  `json:"start_value,omitempty"`
+	Cache       *int64  `json:"cache,omitempty"`
+	Cycle       bool    `json:"cycle,omitempty"`
 }
 
 type SnapRole struct {

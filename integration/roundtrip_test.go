@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 
 	"github.com/dullkingsman/dpg/internal/compiler"
@@ -204,6 +205,16 @@ TABLE users (
     INDICES { idx_users_status (status); }
 }
 
+TABLE posts (
+    id      bigint GENERATED ALWAYS AS IDENTITY,
+    user_id bigint NOT NULL,
+    title   text NOT NULL,
+    body    text,
+    CONSTRAINT posts_pkey PRIMARY KEY (id),
+    CONSTRAINT posts_user_fk FOREIGN KEY (user_id) REFERENCES users (id) ON DELETE CASCADE,
+    CONSTRAINT posts_title_nonempty CHECK (char_length(title) > 0)
+) {}
+
 VIEW active_users AS
     SELECT id, name, email FROM users WHERE status = 'active';
 `
@@ -262,6 +273,130 @@ VIEW active_users AS
 	}
 	if len(driftOps) != 0 {
 		t.Errorf("drift after add-column apply (%d ops):", len(driftOps))
+		for _, op := range driftOps {
+			t.Errorf("  [%s] %s", op.Safety(), op.SQL())
+		}
+	}
+}
+
+// TestRoundtripEnumAddValue verifies that adding a new value to an ENUM type
+// produces an ALTER TYPE ADD VALUE op, applies without error, and leaves zero
+// drift when re-introspected.
+func TestRoundtripEnumAddValue(t *testing.T) {
+	connStr := testpg.Start(t)
+	ctx := context.Background()
+
+	differ := diff.New()
+	emitter := emit.New()
+	applyExec := executor.New()
+	ci := introspect.New()
+	store := newMemStore()
+
+	schemaFile := testdataFile("schema.dpg")
+	schemaDir := filepath.Dir(schemaFile)
+
+	conn, err := executor.Connect(ctx, connStr)
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	defer conn.Close(ctx)
+
+	// Apply the base schema first.
+	applyFixture(t, ctx, conn, []string{schemaFile}, schemaDir, differ, emitter, applyExec, store)
+
+	// Schema with an extra enum value added.
+	extendedSchema := `TYPE status AS ENUM ('active', 'inactive', 'pending', 'archived');
+
+TABLE users (
+    id      bigint GENERATED ALWAYS AS IDENTITY,
+    name    text NOT NULL,
+    email   text NOT NULL,
+    status  status NOT NULL DEFAULT 'active',
+    CONSTRAINT users_pkey PRIMARY KEY (id),
+    CONSTRAINT users_email_key UNIQUE (email)
+) {
+    INDICES { idx_users_status (status); }
+}
+
+TABLE posts (
+    id      bigint GENERATED ALWAYS AS IDENTITY,
+    user_id bigint NOT NULL,
+    title   text NOT NULL,
+    body    text,
+    CONSTRAINT posts_pkey PRIMARY KEY (id),
+    CONSTRAINT posts_user_fk FOREIGN KEY (user_id) REFERENCES users (id) ON DELETE CASCADE,
+    CONSTRAINT posts_title_nonempty CHECK (char_length(title) > 0)
+) {}
+
+VIEW active_users AS
+    SELECT id, name, email FROM users WHERE status = 'active';
+`
+	dir := t.TempDir()
+	extFile := filepath.Join(dir, "schema.dpg")
+	if err := os.WriteFile(extFile, []byte(extendedSchema), 0o644); err != nil {
+		t.Fatalf("write extended schema: %v", err)
+	}
+
+	desired2, err := compiler.Compile([]string{extFile}, dir, pipeline.Default)
+	if err != nil {
+		t.Fatalf("compile extended: %v", err)
+	}
+
+	snap, _ := store.Load("test", "dpgtest")
+	ops, err := differ.Diff(desired2, snap)
+	if err != nil {
+		t.Fatalf("diff (add enum value): %v", err)
+	}
+
+	// Must produce at least one ALTER TYPE ADD VALUE op.
+	var hasAddValue bool
+	for _, op := range ops {
+		if strings.Contains(op.SQL(), "ADD VALUE") {
+			hasAddValue = true
+		}
+	}
+	if !hasAddValue {
+		t.Fatal("expected ALTER TYPE ADD VALUE op for new enum value, got none")
+	}
+
+	migration2, err := emitter.Emit(ops, pipeline.MigrationMeta{Cluster: "test", Database: "dpgtest"})
+	if err != nil {
+		t.Fatalf("emit: %v", err)
+	}
+	if err := applyExec.Apply(ctx, migration2, conn); err != nil {
+		t.Fatalf("apply (add enum value): %v", err)
+	}
+
+	// Save updated snapshot.
+	snap2 := &pipeline.Snapshot{}
+	if err := snapshot.Populate(snap2, desired2); err != nil {
+		t.Fatalf("populate snapshot: %v", err)
+	}
+	if err := store.Save("test", "dpgtest", snap2); err != nil {
+		t.Fatalf("save snapshot: %v", err)
+	}
+
+	// Zero drift after enum add-value apply.
+	liveObjects2, err := ci.Introspect(ctx, conn)
+	if err != nil {
+		t.Fatalf("introspect: %v", err)
+	}
+	var managedLive2 []pipeline.IRObject
+	for _, obj := range liveObjects2 {
+		if _, ok := snap2.Objects[obj.QualifiedName()]; ok {
+			managedLive2 = append(managedLive2, obj)
+		}
+	}
+	liveSnap := &pipeline.Snapshot{}
+	if err := snapshot.Populate(liveSnap, managedLive2); err != nil {
+		t.Fatalf("populate live snapshot: %v", err)
+	}
+	driftOps, err := differ.Diff(desired2, liveSnap)
+	if err != nil {
+		t.Fatalf("drift diff: %v", err)
+	}
+	if len(driftOps) != 0 {
+		t.Errorf("drift after enum add-value apply (%d ops):", len(driftOps))
 		for _, op := range driftOps {
 			t.Errorf("  [%s] %s", op.Safety(), op.SQL())
 		}

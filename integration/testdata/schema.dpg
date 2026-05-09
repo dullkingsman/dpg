@@ -11,5 +11,15 @@ TABLE users (
     INDICES { idx_users_status (status); }
 }
 
+TABLE posts (
+    id      bigint GENERATED ALWAYS AS IDENTITY,
+    user_id bigint NOT NULL,
+    title   text NOT NULL,
+    body    text,
+    CONSTRAINT posts_pkey PRIMARY KEY (id),
+    CONSTRAINT posts_user_fk FOREIGN KEY (user_id) REFERENCES users (id) ON DELETE CASCADE,
+    CONSTRAINT posts_title_nonempty CHECK (char_length(title) > 0)
+) {}
+
 VIEW active_users AS
     SELECT id, name, email FROM users WHERE status = 'active';

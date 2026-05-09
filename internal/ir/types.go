@@ -312,16 +312,17 @@ func (a *Aggregate) irObject()               {}
 
 // Type covers ENUM, COMPOSITE, RANGE, DOMAIN, and BASE types.
 type Type struct {
-	Schema        string
-	Name          string
-	Variant       string   // "ENUM", "COMPOSITE", "RANGE", "DOMAIN", "BASE"
-	EnumValues    []string // ENUM only
-	Body          string   // raw Part1 for composite/range/domain/base (opaque for now)
-	Comment       *string
-	Owner         *string
-	Deprecated    *string
-	MigrateRemove *pipeline.MigrateRemoveBlock // ENUM only: MIGRATE REMOVE { } block
-	SrcPos        pipeline.SourcePos
+	Schema         string
+	Name           string
+	Variant        string    // "ENUM", "COMPOSITE", "RANGE", "DOMAIN", "BASE"
+	EnumValues     []string  // ENUM only
+	CompositeAttrs []*Column // COMPOSITE only: ordered list of attributes
+	Body           string    // raw Part1 for range/domain/base (opaque for now)
+	Comment        *string
+	Owner          *string
+	Deprecated     *string
+	MigrateRemove  *pipeline.MigrateRemoveBlock // ENUM only: MIGRATE REMOVE { } block
+	SrcPos         pipeline.SourcePos
 }
 
 func (t *Type) QualifiedName() string   { return qualName(t.Schema, t.Name) }
@@ -332,11 +333,17 @@ func (t *Type) irObject()               {}
 type Sequence struct {
 	Schema  string
 	Name    string
-	Body    string // raw Part1 text (options)
 	Owner   *string
 	Comment *string
 	Grants  []Grant
-	SrcPos  pipeline.SourcePos
+	// Options (nil = use PostgreSQL default for that parameter)
+	IncrementBy *int64
+	MinValue    *int64
+	MaxValue    *int64
+	StartValue  *int64
+	Cache       *int64
+	Cycle       bool
+	SrcPos      pipeline.SourcePos
 }
 
 func (s *Sequence) QualifiedName() string   { return qualName(s.Schema, s.Name) }
