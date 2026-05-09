@@ -78,7 +78,7 @@ jobs:
             goarch: arm64
             archive: dpg-linux-arm64.tar.gz
 
-          - runner: macos-13
+          - runner: macos-14
             goos: darwin
             goarch: amd64
             archive: dpg-darwin-amd64.tar.gz
