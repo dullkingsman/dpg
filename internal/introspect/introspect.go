@@ -92,6 +92,7 @@ func introspectAggregates(ctx context.Context, conn pipeline.Querier) ([]pipelin
 	const q = `
 SELECT n.nspname, p.proname,
        pg_get_function_identity_arguments(p.oid) AS args,
+       pg_catalog.oidvectortypes(p.proargtypes)   AS arg_types,
        obj_description(p.oid, 'pg_proc') AS comment
 FROM   pg_proc p
 JOIN   pg_namespace n ON n.oid = p.pronamespace
@@ -105,11 +106,12 @@ ORDER  BY n.nspname, p.proname, args`
 	}
 	defer rs.Close()
 
+	aggIdx := make(map[string]*ir.Aggregate)
 	var out []pipeline.IRObject
 	for rs.Next() {
-		var schema, name, args string
+		var schema, name, args, argTypes string
 		var comment *string
-		if err := rs.Scan(&schema, &name, &args, &comment); err != nil {
+		if err := rs.Scan(&schema, &name, &args, &argTypes, &comment); err != nil {
 			return nil, err
 		}
 		agg := &ir.Aggregate{
@@ -119,14 +121,89 @@ ORDER  BY n.nspname, p.proname, args`
 			// Body is intentionally empty: we cannot reconstruct DDL from catalog.
 			// diffAggregate skips the body check when Body == "".
 		}
-		if args != "" {
-			for a := range strings.SplitSeq(args, ", ") {
+		// Use argTypes (type-only, from oidvectortypes) so QualifiedName matches
+		// ir.ArgsKey(). Keep args (with parameter names) for the grants index key.
+		if argTypes != "" {
+			for a := range strings.SplitSeq(argTypes, ", ") {
 				agg.Args = append(agg.Args, ir.FuncArg{Type: ir.TypeRef{Name: strings.TrimSpace(a)}})
 			}
 		}
+		aggIdx[schema+"."+name+"("+args+")"] = agg
 		out = append(out, agg)
 	}
-	return out, rs.Err()
+	if err := rs.Err(); err != nil {
+		return nil, err
+	}
+	rs.Close()
+
+	if err := introspectAggregateGrants(ctx, conn, aggIdx); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func introspectAggregateGrants(ctx context.Context, conn pipeline.Querier, idx map[string]*ir.Aggregate) error {
+	const q = `
+SELECT n.nspname, p.proname,
+       pg_get_function_identity_arguments(p.oid) AS args,
+       CASE WHEN a.grantee = 0 THEN 'PUBLIC' ELSE pg_get_userbyid(a.grantee) END AS grantee,
+       a.privilege_type, a.is_grantable
+FROM   pg_proc p
+JOIN   pg_namespace n ON n.oid = p.pronamespace,
+       LATERAL aclexplode(p.proacl) a
+WHERE  p.prokind = 'a'
+AND    n.nspname NOT IN ('pg_catalog','information_schema','pg_toast')
+ORDER  BY n.nspname, p.proname, args, grantee, a.privilege_type`
+
+	rs, err := conn.QueryRows(ctx, q)
+	if err != nil {
+		return fmt.Errorf("introspect aggregate grants: %w", err)
+	}
+	defer rs.Close()
+
+	type grantKey struct{ schema, name, args, grantee string }
+	type grantEntry struct {
+		privs     []string
+		grantable bool
+	}
+	grants := make(map[grantKey]*grantEntry)
+	var order []grantKey
+
+	for rs.Next() {
+		var schema, name, args, grantee, priv string
+		var grantable bool
+		if err := rs.Scan(&schema, &name, &args, &grantee, &priv, &grantable); err != nil {
+			return err
+		}
+		k := grantKey{schema, name, args, grantee}
+		e, ok := grants[k]
+		if !ok {
+			e = &grantEntry{}
+			grants[k] = e
+			order = append(order, k)
+		}
+		e.privs = append(e.privs, priv)
+		if grantable {
+			e.grantable = true
+		}
+	}
+	if err := rs.Err(); err != nil {
+		return err
+	}
+
+	for _, k := range order {
+		agg, ok := idx[k.schema+"."+k.name+"("+k.args+")"]
+		if !ok {
+			continue
+		}
+		e := grants[k]
+		agg.Grants = append(agg.Grants, ir.Grant{
+			Privileges: e.privs,
+			Roles:      []string{k.grantee},
+			WithGrant:  e.grantable,
+		})
+	}
+	return nil
 }
 
 // ── schemas ───────────────────────────────────────────────────────────────────
@@ -1563,7 +1640,7 @@ func parsePartitionKey(keyDef string) *ir.PartitionSpec {
 			if len(rest) >= 2 && rest[0] == '(' && rest[len(rest)-1] == ')' {
 				rest = rest[1 : len(rest)-1]
 			}
-			for _, col := range strings.Split(rest, ",") {
+			for col := range strings.SplitSeq(rest, ",") {
 				if col = strings.TrimSpace(col); col != "" {
 					spec.Columns = append(spec.Columns, col)
 				}

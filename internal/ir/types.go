@@ -270,7 +270,7 @@ type Function struct {
 }
 
 func (f *Function) QualifiedName() string {
-	return fmt.Sprintf("%s(%s)", qualName(f.Schema, f.Name), argsKey(f.Args))
+	return fmt.Sprintf("%s(%s)", qualName(f.Schema, f.Name), ArgsKey(f.Args))
 }
 func (f *Function) Pos() pipeline.SourcePos { return f.SrcPos }
 func (f *Function) irObject()               {}
@@ -288,7 +288,7 @@ type Procedure struct {
 }
 
 func (p *Procedure) QualifiedName() string {
-	return fmt.Sprintf("%s(%s)", qualName(p.Schema, p.Name), argsKey(p.Args))
+	return fmt.Sprintf("%s(%s)", qualName(p.Schema, p.Name), ArgsKey(p.Args))
 }
 func (p *Procedure) Pos() pipeline.SourcePos { return p.SrcPos }
 func (p *Procedure) irObject()               {}
@@ -305,7 +305,7 @@ type Aggregate struct {
 }
 
 func (a *Aggregate) QualifiedName() string {
-	return fmt.Sprintf("%s(%s)", qualName(a.Schema, a.Name), argsKey(a.Args))
+	return fmt.Sprintf("%s(%s)", qualName(a.Schema, a.Name), ArgsKey(a.Args))
 }
 func (a *Aggregate) Pos() pipeline.SourcePos { return a.SrcPos }
 func (a *Aggregate) irObject()               {}
@@ -591,12 +591,14 @@ func (d *DefaultPrivileges) irObject()               {}
 
 // ── helpers ───────────────────────────────────────────────────────────────────
 
-// argsKey returns a compact type-only argument key for use in qualified names.
-func argsKey(args []FuncArg) string {
+// ArgsKey returns a compact type-only argument key for use in qualified names
+// and snapshot identity. OUT and TABLE params are excluded — PG's overload
+// identity is based on IN and INOUT types only.
+func ArgsKey(args []FuncArg) string {
 	parts := make([]string, 0, len(args))
 	for _, a := range args {
 		if a.Mode == "OUT" || a.Mode == "TABLE" {
-			continue // OUT params are not part of the identity key in PG
+			continue
 		}
 		parts = append(parts, a.Type.String())
 	}

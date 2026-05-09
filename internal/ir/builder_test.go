@@ -338,6 +338,45 @@ func TestRegistration(t *testing.T) {
 	}
 }
 
+// ── ArgsKey ───────────────────────────────────────────────────────────────────
+
+func TestArgsKey(t *testing.T) {
+	cases := []struct {
+		args []ir.FuncArg
+		want string
+	}{
+		{nil, ""},
+		{[]ir.FuncArg{{Mode: "IN", Type: ir.TypeRef{Name: "integer"}}}, "integer"},
+		{[]ir.FuncArg{
+			{Mode: "IN", Type: ir.TypeRef{Name: "integer"}},
+			{Mode: "IN", Type: ir.TypeRef{Name: "text"}},
+		}, "integer, text"},
+		// OUT params are excluded from the identity key.
+		{[]ir.FuncArg{
+			{Mode: "IN", Type: ir.TypeRef{Name: "integer"}},
+			{Mode: "OUT", Type: ir.TypeRef{Name: "text"}},
+		}, "integer"},
+		// TABLE params are also excluded.
+		{[]ir.FuncArg{
+			{Mode: "TABLE", Type: ir.TypeRef{Name: "bigint"}},
+		}, ""},
+		// INOUT params are included.
+		{[]ir.FuncArg{
+			{Mode: "INOUT", Type: ir.TypeRef{Name: "integer"}},
+		}, "integer"},
+		// Default mode (empty string treated as IN) is included.
+		{[]ir.FuncArg{
+			{Type: ir.TypeRef{Name: "boolean"}},
+		}, "boolean"},
+	}
+	for _, tc := range cases {
+		got := ir.ArgsKey(tc.args)
+		if got != tc.want {
+			t.Errorf("ArgsKey(%v) = %q, want %q", tc.args, got, tc.want)
+		}
+	}
+}
+
 // ── helpers ───────────────────────────────────────────────────────────────────
 
 func findCol(cols []*ir.Column, name string) *ir.Column {

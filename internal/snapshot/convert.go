@@ -19,18 +19,6 @@ func hashBodyStr(s string) string {
 	return fmt.Sprintf("%x", sum)
 }
 
-// procArgsKey returns a comma-separated list of input/inout/variadic argument
-// types, matching the identity key used in PG for procedure/aggregate overloads.
-func procArgsKey(args []ir.FuncArg) string {
-	parts := make([]string, 0, len(args))
-	for _, a := range args {
-		if a.Mode != "OUT" && a.Mode != "TABLE" {
-			parts = append(parts, a.Type.String())
-		}
-	}
-	return strings.Join(parts, ", ")
-}
-
 // Populate converts objects into SnapObjects and stores them in snap.
 func Populate(snap *pipeline.Snapshot, objects []pipeline.IRObject) error {
 	for _, obj := range objects {
@@ -66,7 +54,7 @@ func toSnapObject(obj pipeline.IRObject) *SnapObject {
 	case *ir.Procedure:
 		so := &SnapOpaque{
 			Kind: "procedure", Schema: o.Schema, Name: o.Name,
-			Args: procArgsKey(o.Args), BodyHash: o.BodyHash, Comment: o.Comment,
+			Args: ir.ArgsKey(o.Args), BodyHash: o.BodyHash, Comment: o.Comment,
 		}
 		for _, g := range o.Grants {
 			so.Grants = append(so.Grants, toSnapGrant(g))
@@ -75,7 +63,7 @@ func toSnapObject(obj pipeline.IRObject) *SnapObject {
 	case *ir.Aggregate:
 		so := &SnapOpaque{
 			Kind: "aggregate", Schema: o.Schema, Name: o.Name,
-			Args: procArgsKey(o.Args), BodyHash: hashBodyStr(o.Body), Comment: o.Comment,
+			Args: ir.ArgsKey(o.Args), BodyHash: hashBodyStr(o.Body), Comment: o.Comment,
 		}
 		for _, g := range o.Grants {
 			so.Grants = append(so.Grants, toSnapGrant(g))
@@ -336,16 +324,10 @@ func toSnapView(o *ir.View) *SnapView {
 }
 
 func toSnapFunction(o *ir.Function) *SnapFunction {
-	parts := make([]string, 0, len(o.Args))
-	for _, a := range o.Args {
-		if a.Mode != "OUT" && a.Mode != "TABLE" {
-			parts = append(parts, a.Type.String())
-		}
-	}
 	sf := &SnapFunction{
 		Schema:     o.Schema,
 		Name:       o.Name,
-		Args:       strings.Join(parts, ", "),
+		Args:       ir.ArgsKey(o.Args),
 		ReturnType: o.ReturnType.String(),
 		Language:   o.Attrs.Language,
 		Volatility: o.Attrs.Volatility,
