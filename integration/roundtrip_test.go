@@ -138,8 +138,17 @@ func TestRoundtrip(t *testing.T) {
 		t.Fatalf("introspect: %v", err)
 	}
 
+	// Only include introspected objects that DPG applied (ignore pre-existing
+	// infrastructure like the container superuser role).
+	var managedLive []pipeline.IRObject
+	for _, obj := range liveObjects {
+		if _, ok := appliedSnap.Objects[obj.QualifiedName()]; ok {
+			managedLive = append(managedLive, obj)
+		}
+	}
+
 	liveSnap := &pipeline.Snapshot{}
-	if err := snapshot.Populate(liveSnap, liveObjects); err != nil {
+	if err := snapshot.Populate(liveSnap, managedLive); err != nil {
 		t.Fatalf("populate live snapshot: %v", err)
 	}
 
@@ -192,8 +201,8 @@ TABLE users (
     CONSTRAINT users_pkey PRIMARY KEY (id),
     CONSTRAINT users_email_key UNIQUE (email)
 ) {
-    INDEX idx_users_status (status);
-};
+    INDICES { idx_users_status (status); }
+}
 
 VIEW active_users AS
     SELECT id, name, email FROM users WHERE status = 'active';
@@ -232,12 +241,19 @@ VIEW active_users AS
 	}
 
 	// Zero drift after add-column apply.
-	liveObjects, err := ci.Introspect(ctx, conn)
+	liveObjects2, err := ci.Introspect(ctx, conn)
 	if err != nil {
 		t.Fatalf("introspect: %v", err)
 	}
+	snap2, _ := store.Load("test", "dpgtest")
+	var managedLive2 []pipeline.IRObject
+	for _, obj := range liveObjects2 {
+		if _, ok := snap2.Objects[obj.QualifiedName()]; ok {
+			managedLive2 = append(managedLive2, obj)
+		}
+	}
 	liveSnap := &pipeline.Snapshot{}
-	if err := snapshot.Populate(liveSnap, liveObjects); err != nil {
+	if err := snapshot.Populate(liveSnap, managedLive2); err != nil {
 		t.Fatalf("populate live snapshot: %v", err)
 	}
 	driftOps, err := differ.Diff(desired2, liveSnap)

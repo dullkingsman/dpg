@@ -31,7 +31,11 @@ func typeNameToRef(tn *pg_query.TypeName) TypeRef {
 	case 0:
 		ref.Name = "unknown"
 	case 1:
-		ref.Name = names[0]
+		// pg_query emits some built-in aliases (e.g. "timestamptz") as a
+		// single-part name rather than ["pg_catalog", "timestamptz"]. Run
+		// them through pgCatalogName so the canonical form always matches
+		// what format_type() returns during introspection.
+		ref.Name = pgCatalogName(names[0])
 	case 2:
 		if names[0] == "pg_catalog" {
 			// Built-in: strip the catalog prefix and use the canonical name.

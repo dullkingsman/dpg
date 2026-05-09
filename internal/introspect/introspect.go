@@ -6,7 +6,10 @@ package introspect
 import (
 	"context"
 	"fmt"
+	"regexp"
 	"strings"
+
+	pg_query "github.com/pganalyze/pg_query_go/v6"
 
 	"github.com/dullkingsman/dpg/internal/ir"
 	"github.com/dullkingsman/dpg/internal/pipeline"
@@ -282,7 +285,10 @@ ORDER  BY n.nspname, c.relname, a.attnum`
 		case generatedKind != nil && *generatedKind == "s" && def != nil:
 			col.Generated = &ir.Generated{Expr: *def, Stored: true}
 		default:
-			col.Default = def
+			if def != nil {
+				stripped := stripStringLiteralCasts(*def)
+				col.Default = &stripped
+			}
 		}
 		if stats != nil && *stats > 0 {
 			col.Statistics = stats
@@ -632,7 +638,7 @@ ORDER  BY n.nspname, c.relname`
 		if err := rs.Scan(&schema, &name, &owner, &query, &comment, &materialized, &withNoData); err != nil {
 			return nil, err
 		}
-		q := strings.TrimSpace(query)
+		q := normalizeViewQuery(query)
 		v := &ir.View{
 			Schema:       schema,
 			Name:         name,
@@ -955,6 +961,38 @@ ORDER  BY r.rolname`
 
 var _ pipeline.Introspector = (*CatalogIntrospector)(nil)
 
+// ── query normalisation ───────────────────────────────────────────────────────
+
+// stringLiteralCastRE matches a single-quoted SQL string literal (including
+// escaped ” sequences) followed by a ::typename cast.
+var stringLiteralCastRE = regexp.MustCompile(`('(?:[^']|'')*')::[A-Za-z_][A-Za-z0-9_]*`)
+
+// stripStringLiteralCasts removes PG-added ::typename casts from single-quoted
+// string literals in pg_get_expr / pg_get_viewdef output.
+// e.g. 'active'::status → 'active', 'foo'::character → 'foo'.
+// This makes the introspected form match what users write in .dpg source files.
+func stripStringLiteralCasts(s string) string {
+	return stringLiteralCastRE.ReplaceAllString(s, "$1")
+}
+
+// normalizeViewQuery strips PG-added type casts from string literals and then
+// canonicalises the SQL through pg_query parse→deparse so that cosmetic
+// differences (extra parentheses added by pg_get_viewdef, whitespace) do not
+// produce spurious drift ops.
+func normalizeViewQuery(q string) string {
+	q = strings.TrimSpace(q)
+	q = stripStringLiteralCasts(q)
+	res, err := pg_query.Parse(q)
+	if err != nil || len(res.Stmts) == 0 {
+		return q
+	}
+	out, err := pg_query.Deparse(res)
+	if err != nil {
+		return q
+	}
+	return out
+}
+
 // introspectTableInherits populates Table.Inherits for every child table in idx.
 func introspectTableInherits(ctx context.Context, conn pipeline.Querier, idx map[string]*ir.Table) error {
 	const q = `
@@ -992,13 +1030,16 @@ ORDER  BY cn.nspname, cc.relname, pn.nspname, pc.relname`
 // introspectTableGrants populates Table.Grants for every table in idx using
 // aclexplode on pg_class.relacl.
 func introspectTableGrants(ctx context.Context, conn pipeline.Querier, idx map[string]*ir.Table) error {
+	// aclexplode(NULL) returns 0 rows on PG14+, so no COALESCE needed.
+	// An empty-literal COALESCE ('{}'::aclitem[]) produces ARR_NDIM=0, which
+	// PG17 rejects with "ACL arrays must be one-dimensional".
 	const q = `
 SELECT n.nspname, c.relname,
        CASE WHEN a.grantee = 0 THEN 'PUBLIC' ELSE pg_get_userbyid(a.grantee) END AS grantee,
        a.privilege_type, a.is_grantable
 FROM   pg_class c
 JOIN   pg_namespace n ON n.oid = c.relnamespace,
-       LATERAL aclexplode(COALESCE(c.relacl, '{}')) a
+       LATERAL aclexplode(c.relacl) a
 WHERE  c.relkind IN ('r', 'p')
 AND    NOT c.relispartition
 AND    n.nspname NOT IN ('pg_catalog','information_schema','pg_toast')
@@ -1064,7 +1105,7 @@ SELECT n.nspname, c.relname,
        a.privilege_type, a.is_grantable
 FROM   pg_class c
 JOIN   pg_namespace n ON n.oid = c.relnamespace,
-       LATERAL aclexplode(COALESCE(c.relacl, '{}')) a
+       LATERAL aclexplode(c.relacl) a
 WHERE  c.relkind IN ('v', 'm')
 AND    n.nspname NOT IN ('pg_catalog','information_schema','pg_toast')
 ORDER  BY n.nspname, c.relname, grantee, a.privilege_type`
@@ -1130,7 +1171,7 @@ SELECT n.nspname, p.proname,
        a.privilege_type, a.is_grantable
 FROM   pg_proc p
 JOIN   pg_namespace n ON n.oid = p.pronamespace,
-       LATERAL aclexplode(COALESCE(p.proacl, '{}')) a
+       LATERAL aclexplode(p.proacl) a
 WHERE  p.prokind = 'f'
 AND    n.nspname NOT IN ('pg_catalog','information_schema','pg_toast')
 ORDER  BY n.nspname, p.proname, args, grantee, a.privilege_type`

@@ -89,8 +89,15 @@ func (b *Builder) Build(pg pipeline.PGParseResult, block pipeline.BlockAST) (pip
 	if err != nil {
 		return nil, err
 	}
-	if pg.SchemaContext != "" && obj != nil {
-		applySchemaContext(obj, pg.SchemaContext)
+	// Apply schema context from enclosing SCHEMA block or directory inference.
+	// Fall back to "public" so desired IR always uses explicit schema names that
+	// match what the introspector returns from pg_namespace.
+	schemaCtx := pg.SchemaContext
+	if schemaCtx == "" {
+		schemaCtx = "public"
+	}
+	if obj != nil {
+		applySchemaContext(obj, schemaCtx)
 	}
 	return obj, nil
 }
@@ -271,6 +278,7 @@ func (b *Builder) buildColumn(cd *pg_query.ColumnDef, pos pipeline.SourcePos) (*
 
 		case pg_query.ConstrType_CONSTR_IDENTITY:
 			col.Identity = &Identity{Always: cst.GeneratedWhen == "a"}
+			col.NotNull = true // identity columns are always implicitly NOT NULL in PG
 
 		case pg_query.ConstrType_CONSTR_PRIMARY:
 			// Inline PRIMARY KEY — promote to a table-level constraint.
@@ -711,9 +719,14 @@ func (b *Builder) buildView(vs *pg_query.ViewStmt, block pipeline.BlockAST, pos 
 		Recursive:    recursive,
 		SrcPos:       pos,
 	}
-	// Query: deparse the SelectStmt back to text (best-effort).
+	// Deparse the view query as a full statement, not as a subexpression.
 	if vs.Query != nil {
-		v.Query = nodeToText(vs.Query)
+		pr := &pg_query.ParseResult{Stmts: []*pg_query.RawStmt{{Stmt: vs.Query}}}
+		if sql, err := pg_query.Deparse(pr); err == nil {
+			v.Query = sql
+		} else {
+			v.Query = nodeToText(vs.Query)
+		}
 	}
 	if block.Comment != nil {
 		v.Comment = &block.Comment.Value

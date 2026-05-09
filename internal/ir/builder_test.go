@@ -68,7 +68,7 @@ func TestBuildSimpleTable(t *testing.T) {
 	if tbl.Constraints[0].Type != "PRIMARY KEY" {
 		t.Errorf("constraint type: got %q", tbl.Constraints[0].Type)
 	}
-	if tbl.QualifiedName() != "users" {
+	if tbl.QualifiedName() != "public.users" {
 		t.Errorf("QualifiedName: got %q", tbl.QualifiedName())
 	}
 }

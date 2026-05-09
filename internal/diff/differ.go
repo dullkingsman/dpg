@@ -1872,7 +1872,7 @@ func diffColumns(tbl string, o *ir.Table, snap *snapshot.SnapTable) ([]pipeline.
 			// ADD COLUMN
 			var b strings.Builder
 			b.WriteString(fmt.Sprintf("ALTER TABLE %s ADD COLUMN %s %s", tbl, quoteIdent(col.Name), col.Type.String()))
-			if col.NotNull && col.Default == nil && col.Identity == nil {
+			if col.NotNull {
 				b.WriteString(" NOT NULL")
 			}
 			if col.Default != nil {
@@ -1887,6 +1887,7 @@ func diffColumns(tbl string, o *ir.Table, snap *snapshot.SnapTable) ([]pipeline.
 				}
 			}
 			b.WriteString(";")
+			// NOT NULL without a volatile default risks failing on existing rows.
 			safety := pipeline.Safe
 			if col.NotNull && col.Default == nil && col.Identity == nil {
 				safety = pipeline.Caution
