@@ -487,6 +487,9 @@ func dropObject(so *snapshot.SnapObject) []pipeline.DiffOp {
 		if so.Opaque != nil {
 			return []pipeline.DiffOp{destructiveOp(fmt.Sprintf("DROP TEXT SEARCH TEMPLATE IF EXISTS %s;", qualIdent(so.Opaque.Schema, so.Opaque.Name)), zero)}
 		}
+	case "virtual_type":
+		// Virtual types have no SQL backing — nothing to drop.
+		return nil
 	}
 	return nil
 }
@@ -551,6 +554,10 @@ func createObject(obj pipeline.IRObject) ([]pipeline.DiffOp, error) {
 		return createOpaque(o.QualifiedName(), o.Body, "TEXT SEARCH TEMPLATE", o.SrcPos)
 	case *ir.DefaultPrivileges:
 		return createDefaultPrivileges(o), nil
+	case *ir.VirtualType:
+		// Virtual types exist in the snapshot for downstream consumers but
+		// generate no SQL — they have no backing PostgreSQL object.
+		return nil, nil
 	}
 	return nil, nil
 }
@@ -1431,6 +1438,9 @@ func diffObject(desired pipeline.IRObject, snap *snapshot.SnapObject, fullSnap *
 			return nil, nil
 		}
 		return diffOpaqueIR(o.QualifiedName(), "", nil, snap.Opaque, o.SrcPos)
+	case *ir.VirtualType:
+		// Virtual types are DPG-only annotations; no SQL is generated on change.
+		return nil, nil
 	}
 	return nil, nil
 }

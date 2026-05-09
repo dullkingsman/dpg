@@ -32,8 +32,13 @@ func New() *Scanner { return &Scanner{} }
 
 // Scan implements pipeline.Tokenizer. It scans path/src and returns one
 // RawObject per declaration, including objects nested inside SCHEMA { } blocks.
+// MACRO declarations are collected and expanded before the main scan.
 func (sc *Scanner) Scan(path string, src []byte) ([]pipeline.RawObject, error) {
-	s := &state{src: src, path: path, line: 1, col: 1}
+	expanded, err := preprocessMacros(src)
+	if err != nil {
+		return nil, fmt.Errorf("%s: macro preprocessing: %w", path, err)
+	}
+	s := &state{src: expanded, path: path, line: 1, col: 1}
 	objects, _, err := s.scanBody("", false)
 	return objects, err
 }
@@ -560,6 +565,13 @@ func (s *state) detectKind(pos pipeline.SourcePos) (pipeline.ObjectKind, error) 
 		}
 		return pipeline.KindDefaultPrivileges, nil
 
+	case "VIRTUAL":
+		s.skipWS()
+		if w := s.readWord(); strings.ToUpper(w) != "TYPE" {
+			return pipeline.KindUnknown, pipeline.Errorf(pos, "expected TYPE after VIRTUAL, got %q", w)
+		}
+		return pipeline.KindVirtualType, nil
+
 	default:
 		return pipeline.KindUnknown, pipeline.Errorf(pos, "unrecognised declaration keyword %q", word)
 	}
@@ -864,6 +876,7 @@ func KindNames() []string {
 		pipeline.KindTSParser.String(),
 		pipeline.KindTSTemplate.String(),
 		pipeline.KindDefaultPrivileges.String(),
+		pipeline.KindVirtualType.String(),
 	}
 	sort.Strings(names)
 	return names

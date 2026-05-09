@@ -377,6 +377,59 @@ func TestArgsKey(t *testing.T) {
 	}
 }
 
+// ── VirtualType ───────────────────────────────────────────────────────────────
+
+func TestBuildVirtualType(t *testing.T) {
+	obj := buildObject(t, pipeline.KindVirtualType,
+		`status AS "active" | "pending" | "inactive"`, ``)
+	vt, ok := obj.(*ir.VirtualType)
+	if !ok {
+		t.Fatalf("expected *ir.VirtualType, got %T", obj)
+	}
+	if vt.Name != "status" {
+		t.Errorf("Name: got %q, want %q", vt.Name, "status")
+	}
+	if !strings.Contains(vt.Body, "active") {
+		t.Errorf("Body should contain 'active', got %q", vt.Body)
+	}
+	if vt.QualifiedName() != "public.status" {
+		t.Errorf("QualifiedName: got %q", vt.QualifiedName())
+	}
+}
+
+func TestBuildVirtualTypeWithComment(t *testing.T) {
+	obj := buildObject(t, pipeline.KindVirtualType,
+		`user_state AS active | inactive`,
+		`COMMENT "User lifecycle state";`)
+	vt := obj.(*ir.VirtualType)
+	if vt.Comment == nil || *vt.Comment != "User lifecycle state" {
+		t.Errorf("Comment: got %v", vt.Comment)
+	}
+}
+
+func TestBuildVirtualTypeSchemaQualified(t *testing.T) {
+	p := pgparser.New()
+	pgResult, err := p.Parse(pipeline.KindVirtualType, `billing.status AS paid | pending`, zeroPos)
+	if err != nil {
+		t.Fatalf("pg parse error: %v", err)
+	}
+	// Set an explicit schema context — should NOT override the qualified name.
+	pgResult.SchemaContext = "public"
+	bp := blockparser.New()
+	blockAST, _ := bp.Parse(pipeline.KindVirtualType, ``, zeroPos)
+	obj, buildErr := ir.NewBuilder().Build(pgResult, blockAST)
+	if buildErr != nil {
+		t.Fatalf("build error: %v", buildErr)
+	}
+	vt := obj.(*ir.VirtualType)
+	if vt.Schema != "billing" {
+		t.Errorf("Schema: got %q, want %q", vt.Schema, "billing")
+	}
+	if vt.Name != "status" {
+		t.Errorf("Name: got %q, want %q", vt.Name, "status")
+	}
+}
+
 // ── helpers ───────────────────────────────────────────────────────────────────
 
 func findCol(cols []*ir.Column, name string) *ir.Column {

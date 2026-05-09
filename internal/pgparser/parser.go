@@ -24,7 +24,11 @@ func New() *Parser { return &Parser{} }
 
 // Parse implements pipeline.PGSQLParser. It prepends the correct CREATE verb,
 // calls pg_query.Parse, and returns the parse tree wrapped in a PGParseResult.
+// Passthrough kinds (KindVirtualType) bypass pg_query and return Part1 as Raw.
 func (p *Parser) Parse(kind pipeline.ObjectKind, part1 string, pos pipeline.SourcePos) (pipeline.PGParseResult, error) {
+	if kind == pipeline.KindVirtualType {
+		return pipeline.PGParseResult{Raw: part1, Kind: kind, Pos: pos}, nil
+	}
 	sql := Reconstruct(kind, part1)
 	result, err := pg_query.Parse(sql)
 	if err != nil {

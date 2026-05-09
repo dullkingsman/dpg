@@ -143,6 +143,13 @@ func toSnapObject(obj pipeline.IRObject) *SnapObject {
 		return &SnapObject{Kind: "default_privileges", Opaque: &SnapOpaque{
 			Kind: "default_privileges", Name: o.QualifiedName(),
 		}}
+	case *ir.VirtualType:
+		return &SnapObject{Kind: "virtual_type", VirtualType: &SnapVirtualType{
+			Schema:  o.Schema,
+			Name:    o.Name,
+			Body:    o.Body,
+			Comment: o.Comment,
+		}}
 	default:
 		return nil
 	}

@@ -1,0 +1,445 @@
+package scanner
+
+import (
+	"fmt"
+	"strings"
+)
+
+// MacroDef is a named reusable body of text.
+// ParenStyle is true for MACRO name (...) definitions; false for MACRO name { ... }.
+type MacroDef struct {
+	Body       string
+	ParenStyle bool // true = paren-body (column list), false = brace-body (block items)
+}
+
+// macroStore maps macro names to their definitions.
+type macroStore map[string]MacroDef
+
+// preprocessMacros performs two passes over src:
+//  1. Collect all MACRO name (...) and MACRO name {...} definitions.
+//  2. Expand ...name spreads in the rest of the source, erroring on undefined ones.
+//
+// MACRO declarations are removed from the output. The result is valid DPG
+// source with all spreads inlined. Always calls expandMacros so that
+// undefined ...name spreads are detected even when no macros are defined.
+func preprocessMacros(src []byte) ([]byte, error) {
+	store, err := collectMacros(src)
+	if err != nil {
+		return nil, err
+	}
+	// Always run expand so that ...name with no matching macro is detected.
+	return expandMacros(src, store)
+}
+
+// collectMacros scans src for MACRO declarations and returns the store.
+// It is a read-only pass that does not modify src.
+func collectMacros(src []byte) (macroStore, error) {
+	store := macroStore{}
+	p := &macroParser{src: src}
+	for {
+		p.skipWS()
+		if p.eof() {
+			break
+		}
+		pos := p.pos
+
+		// Skip string literals and dollar-quoted strings at the top level.
+		if p.peek() == '\'' {
+			if err := p.skipSingleQuoted(); err != nil {
+				return nil, err
+			}
+			continue
+		}
+		if tag, ok := p.peekDollarTag(); ok {
+			if err := p.skipDollarQuoted(tag); err != nil {
+				return nil, err
+			}
+			continue
+		}
+		// Skip line comments.
+		if p.peek() == '-' && p.peekAt(1) == '-' {
+			for !p.eof() && p.peek() != '\n' {
+				p.advance()
+			}
+			continue
+		}
+		// Skip block comments.
+		if p.peek() == '/' && p.peekAt(1) == '*' {
+			p.advance()
+			p.advance()
+			for !p.eof() {
+				if p.peek() == '*' && p.peekAt(1) == '/' {
+					p.advance()
+					p.advance()
+					break
+				}
+				p.advance()
+			}
+			continue
+		}
+
+		// Detect MACRO keyword.
+		if !isWordStart(p.peek()) {
+			p.advance()
+			continue
+		}
+		wordStart := p.pos
+		word := p.readWord()
+		if strings.ToUpper(word) != "MACRO" {
+			// Skip to the next declaration-level boundary.
+			// We need to skip over the entire declaration so we don't
+			// accidentally pick up a MACRO keyword inside a function body.
+			p.skipDeclaration(pos, wordStart)
+			continue
+		}
+
+		// Read macro name.
+		p.skipWS()
+		if p.eof() {
+			return nil, fmt.Errorf("MACRO: expected name after MACRO keyword")
+		}
+		name := p.readWord()
+		if name == "" {
+			return nil, fmt.Errorf("MACRO: expected identifier after MACRO, got %q", p.peek())
+		}
+
+		// Read body: either (...) or {...}.
+		p.skipWS()
+		switch p.peek() {
+		case '(':
+			p.advance()
+			body, err := p.readBalanced('(', ')')
+			if err != nil {
+				return nil, fmt.Errorf("MACRO %s: %v", name, err)
+			}
+			store[name] = MacroDef{Body: body, ParenStyle: true}
+		case '{':
+			p.advance()
+			body, err := p.readBalanced('{', '}')
+			if err != nil {
+				return nil, fmt.Errorf("MACRO %s: %v", name, err)
+			}
+			store[name] = MacroDef{Body: body, ParenStyle: false}
+		default:
+			return nil, fmt.Errorf("MACRO %s: expected '(' or '{', got %q", name, p.peek())
+		}
+	}
+	return store, nil
+}
+
+// expandMacros replaces ...name occurrences in src with the corresponding macro body.
+// MACRO declarations are removed from the output.
+func expandMacros(src []byte, store macroStore) ([]byte, error) {
+	var out strings.Builder
+	p := &macroParser{src: src}
+
+	for !p.eof() {
+		// Preserve string literals verbatim.
+		if p.peek() == '\'' {
+			start := p.pos
+			if err := p.skipSingleQuoted(); err != nil {
+				return nil, err
+			}
+			out.Write(src[start:p.pos])
+			continue
+		}
+		// Preserve dollar-quoted strings verbatim.
+		if tag, ok := p.peekDollarTag(); ok {
+			start := p.pos
+			if err := p.skipDollarQuoted(tag); err != nil {
+				return nil, err
+			}
+			out.Write(src[start:p.pos])
+			continue
+		}
+		// Preserve comments verbatim.
+		if p.peek() == '-' && p.peekAt(1) == '-' {
+			start := p.pos
+			for !p.eof() && p.peek() != '\n' {
+				p.advance()
+			}
+			out.Write(src[start:p.pos])
+			continue
+		}
+		if p.peek() == '/' && p.peekAt(1) == '*' {
+			start := p.pos
+			p.advance()
+			p.advance()
+			for !p.eof() {
+				if p.peek() == '*' && p.peekAt(1) == '/' {
+					p.advance()
+					p.advance()
+					break
+				}
+				p.advance()
+			}
+			out.Write(src[start:p.pos])
+			continue
+		}
+
+		// Detect MACRO declarations — remove them from the output.
+		if isWordStart(p.peek()) {
+			c := p.pos
+			word := p.readWord()
+			if strings.ToUpper(word) == "MACRO" {
+				// Consume the macro definition entirely (name + body).
+				p.skipWS()
+				p.readWord() // name
+				p.skipWS()
+				if !p.eof() {
+					switch p.peek() {
+					case '(':
+						p.advance()
+						if _, err := p.readBalanced('(', ')'); err != nil {
+							return nil, err
+						}
+					case '{':
+						p.advance()
+						if _, err := p.readBalanced('{', '}'); err != nil {
+							return nil, err
+						}
+					}
+				}
+				// Consume optional trailing semicolon.
+				p.skipWS()
+				if !p.eof() && p.peek() == ';' {
+					p.advance()
+				}
+				continue
+			}
+			// Not MACRO — write the word verbatim.
+			out.Write(src[c:p.pos])
+			continue
+		}
+
+		// Detect spread: ...name
+		if p.peek() == '.' && p.peekAt(1) == '.' && p.peekAt(2) == '.' {
+			p.advance()
+			p.advance()
+			p.advance()
+			p.skipWS()
+			name := p.readWord()
+			if name == "" {
+				out.WriteString("...")
+				continue
+			}
+			def, ok := store[name]
+			if !ok {
+				return nil, fmt.Errorf("spread ...%s: macro %q is not defined", name, name)
+			}
+			out.WriteString(def.Body)
+			// Consume optional trailing comma/semicolon that was the spread's separator.
+			// We leave it to the caller to provide correct separators around the spread.
+			continue
+		}
+
+		out.WriteByte(src[p.pos])
+		p.advance()
+	}
+	return []byte(out.String()), nil
+}
+
+// ── macroParser ───────────────────────────────────────────────────────────────
+
+// macroParser is a minimal cursor used by the macro preprocessor.
+type macroParser struct {
+	src []byte
+	pos int
+}
+
+func (p *macroParser) eof() bool { return p.pos >= len(p.src) }
+func (p *macroParser) peek() byte {
+	if p.eof() {
+		return 0
+	}
+	return p.src[p.pos]
+}
+func (p *macroParser) peekAt(n int) byte {
+	if p.pos+n >= len(p.src) {
+		return 0
+	}
+	return p.src[p.pos+n]
+}
+func (p *macroParser) advance() {
+	if !p.eof() {
+		p.pos++
+	}
+}
+
+func (p *macroParser) skipWS() {
+	for !p.eof() {
+		ch := p.peek()
+		if ch == ' ' || ch == '\t' || ch == '\r' || ch == '\n' {
+			p.advance()
+		} else {
+			break
+		}
+	}
+}
+
+func (p *macroParser) readWord() string {
+	if p.eof() || !isWordStart(p.peek()) {
+		return ""
+	}
+	start := p.pos
+	p.advance()
+	for !p.eof() && isWordCharM(p.peek()) {
+		p.advance()
+	}
+	return string(p.src[start:p.pos])
+}
+
+// isWordCharM checks if a byte can continue an identifier (digits OK after first char).
+func isWordCharM(b byte) bool {
+	return (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') || (b >= '0' && b <= '9') || b == '_'
+}
+
+func (p *macroParser) skipSingleQuoted() error {
+	p.advance() // consume '
+	for !p.eof() {
+		ch := p.src[p.pos]
+		p.advance()
+		if ch == '\'' {
+			if !p.eof() && p.peek() == '\'' {
+				p.advance()
+			} else {
+				return nil
+			}
+		}
+	}
+	return fmt.Errorf("unterminated string literal")
+}
+
+func (p *macroParser) peekDollarTag() (string, bool) {
+	if p.peek() != '$' {
+		return "", false
+	}
+	next := p.peekAt(1)
+	if next == '$' {
+		return "$$", true
+	}
+	if !isWordStart(next) {
+		return "", false
+	}
+	for i := p.pos + 1; i < len(p.src); i++ {
+		b := p.src[i]
+		if b == '$' {
+			return string(p.src[p.pos : i+1]), true
+		}
+		if !isWordCharM(b) {
+			return "", false
+		}
+	}
+	return "", false
+}
+
+func (p *macroParser) skipDollarQuoted(tag string) error {
+	for range tag {
+		p.advance()
+	}
+	tagBytes := []byte(tag)
+	for !p.eof() {
+		if p.pos+len(tagBytes) <= len(p.src) &&
+			string(p.src[p.pos:p.pos+len(tagBytes)]) == tag {
+			for range tag {
+				p.advance()
+			}
+			return nil
+		}
+		p.advance()
+	}
+	return fmt.Errorf("unterminated dollar-quoted string %s", tag)
+}
+
+// readBalanced reads content until the matching close delimiter,
+// tracking nested open/close pairs. The opening delimiter must already be consumed.
+// Returns the content between the delimiters (not including them).
+func (p *macroParser) readBalanced(open, close byte) (string, error) {
+	start := p.pos
+	depth := 1
+	for !p.eof() {
+		ch := p.peek()
+		if ch == open {
+			depth++
+			p.advance()
+		} else if ch == close {
+			depth--
+			if depth == 0 {
+				body := string(p.src[start:p.pos])
+				p.advance() // consume closing delimiter
+				return body, nil
+			}
+			p.advance()
+		} else if ch == '\'' {
+			if err := p.skipSingleQuoted(); err != nil {
+				return "", err
+			}
+		} else if tag, ok := p.peekDollarTag(); ok {
+			if err := p.skipDollarQuoted(tag); err != nil {
+				return "", err
+			}
+		} else if ch == '-' && p.peekAt(1) == '-' {
+			for !p.eof() && p.peek() != '\n' {
+				p.advance()
+			}
+		} else if ch == '/' && p.peekAt(1) == '*' {
+			p.advance()
+			p.advance()
+			for !p.eof() {
+				if p.peek() == '*' && p.peekAt(1) == '/' {
+					p.advance()
+					p.advance()
+					break
+				}
+				p.advance()
+			}
+		} else {
+			p.advance()
+		}
+	}
+	return "", fmt.Errorf("unterminated %c...%c block", open, close)
+}
+
+// skipDeclaration advances past a non-MACRO top-level declaration.
+// This is used during macro collection to skip over declarations that might
+// contain the word "MACRO" in a body (e.g. a function named macro_helper).
+// wordStart is the position where the first keyword started.
+func (p *macroParser) skipDeclaration(declStart, _ int) {
+	// Skip to ';' or end of a { } block at depth 0.
+	// This is a best-effort skip — we track strings and dollar-quotes.
+	for !p.eof() {
+		ch := p.peek()
+		if ch == ';' {
+			p.advance()
+			return
+		}
+		if ch == '{' {
+			p.advance()
+			if _, err := p.readBalanced('{', '}'); err != nil {
+				return
+			}
+			// After a { } block, optionally a trailing ';'.
+			p.skipWS()
+			if !p.eof() && p.peek() == ';' {
+				p.advance()
+			}
+			return
+		}
+		if ch == '\'' {
+			_ = p.skipSingleQuoted()
+			continue
+		}
+		if tag, ok := p.peekDollarTag(); ok {
+			if err := p.skipDollarQuoted(tag); err != nil {
+				return
+			}
+			p.skipWS()
+			if !p.eof() && p.peek() == ';' {
+				p.advance()
+			}
+			return
+		}
+		_ = declStart
+		p.advance()
+	}
+}

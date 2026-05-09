@@ -702,6 +702,117 @@ func TestRegistered(t *testing.T) {
 	}
 }
 
+// ── VirtualType ───────────────────────────────────────────────────────────────
+
+func TestScanVirtualType(t *testing.T) {
+	obj := assertOne(t, scan(t, `VIRTUAL TYPE status AS "active" | "pending" | "inactive";`))
+	assertKind(t, obj, pipeline.KindVirtualType)
+	if !strings.Contains(obj.Part1, "status") {
+		t.Errorf("Part1 should contain 'status', got %q", obj.Part1)
+	}
+	if !strings.Contains(obj.Part1, "active") {
+		t.Errorf("Part1 should contain 'active', got %q", obj.Part1)
+	}
+}
+
+func TestScanVirtualTypeWithBlock(t *testing.T) {
+	obj := assertOne(t, scan(t,
+		`VIRTUAL TYPE user_id_variants AS integer | bigint { COMMENT "ID type union"; }`))
+	assertKind(t, obj, pipeline.KindVirtualType)
+	assertPart1Contains(t, obj, "user_id_variants")
+	assertPart2Contains(t, obj, "COMMENT")
+}
+
+func TestScanVirtualTypeSchemaQualified(t *testing.T) {
+	obj := assertOne(t, scan(t, `VIRTUAL TYPE billing.money_variant AS numeric | integer;`))
+	assertKind(t, obj, pipeline.KindVirtualType)
+	assertPart1Contains(t, obj, "billing.money_variant")
+}
+
+// ── Macro spread ──────────────────────────────────────────────────────────────
+
+func TestMacroColumnExpansion(t *testing.T) {
+	src := `
+MACRO audit_cols (
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+)
+
+TABLE orders (
+    id BIGINT PRIMARY KEY,
+    ...audit_cols
+);
+`
+	objs := scan(t, src)
+	if len(objs) != 1 {
+		t.Fatalf("expected 1 object after macro expansion, got %d", len(objs))
+	}
+	obj := objs[0]
+	assertKind(t, obj, pipeline.KindTable)
+	if !strings.Contains(obj.Part1, "created_at") {
+		t.Errorf("expanded Part1 should contain 'created_at', got %q", obj.Part1)
+	}
+	if !strings.Contains(obj.Part1, "updated_at") {
+		t.Errorf("expanded Part1 should contain 'updated_at', got %q", obj.Part1)
+	}
+}
+
+func TestMacroBlockExpansion(t *testing.T) {
+	src := `
+MACRO std_grants {
+    GRANTS { SELECT TO app_reader; INSERT, UPDATE TO app_writer; }
+}
+
+TABLE items (id BIGINT) {
+    ...std_grants
+}
+`
+	objs := scan(t, src)
+	if len(objs) != 1 {
+		t.Fatalf("expected 1 object after macro expansion, got %d", len(objs))
+	}
+	obj := objs[0]
+	assertKind(t, obj, pipeline.KindTable)
+	if !strings.Contains(obj.Part2, "app_reader") {
+		t.Errorf("expanded Part2 should contain 'app_reader', got %q", obj.Part2)
+	}
+}
+
+func TestMacroUndefinedErrors(t *testing.T) {
+	src := `TABLE orders (id BIGINT, ...missing_macro);`
+	err := scanErr(t, src)
+	if err == nil {
+		t.Fatal("expected error for undefined macro spread, got nil")
+	}
+	if !strings.Contains(err.Error(), "missing_macro") {
+		t.Errorf("error should mention 'missing_macro', got: %v", err)
+	}
+}
+
+func TestMacroMultipleSpreads(t *testing.T) {
+	src := `
+MACRO ts_cols (created_at TIMESTAMPTZ, updated_at TIMESTAMPTZ)
+MACRO soft_delete (deleted_at TIMESTAMPTZ)
+
+TABLE events (
+    id BIGINT,
+    ...ts_cols,
+    name TEXT,
+    ...soft_delete
+);
+`
+	objs := scan(t, src)
+	if len(objs) != 1 {
+		t.Fatalf("expected 1 object, got %d", len(objs))
+	}
+	p1 := objs[0].Part1
+	for _, col := range []string{"created_at", "updated_at", "deleted_at"} {
+		if !strings.Contains(p1, col) {
+			t.Errorf("Part1 should contain %q after expansion, got %q", col, p1)
+		}
+	}
+}
+
 // ── helper ───────────────────────────────────────────────────────────────────
 
 func kindList(objs []pipeline.RawObject) []string {

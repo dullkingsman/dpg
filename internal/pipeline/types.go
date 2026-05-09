@@ -63,6 +63,8 @@ const (
 	KindTSParser
 	KindTSTemplate
 	KindDefaultPrivileges
+	KindVirtualType
+	KindMacro
 )
 
 func (k ObjectKind) String() string {
@@ -139,6 +141,10 @@ func (k ObjectKind) String() string {
 		return "TEXT SEARCH TEMPLATE"
 	case KindDefaultPrivileges:
 		return "DEFAULT PRIVILEGES"
+	case KindVirtualType:
+		return "VIRTUAL TYPE"
+	case KindMacro:
+		return "MACRO"
 	default:
 		return "UNKNOWN"
 	}
@@ -197,9 +203,14 @@ type DiffOp interface {
 // PGParseResult wraps the output of the PGSQLParser.
 // Raw holds the pg_query parse result (type *pg_query.ParseResult from
 // github.com/pganalyze/pg_query_go/v5, added in Phase 4a). In Phase 1 it is nil.
+// For passthrough kinds (KindVirtualType, KindMacro), Raw holds the raw Part1
+// string rather than a pg_query parse tree.
 type PGParseResult struct {
 	Raw any
-	Pos SourcePos
+	// Kind is the ObjectKind that produced this result. Non-zero only for
+	// passthrough kinds (KindVirtualType) where Raw is not a pg_query tree.
+	Kind ObjectKind
+	Pos  SourcePos
 	// SchemaContext is the enclosing SCHEMA name when this object was declared
 	// inside a SCHEMA { } block. The IR builder uses it as a schema fallback
 	// for objects whose Part1 text has no schema qualifier.

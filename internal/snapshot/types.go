@@ -5,15 +5,16 @@ package snapshot
 type SnapObject struct {
 	Kind string `json:"kind"`
 	// One of the following is populated, depending on Kind.
-	Table     *SnapTable     `json:"table,omitempty"`
-	View      *SnapView      `json:"view,omitempty"`
-	Function  *SnapFunction  `json:"function,omitempty"`
-	Type      *SnapType      `json:"type,omitempty"`
-	Schema    *SnapSchema    `json:"schema,omitempty"`
-	Extension *SnapExtension `json:"extension,omitempty"`
-	Sequence  *SnapSequence  `json:"sequence,omitempty"`
-	Role      *SnapRole      `json:"role,omitempty"`
-	Opaque    *SnapOpaque    `json:"opaque,omitempty"`
+	Table       *SnapTable       `json:"table,omitempty"`
+	View        *SnapView        `json:"view,omitempty"`
+	Function    *SnapFunction    `json:"function,omitempty"`
+	Type        *SnapType        `json:"type,omitempty"`
+	Schema      *SnapSchema      `json:"schema,omitempty"`
+	Extension   *SnapExtension   `json:"extension,omitempty"`
+	Sequence    *SnapSequence    `json:"sequence,omitempty"`
+	Role        *SnapRole        `json:"role,omitempty"`
+	VirtualType *SnapVirtualType `json:"virtual_type,omitempty"`
+	Opaque      *SnapOpaque      `json:"opaque,omitempty"`
 }
 
 // SnapOpaque covers body-based objects: Procedure, Aggregate, Tablespace, FDW,
@@ -173,5 +174,15 @@ type SnapSequence struct {
 
 type SnapRole struct {
 	Name    string  `json:"name"`
+	Comment *string `json:"comment,omitempty"`
+}
+
+// SnapVirtualType is the snapshot form of a VIRTUAL TYPE declaration.
+// It is stored for downstream consumers (ORM generators, type checkers) but
+// never included in SQL migrations.
+type SnapVirtualType struct {
+	Schema  string  `json:"schema,omitempty"`
+	Name    string  `json:"name"`
+	Body    string  `json:"body"`
 	Comment *string `json:"comment,omitempty"`
 }

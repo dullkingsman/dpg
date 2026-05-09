@@ -25,7 +25,12 @@ func NewBuilder() *Builder { return &Builder{} }
 // Build implements pipeline.IRBuilder. It dispatches on the ObjectKind embedded
 // in pg.Pos (via the RawObject that produced pg) — but since PGParseResult does
 // not carry the ObjectKind directly, we inspect the protobuf node type instead.
+// For passthrough kinds (KindVirtualType), pg.Kind is set and pg.Raw is a string.
 func (b *Builder) Build(pg pipeline.PGParseResult, block pipeline.BlockAST) (pipeline.IRObject, error) {
+	if pg.Kind == pipeline.KindVirtualType {
+		return b.buildVirtualType(pg.Raw.(string), block, pg.Pos, pg.SchemaContext)
+	}
+
 	node := ast.FirstStmt(pg)
 	if node == nil {
 		return nil, pipeline.Errorf(pg.Pos, "empty PG parse result")
@@ -1437,4 +1442,79 @@ func blockTriggerToIR(tr pipeline.TriggerDef) *Trigger {
 		t.Condition = &tr.Condition.Text
 	}
 	return t
+}
+
+// ── VirtualType ───────────────────────────────────────────────────────────────
+
+// buildVirtualType parses a VIRTUAL TYPE declaration from the raw Part1 text.
+// Part1 format: [schema.]name AS body
+// The body (after AS) is stored verbatim for downstream consumers; DPG generates
+// no SQL for virtual types.
+func (b *Builder) buildVirtualType(part1 string, block pipeline.BlockAST, pos pipeline.SourcePos, schemaCtx string) (*VirtualType, error) {
+	// Find the standalone AS keyword by scanning word-by-word.
+	upper := strings.ToUpper(part1)
+	asIdx := -1
+	for i := 0; i < len(upper); {
+		// Skip whitespace.
+		for i < len(upper) && isWS(upper[i]) {
+			i++
+		}
+		if i >= len(upper) {
+			break
+		}
+		// If this character starts a word, read it.
+		if isWordChar(upper[i]) {
+			start := i
+			for i < len(upper) && isWordChar(upper[i]) {
+				i++
+			}
+			if upper[start:i] == "AS" {
+				asIdx = start
+				break
+			}
+		} else {
+			i++ // skip any non-word, non-whitespace character (e.g. '.')
+		}
+	}
+	if asIdx < 0 {
+		return nil, pipeline.Errorf(pos, "VIRTUAL TYPE: expected AS keyword in %q", part1)
+	}
+
+	namePart := strings.TrimSpace(part1[:asIdx])
+	body := strings.TrimSpace(part1[asIdx+2:]) // skip "AS"
+
+	// Parse the name (possibly schema-qualified: schema.name).
+	var schema, name string
+	if dotIdx := strings.LastIndex(namePart, "."); dotIdx >= 0 {
+		schema = namePart[:dotIdx]
+		name = namePart[dotIdx+1:]
+	} else {
+		name = namePart
+	}
+	if schema == "" {
+		if schemaCtx != "" {
+			schema = schemaCtx
+		} else {
+			schema = "public"
+		}
+	}
+
+	vt := &VirtualType{
+		Schema: schema,
+		Name:   name,
+		Body:   body,
+		SrcPos: pos,
+	}
+	if block.Comment != nil {
+		vt.Comment = &block.Comment.Value
+	}
+	return vt, nil
+}
+
+func isWS(b byte) bool {
+	return b == ' ' || b == '\t' || b == '\n' || b == '\r'
+}
+
+func isWordChar(b byte) bool {
+	return (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') || (b >= '0' && b <= '9') || b == '_'
 }

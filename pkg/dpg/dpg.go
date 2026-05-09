@@ -179,6 +179,11 @@ type TSTemplate = ir.TSTemplate
 // DEFAULT PRIVILEGES FOR ROLE ...).
 type DefaultPrivileges = ir.DefaultPrivileges
 
+// VirtualType is a VIRTUAL TYPE declaration — a DPG-native type annotation
+// with no backing PostgreSQL DDL. It is stored in the snapshot for downstream
+// consumers (ORM generators, type checkers) but never included in migrations.
+type VirtualType = ir.VirtualType
+
 // ── IR sub-types ──────────────────────────────────────────────────────────────
 
 // Column is a single column in a table, view, or composite type. It includes

@@ -566,6 +566,21 @@ func (t *TSTemplate) QualifiedName() string   { return qualName(t.Schema, t.Name
 func (t *TSTemplate) Pos() pipeline.SourcePos { return t.SrcPos }
 func (t *TSTemplate) irObject()               {}
 
+// VirtualType is a VIRTUAL TYPE declaration — a DPG-native type annotation that
+// has no backing PostgreSQL DDL. It is stored in the snapshot for downstream
+// consumers (ORM generators, type checkers) but never included in migrations.
+type VirtualType struct {
+	Schema  string
+	Name    string
+	Body    string // raw text after AS (e.g. "active" | "pending")
+	Comment *string
+	SrcPos  pipeline.SourcePos
+}
+
+func (v *VirtualType) QualifiedName() string   { return qualName(v.Schema, v.Name) }
+func (v *VirtualType) Pos() pipeline.SourcePos { return v.SrcPos }
+func (v *VirtualType) irObject()               {}
+
 // DefaultPrivileges is a DEFAULT PRIVILEGES declaration.
 type DefaultPrivileges struct {
 	InSchema    *string
@@ -642,4 +657,5 @@ var (
 	_ pipeline.IRObject = (*TSParser)(nil)
 	_ pipeline.IRObject = (*TSTemplate)(nil)
 	_ pipeline.IRObject = (*DefaultPrivileges)(nil)
+	_ pipeline.IRObject = (*VirtualType)(nil)
 )
