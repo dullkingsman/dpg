@@ -718,6 +718,7 @@ func introspectFunctions(ctx context.Context, conn pipeline.Querier) ([]pipeline
 	const q = `
 SELECT n.nspname, p.proname,
        pg_get_function_identity_arguments(p.oid) AS args,
+       pg_catalog.oidvectortypes(p.proargtypes)   AS arg_types,
        pg_catalog.format_type(p.prorettype, NULL) AS return_type,
        l.lanname AS language,
        CASE p.provolatile
@@ -744,13 +745,14 @@ ORDER  BY n.nspname, p.proname, args`
 	defer rs.Close()
 
 	funcIdx := make(map[string]*ir.Function)
+	procIdx := make(map[string]*ir.Procedure)
 	var out []pipeline.IRObject
 	for rs.Next() {
-		var schema, name, args, retType, lang, volatility string
+		var schema, name, args, argTypes, retType, lang, volatility string
 		var secDef, strict bool
 		var comment *string
 		var prokind, prosrc string
-		if err := rs.Scan(&schema, &name, &args, &retType, &lang, &volatility, &secDef, &strict, &comment, &prokind, &prosrc); err != nil {
+		if err := rs.Scan(&schema, &name, &args, &argTypes, &retType, &lang, &volatility, &secDef, &strict, &comment, &prokind, &prosrc); err != nil {
 			return nil, err
 		}
 		if prokind == "p" {
@@ -763,11 +765,16 @@ ORDER  BY n.nspname, p.proname, args`
 					Language: lang,
 				},
 			}
-			if args != "" {
-				for a := range strings.SplitSeq(args, ", ") {
+			// Use argTypes (type-only, from oidvectortypes) to build Args so that
+			// the QualifiedName matches argsKey() in the IR builder (which also uses
+			// type-only). Keep args (full identity args with parameter names) for the
+			// grants index key, which mirrors pg_get_function_identity_arguments.
+			if argTypes != "" {
+				for a := range strings.SplitSeq(argTypes, ", ") {
 					proc.Args = append(proc.Args, ir.FuncArg{Type: ir.TypeRef{Name: strings.TrimSpace(a)}})
 				}
 			}
+			procIdx[schema+"."+name+"("+args+")"] = proc
 			out = append(out, proc)
 		} else {
 			fn := &ir.Function{
@@ -783,8 +790,10 @@ ORDER  BY n.nspname, p.proname, args`
 					Strict:      strict,
 				},
 			}
-			if args != "" {
-				for a := range strings.SplitSeq(args, ", ") {
+			// Use argTypes (type-only) so QualifiedName matches argsKey() in IR builder.
+			// Keep args (with parameter names) for the grants index key only.
+			if argTypes != "" {
+				for a := range strings.SplitSeq(argTypes, ", ") {
 					fn.Args = append(fn.Args, ir.FuncArg{Type: ir.TypeRef{Name: strings.TrimSpace(a)}})
 				}
 			}
@@ -798,6 +807,9 @@ ORDER  BY n.nspname, p.proname, args`
 	rs.Close()
 
 	if err := introspectFunctionGrants(ctx, conn, funcIdx); err != nil {
+		return nil, err
+	}
+	if err := introspectProcedureGrants(ctx, conn, procIdx); err != nil {
 		return nil, err
 	}
 	return out, nil
@@ -1332,6 +1344,70 @@ ORDER  BY n.nspname, p.proname, args, grantee, a.privilege_type`
 		}
 		e := grants[k]
 		fn.Grants = append(fn.Grants, ir.Grant{
+			Privileges: e.privs,
+			Roles:      []string{k.grantee},
+			WithGrant:  e.grantable,
+		})
+	}
+	return nil
+}
+
+func introspectProcedureGrants(ctx context.Context, conn pipeline.Querier, idx map[string]*ir.Procedure) error {
+	const q = `
+SELECT n.nspname, p.proname,
+       pg_get_function_identity_arguments(p.oid) AS args,
+       CASE WHEN a.grantee = 0 THEN 'PUBLIC' ELSE pg_get_userbyid(a.grantee) END AS grantee,
+       a.privilege_type, a.is_grantable
+FROM   pg_proc p
+JOIN   pg_namespace n ON n.oid = p.pronamespace,
+       LATERAL aclexplode(p.proacl) a
+WHERE  p.prokind = 'p'
+AND    n.nspname NOT IN ('pg_catalog','information_schema','pg_toast')
+ORDER  BY n.nspname, p.proname, args, grantee, a.privilege_type`
+
+	rs, err := conn.QueryRows(ctx, q)
+	if err != nil {
+		return fmt.Errorf("introspect procedure grants: %w", err)
+	}
+	defer rs.Close()
+
+	type grantKey struct{ schema, name, args, grantee string }
+	type grantEntry struct {
+		privs     []string
+		grantable bool
+	}
+	grants := make(map[grantKey]*grantEntry)
+	var order []grantKey
+
+	for rs.Next() {
+		var schema, name, args, grantee, priv string
+		var grantable bool
+		if err := rs.Scan(&schema, &name, &args, &grantee, &priv, &grantable); err != nil {
+			return err
+		}
+		k := grantKey{schema, name, args, grantee}
+		e, ok := grants[k]
+		if !ok {
+			e = &grantEntry{}
+			grants[k] = e
+			order = append(order, k)
+		}
+		e.privs = append(e.privs, priv)
+		if grantable {
+			e.grantable = true
+		}
+	}
+	if err := rs.Err(); err != nil {
+		return err
+	}
+
+	for _, k := range order {
+		proc, ok := idx[k.schema+"."+k.name+"("+k.args+")"]
+		if !ok {
+			continue
+		}
+		e := grants[k]
+		proc.Grants = append(proc.Grants, ir.Grant{
 			Privileges: e.privs,
 			Roles:      []string{k.grantee},
 			WithGrant:  e.grantable,

@@ -64,11 +64,14 @@ func toSnapObject(obj pipeline.IRObject) *SnapObject {
 	case *ir.Role:
 		return &SnapObject{Kind: "role", Role: toSnapRole(o)}
 	case *ir.Procedure:
-		hash := hashBodyStr(o.Attrs.Body)
-		return &SnapObject{Kind: "procedure", Opaque: &SnapOpaque{
+		so := &SnapOpaque{
 			Kind: "procedure", Schema: o.Schema, Name: o.Name,
-			Args: procArgsKey(o.Args), BodyHash: hash, Comment: o.Comment,
-		}}
+			Args: procArgsKey(o.Args), BodyHash: o.BodyHash, Comment: o.Comment,
+		}
+		for _, g := range o.Grants {
+			so.Grants = append(so.Grants, toSnapGrant(g))
+		}
+		return &SnapObject{Kind: "procedure", Opaque: so}
 	case *ir.Aggregate:
 		so := &SnapOpaque{
 			Kind: "aggregate", Schema: o.Schema, Name: o.Name,

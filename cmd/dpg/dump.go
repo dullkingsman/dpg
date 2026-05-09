@@ -379,7 +379,30 @@ func renderObjectDPG(b *strings.Builder, obj pipeline.IRObject, fmtOpts format.O
 		}
 
 	case *ir.Sequence:
-		fmt.Fprintf(b, "\n%s %s;\n", kw("SEQUENCE"), o.Name)
+		b.WriteString("\n")
+		b.WriteString(kw("SEQUENCE"))
+		b.WriteString(" ")
+		b.WriteString(o.Name)
+		if o.IncrementBy != nil {
+			fmt.Fprintf(b, " %s %d", kw("INCREMENT BY"), *o.IncrementBy)
+		}
+		if o.MinValue != nil {
+			fmt.Fprintf(b, " %s %d", kw("MINVALUE"), *o.MinValue)
+		}
+		if o.MaxValue != nil {
+			fmt.Fprintf(b, " %s %d", kw("MAXVALUE"), *o.MaxValue)
+		}
+		if o.StartValue != nil {
+			fmt.Fprintf(b, " %s %d", kw("START WITH"), *o.StartValue)
+		}
+		if o.Cache != nil {
+			fmt.Fprintf(b, " %s %d", kw("CACHE"), *o.Cache)
+		}
+		if o.Cycle {
+			b.WriteString(" ")
+			b.WriteString(kw("CYCLE"))
+		}
+		b.WriteString(";\n")
 
 	case *ir.Role:
 		fmt.Fprintf(b, "\n%s %s;\n", kw("ROLE"), o.Name)

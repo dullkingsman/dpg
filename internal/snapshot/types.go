@@ -26,7 +26,7 @@ type SnapOpaque struct {
 	Args     string      `json:"args,omitempty"` // type-only arg list (proc/agg identity)
 	BodyHash string      `json:"body_hash,omitempty"`
 	Comment  *string     `json:"comment,omitempty"`
-	Grants   []SnapGrant `json:"grants,omitempty"` // aggregate only
+	Grants   []SnapGrant `json:"grants,omitempty"` // aggregate and procedure
 }
 
 type SnapSchema struct {

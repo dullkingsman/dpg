@@ -565,6 +565,16 @@ func createOpaque(name, body, kind string, pos pipeline.SourcePos) ([]pipeline.D
 	return nil, fmt.Errorf("%s %s: body not captured; define it explicitly in a .dpg source file", kind, name)
 }
 
+func buildProcedureSignature(o *ir.Procedure) string {
+	args := make([]string, 0, len(o.Args))
+	for _, a := range o.Args {
+		if a.Mode != "OUT" && a.Mode != "TABLE" {
+			args = append(args, a.Type.String())
+		}
+	}
+	return fmt.Sprintf("%s(%s)", qualIdent(o.Schema, o.Name), strings.Join(args, ", "))
+}
+
 func createProcedure(o *ir.Procedure) []pipeline.DiffOp {
 	var b strings.Builder
 	b.WriteString("CREATE OR REPLACE PROCEDURE ")
@@ -590,9 +600,16 @@ func createProcedure(o *ir.Procedure) []pipeline.DiffOp {
 	b.WriteString(o.Attrs.Body)
 	b.WriteString("$$;")
 	ops := []pipeline.DiffOp{safeOp(b.String(), o.SrcPos)}
+	sig := buildProcedureSignature(o)
 	if o.Comment != nil {
-		sig := qualIdent(o.Schema, o.Name) + "("
-		ops = append(ops, safeOp(fmt.Sprintf("COMMENT ON PROCEDURE %s IS %s;", sig+")", quoteLit(*o.Comment)), o.SrcPos))
+		ops = append(ops, safeOp(fmt.Sprintf("COMMENT ON PROCEDURE %s IS %s;", sig, quoteLit(*o.Comment)), o.SrcPos))
+	}
+	for _, g := range o.Grants {
+		sql := fmt.Sprintf("GRANT %s ON PROCEDURE %s TO %s", privStr(g.Privileges), sig, roleList(g.Roles))
+		if g.WithGrant {
+			sql += " WITH GRANT OPTION"
+		}
+		ops = append(ops, safeOp(sql+";", o.SrcPos))
 	}
 	return ops
 }
@@ -1453,13 +1470,24 @@ func diffOpaqueIR(name, body string, _ *string, snap *snapshot.SnapOpaque, pos p
 }
 
 func diffProcedure(o *ir.Procedure, snap *snapshot.SnapOpaque) ([]pipeline.DiffOp, error) {
-	// Skip body comparison when either side has no hash (introspected live snap
-	// produced a hash but desired IR may not, or vice versa for live-only runs).
+	sig := buildProcedureSignature(o)
+	pos := o.SrcPos
+
+	// Body changed: re-create via CREATE OR REPLACE (includes comment and grants).
 	if o.BodyHash != "" && snap.BodyHash != "" && o.BodyHash != snap.BodyHash {
-		ops := createProcedure(o)
-		return ops, nil
+		return createProcedure(o), nil
 	}
-	return nil, nil
+
+	var ops []pipeline.DiffOp
+	if !ptrEq(o.Comment, snap.Comment) {
+		if o.Comment != nil {
+			ops = append(ops, safeOp(fmt.Sprintf("COMMENT ON PROCEDURE %s IS %s;", sig, quoteLit(*o.Comment)), pos))
+		} else {
+			ops = append(ops, safeOp(fmt.Sprintf("COMMENT ON PROCEDURE %s IS NULL;", sig), pos))
+		}
+	}
+	ops = append(ops, diffGrantSet(snap.Grants, o.Grants, "PROCEDURE "+sig, pos)...)
+	return ops, nil
 }
 
 func diffExtension(o *ir.Extension, snap *snapshot.SnapExtension) []pipeline.DiffOp {
@@ -1616,7 +1644,10 @@ func diffFunction(o *ir.Function, snap *snapshot.SnapFunction) []pipeline.DiffOp
 	pos := o.SrcPos
 	sig := buildFuncSignature(o)
 
-	if o.BodyHash != snap.BodyHash || o.Attrs.Language != snap.Language || o.Attrs.Volatility != snap.Volatility {
+	// Re-create if: desired has a hash and it differs from the snapshot (including
+	// "" when the snapshot predates body-hash tracking), or language/volatility changed.
+	if (o.BodyHash != "" && o.BodyHash != snap.BodyHash) ||
+		o.Attrs.Language != snap.Language || o.Attrs.Volatility != snap.Volatility {
 		ops = append(ops, safeOp(buildFunctionSQL(o), pos))
 	}
 	if !ptrEq(o.Comment, snap.Comment) {

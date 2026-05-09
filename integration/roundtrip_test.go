@@ -403,6 +403,131 @@ VIEW active_users AS
 	}
 }
 
+// TestRoundtripFunction verifies that a function applies without error, that
+// introspection returns a matching body hash, and that a second plan produces
+// zero drift ops.
+func TestRoundtripFunction(t *testing.T) {
+	connStr := testpg.Start(t)
+	ctx := context.Background()
+
+	differ := diff.New()
+	emitter := emit.New()
+	applyExec := executor.New()
+	ci := introspect.New()
+	store := newMemStore()
+
+	conn, err := executor.Connect(ctx, connStr)
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	defer conn.Close(ctx)
+
+	schema := `FUNCTION add_one(n integer) RETURNS integer
+LANGUAGE sql AS $$
+    SELECT n + 1;
+$$ {}`
+
+	dir := t.TempDir()
+	f := filepath.Join(dir, "schema.dpg")
+	if err := os.WriteFile(f, []byte(schema), 0o644); err != nil {
+		t.Fatalf("write schema: %v", err)
+	}
+
+	applyFixture(t, ctx, conn, []string{f}, dir, differ, emitter, applyExec, store)
+
+	liveObjects, err := ci.Introspect(ctx, conn)
+	if err != nil {
+		t.Fatalf("introspect: %v", err)
+	}
+	snap, _ := store.Load("test", "dpgtest")
+	var managedLive []pipeline.IRObject
+	for _, obj := range liveObjects {
+		if _, ok := snap.Objects[obj.QualifiedName()]; ok {
+			managedLive = append(managedLive, obj)
+		}
+	}
+	liveSnap := &pipeline.Snapshot{}
+	if err := snapshot.Populate(liveSnap, managedLive); err != nil {
+		t.Fatalf("populate live snapshot: %v", err)
+	}
+
+	desired, err := compiler.Compile([]string{f}, dir, pipeline.Default)
+	if err != nil {
+		t.Fatalf("compile: %v", err)
+	}
+	driftOps, err := differ.Diff(desired, liveSnap)
+	if err != nil {
+		t.Fatalf("drift diff: %v", err)
+	}
+	if len(driftOps) != 0 {
+		t.Errorf("drift after function apply (%d ops):", len(driftOps))
+		for _, op := range driftOps {
+			t.Errorf("  [%s] %s", op.Safety(), op.SQL())
+		}
+	}
+}
+
+// TestRoundtripSequence verifies that a standalone sequence with explicit
+// parameters applies cleanly and introspects back to the same params (zero
+// drift after apply).
+func TestRoundtripSequence(t *testing.T) {
+	connStr := testpg.Start(t)
+	ctx := context.Background()
+
+	differ := diff.New()
+	emitter := emit.New()
+	applyExec := executor.New()
+	ci := introspect.New()
+	store := newMemStore()
+
+	conn, err := executor.Connect(ctx, connStr)
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	defer conn.Close(ctx)
+
+	schema := `SEQUENCE order_seq INCREMENT BY 10 MINVALUE 10 MAXVALUE 10000 START WITH 10 CACHE 5;`
+
+	dir := t.TempDir()
+	f := filepath.Join(dir, "schema.dpg")
+	if err := os.WriteFile(f, []byte(schema), 0o644); err != nil {
+		t.Fatalf("write schema: %v", err)
+	}
+
+	applyFixture(t, ctx, conn, []string{f}, dir, differ, emitter, applyExec, store)
+
+	liveObjects, err := ci.Introspect(ctx, conn)
+	if err != nil {
+		t.Fatalf("introspect: %v", err)
+	}
+	snap, _ := store.Load("test", "dpgtest")
+	var managedLive []pipeline.IRObject
+	for _, obj := range liveObjects {
+		if _, ok := snap.Objects[obj.QualifiedName()]; ok {
+			managedLive = append(managedLive, obj)
+		}
+	}
+	liveSnap := &pipeline.Snapshot{}
+	if err := snapshot.Populate(liveSnap, managedLive); err != nil {
+		t.Fatalf("populate live snapshot: %v", err)
+	}
+
+	desired, err := compiler.Compile([]string{f}, dir, pipeline.Default)
+	if err != nil {
+		t.Fatalf("compile: %v", err)
+	}
+	driftOps, err := differ.Diff(desired, liveSnap)
+	if err != nil {
+		t.Fatalf("drift diff: %v", err)
+	}
+	if len(driftOps) != 0 {
+		t.Errorf("drift after sequence apply (%d ops):", len(driftOps))
+		for _, op := range driftOps {
+			t.Errorf("  [%s] %s", op.Safety(), op.SQL())
+		}
+	}
+}
+
 // applyFixture compiles files, diffs against the current store snapshot, and
 // applies the resulting migration. The store snapshot is updated on success.
 func applyFixture(
