@@ -127,7 +127,7 @@ func (d *Differ) Diff(desired []pipeline.IRObject, snap *pipeline.Snapshot) ([]p
 		if err := json.Unmarshal(raw, &so); err != nil {
 			return nil, fmt.Errorf("diff: corrupted snapshot entry %q: %w", key, err)
 		}
-		ops = append(ops, dropObject(key, &so)...)
+		ops = append(ops, dropObject(&so)...)
 	}
 
 	// Pass 3: create new or alter existing objects.
@@ -339,7 +339,7 @@ func diffGrantSet(
 
 // ── DROP operations ───────────────────────────────────────────────────────────
 
-func dropObject(key string, so *snapshot.SnapObject) []pipeline.DiffOp {
+func dropObject(so *snapshot.SnapObject) []pipeline.DiffOp {
 	zero := pipeline.SourcePos{}
 	switch so.Kind {
 	case "schema":
@@ -566,13 +566,7 @@ func createOpaque(name, body, kind string, pos pipeline.SourcePos) ([]pipeline.D
 }
 
 func buildProcedureSignature(o *ir.Procedure) string {
-	args := make([]string, 0, len(o.Args))
-	for _, a := range o.Args {
-		if a.Mode != "OUT" && a.Mode != "TABLE" {
-			args = append(args, a.Type.String())
-		}
-	}
-	return fmt.Sprintf("%s(%s)", qualIdent(o.Schema, o.Name), strings.Join(args, ", "))
+	return fmt.Sprintf("%s(%s)", qualIdent(o.Schema, o.Name), ir.ArgsKey(o.Args))
 }
 
 func createProcedure(o *ir.Procedure) []pipeline.DiffOp {
@@ -615,13 +609,7 @@ func createProcedure(o *ir.Procedure) []pipeline.DiffOp {
 }
 
 func buildAggregateSignature(o *ir.Aggregate) string {
-	args := make([]string, 0, len(o.Args))
-	for _, a := range o.Args {
-		if a.Mode != "OUT" && a.Mode != "TABLE" {
-			args = append(args, a.Type.String())
-		}
-	}
-	return fmt.Sprintf("%s(%s)", qualIdent(o.Schema, o.Name), strings.Join(args, ", "))
+	return fmt.Sprintf("%s(%s)", qualIdent(o.Schema, o.Name), ir.ArgsKey(o.Args))
 }
 
 func createAggregate(o *ir.Aggregate) ([]pipeline.DiffOp, error) {
@@ -1133,13 +1121,7 @@ func createFunction(o *ir.Function) []pipeline.DiffOp {
 }
 
 func buildFuncSignature(o *ir.Function) string {
-	args := make([]string, 0, len(o.Args))
-	for _, a := range o.Args {
-		if a.Mode != "OUT" && a.Mode != "TABLE" {
-			args = append(args, a.Type.String())
-		}
-	}
-	return fmt.Sprintf("%s(%s)", qualIdent(o.Schema, o.Name), strings.Join(args, ", "))
+	return fmt.Sprintf("%s(%s)", qualIdent(o.Schema, o.Name), ir.ArgsKey(o.Args))
 }
 
 func buildFunctionSQL(o *ir.Function) string {
@@ -2064,7 +2046,7 @@ func diffColumns(tbl string, o *ir.Table, snap *snapshot.SnapTable) ([]pipeline.
 		if !exists {
 			// ADD COLUMN
 			var b strings.Builder
-			b.WriteString(fmt.Sprintf("ALTER TABLE %s ADD COLUMN %s %s", tbl, quoteIdent(col.Name), col.Type.String()))
+			fmt.Fprintf(&b, "ALTER TABLE %s ADD COLUMN %s %s", tbl, quoteIdent(col.Name), col.Type.String())
 			if col.NotNull {
 				b.WriteString(" NOT NULL")
 			}
@@ -2326,7 +2308,7 @@ func localConstraintCols(expr string) []string {
 	}
 	inside := expr[open+1 : close]
 	var names []string
-	for _, part := range strings.Split(inside, ",") {
+	for part := range strings.SplitSeq(inside, ",") {
 		part = strings.TrimSpace(part)
 		// Strip optional sort/nulls suffixes that may appear on PK/UNIQUE.
 		if sp := strings.IndexAny(part, " \t"); sp != -1 {
