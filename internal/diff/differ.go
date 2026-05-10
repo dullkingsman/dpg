@@ -1977,6 +1977,23 @@ func diffTableInherits(tbl string, o *ir.Table, snap *snapshot.SnapTable, pos pi
 func diffColumns(tbl string, o *ir.Table, snap *snapshot.SnapTable) ([]pipeline.DiffOp, map[string]string, map[string]bool, error) {
 	var ops []pipeline.DiffOp
 
+	// PostgreSQL PRIMARY KEY implies NOT NULL. Snapshots written before this
+	// inference was applied may have not_null=false for PK columns; normalise
+	// them here so we don't emit a spurious SET NOT NULL on every plan run.
+	pkCols := make(map[string]bool)
+	for _, sc := range snap.Constraints {
+		if sc.Type == "PRIMARY KEY" {
+			for _, col := range localConstraintCols(sc.Expr) {
+				pkCols[col] = true
+			}
+		}
+	}
+	for i := range snap.Columns {
+		if pkCols[snap.Columns[i].Name] {
+			snap.Columns[i].NotNull = true
+		}
+	}
+
 	snapByName := make(map[string]*snapshot.SnapColumn, len(snap.Columns))
 	for i := range snap.Columns {
 		snapByName[snap.Columns[i].Name] = &snap.Columns[i]

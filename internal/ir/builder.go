@@ -286,6 +286,7 @@ func (b *Builder) buildColumn(cd *pg_query.ColumnDef, pos pipeline.SourcePos) (*
 			col.NotNull = true // identity columns are always implicitly NOT NULL in PG
 
 		case pg_query.ConstrType_CONSTR_PRIMARY:
+			col.NotNull = true // PRIMARY KEY implies NOT NULL in PostgreSQL
 			// Inline PRIMARY KEY — promote to a table-level constraint.
 			tc := &Constraint{
 				Name:              cst.Conname,

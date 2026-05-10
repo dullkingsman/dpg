@@ -137,6 +137,21 @@ func TestBuildSchemaQualifiedTable(t *testing.T) {
 	}
 }
 
+func TestBuildPrimaryKeyImpliesNotNull(t *testing.T) {
+	obj := buildObject(t, pipeline.KindTable,
+		`facilities (id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY)`,
+		``,
+	)
+	tbl := obj.(*ir.Table)
+	col := findCol(tbl.Columns, "id")
+	if col == nil {
+		t.Fatal("id column not found")
+	}
+	if !col.NotNull {
+		t.Error("expected NotNull=true for inline PRIMARY KEY column")
+	}
+}
+
 func TestBuildIdentityColumn(t *testing.T) {
 	obj := buildObject(t, pipeline.KindTable,
 		`orders (id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY)`,
