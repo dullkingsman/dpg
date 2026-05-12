@@ -144,6 +144,66 @@ AS $$
 $$;
 ```
 
+## Macro Preprocessing
+
+DPG includes a source-level macro preprocessor that runs before any parsing. Macros define named, reusable fragments that can be spread at any point in a column list or block body.
+
+### Defining macros
+
+```
+MACRO common_timestamps (
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at TIMESTAMPTZ
+)
+
+MACRO soft_delete_cols (
+    deleted_at TIMESTAMPTZ,
+    deleted_by UUID
+)
+
+MACRO standard_grants {
+    GRANTS {
+        SELECT, INSERT, UPDATE TO app_service;
+        SELECT                 TO app_readonly;
+    }
+    REVOCATIONS { ALL PRIVILEGES FROM PUBLIC; }
+}
+```
+
+Two body styles:
+
+| Style | Syntax | Use inside |
+|---|---|---|
+| Paren-body | `MACRO name (...)` | `( )` column list |
+| Brace-body | `MACRO name {...}` | `{ }` block |
+
+`MACRO` declarations are removed from the compiler output — they generate no SQL.
+
+### Spreading a macro
+
+The `...name` spread operator expands a macro inline:
+
+```
+TABLE users (
+    id UUID NOT NULL DEFAULT gen_random_uuid(),
+    ...common_timestamps,
+    ...soft_delete_cols,
+    CONSTRAINT pk_users PRIMARY KEY (id)
+)
+{
+    ...standard_grants
+}
+```
+
+Multiple macros can be spread in any order, and hand-written content may appear before or after each spread.
+
+### Rules
+
+- Spreading an undefined macro name is a **compile-time error**.
+- Macros are **file-scoped** — a macro defined in one `.dpg` file is not visible in other files.
+- `MACRO` is a DPG preprocessor keyword; it does not violate the No-Verb Mandate.
+- Paren-body macros may only be spread inside `( )` lists; brace-body macros may only be spread inside `{ }` blocks.
+
 ## Dollar-Quote Parsing
 
 The parser handles `$$...$$` and `$tag$...$tag$` as opaque string delimiters. When the parser encounters `AS $$`, it scans forward for the matching `$$` token. Everything between the delimiters is treated as opaque text — no brace counting, no keyword interpretation, no SQL parsing. Named dollar-quoting (`$body$`, `$func$`, `$sql$`, any `$identifier$`) is fully supported and the parser matches opening and closing tags exactly.
@@ -216,6 +276,39 @@ You never need to declare objects in order or think about ordering within a file
 **Circular foreign keys:** Two tables with mutual FKs require at least one FK to be `DEFERRABLE`. The compiler emits both tables first, then the circular FK as a subsequent `ALTER TABLE ADD CONSTRAINT ... DEFERRABLE`. If a cycle exists with no `DEFERRABLE` FK, the compiler errors with a message identifying the cycle.
 
 **Cross-file references:** Objects may freely reference objects declared in other files within the same database directory tree. All references are resolved across the full merged object graph before sorting.
+
+## Constraint Inlining in Compiler Output
+
+When the compiler generates a `CREATE TABLE` statement, it normalizes single-column constraints to their inline form. This applies regardless of how the constraint was written in source (inline or table-level):
+
+| Source input | Compiler output |
+|---|---|
+| `CONSTRAINT pk PRIMARY KEY (id)` | `id BIGINT ... CONSTRAINT "pk" PRIMARY KEY` |
+| `id BIGINT PRIMARY KEY` | `id BIGINT ... PRIMARY KEY` |
+| `CONSTRAINT uq UNIQUE (email)` | `email TEXT ... CONSTRAINT "uq" UNIQUE` |
+| `REFERENCES users (id) ON DELETE CASCADE` | `user_id BIGINT REFERENCES "public"."users" ("id") ON DELETE CASCADE` |
+
+Multi-column constraints always remain table-level:
+
+```sql
+CONSTRAINT pk_order_items PRIMARY KEY (order_id, product_id)
+```
+
+Constraint names are preserved — a named constraint inlined into the column definition uses `CONSTRAINT "name" PRIMARY KEY` syntax. Subsequent migrations that DROP or ALTER the constraint use the name as normal.
+
+## PRIMARY KEY Implies NOT NULL
+
+PostgreSQL enforces that every `PRIMARY KEY` column is implicitly `NOT NULL`. The compiler applies the same rule:
+
+- Writing `NOT NULL` on a PK column in source is accepted but redundant — the compiler will not emit it.
+- No spurious `ALTER COLUMN SET NOT NULL` is generated for PK columns during diff.
+- For multi-column primary keys, all participating columns are treated as implicitly NOT NULL.
+
+```
+-- Both are equivalent — compiler outputs the same CREATE TABLE
+TABLE t (id BIGINT PRIMARY KEY);
+TABLE t (id BIGINT NOT NULL PRIMARY KEY);
+```
 
 ## Schema Scoping Within a Database
 

@@ -11,6 +11,7 @@ Complete reference for every object type DPG can declare. All objects follow the
 - [Range TYPE](#range-type)
 - [Domain TYPE](#domain-type)
 - [Base TYPE](#base-type)
+- [VIRTUAL TYPE](#virtual-type)
 - [TABLE](#table)
   - [Column definitions](#column-definitions)
   - [COLUMN block](#column-block)
@@ -193,6 +194,38 @@ Base types are passthrough — the compiler does not perform structural diffing.
 
 ---
 
+## VIRTUAL TYPE
+
+Virtual types are DPG-native and have no PostgreSQL equivalent. They generate **no SQL** — they exist solely to carry type metadata for downstream consumers such as ORM generators, GraphQL schema builders, and type-safe query builders that read the DPG snapshot or IR.
+
+```
+VIRTUAL TYPE user_state AS "active" | "suspended" | "deleted";
+
+VIRTUAL TYPE payment_method AS
+    { kind: "card", last4: string, brand: string }
+    | { kind: "bank_ach", routing: string }
+    | { kind: "wallet" };
+{
+    COMMENT "Payment method discriminated union for the billing SDK";
+}
+
+SCHEMA billing {
+    VIRTUAL TYPE invoice_line AS { description: string, amount: number };
+}
+```
+
+**Rules:**
+
+- The name may be schema-qualified (`schema.name`); defaults to `public`.
+- The body after `AS` is arbitrary text stored verbatim. The compiler does not interpret it.
+- `dpg plan`, `dpg apply`, and `dpg diff` produce zero SQL for virtual type additions, modifications, or removals.
+- Virtual types appear in the snapshot (`kind: "virtual_type"`) for round-trip consistency — tools consuming the snapshot can read them.
+- The `{ }` block accepts only `COMMENT`.
+
+**Typical use:** Define a TypeScript union type, a Zod schema shape, or a JSON Schema discriminator in `.dpg` source alongside the table it annotates. A code-generator reads the DPG snapshot and emits the corresponding language-level type.
+
+---
+
 ## TABLE
 
 The most feature-rich object in DPG. Part 1 is a full PostgreSQL `CREATE TABLE` column list; Part 2 is the `{ }` block holding indexes, policies, triggers, grants, comments, and column-level attributes.
@@ -278,9 +311,9 @@ TABLE products (
     quantity    INTEGER         NOT NULL DEFAULT 0,
     -- text types
     name        TEXT            NOT NULL,
-    slug        VARCHAR(255)    NOT NULL,
+    slug        VARCHAR(255)    NOT NULL UNIQUE,
     -- numeric
-    price       NUMERIC(10, 2)  NOT NULL,
+    price       NUMERIC(10, 2)  NOT NULL CHECK (price >= 0),
     -- boolean
     active      BOOLEAN         NOT NULL DEFAULT true,
     -- timestamps
@@ -292,14 +325,16 @@ TABLE products (
     metadata    JSONB,
     -- generated column
     name_lower  TEXT            GENERATED ALWAYS AS (lower(name)) STORED,
-    -- constraints inline
-    CONSTRAINT pk_products      PRIMARY KEY (id),
-    CONSTRAINT uq_products_slug UNIQUE (slug),
-    CONSTRAINT ck_price_pos     CHECK (price >= 0)
+    -- single-column constraints inline (preferred)
+    CONSTRAINT pk_products PRIMARY KEY (id)
 );
 ```
 
-All PostgreSQL built-in types are valid. Custom types (ENUM, composite, domain) defined in the same database are also valid.
+All PostgreSQL built-in types are valid. Custom types (ENUM, composite, domain, virtual) defined in the same database are also valid.
+
+**Inline vs. table-level constraints:** Single-column `PRIMARY KEY`, `UNIQUE`, `REFERENCES`, and `CHECK` may be written directly on the column or as a separate `CONSTRAINT` entry in the `( )` list — both forms are accepted. The compiler always emits single-column constraints inline in generated `CREATE TABLE` SQL. Multi-column constraints must be table-level.
+
+**PRIMARY KEY implies NOT NULL:** Writing `NOT NULL` on a `PRIMARY KEY` column is accepted but redundant. The compiler does not emit a separate `NOT NULL` clause for PK columns and will not generate `ALTER COLUMN SET NOT NULL` for them.
 
 ### COLUMN block
 
@@ -1298,6 +1333,7 @@ For the complete coverage matrix with diff strategy details, see Appendix A of t
 | Range types | DROP+CREATE on any change |
 | Domain types | Structured |
 | Base types | Passthrough (text equality) |
+| Virtual types | No SQL generated; stored in snapshot only |
 | Schemas | `ALTER SCHEMA RENAME` via `RENAMED FROM` |
 | Extensions | `CREATE EXTENSION IF NOT EXISTS` |
 | Sequences | Most options in-place; ownership change is CAUTION |
