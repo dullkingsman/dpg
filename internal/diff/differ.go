@@ -773,6 +773,73 @@ func createTable(o *ir.Table) []pipeline.DiffOp {
 	}
 	b.WriteString(qualIdent(o.Schema, o.Name))
 	b.WriteString(" (")
+
+	// Classify constraints: single-column PK/UNIQUE/FK and column-promoted CHECK
+	// are inlined into their column; everything else stays table-level.
+	// A column may accumulate multiple inline clauses (e.g. UNIQUE + REFERENCES
+	// + CHECK), so inlineFor holds a slice ordered by declaration.
+	// pkColSet tracks all PK columns so we can suppress redundant NOT NULL
+	// (PRIMARY KEY already implies NOT NULL in PostgreSQL).
+	type inlineKW struct {
+		name    string // CONSTRAINT name, may be ""
+		keyword string // e.g. "PRIMARY KEY", "UNIQUE", "REFERENCES ...", "CHECK (...)"
+	}
+	inlineFor := make(map[string][]inlineKW) // colName → ordered inline clauses
+	pkColSet := make(map[string]bool)        // any PK column (single- or multi-)
+	skipIdx := make(map[int]bool)            // constraint index to omit at table level
+
+	for i, cst := range o.Constraints {
+		cols := localConstraintCols(cst.Expr)
+		switch cst.Type {
+		case "PRIMARY KEY":
+			for _, c := range cols {
+				pkColSet[c] = true
+			}
+			if len(cols) == 1 {
+				inlineFor[cols[0]] = append(inlineFor[cols[0]], inlineKW{name: cst.Name, keyword: "PRIMARY KEY"})
+				skipIdx[i] = true
+			}
+		case "UNIQUE":
+			if len(cols) == 1 {
+				// Skip if column already carries PRIMARY KEY — UNIQUE is redundant.
+				hasPK := false
+				for _, kw := range inlineFor[cols[0]] {
+					if kw.keyword == "PRIMARY KEY" {
+						hasPK = true
+						break
+					}
+				}
+				if !hasPK {
+					kw := "UNIQUE"
+					if strings.Contains(strings.ToUpper(cst.Expr), "NULLS NOT DISTINCT") {
+						kw = "UNIQUE NULLS NOT DISTINCT"
+					}
+					inlineFor[cols[0]] = append(inlineFor[cols[0]], inlineKW{name: cst.Name, keyword: kw})
+					skipIdx[i] = true
+				}
+			}
+		case "FOREIGN KEY":
+			// Single-column FK: strip "FOREIGN KEY ("col") " prefix, keep "REFERENCES ...".
+			// The REFERENCES suffix includes ON DELETE/UPDATE actions and DEFERRABLE.
+			if len(cols) == 1 {
+				upper := strings.ToUpper(cst.Expr)
+				if refIdx := strings.Index(upper, "REFERENCES"); refIdx > 0 {
+					inlineFor[cols[0]] = append(inlineFor[cols[0]], inlineKW{name: cst.Name, keyword: cst.Expr[refIdx:]})
+					skipIdx[i] = true
+				}
+			}
+		case "CHECK":
+			// Inline CHECK when Columns is populated — that means the constraint was
+			// promoted from a column definition (buildColumn sets Columns=[colname]).
+			// Table-level CHECK constraints (Columns empty) stay table-level because
+			// we cannot safely infer which column they belong to from the expression.
+			if len(cst.Columns) == 1 {
+				inlineFor[cst.Columns[0]] = append(inlineFor[cst.Columns[0]], inlineKW{name: cst.Name, keyword: cst.Expr})
+				skipIdx[i] = true
+			}
+		}
+	}
+
 	for i, col := range o.Columns {
 		if i > 0 {
 			b.WriteString(",")
@@ -781,7 +848,8 @@ func createTable(o *ir.Table) []pipeline.DiffOp {
 		b.WriteString(quoteIdent(col.Name))
 		b.WriteString(" ")
 		b.WriteString(col.Type.String())
-		if col.NotNull {
+		// Suppress NOT NULL for PK columns — PRIMARY KEY already implies it.
+		if col.NotNull && !pkColSet[col.Name] {
 			b.WriteString(" NOT NULL")
 		}
 		if col.Default != nil {
@@ -800,8 +868,19 @@ func createTable(o *ir.Table) []pipeline.DiffOp {
 			b.WriteString(col.Generated.Expr)
 			b.WriteString(") STORED")
 		}
+		for _, spec := range inlineFor[col.Name] {
+			if spec.name != "" {
+				b.WriteString(" CONSTRAINT ")
+				b.WriteString(quoteIdent(spec.name))
+			}
+			b.WriteString(" ")
+			b.WriteString(spec.keyword)
+		}
 	}
-	for _, cst := range o.Constraints {
+	for i, cst := range o.Constraints {
+		if skipIdx[i] {
+			continue
+		}
 		b.WriteString(",\n    ")
 		if cst.Name != "" {
 			b.WriteString("CONSTRAINT ")

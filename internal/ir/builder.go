@@ -316,6 +316,21 @@ func (b *Builder) buildColumn(cd *pg_query.ColumnDef, pos pipeline.SourcePos) (*
 			tc.Expr = "UNIQUE " + nd + "(" + quoteIdent(cd.Colname) + ")"
 			promoted = append(promoted, tc)
 
+		case pg_query.ConstrType_CONSTR_CHECK:
+			// Inline CHECK — promote to a table-level constraint.
+			// Columns is set to [colname] so createTable can inline it back.
+			if cst.RawExpr != nil {
+				expr := nodeToText(cst.RawExpr)
+				tc := &Constraint{
+					Name:    cst.Conname,
+					Type:    "CHECK",
+					Columns: []string{cd.Colname},
+					Expr:    "CHECK (" + expr + ")",
+					Pos:     pos,
+				}
+				promoted = append(promoted, tc)
+			}
+
 		case pg_query.ConstrType_CONSTR_FOREIGN:
 			// Inline REFERENCES — promote to a table-level FK constraint.
 			refCols := nodeListToNames(cst.PkAttrs)
