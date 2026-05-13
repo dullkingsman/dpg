@@ -1,7 +1,7 @@
 ---
 title: "CLI Reference"
 description: "All dpg commands with flags and examples."
-weight: 3
+weight: 7
 ---
 
 The `dpg` CLI is the primary interface to the DPG compiler and migration engine. All commands accept the following global flags:

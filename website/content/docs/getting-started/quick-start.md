@@ -173,7 +173,7 @@ This connects to the database, reads the live catalog, and writes `.dpg` files a
 
 ## Next Steps
 
-- [Language Reference](../reference/language/) — two-part syntax, structural scoping, merge rules
-- [Object Reference](../reference/objects/) — all supported PostgreSQL object types
+- [Two-Part Syntax](../fundamentals/two-part-syntax/) — the `{ }` block model, structural scoping, merge rules
+- [Schema Objects](../schema-objects/) — every PostgreSQL object type with DPG source and generated SQL
+- [Lifecycle Directives](../migrations/lifecycle/) — renames, deprecation, protected tables
 - [CLI Reference](../cli/) — all commands with flags
-- [Linter](../reference/linter/) — built-in static analysis rules

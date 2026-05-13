@@ -1,7 +1,7 @@
 ---
 title: "Extending DPG"
 description: "Use the pkg/dpg public API to extend DPG with custom linters, snapshot stores, and apply executors."
-weight: 4
+weight: 8
 ---
 
 DPG exposes a stable public API in `pkg/dpg` for plugin authors. Extensions register with the DPG pipeline registry and are called during normal `dpg` command execution.
