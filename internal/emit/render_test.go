@@ -109,8 +109,11 @@ func TestRenderNonTransactional(t *testing.T) {
 		t.Fatal(err)
 	}
 	out := buf.String()
-	if !strings.Contains(out, "Non-transactional") {
+	if !strings.Contains(out, "non-transactional") {
 		t.Errorf("expected non-transactional section header in output")
+	}
+	if !strings.Contains(out, "--------") {
+		t.Errorf("expected section separator in output")
 	}
 	if !strings.Contains(out, nonTxnOp.sql) {
 		t.Errorf("expected non-transactional SQL in output")

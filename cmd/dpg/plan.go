@@ -102,6 +102,8 @@ func newPlanCmd() *cobra.Command {
 			}
 		}
 
+		var migrations []pipeline.Migration
+
 		for _, cl := range clusters {
 			if len(cl.SourceFiles) > 0 {
 				var clusterSnap *pipeline.Snapshot
@@ -116,8 +118,12 @@ func newPlanCmd() *cobra.Command {
 						return fmt.Errorf("%s (cluster): snapshot: %w", cl.Name(), err)
 					}
 				}
-				if err := runClusterPlan(cl, clusterSnap, differ, emitter, lintCfg, format); err != nil {
+				m, err := buildClusterPlan(cl, clusterSnap, differ, emitter, lintCfg, format)
+				if err != nil {
 					return fmt.Errorf("%s (cluster): %w", cl.Name(), err)
+				}
+				if format != "json" {
+					migrations = append(migrations, m)
 				}
 			}
 
@@ -138,10 +144,23 @@ func newPlanCmd() *cobra.Command {
 						return fmt.Errorf("%s/%s: snapshot: %w", cl.Name(), db.Name(), err)
 					}
 				}
-				if err := runPlan(cl, db, snap, differ, emitter, lintCfg, format); err != nil {
+				m, err := buildPlan(cl, db, snap, differ, emitter, lintCfg, format)
+				if err != nil {
 					return fmt.Errorf("%s/%s: %w", cl.Name(), db.Name(), err)
 				}
+				if format != "json" {
+					migrations = append(migrations, m)
+				}
 			}
+		}
+
+		if format != "json" && len(migrations) > 0 {
+			color := ui.IsColorEnabled(os.Stdout)
+			return emit.RenderAll(os.Stdout, migrations, emit.RenderOptions{
+				ShowSafety:    true,
+				ShowSourcePos: true,
+				Color:         color,
+			})
 		}
 		return nil
 	}
@@ -206,7 +225,7 @@ func introspectSnapshot(ctx context.Context, cl *project.Cluster, secretResolver
 	return snap, nil
 }
 
-func runPlan(
+func buildPlan(
 	cl *project.Cluster,
 	db *project.Database,
 	snap *pipeline.Snapshot,
@@ -214,28 +233,27 @@ func runPlan(
 	emitter pipeline.Emitter,
 	lintCfg pipeline.LinterConfig,
 	format string,
-) error {
-	color := ui.IsColorEnabled(os.Stdout)
+) (pipeline.Migration, error) {
 	errColor := ui.IsColorEnabled(os.Stderr)
 
 	desired, err := compiler.Compile(db.SourceFiles, db.Dir, pipeline.Default)
 	if err != nil {
-		return err
+		return pipeline.Migration{}, err
 	}
 
 	if linter, ok := pipeline.Resolve[pipeline.Linter](pipeline.Default, pipeline.KeyLinter); ok {
 		diags, lintErr := linter.Lint(desired, lintCfg)
 		if lintErr != nil {
-			return lintErr
+			return pipeline.Migration{}, lintErr
 		}
 		if ui.PrintLintDiagnostics(os.Stderr, diags, errColor) {
-			return ui.ErrSilent
+			return pipeline.Migration{}, ui.ErrSilent
 		}
 	}
 
 	ops, err := differ.Diff(desired, snap)
 	if err != nil {
-		return err
+		return pipeline.Migration{}, err
 	}
 
 	rev, _ := gitRevision()
@@ -247,18 +265,10 @@ func runPlan(
 	}
 
 	if format == "json" {
-		return renderPlanJSON(ops, meta)
+		return pipeline.Migration{}, renderPlanJSON(ops, meta)
 	}
 
-	migration, err := emitter.Emit(ops, meta)
-	if err != nil {
-		return err
-	}
-	return emit.Render(os.Stdout, migration, emit.RenderOptions{
-		ShowSafety:    true,
-		ShowSourcePos: true,
-		Color:         color,
-	})
+	return emitter.Emit(ops, meta)
 }
 
 func renderPlanJSON(ops []pipeline.DiffOp, meta pipeline.MigrationMeta) error {
@@ -282,36 +292,35 @@ func renderPlanJSON(ops []pipeline.DiffOp, meta pipeline.MigrationMeta) error {
 	return writeJSON(out)
 }
 
-// runClusterPlan plans cluster-level objects (roles, tablespaces, etc.).
-func runClusterPlan(
+// buildClusterPlan plans cluster-level objects (roles, tablespaces, etc.).
+func buildClusterPlan(
 	cl *project.Cluster,
 	snap *pipeline.Snapshot,
 	differ pipeline.Differ,
 	emitter pipeline.Emitter,
 	lintCfg pipeline.LinterConfig,
 	format string,
-) error {
-	color := ui.IsColorEnabled(os.Stdout)
+) (pipeline.Migration, error) {
 	errColor := ui.IsColorEnabled(os.Stderr)
 
 	desired, err := compiler.Compile(cl.SourceFiles, cl.ObjectsDir, pipeline.Default)
 	if err != nil {
-		return err
+		return pipeline.Migration{}, err
 	}
 
 	if linter, ok := pipeline.Resolve[pipeline.Linter](pipeline.Default, pipeline.KeyLinter); ok {
 		diags, lintErr := linter.Lint(desired, lintCfg)
 		if lintErr != nil {
-			return lintErr
+			return pipeline.Migration{}, lintErr
 		}
 		if ui.PrintLintDiagnostics(os.Stderr, diags, errColor) {
-			return ui.ErrSilent
+			return pipeline.Migration{}, ui.ErrSilent
 		}
 	}
 
 	ops, err := differ.Diff(desired, snap)
 	if err != nil {
-		return err
+		return pipeline.Migration{}, err
 	}
 
 	rev, _ := gitRevision()
@@ -319,22 +328,15 @@ func runClusterPlan(
 		GeneratedAt:    time.Now().UTC(),
 		SourceRevision: rev,
 		Cluster:        cl.Name(),
-		Database:       cl.ClusterSnapshotKey(),
+		// Database is intentionally empty for cluster-level plans; the Cluster
+		// field already identifies the context and _cluster must not appear in output.
 	}
 
 	if format == "json" {
-		return renderPlanJSON(ops, meta)
+		return pipeline.Migration{}, renderPlanJSON(ops, meta)
 	}
 
-	migration, err := emitter.Emit(ops, meta)
-	if err != nil {
-		return err
-	}
-	return emit.Render(os.Stdout, migration, emit.RenderOptions{
-		ShowSafety:    true,
-		ShowSourcePos: true,
-		Color:         color,
-	})
+	return emitter.Emit(ops, meta)
 }
 
 // introspectClusterSnapshot connects to the cluster and returns a snapshot

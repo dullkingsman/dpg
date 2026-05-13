@@ -48,7 +48,7 @@ func Render(w io.Writer, m pipeline.Migration, opts RenderOptions) error {
 		fmt.Fprintf(w, "%s %s\n", dim("-- Source revision:"), m.Meta.SourceRevision)
 	}
 	if m.Meta.Cluster != "" {
-		fmt.Fprintf(w, "%s %s\n", dim("-- Cluster:        "), cyan(m.Meta.Cluster))
+		fmt.Fprintf(w, "%s %s", dim("-- Cluster:        "), cyan(m.Meta.Cluster))
 	}
 	if m.Meta.Database != "" {
 		fmt.Fprintf(w, "%s %s\n", dim("-- Database:       "), cyan(m.Meta.Database))
@@ -59,24 +59,131 @@ func Render(w io.Writer, m pipeline.Migration, opts RenderOptions) error {
 		return nil
 	}
 
-	// Transactional block.
-	if len(m.Transactional) > 0 {
+	writeMigrationBody(w, m, opts)
+	return nil
+}
+
+// RenderAll writes multiple migrations as a single document with one shared
+// header. Operations are grouped into two top-level sections — transactional
+// and non-transactional — each containing every cluster/database that has ops
+// in that section, introduced by "-- Database:" labels. The two sections are
+// divided by a dashed rule. Only the section that has ops is printed.
+func RenderAll(w io.Writer, migrations []pipeline.Migration, opts RenderOptions) error {
+	if len(migrations) == 0 {
+		return nil
+	}
+
+	c := opts.Color
+	dim := func(s string) string { return ui.Dim(s, c) }
+	cyan := func(s string) string { return ui.Cyan(s, c) }
+
+	first := migrations[0]
+	genAt := first.Meta.GeneratedAt
+	if genAt.IsZero() {
+		genAt = time.Now().UTC()
+	}
+
+	// Shared header — printed once for the whole document.
+	fmt.Fprintf(w, "%s\n", dim("-- DPG Migration"))
+	fmt.Fprintf(w, "%s %s\n", dim("-- Generated:      "), genAt.UTC().Format(time.RFC3339))
+	if first.Meta.SourceRevision != "" {
+		fmt.Fprintf(w, "%s %s\n", dim("-- Source revision:"), first.Meta.SourceRevision)
+	}
+	if first.Meta.Cluster != "" {
+		fmt.Fprintf(w, "%s %s", dim("-- Cluster:        "), cyan(first.Meta.Cluster))
+	}
+
+	hasTransactional := func() bool {
+		for _, m := range migrations {
+			if len(m.Transactional) > 0 {
+				return true
+			}
+		}
+		return false
+	}()
+	hasNonTransactional := func() bool {
+		for _, m := range migrations {
+			if len(m.NonTransactional) > 0 {
+				return true
+			}
+		}
+		return false
+	}()
+
+	if !hasTransactional && !hasNonTransactional {
+		fmt.Fprintf(w, "\n\n%s\n", dim("-- (no changes)"))
+		return nil
+	}
+
+	// Transactional super-section: one BEGIN/COMMIT wraps all databases.
+	if hasTransactional {
+		fmt.Fprintf(w, "\n\n%s\n", dim("-- transactional"))
 		fmt.Fprintf(w, "\n%s\n", ui.HighlightSQL("BEGIN;", c))
+		for _, m := range migrations {
+			if len(m.Transactional) == 0 {
+				continue
+			}
+			if m.Meta.Database != "" {
+				fmt.Fprintf(w, "\n%s %s\n", dim("-- Database:       "), cyan(m.Meta.Database))
+			}
+			for _, op := range m.Transactional {
+				writeOp(w, op, opts)
+			}
+		}
+		fmt.Fprintf(w, "\n%s\n", ui.HighlightSQL("COMMIT;", c))
+	}
+
+	// Separator between the two top-level sections.
+	if hasTransactional && hasNonTransactional {
+		fmt.Fprintf(w, "\n%s\n", dim("--------"))
+	}
+
+	// Non-transactional super-section: cluster first, then each database.
+	if hasNonTransactional {
+		fmt.Fprintf(w, "\n%s\n", dim("-- non-transactional"))
+		for _, m := range migrations {
+			if len(m.NonTransactional) == 0 {
+				continue
+			}
+			if m.Meta.Database != "" {
+				fmt.Fprintf(w, "\n%s %s\n", dim("-- Database:       "), cyan(m.Meta.Database))
+			}
+			for _, op := range m.NonTransactional {
+				writeOp(w, op, opts)
+			}
+		}
+	}
+
+	return nil
+}
+
+// writeMigrationBody renders the two sections of a migration: a transactional
+// block wrapped in BEGIN/COMMIT, and a non-transactional block for operations
+// that must run outside a transaction (e.g. CREATE INDEX CONCURRENTLY). Both
+// sections share the same structure and are separated by a dashed rule.
+func writeMigrationBody(w io.Writer, m pipeline.Migration, opts RenderOptions) {
+	c := opts.Color
+	dim := func(s string) string { return ui.Dim(s, c) }
+
+	if len(m.Transactional) > 0 {
+		fmt.Fprintf(w, "\n%s\n", dim("-- transactional"))
+		fmt.Fprintf(w, "%s\n", ui.HighlightSQL("BEGIN;", c))
 		for _, op := range m.Transactional {
 			writeOp(w, op, opts)
 		}
 		fmt.Fprintf(w, "\n%s\n", ui.HighlightSQL("COMMIT;", c))
 	}
 
-	// Non-transactional steps.
+	if len(m.Transactional) > 0 && len(m.NonTransactional) > 0 {
+		fmt.Fprintf(w, "\n%s\n", dim("--------"))
+	}
+
 	if len(m.NonTransactional) > 0 {
-		fmt.Fprintf(w, "\n%s\n", dim("-- Non-transactional steps (run outside transaction):"))
+		fmt.Fprintf(w, "\n%s\n", dim("-- non-transactional"))
 		for _, op := range m.NonTransactional {
 			writeOp(w, op, opts)
 		}
 	}
-
-	return nil
 }
 
 func writeOp(w io.Writer, op pipeline.DiffOp, opts RenderOptions) {

@@ -54,7 +54,11 @@ func (s *FileStore) Save(cluster, database string, snap *pipeline.Snapshot) erro
 	snap.DPGVersion = Version
 	snap.AppliedAt = time.Now().UTC().Format(time.RFC3339)
 	snap.Cluster = cluster
-	snap.Database = database
+	// _cluster is the internal storage key for cluster-level objects; the
+	// database field is omitted from the JSON so the snapshot is unambiguous.
+	if database != "_cluster" {
+		snap.Database = database
+	}
 
 	data, err := json.MarshalIndent(snap, "", "  ")
 	if err != nil {

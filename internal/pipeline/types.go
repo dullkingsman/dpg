@@ -229,7 +229,7 @@ type IRObject interface {
 type Snapshot struct {
 	DPGVersion     string                     `json:"dpg_version"`
 	Cluster        string                     `json:"cluster"`
-	Database       string                     `json:"database"`
+	Database       string                     `json:"database,omitempty"`
 	AppliedAt      string                     `json:"applied_at"`
 	SourceRevision string                     `json:"source_revision"`
 	Objects        map[string]json.RawMessage `json:"objects,omitempty"`
