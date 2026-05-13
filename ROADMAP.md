@@ -2,7 +2,7 @@
 
 This document describes the planned direction for DPG. It is a living document and will be updated as priorities shift. Items are not binding commitments.
 
-For the full language specification see [rfc/v0.8.0.md](rfc/v0.8.0.md).
+For the full language specification see [rfc/dpg-1.md](rfc/dpg-1.md).
 
 ---
 

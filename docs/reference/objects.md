@@ -1314,7 +1314,7 @@ SCHEMA public {
 
 ## Feature Coverage Summary
 
-For the complete coverage matrix with diff strategy details, see Appendix A of the [RFC](../../rfc/v0.8.0.md).
+For the complete coverage matrix with diff strategy details, see Appendix A of the [RFC](../../rfc/dpg-1.md).
 
 | Feature | Diff strategy |
 |---|---|

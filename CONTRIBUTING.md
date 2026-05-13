@@ -69,7 +69,7 @@ rfc/               Language specification
 
 4. **Commit messages** should be concise and written in the imperative mood (`add support for X`, `fix Y when Z`). Reference issues where applicable (`fixes #42`).
 
-5. **Open a pull request** against `main` with a clear description of what changed and why. Include the relevant section of the [RFC](rfc/v0.8.0.md) if your change affects language semantics.
+5. **Open a pull request** against `main` with a clear description of what changed and why. Include the relevant section of the [RFC](rfc/dpg-1.md) if your change affects language semantics.
 
 ## Code Style
 
@@ -93,7 +93,7 @@ Open a GitHub issue with:
 
 ## Proposing Features
 
-Open an issue before writing significant code. Features that change language semantics should reference or propose an RFC amendment. The current specification lives in [rfc/v0.8.0.md](rfc/v0.8.0.md).
+Open an issue before writing significant code. Features that change language semantics should reference or propose an RFC amendment. The current specification lives in [rfc/dpg-1.md](rfc/dpg-1.md).
 
 ## License
 

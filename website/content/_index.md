@@ -41,4 +41,4 @@ Run `dpg plan` to see the SQL diff. Run `dpg apply` to execute it.
 | [CLI Reference](docs/cli/) | All commands with flags |
 | [Language Reference](docs/reference/language/) | Two-part syntax, merge rules, structural scoping |
 | [Plugin API](docs/extending/) | Extend DPG via the public Go API |
-| [RFC DPG-001](rfc/v0.8.0/) | Full specification |
+| [RFC DPG-001](rfc/dpg-1/) | Full specification |

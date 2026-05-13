@@ -121,7 +121,7 @@ See [docs/reference/project.md](docs/reference/project.md) for the full project 
 | [Secrets](docs/reference/secrets.md) | env:, link:, plain-value passthrough |
 | [Snapshot Format](docs/reference/snapshot.md) | JSON structure and VCS commit strategy |
 | [Portability](docs/reference/portability.md) | PostgreSQL-specific constructs and standard SQL alternatives |
-| [RFC v0.8.0](rfc/v0.8.0.md) | Full language specification |
+| [RFC DPG-1](rfc/dpg-1.md) | Full language specification |
 
 ## Contributing
 
