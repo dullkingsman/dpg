@@ -1,0 +1,143 @@
+=====================================
+Simple SQL function
+=====================================
+
+FUNCTION add(a integer, b integer) RETURNS integer LANGUAGE sql AS $$
+    SELECT a + b;
+$$;
+
+-------------------------------------
+
+(source_file
+  (function_declaration
+    name: (identifier)
+    params: (param_list
+      (param_def
+        name: (identifier)
+        type: (sql_type
+          (identifier)))
+      (param_def
+        name: (identifier)
+        type: (sql_type
+          (identifier))))
+    returns: (sql_type
+      (identifier))
+    body: (dollar_quoted_string)))
+
+=====================================
+Function with schema-qualified name and options
+=====================================
+
+FUNCTION public.get_user(user_id bigint)
+    RETURNS text
+    LANGUAGE plpgsql
+    STABLE
+    SECURITY DEFINER
+    AS $$
+BEGIN
+    RETURN (SELECT email FROM users WHERE id = user_id);
+END;
+$$
+{
+    COMMENT "fetch user email by id";
+}
+
+-------------------------------------
+
+(source_file
+  (function_declaration
+    name: (identifier)
+    name: (identifier)
+    params: (param_list
+      (param_def
+        name: (identifier)
+        type: (sql_type
+          (identifier))))
+    returns: (sql_type
+      (identifier))
+    body: (dollar_quoted_string)
+    (dpg_block
+      (comment_directive
+        text: (string_literal)))))
+
+=====================================
+Procedure declaration
+=====================================
+
+PROCEDURE archive_old_records(cutoff_date date)
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+    DELETE FROM events WHERE created_at < cutoff_date;
+END;
+$$;
+
+-------------------------------------
+
+(source_file
+  (procedure_declaration
+    name: (identifier)
+    params: (param_list
+      (param_def
+        name: (identifier)
+        type: (sql_type
+          (identifier))))
+    language: (identifier)
+    body: (dollar_quoted_string)))
+
+=====================================
+Function with deprecated directive
+=====================================
+
+FUNCTION legacy_compute(x integer) RETURNS integer LANGUAGE sql AS $$ SELECT x $$
+{
+    DEPRECATED "use new_compute instead";
+}
+
+-------------------------------------
+
+(source_file
+  (function_declaration
+    name: (identifier)
+    params: (param_list
+      (param_def
+        name: (identifier)
+        type: (sql_type
+          (identifier))))
+    returns: (sql_type
+      (identifier))
+    body: (dollar_quoted_string)
+    (dpg_block
+      (deprecated_directive
+        message: (string_literal)))))
+
+=====================================
+Function with grants
+=====================================
+
+FUNCTION api.hash_password(plain text) RETURNS text LANGUAGE sql IMMUTABLE AS $$
+    SELECT crypt(plain, gen_salt('bf'));
+$$
+{
+    GRANTS { EXECUTE TO api_role; }
+}
+
+-------------------------------------
+
+(source_file
+  (function_declaration
+    name: (identifier)
+    name: (identifier)
+    params: (param_list
+      (param_def
+        name: (identifier)
+        type: (sql_type
+          (identifier))))
+    returns: (sql_type
+      (identifier))
+    body: (dollar_quoted_string)
+    (dpg_block
+      (grants_block
+        (grant_directive
+          privilege: (privilege_spec)
+          (identifier))))))

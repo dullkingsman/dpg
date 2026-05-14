@@ -1,0 +1,90 @@
+=====================================
+Paren-body macro declaration
+=====================================
+
+MACRO timestamps (
+    created_at timestamptz NOT NULL DEFAULT now(),
+    updated_at timestamptz NOT NULL DEFAULT now()
+)
+
+-------------------------------------
+
+(source_file
+  (macro_declaration
+    name: (identifier)
+    body: (column_def
+      name: (identifier)
+      type: (sql_type
+        (identifier)))
+    body: (column_def
+      name: (identifier)
+      type: (sql_type
+        (identifier)))))
+
+=====================================
+Brace-body macro declaration
+=====================================
+
+MACRO audit_directives {
+    COMMENT "audit trail";
+    OWNER audit_role;
+}
+
+-------------------------------------
+
+(source_file
+  (macro_declaration
+    name: (identifier)
+    body: (comment_directive
+      text: (string_literal))
+    body: (owner_directive
+      role: (identifier))))
+
+=====================================
+Macro spread in table column list
+=====================================
+
+TABLE events (
+    id bigint,
+    ...timestamps
+);
+
+-------------------------------------
+
+(source_file
+  (table_declaration
+    name: (identifier)
+    columns: (column_list
+      (column_def
+        name: (identifier)
+        type: (sql_type
+          (identifier)))
+      (macro_spread
+        name: (identifier)))))
+
+=====================================
+Macro spread in dpg block
+=====================================
+
+TABLE audit_log (
+    id bigint
+) {
+    ...audit_directives
+    COMMENT "override comment";
+}
+
+-------------------------------------
+
+(source_file
+  (table_declaration
+    name: (identifier)
+    columns: (column_list
+      (column_def
+        name: (identifier)
+        type: (sql_type
+          (identifier))))
+    (dpg_block
+      (macro_spread
+        name: (identifier))
+      (comment_directive
+        text: (string_literal)))))

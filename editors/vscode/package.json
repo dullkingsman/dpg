@@ -1,0 +1,85 @@
+{
+  "name": "vscode-dpg",
+  "displayName": "DPG — Declarative PG",
+  "description": "Language support for .dpg (DPG / Declarative PG) source files",
+  "version": "0.1.0",
+  "publisher": "dullkingsman",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/dullkingsman/dpg"
+  },
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Programming Languages",
+    "Formatters",
+    "Linters"
+  ],
+  "activationEvents": [
+    "onLanguage:dpg"
+  ],
+  "contributes": {
+    "languages": [
+      {
+        "id": "dpg",
+        "aliases": ["DPG", "Declarative PG"],
+        "extensions": [".dpg"],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "dpg",
+        "scopeName": "source.dpg",
+        "path": "./syntaxes/dpg.tmLanguage.json"
+      }
+    ],
+    "configuration": {
+      "title": "DPG",
+      "properties": {
+        "dpg.lsp.enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Enable the DPG Language Server (diagnostics, hover, completions)."
+        },
+        "dpg.lsp.path": {
+          "type": "string",
+          "default": "dpg-lsp",
+          "description": "Path to the dpg-lsp binary."
+        },
+        "dpg.fmt.onSave": {
+          "type": "boolean",
+          "default": true,
+          "description": "Run dpg fmt when a .dpg file is saved."
+        },
+        "dpg.fmt.path": {
+          "type": "string",
+          "default": "dpg",
+          "description": "Path to the dpg binary used for formatting."
+        }
+      }
+    }
+  },
+  "main": "./out/extension.js",
+  "scripts": {
+    "compile": "tsc -p ./",
+    "watch":   "tsc -watch -p ./",
+    "package": "vsce package",
+    "publish": "vsce publish",
+    "test":    "node ./out/test/runTests.js"
+  },
+  "dependencies": {
+    "vscode-languageclient": "^9.0.1"
+  },
+  "devDependencies": {
+    "@types/mocha":          "^10.0.6",
+    "@types/vscode":         "^1.85.0",
+    "@vscode/test-electron": "^2.3.9",
+    "@vscode/vsce":          "^2.24.0",
+    "glob":                  "^10.3.10",
+    "mocha":                 "^10.3.0",
+    "typescript":            "^5.3.2"
+  }
+}

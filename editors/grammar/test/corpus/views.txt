@@ -1,0 +1,88 @@
+=====================================
+Simple view
+=====================================
+
+VIEW active_users AS SELECT id, email FROM users WHERE active = true;
+
+-------------------------------------
+
+(source_file
+  (view_declaration
+    name: (identifier)
+    query: (sql_expression
+      (identifier)
+      (identifier)
+      (identifier)
+      (identifier)
+      (identifier)
+      (identifier)
+      (boolean_literal))))
+
+=====================================
+View with dpg block
+=====================================
+
+VIEW user_summary AS SELECT id, name FROM users
+{
+    COMMENT "summarised user info";
+    GRANTS {
+        SELECT TO reporter;
+    }
+}
+
+-------------------------------------
+
+(source_file
+  (view_declaration
+    name: (identifier)
+    query: (sql_expression
+      (identifier)
+      (identifier)
+      (identifier)
+      (identifier))
+    (dpg_block
+      (comment_directive
+        text: (string_literal))
+      (grants_block
+        (grant_directive
+          privilege: (privilege_spec)
+          (identifier))))))
+
+=====================================
+Materialized view
+=====================================
+
+MATERIALIZED VIEW order_stats AS SELECT count(*) FROM orders WITH NO DATA
+
+-------------------------------------
+
+(source_file
+  (materialized_view_declaration
+    name: (identifier)
+    query: (sql_expression
+      (identifier)
+      (identifier)
+      (identifier))))
+
+=====================================
+Recursive view
+=====================================
+
+RECURSIVE VIEW org_tree (id, parent_id, depth) AS
+    SELECT id, parent_id, 0 FROM orgs WHERE parent_id IS NULL;
+
+-------------------------------------
+
+(source_file
+  (recursive_view_declaration
+    name: (identifier)
+    (identifier)
+    (identifier)
+    (identifier)
+    query: (sql_expression
+      (identifier)
+      (identifier)
+      (number_literal)
+      (identifier)
+      (identifier)
+      (boolean_literal))))

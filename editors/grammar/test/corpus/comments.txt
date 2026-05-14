@@ -1,0 +1,117 @@
+=====================================
+Line comment before declaration
+=====================================
+
+-- This is a user table
+TABLE users (
+    id bigint
+);
+
+-------------------------------------
+
+(source_file
+  (line_comment)
+  (table_declaration
+    name: (identifier)
+    columns: (column_list
+      (column_def
+        name: (identifier)
+        type: (sql_type
+          (identifier))))))
+
+=====================================
+Block comment
+=====================================
+
+/* This is a block comment */
+TABLE products (id bigint);
+
+-------------------------------------
+
+(source_file
+  (block_comment)
+  (table_declaration
+    name: (identifier)
+    columns: (column_list
+      (column_def
+        name: (identifier)
+        type: (sql_type
+          (identifier))))))
+
+=====================================
+Inline line comment between columns
+=====================================
+
+TABLE metrics (
+    -- primary identifier
+    id bigint,
+    value numeric
+);
+
+-------------------------------------
+
+(source_file
+  (table_declaration
+    name: (identifier)
+    columns: (column_list
+      (line_comment)
+      (column_def
+        name: (identifier)
+        type: (sql_type
+          (identifier)))
+      (column_def
+        name: (identifier)
+        type: (sql_type
+          (identifier))))))
+
+=====================================
+Dollar-quoted string body
+=====================================
+
+FUNCTION noop() RETURNS void LANGUAGE sql AS $$
+    SELECT 1;
+$$;
+
+-------------------------------------
+
+(source_file
+  (function_declaration
+    name: (identifier)
+    params: (param_list)
+    returns: (sql_type
+      (identifier))
+    body: (dollar_quoted_string)))
+
+=====================================
+Dollar-quoted string with tag
+=====================================
+
+FUNCTION tagged() RETURNS void LANGUAGE plpgsql AS $body$
+BEGIN
+END;
+$body$;
+
+-------------------------------------
+
+(source_file
+  (function_declaration
+    name: (identifier)
+    params: (param_list)
+    returns: (sql_type
+      (identifier))
+    body: (dollar_quoted_string)))
+
+=====================================
+Single-quoted string literal
+=====================================
+
+ENUM colors ('red', 'green', 'blue');
+
+-------------------------------------
+
+(source_file
+  (enum_declaration
+    name: (identifier)
+    (string_literal)
+    (string_literal)
+    (string_literal)))

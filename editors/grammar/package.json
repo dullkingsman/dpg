@@ -1,0 +1,17 @@
+{
+  "name": "tree-sitter-dpg",
+  "version": "0.1.0",
+  "description": "Tree-sitter grammar for DPG (.dpg) source files",
+  "main": "bindings/node",
+  "keywords": ["tree-sitter", "dpg", "postgresql", "schema"],
+  "scripts": {
+    "build":     "npx tree-sitter generate",
+    "pretest":   "npx tree-sitter generate",
+    "test":      "npx tree-sitter test",
+    "highlight": "npx tree-sitter highlight"
+  },
+  "tree-sitter": [{ "scope": "source.dpg" }],
+  "devDependencies": {
+    "tree-sitter-cli": "^0.22.0"
+  }
+}

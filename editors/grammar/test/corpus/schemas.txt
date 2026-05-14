@@ -1,0 +1,104 @@
+=====================================
+Schema block with nested table
+=====================================
+
+SCHEMA iam {
+    TABLE roles (
+        id bigint,
+        name text
+    );
+}
+
+-------------------------------------
+
+(source_file
+  (schema_block
+    name: (identifier)
+    (table_declaration
+      name: (identifier)
+      columns: (column_list
+        (column_def
+          name: (identifier)
+          type: (sql_type
+            (identifier)))
+        (column_def
+          name: (identifier)
+          type: (sql_type
+            (identifier)))))))
+
+=====================================
+Schema block with comment and owner
+=====================================
+
+SCHEMA analytics {
+    COMMENT "analytics schema";
+    OWNER analyst_role;
+}
+
+-------------------------------------
+
+(source_file
+  (schema_block
+    name: (identifier)
+    (comment_directive
+      text: (string_literal))
+    (owner_directive
+      role: (identifier))))
+
+=====================================
+Schema block with renamed_from
+=====================================
+
+SCHEMA reporting {
+    RENAMED FROM stats;
+}
+
+-------------------------------------
+
+(source_file
+  (schema_block
+    name: (identifier)
+    (renamed_from_directive
+      old_name: (identifier))))
+
+=====================================
+Role with login options
+=====================================
+
+ROLE app_readonly NOLOGIN NOINHERIT;
+
+-------------------------------------
+
+(source_file
+  (role_declaration
+    name: (identifier)))
+
+=====================================
+Role with password
+=====================================
+
+ROLE app_user LOGIN NOSUPERUSER PASSWORD 'env:APP_USER_PASSWORD'
+{
+    COMMENT "application runtime user";
+}
+
+-------------------------------------
+
+(source_file
+  (role_declaration
+    name: (identifier)
+    (dpg_block
+      (comment_directive
+        text: (string_literal)))))
+
+=====================================
+Extension declaration
+=====================================
+
+EXTENSION pgcrypto SCHEMA public VERSION '1.3' CASCADE;
+
+-------------------------------------
+
+(source_file
+  (extension_declaration
+    name: (identifier)))
