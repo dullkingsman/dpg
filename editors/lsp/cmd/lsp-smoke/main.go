@@ -70,7 +70,7 @@ func run() error {
 	c := &client{conn: conn, reader: bufio.NewReader(conn), id: 0}
 
 	// ── 1. initialize ─────────────────────────────────────────────────────────
-	rootURI := "file://" + projectRoot()
+	rootURI := "file://" + lspRoot()
 	resp, err := c.call("initialize", map[string]any{
 		"processId": os.Getpid(),
 		"rootUri":   rootURI,
@@ -100,11 +100,11 @@ func run() error {
 	c.notify("initialized", map[string]any{})
 
 	// ── 3. textDocument/didOpen — valid file (expect 0 diagnostics) ───────────
-	schemaPath := filepath.Join(projectRoot(), "simple_proj", "db", "postworld", "dpg_test", "schemas", "iam", "schema.dpg")
+	schemaPath := filepath.Join(lspRoot(), "testdata", "schema.dpg")
 	schemaURI := "file://" + schemaPath
 	schemaContent, err := os.ReadFile(schemaPath)
 	if err != nil {
-		return fmt.Errorf("read schema file: %w. Run from the dpg.idea project root.", err)
+		return fmt.Errorf("read schema file: %w", err)
 	}
 
 	c.notify("textDocument/didOpen", map[string]any{
@@ -307,8 +307,8 @@ func findOrBuild() (string, error) {
 	return bin, nil
 }
 
-func projectRoot() string {
+func lspRoot() string {
 	_, self, _, _ := runtime.Caller(0)
-	// editors/lsp/cmd/lsp-smoke/main.go → go up 4 levels
-	return filepath.Join(filepath.Dir(self), "..", "..", "..", "..")
+	// editors/lsp/cmd/lsp-smoke/main.go → go up 2 levels → editors/lsp/
+	return filepath.Join(filepath.Dir(self), "..", "..")
 }
