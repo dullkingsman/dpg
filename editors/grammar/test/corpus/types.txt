@@ -1,0 +1,117 @@
+=====================================
+Simple enum
+=====================================
+
+ENUM order_status ('pending', 'confirmed', 'shipped', 'delivered', 'cancelled');
+
+-------------------------------------
+
+(source_file
+  (enum_declaration
+    name: (identifier)
+    (string_literal)
+    (string_literal)
+    (string_literal)
+    (string_literal)
+    (string_literal)))
+
+=====================================
+Enum with migrate remove
+=====================================
+
+ENUM user_tier ('free', 'pro', 'enterprise')
+{
+    MIGRATE REMOVE ('free') {
+        UPDATE users SET tier = 'pro' WHERE tier = 'free';
+    }
+}
+
+-------------------------------------
+
+(source_file
+  (enum_declaration
+    name: (identifier)
+    (string_literal)
+    (string_literal)
+    (string_literal)
+    (dpg_block
+      (migrate_remove_directive
+        value: (string_literal)
+        (sql_expression
+          (string_literal)
+          (string_literal))))))
+
+=====================================
+Composite type
+=====================================
+
+TYPE address AS (
+    street text,
+    city text,
+    postcode text
+);
+
+-------------------------------------
+
+(source_file
+  (composite_type_declaration
+    name: (identifier)
+    (identifier)
+    (sql_type
+      (identifier))
+    (identifier)
+    (sql_type
+      (identifier))
+    (identifier)
+    (sql_type
+      (identifier))))
+
+=====================================
+Domain declaration
+=====================================
+
+DOMAIN email_address AS text;
+
+-------------------------------------
+
+(source_file
+  (domain_declaration
+    name: (identifier)
+    base: (sql_type
+      (identifier))))
+
+=====================================
+Virtual type
+=====================================
+
+VIRTUAL TYPE user_input AS jsonb
+{
+    COMMENT "validated user input shape";
+}
+
+-------------------------------------
+
+(source_file
+  (virtual_type_declaration
+    name: (identifier)
+    expression: (sql_type
+      (identifier))
+    (dpg_block
+      (comment_directive
+        text: (string_literal)))))
+
+=====================================
+Sequence with options
+=====================================
+
+SEQUENCE user_id_seq AS bigint INCREMENT BY 1 START WITH 1000 NO CYCLE;
+
+-------------------------------------
+
+(source_file
+  (sequence_declaration
+    name: (identifier)
+    (sql_type
+      (identifier))
+    (number_literal)
+    (number_literal)))

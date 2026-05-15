@@ -1,0 +1,49 @@
+{
+  "name": "tree-sitter-dpg",
+  "version": "0.1.0",
+  "description": "Tree-sitter grammar for DPG (.dpg) source files",
+  "main": "bindings/node",
+  "types": "bindings/node",
+  "keywords": [
+    "tree-sitter",
+    "dpg",
+    "postgresql",
+    "schema"
+  ],
+  "files": [
+    "grammar.js",
+    "binding.gyp",
+    "prebuilds/**",
+    "bindings/node/*",
+    "queries/*",
+    "src/**"
+  ],
+  "scripts": {
+    "build": "npx tree-sitter generate",
+    "pretest": "npx tree-sitter generate",
+    "test": "npx tree-sitter test",
+    "highlight": "npx tree-sitter highlight",
+    "install": "node-gyp-build",
+    "prebuildify": "prebuildify --napi --strip"
+  },
+  "tree-sitter": [
+    {
+      "scope": "source.dpg"
+    }
+  ],
+  "devDependencies": {
+    "tree-sitter-cli": "^0.22.0",
+    "prebuildify": "^6.0.0"
+  },
+  "dependencies": {
+    "node-gyp-build": "^4.8.0"
+  },
+  "peerDependencies": {
+    "tree-sitter": "^0.21.0"
+  },
+  "peerDependenciesMeta": {
+    "tree_sitter": {
+      "optional": true
+    }
+  }
+}

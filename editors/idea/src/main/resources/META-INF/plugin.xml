@@ -1,0 +1,28 @@
+<idea-plugin>
+  <id>com.dullkingsman.dpg</id>
+  <name>DPG — Declarative PG</name>
+  <version>0.1.0</version>
+  <vendor url="https://github.com/dullkingsman/dpg">dullkingsman</vendor>
+
+  <description><![CDATA[
+    <p>Language support for <b>.dpg</b> (DPG / Declarative PG) source files.</p>
+    <ul>
+      <li>Syntax highlighting via the DPG file type</li>
+      <li>Format on save via <code>dpg fmt</code></li>
+      <li>Diagnostics, hover, go-to-definition, and completions via <code>dpg-lsp</code></li>
+    </ul>
+    <p>Requires <code>dpg-lsp</code> on <code>$PATH</code>. Install with:<br/>
+    <code>go install github.com/dullkingsman/dpg-lsp/cmd/dpg-lsp@latest</code></p>
+  ]]></description>
+
+  <depends>com.intellij.modules.platform</depends>
+
+  <extensions defaultExtensionNs="com.intellij">
+    <fileType
+        name="DPG"
+        implementationClass="com.dullkingsman.dpg.DpgFileType"
+        language="DPG"
+        extensions="dpg"
+        fieldName="INSTANCE"/>
+  </extensions>
+</idea-plugin>

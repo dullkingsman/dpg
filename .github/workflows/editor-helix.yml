@@ -1,0 +1,27 @@
+name: Editor / Helix
+
+on:
+  push:
+    branches: [master]
+    paths:
+      - "editors/helix/**"
+  pull_request:
+    branches: [master]
+    paths:
+      - "editors/helix/**"
+
+jobs:
+  helix:
+    name: Helix config
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Validate languages.toml
+        working-directory: editors/helix
+        run: bash validate.sh

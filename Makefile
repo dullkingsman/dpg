@@ -20,6 +20,7 @@ HUGO := $(shell PATH="$(HOME)/.local/bin:$(PATH)" sh -c 'command -v hugo 2>/dev/
 
 .PHONY: build build-full install install-full \
         test test-verbose test-integration test-examples vet lint \
+        test-lsp test-grammar test-nvim test-vscode test-idea test-helix test-editors \
         dist dist-linux dist-darwin dist-windows \
         clean clean-dist clean-all version release \
         docs-cli docs-site docs-serve
@@ -56,6 +57,41 @@ test-integration:
 
 test-examples:
 	go test ./examples/... -v
+
+# ── Editor tests ──────────────────────────────────────────────────────────────
+
+# LSP Go unit tests (fast; no binaries required)
+test-lsp:
+	cd editors/lsp && go test ./internal/...
+
+# LSP end-to-end smoke test (builds dpg-lsp; requires dpg on PATH)
+test-lsp-smoke:
+	cd editors/lsp && go test ./cmd/lsp-smoke/
+
+# Tree-sitter grammar (requires Node.js + tree-sitter-cli)
+test-grammar:
+	editors/grammar/scripts/test.sh
+
+# Neovim Lua specs (requires nvim 0.10+ and plenary.nvim)
+test-nvim:
+	nvim --headless -u editors/nvim/tests/minimal_init.lua \
+	  -c "PlenaryBustedDirectory editors/nvim/tests/ {minimal_init='editors/nvim/tests/minimal_init.lua'}" \
+	  -c "qa!"
+
+# VS Code extension tests (requires Node.js; downloads Electron on first run)
+test-vscode:
+	cd editors/vscode && npm install && npm run compile && npm test
+
+# JetBrains plugin tests (requires JDK 17+; downloads IntelliJ on first run)
+test-idea:
+	cd editors/idea && ./gradlew test
+
+# Helix languages.toml structural validation (requires python3 or taplo)
+test-helix:
+	editors/helix/validate.sh
+
+# Run all editor test suites
+test-editors: test-lsp test-grammar test-nvim test-vscode test-idea test-helix
 
 # ── Quality ───────────────────────────────────────────────────────────────────
 

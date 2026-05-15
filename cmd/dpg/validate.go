@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
 
 	"github.com/spf13/cobra"
 
@@ -20,7 +21,7 @@ func newValidateCmd() *cobra.Command {
 	)
 
 	cmd := &cobra.Command{
-		Use:   "validate",
+		Use:   "validate [file...]",
 		Short: "Validate .dpg source files offline without diffing",
 		Long: `Parse and compile all .dpg source files and run the linter. No database
 connection or snapshot is required.
@@ -28,8 +29,28 @@ connection or snapshot is required.
 Exits 0 when there are no errors. Lint warnings do not cause a non-zero exit
 unless --strict is passed to the linter (see dpg.toml [linter] settings).
 
+When one or more .dpg files are given as arguments, only those files are
+validated (no project discovery required). This mode is used by the LSP
+server to validate individual files or editor buffers.
+
 Use --format json for machine-readable output.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
+			linter, _ := pipeline.Resolve[pipeline.Linter](pipeline.Default, pipeline.KeyLinter)
+
+			// File-argument mode: validate specific files without project discovery.
+			if len(args) > 0 {
+				// Use the directory of the first file as dbDir so schema inference works.
+				dbDir := filepath.Dir(args[0])
+				errored, err := runValidate("(none)", "(standalone)", args, dbDir, linter, pipeline.LinterConfig{}, format)
+				if err != nil {
+					return err
+				}
+				if errored {
+					return ui.ErrSilent
+				}
+				return nil
+			}
+
 			proj, err := discoverProject()
 			if err != nil {
 				return err
@@ -40,7 +61,6 @@ Use --format json for machine-readable output.`,
 				return err
 			}
 
-			linter, _ := pipeline.Resolve[pipeline.Linter](pipeline.Default, pipeline.KeyLinter)
 			lintCfg := linterConfigFrom(proj.RootConfig.Linter)
 
 			hasError := false
@@ -112,10 +132,11 @@ func runValidate(
 	desired, err := compiler.Compile(files, dbDir, pipeline.Default)
 	if err != nil {
 		if format == "json" {
+			errors := compileErrsToDiagnostics(err)
 			out := validateJSON{
 				Cluster:  clusterName,
 				Database: dbName,
-				Errors:   []diagnosticOut{{Message: err.Error()}},
+				Errors:   errors,
 				Warnings: []diagnosticOut{},
 			}
 			return true, writeJSON(out)
@@ -173,6 +194,25 @@ func emitValidateJSON(cluster, database string, objectCount int, diags []pipelin
 		}
 	}
 	return hasError, writeJSON(out)
+}
+
+// compileErrsToDiagnostics converts a compiler error to a slice of diagnosticOut,
+// preserving file/line/col from *pipeline.Diagnostics when available.
+func compileErrsToDiagnostics(err error) []diagnosticOut {
+	if diags, ok := err.(pipeline.Diagnostics); ok {
+		out := make([]diagnosticOut, 0, len(diags))
+		for _, d := range diags {
+			out = append(out, diagnosticOut{
+				Rule:    "DPG-E000",
+				Message: d.Message,
+				File:    d.Pos.File,
+				Line:    d.Pos.Line,
+				Col:     d.Pos.Col,
+			})
+		}
+		return out
+	}
+	return []diagnosticOut{{Message: err.Error()}}
 }
 
 func writeJSON(v any) error {

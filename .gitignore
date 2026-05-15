@@ -1,6 +1,8 @@
 # IDE configs
 .idea
 .vscode
+**/*/node_modules
+**/*/.vscode-test
 
 # envs
 .env*

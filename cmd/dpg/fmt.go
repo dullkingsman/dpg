@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -15,8 +16,9 @@ import (
 
 func newFmtCmd() *cobra.Command {
 	var (
-		check bool
-		diff  bool
+		check    bool
+		diff     bool
+		useStdin bool
 	)
 
 	cmd := &cobra.Command{
@@ -28,7 +30,9 @@ With no arguments, all .dpg files under the project root are formatted.
 Pass specific files or directories to restrict formatting to those paths.
 
   --check   Exit 1 if any file would change; no files are written (CI gate).
-  --diff    Print a unified diff of what would change; no files are written.`,
+  --diff    Print a unified diff of what would change; no files are written.
+  --stdin   Read source from stdin and write formatted output to stdout.
+            Used by editor integrations (e.g. Helix) that pipe file content.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			opts := format.Options{
 				IndentSize:  4,
@@ -47,6 +51,16 @@ Pass specific files or directories to restrict formatting to those paths.
 				}
 			}
 
+			if useStdin {
+				src, err := io.ReadAll(os.Stdin)
+				if err != nil {
+					return fmt.Errorf("dpg fmt: reading stdin: %w", err)
+				}
+				out, _ := format.Format("<stdin>", src, opts)
+				_, err = os.Stdout.Write(out)
+				return err
+			}
+
 			targets, err := resolveFmtTargetsRaw(proj, projErr, args)
 			if err != nil {
 				return err
@@ -61,6 +75,7 @@ Pass specific files or directories to restrict formatting to those paths.
 
 	cmd.Flags().BoolVar(&check, "check", false, "exit 1 if any file would change (no files written)")
 	cmd.Flags().BoolVar(&diff, "diff", false, "print unified diff of changes (no files written)")
+	cmd.Flags().BoolVar(&useStdin, "stdin", false, "read from stdin, write formatted output to stdout")
 	return cmd
 }
 

@@ -1,0 +1,5 @@
+{
+  "name": "tree-sitter-dpg",
+  "description": "DPG grammar for tree-sitter (Node binding)",
+  "main": "index.js"
+}

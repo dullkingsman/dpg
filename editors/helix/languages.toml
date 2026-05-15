@@ -1,0 +1,22 @@
+[[language]]
+name              = "dpg"
+scope             = "source.dpg"
+file-types        = ["dpg"]
+comment-token     = "--"
+block-comment-tokens = { start = "/*", end = "*/" }
+auto-format       = true
+indent            = { tab-width = 4, unit = "    " }
+
+formatter = { command = "dpg", args = ["fmt", "--stdin"] }
+
+# Requires dpg-lsp on $PATH:
+#   go install github.com/dullkingsman/dpg-lsp/cmd/dpg-lsp@latest
+language-servers = ["dpg-lsp"]
+
+# Tree-sitter grammar — add to your languages.toml or wait for upstream inclusion.
+[language.grammar]
+source = { git = "https://github.com/dullkingsman/tree-sitter-dpg", rev = "main" }
+
+[language-server.dpg-lsp]
+command = "dpg-lsp"
+args    = ["--stdio"]

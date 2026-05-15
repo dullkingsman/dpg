@@ -1,0 +1,248 @@
+=====================================
+Minimal table no block
+=====================================
+
+TABLE users (
+    id bigint
+);
+
+-------------------------------------
+
+(source_file
+  (table_declaration
+    name: (identifier)
+    columns: (column_list
+      (column_def
+        name: (identifier)
+        type: (sql_type
+          (identifier))))))
+
+=====================================
+Table with dpg block comment and owner
+=====================================
+
+TABLE orders (
+    id bigint NOT NULL
+) {
+    COMMENT "order records";
+    OWNER app_user;
+}
+
+-------------------------------------
+
+(source_file
+  (table_declaration
+    name: (identifier)
+    columns: (column_list
+      (column_def
+        name: (identifier)
+        type: (sql_type
+          (identifier))))
+    (dpg_block
+      (comment_directive
+        text: (string_literal))
+      (owner_directive
+        role: (identifier)))))
+
+=====================================
+Table with schema-qualified name
+=====================================
+
+TABLE iam.identities (
+    id bigint
+);
+
+-------------------------------------
+
+(source_file
+  (table_declaration
+    name: (identifier)
+    name: (identifier)
+    columns: (column_list
+      (column_def
+        name: (identifier)
+        type: (sql_type
+          (identifier))))))
+
+=====================================
+Table with primary key and not null
+=====================================
+
+TABLE accounts (
+    id bigint NOT NULL,
+    email text NOT NULL,
+    CONSTRAINT accounts_pkey PRIMARY KEY (id)
+);
+
+-------------------------------------
+
+(source_file
+  (table_declaration
+    name: (identifier)
+    columns: (column_list
+      (column_def
+        name: (identifier)
+        type: (sql_type
+          (identifier)))
+      (column_def
+        name: (identifier)
+        type: (sql_type
+          (identifier)))
+      (table_constraint
+        name: (identifier)
+        (identifier)))))
+
+=====================================
+Table with foreign key reference
+=====================================
+
+TABLE memberships (
+    user_id bigint NOT NULL REFERENCES users(id),
+    group_id bigint NOT NULL REFERENCES groups(id)
+);
+
+-------------------------------------
+
+(source_file
+  (table_declaration
+    name: (identifier)
+    columns: (column_list
+      (column_def
+        name: (identifier)
+        type: (sql_type
+          (identifier))
+        (identifier)
+        (identifier))
+      (column_def
+        name: (identifier)
+        type: (sql_type
+          (identifier))
+        (identifier)
+        (identifier)))))
+
+=====================================
+Table with indices block
+=====================================
+
+TABLE products (
+    id bigint,
+    sku text
+) {
+    INDICES {
+        idx_products_sku (sku);
+    }
+}
+
+-------------------------------------
+
+(source_file
+  (table_declaration
+    name: (identifier)
+    columns: (column_list
+      (column_def
+        name: (identifier)
+        type: (sql_type
+          (identifier)))
+      (column_def
+        name: (identifier)
+        type: (sql_type
+          (identifier))))
+    (dpg_block
+      (indices_block
+        (index_def
+          name: (identifier)
+          (index_column
+            (identifier)))))))
+
+=====================================
+Table with renamed_from directive
+=====================================
+
+TABLE order_items (
+    id bigint
+) {
+    RENAMED FROM line_items;
+}
+
+-------------------------------------
+
+(source_file
+  (table_declaration
+    name: (identifier)
+    columns: (column_list
+      (column_def
+        name: (identifier)
+        type: (sql_type
+          (identifier))))
+    (dpg_block
+      (renamed_from_directive
+        old_name: (identifier)))))
+
+=====================================
+Table with macro spread in column list
+=====================================
+
+TABLE events (
+    id bigint,
+    ...timestamps
+);
+
+-------------------------------------
+
+(source_file
+  (table_declaration
+    name: (identifier)
+    columns: (column_list
+      (column_def
+        name: (identifier)
+        type: (sql_type
+          (identifier)))
+      (macro_spread
+        name: (identifier)))))
+
+=====================================
+Unlogged table
+=====================================
+
+UNLOGGED TABLE sessions (
+    token text
+);
+
+-------------------------------------
+
+(source_file
+  (table_declaration
+    name: (identifier)
+    columns: (column_list
+      (column_def
+        name: (identifier)
+        type: (sql_type
+          (identifier))))))
+
+=====================================
+Table with grants block
+=====================================
+
+TABLE reports (
+    id bigint
+) {
+    GRANTS {
+        SELECT TO readonly_role;
+    }
+}
+
+-------------------------------------
+
+(source_file
+  (table_declaration
+    name: (identifier)
+    columns: (column_list
+      (column_def
+        name: (identifier)
+        type: (sql_type
+          (identifier))))
+    (dpg_block
+      (grants_block
+        (grant_directive
+          privilege: (privilege_spec)
+          (identifier))))))

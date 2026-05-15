@@ -1,0 +1,37 @@
+name: Editor / Grammar
+
+on:
+  push:
+    branches: [master]
+    paths:
+      - "editors/grammar/**"
+  pull_request:
+    branches: [master]
+    paths:
+      - "editors/grammar/**"
+
+jobs:
+  grammar:
+    name: Tree-sitter grammar
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: editors/grammar/package.json
+
+      - name: Install dependencies
+        working-directory: editors/grammar
+        run: npm install
+
+      - name: Generate parser
+        working-directory: editors/grammar
+        run: npx tree-sitter generate
+
+      - name: Run corpus tests
+        working-directory: editors/grammar
+        run: npx tree-sitter test
