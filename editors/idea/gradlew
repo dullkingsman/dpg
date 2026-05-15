@@ -202,4 +202,34 @@ eval "set -- $(
         tr '\n' ' '
     )" '"$@"'
 
-exec "$JAVACMD" "$@"
+# ── Local-first Gradle distribution ─────────────────────────────────────────
+# If the zip already exists locally, patch the wrapper properties to use the
+# file:// URL for this invocation so no network access is needed. The file is
+# restored to the original HTTPS URL via an EXIT trap before this script exits.
+_GRADLE_PROPS="$APP_HOME/gradle/wrapper/gradle-wrapper.properties"
+_LOCAL_GRADLE_ZIP="/tmp/gradle-8.6-bin.zip"
+_ORIG_DIST_URL_LINE=""
+
+if [ -f "$_LOCAL_GRADLE_ZIP" ]; then
+    _ORIG_DIST_URL_LINE=$(grep '^distributionUrl=' "$_GRADLE_PROPS" || true)
+    _tmp_props=$(mktemp)
+    grep -v '^distributionUrl=' "$_GRADLE_PROPS" > "$_tmp_props"
+    printf 'distributionUrl=file\\:///tmp/gradle-8.6-bin.zip\n' >> "$_tmp_props"
+    cp "$_tmp_props" "$_GRADLE_PROPS"
+    rm -f "$_tmp_props"
+fi
+
+_restore_gradle_props() {
+    if [ -n "$_ORIG_DIST_URL_LINE" ]; then
+        _tmp=$(mktemp)
+        grep -v '^distributionUrl=' "$_GRADLE_PROPS" > "$_tmp"
+        printf '%s\n' "$_ORIG_DIST_URL_LINE" >> "$_tmp"
+        cp "$_tmp" "$_GRADLE_PROPS"
+        rm -f "$_tmp"
+    fi
+}
+trap '_restore_gradle_props' EXIT INT TERM
+# ─────────────────────────────────────────────────────────────────────────────
+
+"$JAVACMD" "$@"
+exit $?
