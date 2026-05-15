@@ -33,14 +33,20 @@ var __importStar = (this && this.__importStar) || (function () {
     };
 })();
 Object.defineProperty(exports, "__esModule", { value: true });
+const fs = __importStar(require("fs"));
 const path = __importStar(require("path"));
 const test_electron_1 = require("@vscode/test-electron");
 async function main() {
     const extensionDevelopmentPath = path.resolve(__dirname, "../../");
     const extensionTestsPath = path.resolve(__dirname, "./suite/index");
+    // Prefer a locally-installed VS Code to avoid network downloads in restricted
+    // environments (CI without JetBrains CDN, dev boxes with firewall rules, etc.).
+    const localCandidates = ["/usr/share/code/bin/code", "/usr/bin/code"];
+    const vscodeExecutablePath = localCandidates.find((p) => fs.existsSync(p)) ?? undefined;
     await (0, test_electron_1.runTests)({
         extensionDevelopmentPath,
         extensionTestsPath,
+        vscodeExecutablePath,
         // Use a temp workspace so tests don't touch real files.
         launchArgs: ["--disable-extensions"],
     });

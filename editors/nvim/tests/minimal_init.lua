@@ -15,36 +15,45 @@ vim.opt.runtimepath:prepend(plugin_root)
 
 -- Stub out nvim-treesitter so treesitter.lua gracefully no-ops when the
 -- real plugin is not installed in the test environment.
+-- One persistent table so writes from setup() are visible to subsequent reads.
+local _parser_configs = {}
 package.preload["nvim-treesitter.parsers"] = function()
   return {
-    get_parser_configs = function()
-      local configs = {}
-      return setmetatable(configs, {
-        __index  = function(t, k) t[k] = {}; return t[k] end,
-        __newindex = function(t, k, v) rawset(t, k, v) end,
-      })
-    end,
+    get_parser_configs = function() return _parser_configs end,
   }
 end
 
 -- Stub out nvim-lspconfig so lsp.lua gracefully no-ops.
+-- Shared table: writes to lspconfig.configs are visible on lspconfig[key].
+local _lsp_configs = {}
 package.preload["lspconfig"] = function()
-  return {
+  return setmetatable({
     util = {
       root_pattern = function(...) return function() return nil end end,
     },
-  }
+  }, {
+    __index = function(_, k)
+      if _lsp_configs[k] ~= nil then
+        return { setup = function() end }
+      end
+    end,
+  })
 end
 package.preload["lspconfig.configs"] = function()
-  return {}
+  return _lsp_configs
 end
 
 -- Load plenary (required for the busted runner).
--- Plenary must be on runtimepath; install it normally via your plugin manager
--- or clone it alongside this repo for CI:
---   git clone https://github.com/nvim-lua/plenary.nvim /tmp/plenary
---   nvim --headless -u tests/minimal_init.lua ...  (add /tmp/plenary to rtp first)
-local plenary_path = vim.fn.expand("~/.local/share/nvim/site/pack/packer/start/plenary.nvim")
-if vim.fn.isdirectory(plenary_path) == 1 then
-  vim.opt.runtimepath:append(plenary_path)
+-- CI: git clone https://github.com/nvim-lua/plenary.nvim /tmp/plenary
+-- Dev: install via your plugin manager (packer, lazy, etc.)
+local plenary_candidates = {
+  "/tmp/plenary",
+  vim.fn.expand("~/.local/share/nvim/site/pack/packer/start/plenary.nvim"),
+  vim.fn.expand("~/.local/share/nvim/lazy/plenary.nvim"),
+}
+for _, p in ipairs(plenary_candidates) do
+  if vim.fn.isdirectory(p) == 1 then
+    vim.opt.runtimepath:append(p)
+    break
+  end
 end

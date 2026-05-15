@@ -49,9 +49,8 @@ describe("DPG format-on-save", function()
     assert.has_no_errors(function()
       -- Fire the autocmd manually.
       vim.api.nvim_exec_autocmds("BufWritePre", {
-        group   = "DpgFmt",
-        pattern = "*.dpg",
-        buf     = buf,
+        group  = "DpgFmt",
+        buffer = buf,
       })
     end)
   end)
@@ -64,9 +63,8 @@ describe("DPG format-on-save", function()
 
     assert.has_no_errors(function()
       vim.api.nvim_exec_autocmds("BufWritePre", {
-        group   = "DpgFmt",
-        pattern = "*.dpg",
-        buf     = buf,
+        group  = "DpgFmt",
+        buffer = buf,
       })
     end)
   end)
