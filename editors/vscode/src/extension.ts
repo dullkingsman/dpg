@@ -41,7 +41,7 @@ function formatDocument(
   const filePath = doc.uri.fsPath;
 
   return new Promise<vscode.TextEdit[]>((resolve) => {
-    execFile(fmtPath, ["fmt", filePath], (err) => {
+    execFile(fmtPath, ["fmt", filePath], (err: Error | null) => {
       if (err) {
         resolve([]);
         return;

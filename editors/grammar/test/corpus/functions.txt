@@ -22,6 +22,7 @@ $$;
           (identifier))))
     returns: (sql_type
       (identifier))
+    language: (identifier)
     body: (dollar_quoted_string)))
 
 =====================================
@@ -55,6 +56,7 @@ $$
           (identifier))))
     returns: (sql_type
       (identifier))
+    language: (identifier)
     body: (dollar_quoted_string)
     (dpg_block
       (comment_directive
@@ -106,6 +108,7 @@ FUNCTION legacy_compute(x integer) RETURNS integer LANGUAGE sql AS $$ SELECT x $
           (identifier))))
     returns: (sql_type
       (identifier))
+    language: (identifier)
     body: (dollar_quoted_string)
     (dpg_block
       (deprecated_directive
@@ -135,6 +138,7 @@ $$
           (identifier))))
     returns: (sql_type
       (identifier))
+    language: (identifier)
     body: (dollar_quoted_string)
     (dpg_block
       (grants_block

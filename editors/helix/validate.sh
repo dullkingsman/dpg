@@ -49,6 +49,9 @@ assert dpg is not None, "expected a [[language]] entry with name = 'dpg'"
 assert dpg.get("scope") == "source.dpg", "expected scope = 'source.dpg'"
 assert "dpg" in dpg.get("file-types", []), "expected 'dpg' in file-types"
 assert dpg.get("comment-token") == "--", "expected comment-token = '--'"
+fmt = dpg.get("formatter", {})
+assert fmt.get("command") == "dpg", "expected formatter command = 'dpg'"
+assert fmt.get("args") == ["fmt", "--stdin"], "expected formatter args = ['fmt', '--stdin']"
 
 servers = data.get("language-server", {})
 assert "dpg-lsp" in servers, "expected [language-server.dpg-lsp] section"

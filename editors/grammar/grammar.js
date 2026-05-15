@@ -4,6 +4,15 @@
 module.exports = grammar({
   name: "dpg",
 
+  conflicts: $ => [
+    // `ROLE name ROLE other_role`: second ROLE could be a new declaration
+    // or the _role_option `ROLE role_list`. GLR resolves at parse time.
+    [$.role_declaration],
+    // `name type CONSTRAINT ...`: after a bare type, a constraint keyword could
+    // end the repeat or start a new _column_constraint. GLR resolves correctly.
+    [$.column_def],
+  ],
+
   externals: $ => [
     $.dollar_quoted_string,
     $._block_comment_content,
@@ -38,7 +47,7 @@ module.exports = grammar({
       $.procedure_declaration,
       $.aggregate_declaration,
       $.enum_declaration,
-      $.type_declaration,
+      $._type_declaration,
       $.domain_declaration,
       $.virtual_type_declaration,
       $.sequence_declaration,
@@ -263,7 +272,7 @@ module.exports = grammar({
 
     // ─── TYPE (composite / range / base / virtual) ────────────────────────────
 
-    type_declaration: $ => choice(
+    _type_declaration: $ => choice(
       $.composite_type_declaration,
       $.range_type_declaration,
       $.base_type_declaration,
@@ -579,7 +588,7 @@ module.exports = grammar({
 
     dpg_block: $ => seq(
       "{",
-      repeat($._block_directive),
+      repeat(choice($._block_directive, $.macro_spread)),
       "}",
     ),
 
@@ -801,10 +810,14 @@ module.exports = grammar({
       optional(seq(kw("WITHOUT"), kw("TIME"), kw("ZONE"))),
     ),
 
-    // Opaque SQL expression: balanced parens, any token except top-level delimiters.
-    // Used for DEFAULT values, CHECK predicates, query bodies, etc.
+    // Opaque SQL expression: consumes tokens until top-level { ; or , (comma breaks
+    // out so it can be used inside commaSep contexts).  $.identifier is listed
+    // explicitly so that word-shaped tokens (SELECT, FROM, WHERE, …) are accepted
+    // even when they share spelling with DPG keywords that have lower GLR priority
+    // in this position.
     sql_expression: $ => prec.left(repeat1(
       choice(
+        $.identifier,
         $.string_literal,
         $.dollar_quoted_string,
         $.number_literal,
@@ -834,9 +847,12 @@ module.exports = grammar({
 
     identifier: _ => /[a-zA-Z_][a-zA-Z0-9_$]*/,
 
-    quoted_identifier: _ => seq('"', /[^"]*/, '"'),
-
-    string_literal: _ => seq("'", /[^']*/, "'"),
+    // DPG uses double-quoted strings for directive messages (COMMENT, DEPRECATED)
+    // and single-quoted strings for SQL string literals.  Both parse as string_literal.
+    string_literal: _ => choice(
+      seq("'", /[^']*/, "'"),
+      seq('"', /[^"]*/, '"'),
+    ),
 
     number_literal: _ => /-?[0-9]+(\.[0-9]+)?/,
 
@@ -844,7 +860,8 @@ module.exports = grammar({
 
     line_comment: _ => token(seq("--", /.*/)),
 
-    block_comment: $ => seq("/*", $._block_comment_content, "*/"),
+    // The external scanner consumes "/*" content AND the closing "*/".
+    block_comment: $ => seq("/*", $._block_comment_content),
   },
 });
 

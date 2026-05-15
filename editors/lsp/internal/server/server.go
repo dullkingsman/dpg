@@ -85,7 +85,13 @@ func newServer() *glspserver.Server {
 	}
 
 	handler.TextDocumentDidClose = func(ctx *glsp.Context, params *protocol.DidCloseTextDocumentParams) error {
-		ws.CloseDocument(uriToPath(string(params.TextDocument.URI)))
+		path := uriToPath(string(params.TextDocument.URI))
+		ws.CloseDocument(path)
+		// Clear diagnostics in the client's panel for this file.
+		ctx.Notify(protocol.ServerTextDocumentPublishDiagnostics, protocol.PublishDiagnosticsParams{
+			URI:         params.TextDocument.URI,
+			Diagnostics: []protocol.Diagnostic{},
+		})
 		return nil
 	}
 
@@ -105,7 +111,8 @@ func newServer() *glspserver.Server {
 
 	handler.TextDocumentCompletion = func(ctx *glsp.Context, params *protocol.CompletionParams) (any, error) {
 		path := uriToPath(string(params.TextDocument.URI))
-		return analysis.Completion(ws, path, params.Position), nil
+		items := analysis.Completion(ws, path, params.Position)
+		return protocol.CompletionList{IsIncomplete: false, Items: items}, nil
 	}
 
 	handler.TextDocumentFormatting = func(ctx *glsp.Context, params *protocol.DocumentFormattingParams) ([]protocol.TextEdit, error) {

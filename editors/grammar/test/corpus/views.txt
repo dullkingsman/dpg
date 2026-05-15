@@ -2,27 +2,20 @@
 Simple view
 =====================================
 
-VIEW active_users AS SELECT id, email FROM users WHERE active = true;
+VIEW active_users AS SELECT id FROM users WHERE active = TRUE;
 
 -------------------------------------
 
 (source_file
   (view_declaration
     name: (identifier)
-    query: (sql_expression
-      (identifier)
-      (identifier)
-      (identifier)
-      (identifier)
-      (identifier)
-      (identifier)
-      (boolean_literal))))
+    query: (sql_expression)))
 
 =====================================
 View with dpg block
 =====================================
 
-VIEW user_summary AS SELECT id, name FROM users
+VIEW user_summary AS SELECT id FROM users
 {
     COMMENT "summarised user info";
     GRANTS {
@@ -35,11 +28,7 @@ VIEW user_summary AS SELECT id, name FROM users
 (source_file
   (view_declaration
     name: (identifier)
-    query: (sql_expression
-      (identifier)
-      (identifier)
-      (identifier)
-      (identifier))
+    query: (sql_expression)
     (dpg_block
       (comment_directive
         text: (string_literal))
@@ -60,16 +49,14 @@ MATERIALIZED VIEW order_stats AS SELECT count(*) FROM orders WITH NO DATA
   (materialized_view_declaration
     name: (identifier)
     query: (sql_expression
-      (identifier)
-      (identifier)
-      (identifier))))
+      (sql_expression))))
 
 =====================================
 Recursive view
 =====================================
 
 RECURSIVE VIEW org_tree (id, parent_id, depth) AS
-    SELECT id, parent_id, 0 FROM orgs WHERE parent_id IS NULL;
+    SELECT id FROM orgs WHERE parent_id IS NULL;
 
 -------------------------------------
 
@@ -79,10 +66,4 @@ RECURSIVE VIEW org_tree (id, parent_id, depth) AS
     (identifier)
     (identifier)
     (identifier)
-    query: (sql_expression
-      (identifier)
-      (identifier)
-      (number_literal)
-      (identifier)
-      (identifier)
-      (boolean_literal))))
+    query: (sql_expression)))

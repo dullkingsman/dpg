@@ -22,11 +22,13 @@ type diagnosticRaw struct {
 	Col     int    `json:"col,omitempty"`
 }
 
-// runValidate shells out to `dpg validate --format json` and returns diagnostics
-// mapped back to originalPath (tmpPath is used for the actual file content).
+// runValidate shells out to `dpg validate --format json <tmpPath>` and returns
+// diagnostics remapped back to originalPath.
 func runValidate(root, tmpPath, originalPath string) []Diagnostic {
-	args := []string{"validate", "--format", "json"}
-	cmd := exec.Command("dpg", args...)
+	// Pass tmpPath as a positional argument so dpg validates only that file,
+	// without needing a full project on disk. The JSON output will reference
+	// tmpPath in the `file` field; fileMatches remaps it to originalPath.
+	cmd := exec.Command("dpg", "validate", "--format", "json", tmpPath)
 	if root != "" {
 		cmd.Dir = root
 	}
@@ -34,7 +36,7 @@ func runValidate(root, tmpPath, originalPath string) []Diagnostic {
 	out, err := cmd.Output()
 	if err != nil {
 		if exitErr, ok := err.(*exec.ExitError); ok {
-			// dpg validate exits non-zero when there are errors; stderr has the JSON
+			// dpg validate exits non-zero when there are errors; stdout has JSON
 			out = append(out, exitErr.Stderr...)
 		} else {
 			return nil

@@ -89,7 +89,8 @@ TABLE accounts (
         type: (sql_type
           (identifier)))
       (table_constraint
-        name: (identifier)))))
+        name: (identifier)
+        (identifier)))))
 
 =====================================
 Table with foreign key reference
@@ -109,11 +110,15 @@ TABLE memberships (
       (column_def
         name: (identifier)
         type: (sql_type
-          (identifier)))
+          (identifier))
+        (identifier)
+        (identifier))
       (column_def
         name: (identifier)
         type: (sql_type
-          (identifier))))))
+          (identifier))
+        (identifier)
+        (identifier)))))
 
 =====================================
 Table with indices block

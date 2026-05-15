@@ -1,7 +1,7 @@
 package com.dullkingsman.dpg
 
+import com.intellij.execution.configurations.GeneralCommandLine
 import com.intellij.testFramework.fixtures.BasePlatformTestCase
-import com.intellij.testFramework.fixtures.IdeaTestFixtureFactory
 
 class DpgLspServerDescriptorTest : BasePlatformTestCase() {
 
@@ -38,6 +38,6 @@ class DpgLspServerDescriptorTest : BasePlatformTestCase() {
     }
 
     fun testPresentationTextIsNotBlank() {
-        assertTrue(descriptor.presentationText.isNotBlank())
+        assertTrue(descriptor.presentableName.isNotBlank())
     }
 }

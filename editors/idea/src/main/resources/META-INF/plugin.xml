@@ -8,8 +8,8 @@
     <p>Language support for <b>.dpg</b> (DPG / Declarative PG) source files.</p>
     <ul>
       <li>Syntax highlighting via the DPG file type</li>
-      <li>Diagnostics, hover, go-to-definition, and completions via <code>dpg-lsp</code></li>
       <li>Format on save via <code>dpg fmt</code></li>
+      <li>Diagnostics, hover, go-to-definition, and completions via <code>dpg-lsp</code></li>
     </ul>
     <p>Requires <code>dpg-lsp</code> on <code>$PATH</code>. Install with:<br/>
     <code>go install github.com/dullkingsman/dpg-lsp/cmd/dpg-lsp@latest</code></p>
@@ -18,16 +18,11 @@
   <depends>com.intellij.modules.platform</depends>
 
   <extensions defaultExtensionNs="com.intellij">
-    <!-- File type registration -->
     <fileType
         name="DPG"
         implementationClass="com.dullkingsman.dpg.DpgFileType"
         language="DPG"
         extensions="dpg"
         fieldName="INSTANCE"/>
-
-    <!-- LSP client (IntelliJ Platform 2023.1+) -->
-    <platform.lsp.serverSupportProvider
-        implementation="com.dullkingsman.dpg.DpgLspServerSupportProvider"/>
   </extensions>
 </idea-plugin>

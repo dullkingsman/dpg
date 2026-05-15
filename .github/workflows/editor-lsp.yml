@@ -1,0 +1,36 @@
+name: Editor / LSP
+
+on:
+  push:
+    branches: [master]
+    paths:
+      - "editors/lsp/**"
+  pull_request:
+    branches: [master]
+    paths:
+      - "editors/lsp/**"
+
+jobs:
+  lsp:
+    name: dpg-lsp Go server
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: editors/lsp/go.mod
+          cache: true
+
+      - name: Vet
+        working-directory: editors/lsp
+        run: go vet ./...
+
+      - name: Build
+        working-directory: editors/lsp
+        run: go build ./...
+
+      - name: Test
+        working-directory: editors/lsp
+        run: go test ./...

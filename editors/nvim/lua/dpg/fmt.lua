@@ -1,3 +1,4 @@
+-- Requires Neovim 0.10+  (vim.system API)
 local M = {}
 
 function M.setup()
@@ -8,8 +9,8 @@ function M.setup()
       local path = vim.api.nvim_buf_get_name(ev.buf)
       if path == "" then return end
 
-      -- Write buffer to disk first (BufWritePre fires before the actual write,
-      -- so we need to save to a temp file to format the current in-memory state)
+      -- Write buffer content to a temp file so dpg fmt sees the in-memory
+      -- state (BufWritePre fires before the actual disk write).
       local tmp = path .. ".dpg-lsp-tmp"
       local lines = vim.api.nvim_buf_get_lines(ev.buf, 0, -1, false)
       local f = io.open(tmp, "w")
@@ -19,7 +20,6 @@ function M.setup()
 
       local result = vim.system({ "dpg", "fmt", tmp }, { text = true }):wait()
       if result.code == 0 then
-        -- Read formatted content back into the buffer
         local formatted = vim.fn.readfile(tmp)
         vim.api.nvim_buf_set_lines(ev.buf, 0, -1, false, formatted)
       end

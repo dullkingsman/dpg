@@ -38,12 +38,7 @@ ENUM user_tier ('free', 'pro', 'enterprise')
       (migrate_remove_directive
         value: (string_literal)
         (sql_expression
-          (identifier)
-          (identifier)
-          (identifier)
           (string_literal)
-          (identifier)
-          (identifier)
           (string_literal))))))
 
 =====================================
@@ -115,4 +110,8 @@ SEQUENCE user_id_seq AS bigint INCREMENT BY 1 START WITH 1000 NO CYCLE;
 
 (source_file
   (sequence_declaration
-    name: (identifier)))
+    name: (identifier)
+    (sql_type
+      (identifier))
+    (number_literal)
+    (number_literal)))

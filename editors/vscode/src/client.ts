@@ -1,4 +1,3 @@
-import * as path from "path";
 import * as vscode from "vscode";
 import {
   LanguageClient,
@@ -34,7 +33,9 @@ export function startClient(
     clientOptions
   );
 
-  ctx.subscriptions.push(client.start());
+  client.start().then(() => {
+    ctx.subscriptions.push({ dispose: () => client?.stop() });
+  });
   return client;
 }
 

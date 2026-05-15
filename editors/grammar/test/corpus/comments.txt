@@ -80,6 +80,7 @@ $$;
     params: (param_list)
     returns: (sql_type
       (identifier))
+    language: (identifier)
     body: (dollar_quoted_string)))
 
 =====================================
@@ -99,6 +100,7 @@ $body$;
     params: (param_list)
     returns: (sql_type
       (identifier))
+    language: (identifier)
     body: (dollar_quoted_string)))
 
 =====================================

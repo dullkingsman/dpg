@@ -1,3 +1,4 @@
+-- Requires Neovim 0.10+
 local M = {}
 
 ---@class DpgOpts

@@ -24,8 +24,13 @@
     "languages": [
       {
         "id": "dpg",
-        "aliases": ["DPG", "Declarative PG"],
-        "extensions": [".dpg"],
+        "aliases": [
+          "DPG",
+          "Declarative PG"
+        ],
+        "extensions": [
+          ".dpg"
+        ],
         "configuration": "./language-configuration.json"
       }
     ],
@@ -65,21 +70,22 @@
   "main": "./out/extension.js",
   "scripts": {
     "compile": "tsc -p ./",
-    "watch":   "tsc -watch -p ./",
+    "watch": "tsc -watch -p ./",
     "package": "vsce package",
     "publish": "vsce publish",
-    "test":    "node ./out/test/runTests.js"
+    "test": "node ./out/test/runTests.js"
   },
   "dependencies": {
     "vscode-languageclient": "^9.0.1"
   },
   "devDependencies": {
-    "@types/mocha":          "^10.0.6",
-    "@types/vscode":         "^1.85.0",
+    "@types/mocha": "^10.0.6",
+    "@types/node": "^25.8.0",
+    "@types/vscode": "^1.85.0",
     "@vscode/test-electron": "^2.3.9",
-    "@vscode/vsce":          "^2.24.0",
-    "glob":                  "^10.3.10",
-    "mocha":                 "^10.3.0",
-    "typescript":            "^5.3.2"
+    "@vscode/vsce": "^2.24.0",
+    "glob": "^10.3.10",
+    "mocha": "^10.3.0",
+    "typescript": "^5.3.2"
   }
 }

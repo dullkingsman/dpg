@@ -7,9 +7,7 @@ block-comment-tokens = { start = "/*", end = "*/" }
 auto-format       = true
 indent            = { tab-width = 4, unit = "    " }
 
-# dpg-fmt-stdin: wrapper that reads stdin → dpg fmt → stdout.
-# See docs/editor-integration.md for the wrapper script.
-formatter = { command = "dpg-fmt-stdin" }
+formatter = { command = "dpg", args = ["fmt", "--stdin"] }
 
 # Requires dpg-lsp on $PATH:
 #   go install github.com/dullkingsman/dpg-lsp/cmd/dpg-lsp@latest

@@ -290,7 +290,7 @@ func findOrBuild() (string, error) {
 
 	// Build from source relative to this file.
 	_, self, _, _ := runtime.Caller(0)
-	lspRoot := filepath.Join(filepath.Dir(self), "..", "..", "..")
+	lspRoot := filepath.Join(filepath.Dir(self), "..", "..")
 
 	bin := filepath.Join(os.TempDir(), "dpg-lsp-smoke")
 	if runtime.GOOS == "windows" {

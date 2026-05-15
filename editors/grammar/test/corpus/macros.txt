@@ -15,11 +15,13 @@ MACRO timestamps (
     body: (column_def
       name: (identifier)
       type: (sql_type
-        (identifier)))
+        (identifier))
+      (sql_expression))
     body: (column_def
       name: (identifier)
       type: (sql_type
-        (identifier)))))
+        (identifier))
+      (sql_expression))))
 
 =====================================
 Brace-body macro declaration

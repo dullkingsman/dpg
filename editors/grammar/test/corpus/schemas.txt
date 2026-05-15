@@ -87,6 +87,7 @@ ROLE app_user LOGIN NOSUPERUSER PASSWORD 'env:APP_USER_PASSWORD'
 (source_file
   (role_declaration
     name: (identifier)
+    (string_literal)
     (dpg_block
       (comment_directive
         text: (string_literal)))))
@@ -101,4 +102,6 @@ EXTENSION pgcrypto SCHEMA public VERSION '1.3' CASCADE;
 
 (source_file
   (extension_declaration
-    name: (identifier)))
+    name: (identifier)
+    (identifier)
+    (string_literal)))
