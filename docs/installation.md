@@ -4,14 +4,94 @@
 
 | Requirement | Minimum |
 |---|---|
-| Go | 1.25 or later |
 | PostgreSQL target | 14 or later |
+| OS | Linux (amd64/arm64), macOS (amd64/arm64), Windows (amd64) |
+
+To build from source, a C compiler (GCC or Clang) and Go 1.25+ are also required — see [Build from Source](#build-from-source) for details.
+
+---
+
+## Install from Binary
+
+The quickest way to install dpg is via the install script, which downloads the correct pre-built binary for your platform.
+
+### One-line install (Linux / macOS)
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/dullkingsman/dpg/master/scripts/install.sh | bash
+```
+
+This installs `dpg` to `/usr/local/bin` (if `sudo` is available) or `~/.local/bin` (otherwise).
+
+To also install the language server in one step:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/dullkingsman/dpg/master/scripts/install.sh | bash -s -- --with-lsp
+```
+
+### Install script options
+
+```bash
+# Install a specific version
+bash scripts/install.sh --version v0.8.0
+
+# Override install directory
+bash scripts/install.sh --install-dir ~/.bin
+
+# Preview what would be installed (no changes made)
+bash scripts/install.sh --check
+
+# Install dpg + dpg-lsp in one step (requires Go on PATH)
+bash scripts/install.sh --with-lsp
+```
+
+### Manual download
+
+Download the binary directly from the [Releases page](https://github.com/dullkingsman/dpg/releases) and put it on your `PATH`:
+
+| Platform | Archive |
+|---|---|
+| Linux amd64 | `dpg-linux-amd64.tar.gz` |
+| Linux arm64 | `dpg-linux-arm64.tar.gz` |
+| macOS Intel | `dpg-darwin-amd64.tar.gz` |
+| macOS Apple Silicon | `dpg-darwin-arm64.tar.gz` |
+| Windows amd64 | `dpg-windows-amd64.exe.tar.gz` |
+
+Each archive contains a single binary. Extract it and rename it to `dpg` (or `dpg.exe` on Windows), then place it somewhere on your `PATH`.
+
+### Install via `go install`
+
+If you have Go 1.25+ and a C compiler installed:
+
+```bash
+go install github.com/dullkingsman/dpg/cmd/dpg@latest
+```
+
+---
+
+## Install the Language Server (dpg-lsp)
+
+`dpg-lsp` provides diagnostics, hover documentation, go-to-definition, and completions in editors. It is a separate binary that requires Go on `PATH`:
+
+```bash
+go install github.com/dullkingsman/dpg-lsp/cmd/dpg-lsp@latest
+```
+
+After installing, make sure `$(go env GOPATH)/bin` is on your `PATH`. Editor setup is covered in [Editor Integration](./editor-integration.md).
+
+---
+
+## Build from Source
+
+### System Requirements (source build)
+
+| Requirement | Minimum |
+|---|---|
+| Go | 1.25 or later |
 | CGo toolchain | Required — `pg_query_go` uses libpg_query (C library) |
 | GCC / Clang | Must be on `PATH` for the CGo build |
 
 Because `pg_query_go` links against the real PostgreSQL C parser, a C compiler must be present. Pure-Go cross-compilation is **not** possible; each target platform must be built on that platform or with a compatible CGo cross-compilation toolchain.
-
-## Build from Source
 
 ```bash
 git clone https://github.com/dullkingsman/dpg
@@ -74,6 +154,8 @@ make dist-darwin     # requires macOS SDK (only works on macOS hosts)
 ```
 
 For CI/CD release pipelines, consider using [goreleaser](https://goreleaser.com) with the Docker CGo cross-compilation approach (see `goreleaser` documentation for details).
+
+---
 
 ## Verifying the Install
 
