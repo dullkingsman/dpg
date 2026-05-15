@@ -1,0 +1,16 @@
+TABLE users (
+    id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    email text NOT NULL UNIQUE,
+    name text,
+    active boolean NOT NULL DEFAULT true,
+    created_at timestamp WITH time zone NOT NULL DEFAULT now(),
+    updated_at timestamp WITH time zone NOT NULL DEFAULT now()
+);
+
+TABLE sessions (
+    id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    user_id bigint NOT NULL REFERENCES users(id),
+    token text NOT NULL UNIQUE,
+    expires_at timestamp WITH time zone NOT NULL,
+    created_at timestamp WITH time zone NOT NULL DEFAULT now()
+);
