@@ -3,6 +3,16 @@ set -e
 
 REPO_ROOT="$(git rev-parse --show-toplevel)"
 
+# Git hooks run with a minimal environment — augment PATH so make/go are found.
+# Covers: system install (/usr/local/go), user-local install (~/.local/bin),
+# and GOPATH-managed binaries.
+export PATH="/usr/local/go/bin:${HOME}/.local/bin:${HOME}/go/bin:${PATH}"
+
+if ! command -v go >/dev/null 2>&1; then
+    echo "pre-commit: 'go' not found on PATH — skipping CLI doc regeneration." >&2
+    echo "  Install Go or add it to PATH to enable auto-regeneration." >&2
+fi
+
 if git diff --cached --name-only | grep -q "^editors/grammar/grammar\.js$"; then
     echo "grammar.js staged — regenerating parser.c..."
     (cd editors/grammar && npx tree-sitter generate)
@@ -12,8 +22,12 @@ fi
 
 # Regenerate CLI reference docs when any CLI source file is modified.
 if git diff --cached --name-only | grep -qE "^core/(cmd/dpg|tools/gendocs)/"; then
-    echo "CLI source changed — regenerating CLI reference docs..."
-    (cd "$REPO_ROOT" && make docs-cli)
-    git add "$REPO_ROOT/site/content/docs/cli/"
-    echo "CLI docs updated and staged."
+    if command -v go >/dev/null 2>&1; then
+        echo "CLI source changed — regenerating CLI reference docs..."
+        (cd "$REPO_ROOT" && make docs-cli)
+        git add "$REPO_ROOT/site/content/docs/cli/"
+        echo "CLI docs updated and staged."
+    else
+        echo "pre-commit: skipping CLI doc regeneration ('go' not on PATH)." >&2
+    fi
 fi
