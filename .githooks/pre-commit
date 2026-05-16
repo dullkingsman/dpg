@@ -13,10 +13,11 @@ if ! command -v go >/dev/null 2>&1; then
     echo "  Install Go or add it to PATH to enable auto-regeneration." >&2
 fi
 
-if git diff --cached --name-only | grep -q "^editors/grammar/grammar\.js$"; then
+# Regenerate parser.c when grammar.js changes.
+if git diff --cached --name-only | grep -q "^lang/grammar/grammar\.js$"; then
     echo "grammar.js staged — regenerating parser.c..."
-    (cd editors/grammar && npx tree-sitter generate)
-    git add editors/grammar/src/parser.c
+    (cd "$REPO_ROOT/lang/grammar" && npx tree-sitter generate)
+    git add "$REPO_ROOT/lang/grammar/src/parser.c"
     echo "parser.c updated and staged."
 fi
 
