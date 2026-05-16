@@ -254,7 +254,7 @@ Author's Address .................................................. 154
        beyond what is required to define observable behaviour.
    -   PostgreSQL runtime behaviour (query planning, execution, etc.).
    -   Data manipulation language (SELECT, INSERT, UPDATE, DELETE).
-   -   Inline data seeding (deferred; see Section 23).
+   -   Inline data seeding (out of scope; DPG is a schema tool).
 
 ### 1.2. Problem Statement
 
@@ -968,9 +968,17 @@ TABLE accounts (
 
 #### 4.7.3. Macro Scoping Rules
 
-   -   Macros are file-scoped in the current version.  A macro defined
-       in `tables/users.dpg` is NOT visible in `tables/orders.dpg`.
-       Cross-file macro sharing is deferred (Section 23).
+   -   Macros are **project-scoped**.  A macro defined in any `.dpg`
+       file within the compilation scope (all files for a given database
+       pass through the compiler together) is visible in every other
+       file.  The compiler performs a global collection pre-pass over
+       all source files before any file is tokenized, so declaration
+       order across files does not matter.
+
+   -   When the same macro name is defined in multiple files, the
+       file-local definition takes precedence over any globally-collected
+       definition.  This allows individual files to override a shared
+       macro with a specialised version.
 
    -   A macro name MUST be unique within its file.  Redefining a macro
        name in the same file is a compiler error (DPG-E011).
@@ -3306,18 +3314,29 @@ Phase 10: Emission (Emitter)
 
 ### 15.3. Phase 2 — Macro Preprocessing
 
-   The macro preprocessor performs two passes over each source file:
+   Macro preprocessing runs in three passes across the full file set:
 
-   **Pass 1 — Collection:** Scan for `MACRO name (body)` and
-   `MACRO name {body}` declarations.  Record each macro's name, body
-   type, and expanded text.  Emit error DPG-E007 if a macro declaration
-   is found inside a block.  Emit error DPG-E011 if a name is
-   redeclared.  Remove all `MACRO` declarations from the output text.
+   **Pre-pass — Global Collection:** Before processing any individual
+   file, the compiler iterates over every source file and collects all
+   `MACRO` declarations into a shared global store.  This pass is
+   read-only; it does not modify any file and does not expand spreads.
+   If the Tokenizer implements the optional `GlobalMacroSeeder`
+   interface, the compiler delegates this pre-pass to the tokenizer via
+   `AddGlobalMacros(src []byte)`.
+
+   **Pass 1 — Per-file Collection:** For each source file, scan for
+   `MACRO name (body)` and `MACRO name {body}` declarations.  Merge
+   the file-local definitions with the global store; file-local
+   definitions take precedence on name conflicts.  Emit error DPG-E007
+   if a macro declaration is found inside a block.  Emit error DPG-E011
+   if a name is redeclared within the same file.  Remove all `MACRO`
+   declarations from the file's output text.
 
    **Pass 2 — Expansion:** Scan for `...name` spread operators.
-   Expand each spread inline by substituting the recorded body text.
-   Emit error DPG-E010 if a name is not found.  Emit error DPG-E008 or
-   DPG-E009 if the body type does not match the context.
+   Expand each spread inline by substituting the recorded body text
+   from the merged store.  Emit error DPG-E010 if a name is not found.
+   Emit error DPG-E008 or DPG-E009 if the body type does not match
+   the context.
 
    Pass 2 is applied iteratively until no `...name` tokens remain, to
    handle macros whose bodies contain other spread operators.  If

@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Cross-file macro sharing** — macros defined in any `.dpg` file within a compilation scope are now available to every other file in that scope. The compiler performs a global collection pre-pass over all source files before tokenization begins. File-local declarations take precedence over same-named cross-file macros.
+
+### Changed
+
+- **Default privileges diffing** — `DEFAULT PRIVILEGES` declarations are now diffed structurally (per-grant and per-revocation) rather than by opaque body hash. Changes to individual grants or revocations produce minimal `GRANT`/`REVOKE` statements instead of regenerating the entire block.
+
 ## [0.5.2] — 2026-05-16
 
 ### Added

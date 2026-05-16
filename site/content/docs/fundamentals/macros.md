@@ -71,10 +71,50 @@ ALTER TABLE "public"."orders" ENABLE ROW LEVEL SECURITY;
 GRANT SELECT ON TABLE "public"."orders" TO "app_readonly";
 ```
 
+## Cross-file macros
+
+Macros are project-scoped. You can define shared macros in a dedicated file and spread them anywhere else in the same database compilation scope.
+
+```sql
+-- macros.dpg
+MACRO common_timestamps (
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at TIMESTAMPTZ
+)
+
+MACRO audit_block {
+    OWNER "app_admin";
+    ENABLE ROW LEVEL SECURITY;
+}
+```
+
+```sql
+-- tables/accounts.dpg  (no MACRO declaration needed)
+TABLE accounts (
+    id   UUID NOT NULL DEFAULT gen_random_uuid(),
+    name TEXT NOT NULL,
+    ...common_timestamps,
+    CONSTRAINT pk_accounts PRIMARY KEY (id)
+) { ...audit_block }
+```
+
+```sql
+-- tables/orders.dpg  (same macros, different file)
+TABLE orders (
+    id     BIGINT GENERATED ALWAYS AS IDENTITY,
+    amount NUMERIC(10,2) NOT NULL,
+    ...common_timestamps,
+    CONSTRAINT pk_orders PRIMARY KEY (id)
+) { ...audit_block }
+```
+
+A file-local `MACRO` declaration with the same name as a cross-file macro takes precedence, so individual files can specialise a shared definition without affecting others.
+
 ## Rules
 
 - A paren-body macro may only be spread inside a `( )` list.
 - A brace-body macro may only be spread inside a `{ }` block.
 - Spreading an undefined macro name is a compile-time error.
-- Macros are file-scoped — cross-file macro sharing is not yet supported. Redefine the macro in each file that uses it.
+- Macros are **project-scoped**: a macro defined in any `.dpg` file is available in every other file within the same compilation scope (all files for a given database). Declaration order across files does not matter.
+- A file-local `MACRO` declaration overrides a same-named macro from another file, letting individual files specialise a shared definition.
 - `MACRO` does not violate the no-verb mandate; it is a DPG preprocessor keyword, not a PostgreSQL keyword.
