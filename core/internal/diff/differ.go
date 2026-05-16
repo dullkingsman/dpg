@@ -487,6 +487,21 @@ func dropObject(so *snapshot.SnapObject) []pipeline.DiffOp {
 		if so.Opaque != nil {
 			return []pipeline.DiffOp{destructiveOp(fmt.Sprintf("DROP TEXT SEARCH TEMPLATE IF EXISTS %s;", qualIdent(so.Opaque.Schema, so.Opaque.Name)), zero)}
 		}
+	case "default_privileges":
+		if so.DefaultPrivileges != nil {
+			// Revoking a DEFAULT PRIVILEGES declaration means revoking all its grants.
+			dp := so.DefaultPrivileges
+			prefix := buildDefaultPrivPrefix(dp.ForRole, dp.InSchema)
+			var ops []pipeline.DiffOp
+			for _, g := range dp.Grants {
+				ops = append(ops, cautionOp(
+					fmt.Sprintf("%s REVOKE %s ON %s FROM %s;",
+						prefix, privStr(g.Privileges), dp.ObjectType, roleList(g.Roles)),
+					zero,
+				))
+			}
+			return ops
+		}
 	case "virtual_type":
 		// Virtual types have no SQL backing — nothing to drop.
 		return nil
@@ -691,38 +706,115 @@ func diffAggregate(o *ir.Aggregate, snap *snapshot.SnapOpaque) ([]pipeline.DiffO
 func createDefaultPrivileges(o *ir.DefaultPrivileges) []pipeline.DiffOp {
 	var ops []pipeline.DiffOp
 	pos := o.SrcPos
+	prefix := buildDefaultPrivPrefix(o.ForRole, o.InSchema)
 	for _, g := range o.Grants {
-		var b strings.Builder
-		b.WriteString("ALTER DEFAULT PRIVILEGES")
-		if o.ForRole != nil {
-			b.WriteString(" FOR ROLE ")
-			b.WriteString(quoteIdent(*o.ForRole))
-		}
-		if o.InSchema != nil {
-			b.WriteString(" IN SCHEMA ")
-			b.WriteString(quoteIdent(*o.InSchema))
-		}
-		b.WriteString(" GRANT ")
-		if len(g.Privileges) == 0 {
-			b.WriteString("ALL")
-		} else {
-			b.WriteString(strings.Join(g.Privileges, ", "))
-		}
-		b.WriteString(" ON ")
-		b.WriteString(o.ObjectType)
-		b.WriteString(" TO ")
-		roles := make([]string, len(g.Roles))
-		for i, r := range g.Roles {
-			roles[i] = quoteIdent(r)
-		}
-		b.WriteString(strings.Join(roles, ", "))
+		sql := fmt.Sprintf("%s GRANT %s ON %s TO %s",
+			prefix, privStr(g.Privileges), o.ObjectType, roleList(g.Roles))
 		if g.WithGrant {
-			b.WriteString(" WITH GRANT OPTION")
+			sql += " WITH GRANT OPTION"
 		}
-		b.WriteString(";")
-		ops = append(ops, safeOp(b.String(), pos))
+		ops = append(ops, safeOp(sql+";", pos))
+	}
+	for _, r := range o.Revocations {
+		cascade := ""
+		if r.Cascade {
+			cascade = " CASCADE"
+		}
+		sql := fmt.Sprintf("%s REVOKE %s ON %s FROM %s%s",
+			prefix, privStr(r.Privileges), o.ObjectType, roleList(r.Roles), cascade)
+		ops = append(ops, cautionOp(sql+";", pos))
 	}
 	return ops
+}
+
+// diffDefaultPrivileges diffs a DEFAULT PRIVILEGES declaration against its snapshot.
+// Grants are diffed structurally; revocations are re-emitted whenever their set changes.
+func diffDefaultPrivileges(o *ir.DefaultPrivileges, snap *snapshot.SnapDefaultPrivileges) []pipeline.DiffOp {
+	var ops []pipeline.DiffOp
+	pos := o.SrcPos
+
+	prefix := buildDefaultPrivPrefix(o.ForRole, o.InSchema)
+
+	// Diff grants.
+	snapGrantsByKey := make(map[string]snapshot.SnapGrant, len(snap.Grants))
+	for _, g := range snap.Grants {
+		snapGrantsByKey[grantKey(g.Privileges, g.Roles, g.WithGrant)] = g
+	}
+	desiredGrantsByKey := make(map[string]ir.Grant, len(o.Grants))
+	for _, g := range o.Grants {
+		desiredGrantsByKey[grantKey(g.Privileges, g.Roles, g.WithGrant)] = g
+	}
+
+	for k, sg := range snapGrantsByKey {
+		if _, ok := desiredGrantsByKey[k]; !ok {
+			ops = append(ops, cautionOp(
+				fmt.Sprintf("%s REVOKE %s ON %s FROM %s;",
+					prefix, privStr(sg.Privileges), o.ObjectType, roleList(sg.Roles)),
+				pos,
+			))
+		}
+	}
+	for k, g := range desiredGrantsByKey {
+		if _, ok := snapGrantsByKey[k]; !ok {
+			sql := fmt.Sprintf("%s GRANT %s ON %s TO %s",
+				prefix, privStr(g.Privileges), o.ObjectType, roleList(g.Roles))
+			if g.WithGrant {
+				sql += " WITH GRANT OPTION"
+			}
+			ops = append(ops, safeOp(sql+";", pos))
+		}
+	}
+
+	// Diff explicit revocations.
+	snapRevsByKey := make(map[string]snapshot.SnapGrant, len(snap.Revocations))
+	for _, r := range snap.Revocations {
+		snapRevsByKey[grantKey(r.Privileges, r.Roles, false)] = r
+	}
+	desiredRevsByKey := make(map[string]ir.Revocation, len(o.Revocations))
+	for _, r := range o.Revocations {
+		desiredRevsByKey[grantKey(r.Privileges, r.Roles, false)] = r
+	}
+
+	for k, sr := range snapRevsByKey {
+		if _, ok := desiredRevsByKey[k]; !ok {
+			// Revocation removed from desired: re-grant to restore.
+			ops = append(ops, safeOp(
+				fmt.Sprintf("%s GRANT %s ON %s TO %s;",
+					prefix, privStr(sr.Privileges), o.ObjectType, roleList(sr.Roles)),
+				pos,
+			))
+		}
+	}
+	for k, r := range desiredRevsByKey {
+		if _, ok := snapRevsByKey[k]; !ok {
+			cascade := ""
+			if r.Cascade {
+				cascade = " CASCADE"
+			}
+			ops = append(ops, cautionOp(
+				fmt.Sprintf("%s REVOKE %s ON %s FROM %s%s;",
+					prefix, privStr(r.Privileges), o.ObjectType, roleList(r.Roles), cascade),
+				pos,
+			))
+		}
+	}
+
+	return ops
+}
+
+// buildDefaultPrivPrefix builds the "ALTER DEFAULT PRIVILEGES [FOR ROLE x] [IN SCHEMA y]" prefix.
+func buildDefaultPrivPrefix(forRole, inSchema *string) string {
+	var b strings.Builder
+	b.WriteString("ALTER DEFAULT PRIVILEGES")
+	if forRole != nil {
+		b.WriteString(" FOR ROLE ")
+		b.WriteString(quoteIdent(*forRole))
+	}
+	if inSchema != nil {
+		b.WriteString(" IN SCHEMA ")
+		b.WriteString(quoteIdent(*inSchema))
+	}
+	return b.String()
 }
 
 func createSchema(o *ir.Schema) []pipeline.DiffOp {
@@ -1513,10 +1605,10 @@ func diffObject(desired pipeline.IRObject, snap *snapshot.SnapObject, fullSnap *
 		}
 		return diffOpaqueIR(o.QualifiedName(), o.Body, nil, snap.Opaque, o.SrcPos)
 	case *ir.DefaultPrivileges:
-		if snap.Opaque == nil {
+		if snap.DefaultPrivileges == nil {
 			return nil, nil
 		}
-		return diffOpaqueIR(o.QualifiedName(), "", nil, snap.Opaque, o.SrcPos)
+		return diffDefaultPrivileges(o, snap.DefaultPrivileges), nil
 	case *ir.VirtualType:
 		// Virtual types are DPG-only annotations; no SQL is generated on change.
 		return nil, nil

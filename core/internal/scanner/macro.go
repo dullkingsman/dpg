@@ -15,19 +15,31 @@ type MacroDef struct {
 // macroStore maps macro names to their definitions.
 type macroStore map[string]MacroDef
 
-// preprocessMacros performs two passes over src:
-//  1. Collect all MACRO name (...) and MACRO name {...} definitions.
-//  2. Expand ...name spreads in the rest of the source, erroring on undefined ones.
+// preprocessMacrosWithGlobal performs two passes over src:
+//  1. Collect all MACRO name (...) and MACRO name {...} definitions from src.
+//  2. Merge with global (file-local definitions take precedence).
+//  3. Expand ...name spreads in src, erroring on undefined ones.
 //
 // MACRO declarations are removed from the output. The result is valid DPG
-// source with all spreads inlined. Always calls expandMacros so that
-// undefined ...name spreads are detected even when no macros are defined.
-func preprocessMacros(src []byte) ([]byte, error) {
-	store, err := collectMacros(src)
+// source with all spreads inlined.
+func preprocessMacrosWithGlobal(src []byte, global macroStore) ([]byte, error) {
+	local, err := collectMacros(src)
 	if err != nil {
 		return nil, err
 	}
-	// Always run expand so that ...name with no matching macro is detected.
+	var store macroStore
+	if len(global) == 0 {
+		store = local
+	} else {
+		store = make(macroStore, len(global)+len(local))
+		for k, v := range global {
+			store[k] = v
+		}
+		// File-local definitions override globals.
+		for k, v := range local {
+			store[k] = v
+		}
+	}
 	return expandMacros(src, store)
 }
 

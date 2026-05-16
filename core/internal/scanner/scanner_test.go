@@ -813,6 +813,79 @@ TABLE events (
 	}
 }
 
+// ── cross-file macro sharing ──────────────────────────────────────────────────
+
+func TestGlobalMacro_AvailableInSecondFile(t *testing.T) {
+	macroFile := []byte(`MACRO audit_cols (
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+)`)
+	consumerFile := []byte(`TABLE events (id BIGINT, ...audit_cols);`)
+
+	sc := scanner.New()
+	if err := sc.AddGlobalMacros(macroFile); err != nil {
+		t.Fatalf("AddGlobalMacros: %v", err)
+	}
+	objs, err := sc.Scan("consumer.dpg", consumerFile)
+	if err != nil {
+		t.Fatalf("Scan: %v", err)
+	}
+	if len(objs) != 1 {
+		t.Fatalf("expected 1 object, got %d", len(objs))
+	}
+	if !strings.Contains(objs[0].Part1, "created_at") {
+		t.Errorf("global macro not expanded: Part1 = %q", objs[0].Part1)
+	}
+}
+
+func TestGlobalMacro_LocalOverridesGlobal(t *testing.T) {
+	globalFile := []byte(`MACRO ts_cols (created_at TIMESTAMPTZ)`)
+	localFile := []byte(`
+MACRO ts_cols (created_at TIMESTAMPTZ, updated_at TIMESTAMPTZ)
+TABLE events (id BIGINT, ...ts_cols);
+`)
+	sc := scanner.New()
+	if err := sc.AddGlobalMacros(globalFile); err != nil {
+		t.Fatalf("AddGlobalMacros: %v", err)
+	}
+	objs, err := sc.Scan("local.dpg", localFile)
+	if err != nil {
+		t.Fatalf("Scan: %v", err)
+	}
+	if len(objs) != 1 {
+		t.Fatalf("expected 1 object, got %d", len(objs))
+	}
+	// local definition has both columns; global only has created_at
+	if !strings.Contains(objs[0].Part1, "updated_at") {
+		t.Errorf("local macro should override global: Part1 = %q", objs[0].Part1)
+	}
+}
+
+func TestGlobalMacro_MultipleFiles(t *testing.T) {
+	file1 := []byte(`MACRO col_a (a TEXT NOT NULL)`)
+	file2 := []byte(`MACRO col_b (b INTEGER NOT NULL DEFAULT 0)`)
+	consumer := []byte(`TABLE t (id BIGINT, ...col_a, ...col_b);`)
+
+	sc := scanner.New()
+	for _, f := range [][]byte{file1, file2} {
+		if err := sc.AddGlobalMacros(f); err != nil {
+			t.Fatalf("AddGlobalMacros: %v", err)
+		}
+	}
+	objs, err := sc.Scan("consumer.dpg", consumer)
+	if err != nil {
+		t.Fatalf("Scan: %v", err)
+	}
+	if len(objs) != 1 {
+		t.Fatalf("expected 1 object, got %d", len(objs))
+	}
+	for _, col := range []string{"a TEXT", "b INTEGER"} {
+		if !strings.Contains(objs[0].Part1, col) {
+			t.Errorf("expected %q in Part1, got %q", col, objs[0].Part1)
+		}
+	}
+}
+
 // ── helper ───────────────────────────────────────────────────────────────────
 
 func kindList(objs []pipeline.RawObject) []string {

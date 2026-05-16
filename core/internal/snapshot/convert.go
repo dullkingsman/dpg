@@ -140,9 +140,21 @@ func toSnapObject(obj pipeline.IRObject) *SnapObject {
 			Kind: "ts_template", Schema: o.Schema, Name: o.Name, BodyHash: hashBodyStr(o.Body),
 		}}
 	case *ir.DefaultPrivileges:
-		return &SnapObject{Kind: "default_privileges", Opaque: &SnapOpaque{
-			Kind: "default_privileges", Name: o.QualifiedName(),
-		}}
+		sdp := &SnapDefaultPrivileges{
+			ForRole:    o.ForRole,
+			InSchema:   o.InSchema,
+			ObjectType: o.ObjectType,
+		}
+		for _, g := range o.Grants {
+			sdp.Grants = append(sdp.Grants, toSnapGrant(g))
+		}
+		for _, r := range o.Revocations {
+			sdp.Revocations = append(sdp.Revocations, SnapGrant{
+				Privileges: r.Privileges,
+				Roles:      r.Roles,
+			})
+		}
+		return &SnapObject{Kind: "default_privileges", DefaultPrivileges: sdp}
 	case *ir.VirtualType:
 		return &SnapObject{Kind: "virtual_type", VirtualType: &SnapVirtualType{
 			Schema:  o.Schema,

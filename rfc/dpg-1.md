@@ -4424,22 +4424,15 @@ serial_sequence_declared      = "off"
    of the specification.  They are documented here to establish the
    intended direction for future versions.
 
-   **Inline data seeding (`SEED { }` blocks):**
-   Deferred to a future `dpg-seed` extension specification.  Inline
-   seeding blurs the boundary between schema management and data
-   management and requires careful specification of merge semantics,
-   idempotency, and truncate-vs-upsert strategies.
-
    **Minimum PostgreSQL version targeting:**
    Planned for v1.1.  The compiler's internal portability annotation
    infrastructure is already in place.  Per-object version gating will
-   allow users to declare `MIN_PG_VERSION = 15` and have the compiler
-   omit or adapt DDL for features not available on older servers.
-
-   **Cross-file macro sharing:**
-   Currently `MACRO` definitions are file-scoped.  A future version
-   will add a global macro registry so shared column sets can live in
-   a dedicated `macros.dpg` file and be imported by any other file.
+   allow users to declare `MIN_PG_VERSION = 15` in their root
+   `dpg.toml` and have the compiler emit warnings (and optionally
+   errors) when a declared object uses a feature unavailable on older
+   servers.  The portability analyzer already classifies each IR object
+   as `Standard` or `PGSpecific`; version gating extends this with a
+   per-object minimum PG release map.
 
    **Rule (REWRITE) objects:**
    PostgreSQL `CREATE RULE` is a legacy feature superseded by triggers
@@ -4583,13 +4576,13 @@ serial_sequence_declared      = "off"
    | Text Search Parsers | Declared, Diffed | |
    | Text Search Templates | Declared, Diffed | |
    | Macro preprocessor | Declared, No SQL | Compile-time text expansion |
+   | Cross-file macro sharing | Declared, No SQL | Macros defined in any file in the compilation scope are available to all others |
    | Rules (REWRITE) | Out of scope | Legacy |
    | `IMPORT FOREIGN SCHEMA` | Out of scope | Runtime discovery |
    | `REFRESH MATERIALIZED VIEW` | Out of scope | Runtime DML |
    | Temporary tables | Out of scope | Session-scoped |
-   | Inline data seeding | Deferred | See §23 |
+   | Inline data seeding | Out of scope | DPG is a schema tool; data management is outside its scope |
    | Minimum PG version targeting | Deferred | See §23; planned v1.1 |
-   | Cross-file macro sharing | Deferred | See §23 |
 
 ---
 

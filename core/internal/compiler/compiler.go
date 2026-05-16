@@ -49,6 +49,20 @@ func Compile(files []string, dbDir string, reg *pipeline.Registry) ([]pipeline.I
 	// Track unique directory-inferred schemas so we can inject synthetic declarations.
 	dirSchemas := map[string]pipeline.SourcePos{}
 
+	// Stage 0: If the tokenizer supports cross-file macro sharing, do a pre-pass
+	// to collect all macro definitions before any file is tokenized.
+	if seeder, ok := tokenizer.(pipeline.GlobalMacroSeeder); ok {
+		for _, path := range files {
+			src, readErr := os.ReadFile(path)
+			if readErr != nil {
+				return nil, fmt.Errorf("compiler: reading %s: %w", path, readErr)
+			}
+			if seedErr := seeder.AddGlobalMacros(src); seedErr != nil {
+				return nil, fmt.Errorf("compiler: collecting macros from %s: %w", path, seedErr)
+			}
+		}
+	}
+
 	// Stage 1: Tokenize all source files.
 	for _, path := range files {
 		src, readErr := os.ReadFile(path)

@@ -9,6 +9,14 @@ type Tokenizer interface {
 	Scan(path string, src []byte) ([]RawObject, error)
 }
 
+// GlobalMacroSeeder is an optional interface that a Tokenizer may implement.
+// When detected by the compiler it is called once per source file before any
+// Scan calls begin, enabling cross-file macro sharing: macros defined in any
+// .dpg file within the compilation scope are available to every other file.
+type GlobalMacroSeeder interface {
+	AddGlobalMacros(src []byte) error
+}
+
 // PGSQLParser parses the Part 1 PG SQL text of a declaration by prepending
 // the correct CREATE verb and feeding it to the real PostgreSQL parser.
 // Default implementation: internal/pgparser.LibPQParser (uses libpg_query via

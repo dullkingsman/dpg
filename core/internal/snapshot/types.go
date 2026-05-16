@@ -5,16 +5,17 @@ package snapshot
 type SnapObject struct {
 	Kind string `json:"kind"`
 	// One of the following is populated, depending on Kind.
-	Table       *SnapTable       `json:"table,omitempty"`
-	View        *SnapView        `json:"view,omitempty"`
-	Function    *SnapFunction    `json:"function,omitempty"`
-	Type        *SnapType        `json:"type,omitempty"`
-	Schema      *SnapSchema      `json:"schema,omitempty"`
-	Extension   *SnapExtension   `json:"extension,omitempty"`
-	Sequence    *SnapSequence    `json:"sequence,omitempty"`
-	Role        *SnapRole        `json:"role,omitempty"`
-	VirtualType *SnapVirtualType `json:"virtual_type,omitempty"`
-	Opaque      *SnapOpaque      `json:"opaque,omitempty"`
+	Table             *SnapTable             `json:"table,omitempty"`
+	View              *SnapView              `json:"view,omitempty"`
+	Function          *SnapFunction          `json:"function,omitempty"`
+	Type              *SnapType              `json:"type,omitempty"`
+	Schema            *SnapSchema            `json:"schema,omitempty"`
+	Extension         *SnapExtension         `json:"extension,omitempty"`
+	Sequence          *SnapSequence          `json:"sequence,omitempty"`
+	Role              *SnapRole              `json:"role,omitempty"`
+	VirtualType       *SnapVirtualType       `json:"virtual_type,omitempty"`
+	DefaultPrivileges *SnapDefaultPrivileges `json:"default_privileges,omitempty"`
+	Opaque            *SnapOpaque            `json:"opaque,omitempty"`
 }
 
 // SnapOpaque covers body-based objects: Procedure, Aggregate, Tablespace, FDW,
@@ -185,4 +186,14 @@ type SnapVirtualType struct {
 	Name    string  `json:"name"`
 	Body    string  `json:"body"`
 	Comment *string `json:"comment,omitempty"`
+}
+
+// SnapDefaultPrivileges is the snapshot form of a DEFAULT PRIVILEGES declaration.
+// Each entry identifies a (ForRole, InSchema, ObjectType) combination and its grants.
+type SnapDefaultPrivileges struct {
+	ForRole     *string     `json:"for_role,omitempty"`
+	InSchema    *string     `json:"in_schema,omitempty"`
+	ObjectType  string      `json:"object_type"`
+	Grants      []SnapGrant `json:"grants,omitempty"`
+	Revocations []SnapGrant `json:"revocations,omitempty"`
 }

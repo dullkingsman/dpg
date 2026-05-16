@@ -24,17 +24,38 @@ func init() {
 	pipeline.Default.Register(pipeline.KeyTokenizer, New())
 }
 
-// Scanner implements pipeline.Tokenizer.
-type Scanner struct{}
+// Scanner implements pipeline.Tokenizer and pipeline.GlobalMacroSeeder.
+type Scanner struct {
+	global macroStore // macros collected from all files during the pre-pass
+}
 
 // New returns a Scanner ready to use.
 func New() *Scanner { return &Scanner{} }
 
+// AddGlobalMacros implements pipeline.GlobalMacroSeeder. It collects MACRO
+// definitions from src and adds them to the shared store. Definitions from
+// later calls override earlier ones when names conflict.
+func (sc *Scanner) AddGlobalMacros(src []byte) error {
+	local, err := collectMacros(src)
+	if err != nil {
+		return err
+	}
+	if sc.global == nil {
+		sc.global = make(macroStore, len(local))
+	}
+	for k, v := range local {
+		sc.global[k] = v
+	}
+	return nil
+}
+
 // Scan implements pipeline.Tokenizer. It scans path/src and returns one
 // RawObject per declaration, including objects nested inside SCHEMA { } blocks.
-// MACRO declarations are collected and expanded before the main scan.
+// MACRO declarations are collected and expanded before the main scan. Global
+// macros seeded via AddGlobalMacros are available to all files; file-local
+// definitions take precedence over global ones.
 func (sc *Scanner) Scan(path string, src []byte) ([]pipeline.RawObject, error) {
-	expanded, err := preprocessMacros(src)
+	expanded, err := preprocessMacrosWithGlobal(src, sc.global)
 	if err != nil {
 		return nil, fmt.Errorf("%s: macro preprocessing: %w", path, err)
 	}

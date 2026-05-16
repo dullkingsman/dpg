@@ -2276,3 +2276,149 @@ func TestDiffRoleCommentAdded(t *testing.T) {
 		t.Errorf("expected COMMENT ON ROLE with new comment, got: %v", sqlList(ops))
 	}
 }
+
+// ── DefaultPrivileges diffing ─────────────────────────────────────────────────
+
+func TestDiffDefaultPrivilegesCreate(t *testing.T) {
+	d := New()
+	desired := []pipeline.IRObject{
+		&ir.DefaultPrivileges{
+			ObjectType: "TABLES",
+			Grants:     []ir.Grant{{Privileges: []string{"SELECT"}, Roles: []string{"app_readonly"}}},
+		},
+	}
+	ops, err := d.Diff(desired, &pipeline.Snapshot{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsSQL(ops, "ALTER DEFAULT PRIVILEGES") || !containsSQL(ops, "GRANT SELECT") || !containsSQL(ops, "app_readonly") {
+		t.Errorf("expected ALTER DEFAULT PRIVILEGES GRANT, got: %v", sqlList(ops))
+	}
+}
+
+func TestDiffDefaultPrivilegesGrantAdded(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	dp := &snapshot.SnapDefaultPrivileges{
+		ObjectType: "TABLES",
+		Grants:     []snapshot.SnapGrant{{Privileges: []string{"SELECT"}, Roles: []string{"app_readonly"}}},
+	}
+	_ = snap.SetObject("DEFAULT PRIVILEGES", &snapshot.SnapObject{
+		Kind:              "default_privileges",
+		DefaultPrivileges: dp,
+	})
+	desired := []pipeline.IRObject{
+		&ir.DefaultPrivileges{
+			ObjectType: "TABLES",
+			Grants: []ir.Grant{
+				{Privileges: []string{"SELECT"}, Roles: []string{"app_readonly"}},
+				{Privileges: []string{"INSERT"}, Roles: []string{"app_writer"}},
+			},
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsSQL(ops, "GRANT INSERT") || !containsSQL(ops, "app_writer") {
+		t.Errorf("expected GRANT for new privilege, got: %v", sqlList(ops))
+	}
+	if containsSQL(ops, "REVOKE") {
+		t.Errorf("expected no REVOKE for unchanged grant, got: %v", sqlList(ops))
+	}
+}
+
+func TestDiffDefaultPrivilegesGrantRemoved(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	dp := &snapshot.SnapDefaultPrivileges{
+		ObjectType: "TABLES",
+		Grants: []snapshot.SnapGrant{
+			{Privileges: []string{"SELECT"}, Roles: []string{"app_readonly"}},
+			{Privileges: []string{"INSERT"}, Roles: []string{"app_writer"}},
+		},
+	}
+	_ = snap.SetObject("DEFAULT PRIVILEGES", &snapshot.SnapObject{
+		Kind:              "default_privileges",
+		DefaultPrivileges: dp,
+	})
+	desired := []pipeline.IRObject{
+		&ir.DefaultPrivileges{
+			ObjectType: "TABLES",
+			Grants:     []ir.Grant{{Privileges: []string{"SELECT"}, Roles: []string{"app_readonly"}}},
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsSQL(ops, "REVOKE INSERT") || !containsSQL(ops, "app_writer") {
+		t.Errorf("expected REVOKE for removed grant, got: %v", sqlList(ops))
+	}
+}
+
+func TestDiffDefaultPrivilegesUnchangedIsNoop(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	dp := &snapshot.SnapDefaultPrivileges{
+		ObjectType: "TABLES",
+		Grants:     []snapshot.SnapGrant{{Privileges: []string{"SELECT"}, Roles: []string{"app_readonly"}}},
+	}
+	_ = snap.SetObject("DEFAULT PRIVILEGES", &snapshot.SnapObject{
+		Kind:              "default_privileges",
+		DefaultPrivileges: dp,
+	})
+	desired := []pipeline.IRObject{
+		&ir.DefaultPrivileges{
+			ObjectType: "TABLES",
+			Grants:     []ir.Grant{{Privileges: []string{"SELECT"}, Roles: []string{"app_readonly"}}},
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ops) != 0 {
+		t.Errorf("expected no ops for unchanged default privileges, got: %v", sqlList(ops))
+	}
+}
+
+func TestDiffDefaultPrivilegesDropEmitsRevoke(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	dp := &snapshot.SnapDefaultPrivileges{
+		ObjectType: "TABLES",
+		Grants:     []snapshot.SnapGrant{{Privileges: []string{"SELECT"}, Roles: []string{"app_readonly"}}},
+	}
+	_ = snap.SetObject("DEFAULT PRIVILEGES", &snapshot.SnapObject{
+		Kind:              "default_privileges",
+		DefaultPrivileges: dp,
+	})
+	// desired has no DefaultPrivileges — it was removed
+	ops, err := d.Diff([]pipeline.IRObject{}, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsSQL(ops, "REVOKE SELECT") || !containsSQL(ops, "app_readonly") {
+		t.Errorf("expected REVOKE when default privileges removed, got: %v", sqlList(ops))
+	}
+}
+
+func TestDiffDefaultPrivilegesForRole(t *testing.T) {
+	d := New()
+	forRole := "dba"
+	desired := []pipeline.IRObject{
+		&ir.DefaultPrivileges{
+			ForRole:    &forRole,
+			ObjectType: "TABLES",
+			Grants:     []ir.Grant{{Privileges: []string{"ALL"}, Roles: []string{"app_service"}}},
+		},
+	}
+	ops, err := d.Diff(desired, &pipeline.Snapshot{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsSQL(ops, "FOR ROLE") || !containsSQL(ops, "dba") {
+		t.Errorf("expected FOR ROLE in DEFAULT PRIVILEGES, got: %v", sqlList(ops))
+	}
+}
