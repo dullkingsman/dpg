@@ -1,0 +1,9 @@
+# Gradle local cache (machine-specific; restored by CI gradle action)
+.gradle/
+
+# IntelliJ Platform downloaded by the Gradle plugin (large; cached by CI)
+.intellijPlatform/
+
+# Gradle build output
+build/
+out/
