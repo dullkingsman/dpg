@@ -59,7 +59,7 @@ cd dpg
 make install       # installs dpg to $GOPATH/bin
 ```
 
-See [docs/installation.md](docs/installation.md) for cross-compilation, pre-built binaries, and all `make` targets.
+See the [installation guide](https://dullkingsman.github.io/dpg/docs/getting-started/installation/) for cross-compilation, pre-built binaries, and all `make` targets.
 
 ## Quick Start
 
@@ -84,7 +84,7 @@ dpg verify         # detect live drift against the committed snapshot
 | `dpg diff` | Diff two `.dpg` source directories and print the SQL between them. |
 | `dpg portability` | Report PostgreSQL-specific constructs that reduce portability. |
 
-All commands accept `--cluster` and `--database` flags when a project has multiple targets. See [docs/reference/commands.md](docs/reference/commands.md) for the full flag reference.
+All commands accept `--cluster` and `--database` flags when a project has multiple targets. See the [CLI reference](https://dullkingsman.github.io/dpg/docs/reference/commands/) for the full flag reference.
 
 ## Project Layout
 
@@ -105,22 +105,22 @@ myproject/
     └── snapshots/                   # Committed snapshot (source of truth)
 ```
 
-See [docs/reference/project.md](docs/reference/project.md) for the full project structure reference.
+See the [project structure reference](https://dullkingsman.github.io/dpg/docs/reference/project/) for the full project structure reference.
 
 ## Documentation
 
 | Document | Contents |
 |---|---|
-| [Installation](docs/installation.md) | Build requirements, make targets, cross-compilation |
-| [Project Structure](docs/reference/project.md) | Directory layout, dpg.toml, cluster and database config |
-| [Language Reference](docs/reference/language.md) | Two-part syntax, schema scoping, merge rules, dependency ordering |
-| [Object Reference](docs/reference/objects.md) | Tables, views, functions, types, sequences, roles, indexes, RLS, grants |
-| [CLI Reference](docs/reference/commands.md) | All commands and flags |
-| [Linter](docs/reference/linter.md) | Lint rules and configuration |
-| [Lifecycle Directives](docs/reference/lifecycle.md) | RENAMED FROM, DEPRECATED, PROTECTED, DROP CASCADE |
-| [Secrets](docs/reference/secrets.md) | env:, link:, plain-value passthrough |
-| [Snapshot Format](docs/reference/snapshot.md) | JSON structure and VCS commit strategy |
-| [Portability](docs/reference/portability.md) | PostgreSQL-specific constructs and standard SQL alternatives |
+| [Installation](https://dullkingsman.github.io/dpg/docs/getting-started/installation/) | Build requirements, make targets, cross-compilation |
+| [Project Structure](https://dullkingsman.github.io/dpg/docs/reference/project/) | Directory layout, dpg.toml, cluster and database config |
+| [Language Reference](https://dullkingsman.github.io/dpg/docs/reference/language/) | Two-part syntax, schema scoping, merge rules, dependency ordering |
+| [Object Reference](https://dullkingsman.github.io/dpg/docs/reference/objects/) | Tables, views, functions, types, sequences, roles, indexes, RLS, grants |
+| [CLI Reference](https://dullkingsman.github.io/dpg/docs/reference/commands/) | All commands and flags |
+| [Linter](https://dullkingsman.github.io/dpg/docs/reference/linter/) | Lint rules and configuration |
+| [Lifecycle Directives](https://dullkingsman.github.io/dpg/docs/reference/lifecycle/) | RENAMED FROM, DEPRECATED, PROTECTED, DROP CASCADE |
+| [Secrets](https://dullkingsman.github.io/dpg/docs/reference/secrets/) | env:, link:, plain-value passthrough |
+| [Snapshot Format](https://dullkingsman.github.io/dpg/docs/reference/snapshot/) | JSON structure and VCS commit strategy |
+| [Portability](https://dullkingsman.github.io/dpg/docs/reference/portability/) | PostgreSQL-specific constructs and standard SQL alternatives |
 | [RFC DPG-1](rfc/dpg-1.md) | Full language specification |
 
 ## Development

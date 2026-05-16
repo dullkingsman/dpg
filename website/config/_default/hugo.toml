@@ -12,6 +12,12 @@ publishDir = "../core/internal/docssite/public"
     path = "github.com/google/docsy"
   [[module.imports]]
     path = "github.com/google/docsy/dependencies"
+  [[module.mounts]]
+    source = "content"
+    target = "content"
+  [[module.mounts]]
+    source = "../rfc"
+    target = "content/rfc"
 
 [markup.goldmark.renderer]
   unsafe = true

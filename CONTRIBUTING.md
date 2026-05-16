@@ -17,39 +17,50 @@ No live PostgreSQL instance is required for most development. The test suite is 
 ```bash
 git clone https://github.com/dullkingsman/dpg
 cd dpg
-make build     # builds ./build/dpg
+make build     # builds core/build/dpg
 make test      # runs all tests
 ```
 
 ## Repository Layout
 
 ```
-cmd/dpg/           CLI commands (plan, apply, verify, dump, diff, portability)
-internal/
-  ast/             Abstract syntax tree types
-  blockparser/     DPG { } block parser
-  compiler/        Orchestrates scan → parse → IR build pipeline
-  config/          dpg.toml loading
-  diff/            Differ: desired IR vs snapshot → DiffOps
-  emit/            Renders DiffOps to a Migration with SQL text
-  executor/        Applies migrations against a live PG connection
-  graph/           Dependency resolver with topological sort
-  introspect/      Live PG catalog introspection
-  ir/              IR types and Builder (parse tree → typed IR objects)
-  linter/          Static analysis diagnostics
-  merger/          Source file merging
-  pipeline/        Interfaces and registry (internal)
-  pgparser/        PostgreSQL DDL parser wrapper
-  portability/     Portability analysis
-  project/         Project discovery and structure
-  scanner/         Source file scanner
-  secrets/         Secret resolution (env:, link:)
-  snapshot/        Snapshot serialization
-  ui/              Terminal output helpers
-  version/         Build-time version metadata
-docs/              Documentation
-examples/          Runnable pipeline examples (also serve as integration tests)
-rfc/               Language specification
+core/                  Go module (github.com/dullkingsman/dpg)
+  cmd/dpg/             CLI commands (plan, apply, verify, dump, diff, portability)
+  internal/
+    ast/               Abstract syntax tree types
+    blockparser/       DPG { } block parser
+    compiler/          Orchestrates scan → parse → IR build pipeline
+    config/            dpg.toml loading
+    diff/              Differ: desired IR vs snapshot → DiffOps
+    docssite/          Embedded documentation site (Hugo output)
+    emit/              Renders DiffOps to a Migration with SQL text
+    executor/          Applies migrations against a live PG connection
+    graph/             Dependency resolver with topological sort
+    introspect/        Live PG catalog introspection
+    ir/                IR types and Builder (parse tree → typed IR objects)
+    linter/            Static analysis diagnostics
+    merger/            Source file merging
+    pipeline/          Interfaces and registry (internal)
+    pgparser/          PostgreSQL DDL parser wrapper
+    portability/       Portability analysis
+    project/           Project discovery and structure
+    scanner/           Source file scanner
+    secrets/           Secret resolution (env:, link:)
+    snapshot/          Snapshot serialization
+    ui/                Terminal output helpers
+    version/           Build-time version metadata
+  examples/            Runnable pipeline examples (also serve as integration tests)
+lang/                  Language tooling
+  grammar/             Tree-sitter grammar (tree-sitter-dpg)
+  lsp/                 Language server (dpg-lsp)
+  syntaxes/            TextMate / VS Code syntax definitions
+plugins/               Editor integrations
+  helix/               Helix plugin
+  idea/                JetBrains plugin
+  nvim/                Neovim plugin
+  vscode/              VS Code extension
+rfc/                   Language specification
+website/               Hugo documentation site
 ```
 
 ## Making Changes

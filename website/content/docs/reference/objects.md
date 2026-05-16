@@ -17,6 +17,7 @@ Complete reference for every object type DPG can declare. All objects follow the
 - [Range TYPE](#range-type)
 - [Domain TYPE](#domain-type)
 - [Base TYPE](#base-type)
+- [VIRTUAL TYPE](#virtual-type)
 - [TABLE](#table)
   - [Column definitions](#column-definitions)
   - [COLUMN block](#column-block)
@@ -196,6 +197,38 @@ SCHEMA public {
 ```
 
 Base types are passthrough — the compiler does not perform structural diffing. Any change triggers a DROP + recreate.
+
+---
+
+## VIRTUAL TYPE
+
+Virtual types are DPG-native and have no PostgreSQL equivalent. They generate **no SQL** — they exist solely to carry type metadata for downstream consumers such as ORM generators, GraphQL schema builders, and type-safe query builders that read the DPG snapshot or IR.
+
+```
+VIRTUAL TYPE user_state AS "active" | "suspended" | "deleted";
+
+VIRTUAL TYPE payment_method AS
+    { kind: "card", last4: string, brand: string }
+    | { kind: "bank_ach", routing: string }
+    | { kind: "wallet" };
+{
+    COMMENT "Payment method discriminated union for the billing SDK";
+}
+
+SCHEMA billing {
+    VIRTUAL TYPE invoice_line AS { description: string, amount: number };
+}
+```
+
+**Rules:**
+
+- The name may be schema-qualified (`schema.name`); defaults to `public`.
+- The body after `AS` is arbitrary text stored verbatim. The compiler does not interpret it.
+- `dpg plan`, `dpg apply`, and `dpg diff` produce zero SQL for virtual type additions, modifications, or removals.
+- Virtual types appear in the snapshot (`kind: "virtual_type"`) for round-trip consistency — tools consuming the snapshot can read them.
+- The `{ }` block accepts only `COMMENT`.
+
+**Typical use:** Define a TypeScript union type, a Zod schema shape, or a JSON Schema discriminator in `.dpg` source alongside the table it annotates. A code-generator reads the DPG snapshot and emits the corresponding language-level type.
 
 ---
 

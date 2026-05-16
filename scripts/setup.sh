@@ -70,7 +70,7 @@ ARCH_RAW="$(uname -m)"
 case "$OS" in
   Linux)  PLATFORM="linux" ;;
   Darwin) PLATFORM="macos" ;;
-  *)      die "Unsupported OS: $OS (Windows: see docs/development.md)" ;;
+  *)      die "Unsupported OS: $OS (Windows: see https://dullkingsman.github.io/dpg/docs/getting-started/installation/)" ;;
 esac
 
 case "$ARCH_RAW" in
@@ -84,7 +84,7 @@ if [[ "$PLATFORM" == "linux" ]]; then
   if   command -v apt-get &>/dev/null; then PKG_MGR="apt"
   elif command -v dnf     &>/dev/null; then PKG_MGR="dnf"
   elif command -v pacman  &>/dev/null; then PKG_MGR="pacman"
-  else die "Unsupported Linux distribution. Install dependencies manually — see docs/development.md"
+  else die "Unsupported Linux distribution. Install dependencies manually — see https://dullkingsman.github.io/dpg/docs/getting-started/installation/"
   fi
 fi
 

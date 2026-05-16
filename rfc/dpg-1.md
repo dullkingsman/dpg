@@ -1,3 +1,16 @@
+---
+title: "RFC DPG-1: Declarative PG"
+rfc_number: "DPG-001"
+rfc_status: "Standards Track"
+rfc_version: "0.9.0"
+rfc_date: "2026-05-13"
+rfc_target: "PostgreSQL 14+"
+rfc_authors: "Daniel Tsegaw"
+layout: "rfc"
+weight: 1
+description: "Full normative specification for DPG — a declarative, state-based superset of PostgreSQL SQL that compiles to idiomatic PG DDL."
+---
+
 ```
 DPG Working Group                                          D. Tsegaw
 Request for Comments: 1                                    Independent
