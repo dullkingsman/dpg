@@ -6,7 +6,7 @@
 //
 //	go run ./tools/gendocs [--output <dir>]
 //
-// The output directory defaults to website/content/docs/cli. Each subcommand
+// The output directory defaults to site/content/docs/cli. Each subcommand
 // produces one markdown file (e.g. dpg_plan.md). Cross-links between generated
 // files use Hugo-compatible URL paths (no .md extension).
 package main
@@ -22,7 +22,7 @@ import (
 )
 
 func main() {
-	outDir := filepath.Join("website", "content", "docs", "cli")
+	outDir := filepath.Join("site", "content", "docs", "cli")
 	for i, arg := range os.Args[1:] {
 		if arg == "--output" && i+1 < len(os.Args[1:]) {
 			outDir = os.Args[i+2]

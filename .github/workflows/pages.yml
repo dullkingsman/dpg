@@ -31,7 +31,7 @@ jobs:
 
       - name: Generate CLI documentation
         working-directory: core
-        run: go run ./tools/gendocs --output ../website/content/docs/cli
+        run: go run ./tools/gendocs --output ../site/content/docs/cli
 
       - uses: peaceiris/actions-hugo@v3
         with:
@@ -41,7 +41,7 @@ jobs:
       - uses: actions/cache@v4
         with:
           path: ~/.cache/hugo_cache
-          key: hugo-${{ hashFiles('website/go.sum') }}
+          key: hugo-${{ hashFiles('site/go.sum') }}
           restore-keys: hugo-
 
       - uses: actions/setup-node@v4
@@ -50,14 +50,14 @@ jobs:
 
       - name: Install PostCSS dependencies
         run: npm install
-        working-directory: website
+        working-directory: site
 
       - name: Resolve versions
         run: |
           if [[ "$GITHUB_REF_NAME" == docs-v* ]]; then
             echo "DOCS_VERSION=${GITHUB_REF_NAME#docs-}" >> $GITHUB_ENV
           else
-            echo "DOCS_VERSION=$(cat website/VERSION)" >> $GITHUB_ENV
+            echo "DOCS_VERSION=$(cat site/VERSION)" >> $GITHUB_ENV
           fi
           echo "DPG_VERSION=$(git describe --tags --match 'v[0-9]*' --abbrev=0 2>/dev/null || echo dev)" >> $GITHUB_ENV
           LSP_TAG=$(git describe --tags --match 'lsp-v*' --abbrev=0 2>/dev/null || echo "lsp-dev")
@@ -65,7 +65,7 @@ jobs:
 
       - name: Build Hugo site
         run: hugo --minify
-        working-directory: website
+        working-directory: site
         env:
           HUGO_BASEURL: "https://dullkingsman.github.io/dpg/"
           HUGO_PARAMS_DOCSVERSION: ${{ env.DOCS_VERSION }}

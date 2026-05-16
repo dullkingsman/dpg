@@ -60,7 +60,7 @@ plugins/               Editor integrations
   nvim/                Neovim plugin
   vscode/              VS Code extension
 rfc/                   Language specification
-website/               Hugo documentation site
+site/                  Hugo documentation site
 ```
 
 ## Making Changes

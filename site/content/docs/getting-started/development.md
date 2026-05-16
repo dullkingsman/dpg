@@ -187,15 +187,13 @@ dpg/
 ├── pkg/dpg/              # Stable public API (plugin authors import this)
 ├── tools/gendocs/        # Standalone CLI doc generator (cobra/doc)
 ├── internal/docssite/    # Embedded Hugo site server
-├── website/              # Hugo/Docsy source for the documentation site
+├── site/                 # Hugo/Docsy source for the documentation site
 │   ├── config/_default/  # Hugo configuration
 │   ├── content/          # Markdown pages
-│   │   ├── docs/         # Getting started, reference, CLI, extending
-│   │   └── rfc/          # RFC DPG-001
+│   │   └── docs/         # Getting started, reference, CLI, extending
 │   ├── layouts/          # Custom Hugo templates
 │   └── static/           # Static assets (CSS, etc.)
-├── docs/                 # Source documentation (mirrored into website)
-├── rfc/                  # RFC source (mirrored into website/content/rfc)
+├── rfc/                  # Language specification (mounted into site/content/rfc)
 ├── examples/             # Runnable examples and plugin tests
 ├── scripts/              # Development tooling
 ├── Makefile              # All build/test/docs targets
@@ -287,7 +285,7 @@ make docs-serve
 # Requires: Hugo extended 0.147.0, Node.js 20, npm.
 ```
 
-The CLI reference pages (`website/content/docs/cli/*.md`) are generated automatically by `make docs-serve` before Hugo starts.
+The CLI reference pages (`site/content/docs/cli/*.md`) are generated automatically by `make docs-serve` before Hugo starts.
 
 ### Building a static copy
 
@@ -299,7 +297,7 @@ make docs-site
 
 ### Keeping CLI docs in sync
 
-The generated CLI docs in `website/content/docs/cli/` are produced by `tools/gendocs/main.go`, which mirrors the command tree from `cmd/dpg` without importing pipeline stages. When you add or change a flag, also update its mirror in `tools/gendocs/main.go`.
+The generated CLI docs in `site/content/docs/cli/` are produced by `tools/gendocs/main.go`, which mirrors the command tree from `cmd/dpg` without importing pipeline stages. When you add or change a flag, also update its mirror in `tools/gendocs/main.go`.
 
 ```bash
 make docs-cli       # regenerate only the CLI markdown files
@@ -331,7 +329,7 @@ make docs-cli       # regenerate only the CLI markdown files
 
 1. Implement in `internal/linter/` (satisfies `pipeline.Linter` or extend `BuiltinLinter`)
 2. Add a unit test
-3. Document in `docs/reference/linter.md` and `website/content/docs/reference/linter.md`
+3. Document in `site/content/docs/reference/linter.md`
 
 ### Add a new IR object type
 

@@ -13,8 +13,8 @@ LDFLAGS := -X '$(MODULE)/internal/version.Version=$(VERSION)' \
            -X '$(MODULE)/internal/version.Date=$(DATE)'
 
 CORE        := core
-WEBSITE_DIR := website
-DOCS_VERSION ?= $(shell cat website/VERSION 2>/dev/null || echo dev)
+WEBSITE_DIR := site
+DOCS_VERSION ?= $(shell cat site/VERSION 2>/dev/null || echo dev)
 LSP_VERSION  ?= $(shell git describe --tags --match 'lsp-v*' --abbrev=0 2>/dev/null | sed 's/^lsp-//' || echo dev)
 
 # Resolve hugo binary: prefer user-local installs (~/.local/bin) over system-
