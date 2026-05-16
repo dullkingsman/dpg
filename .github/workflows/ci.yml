@@ -20,7 +20,7 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: core/go.mod
-          cache: true
+          cache-dependency-path: core/go.sum
 
       - name: Vet
         working-directory: core
@@ -40,7 +40,7 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: core/go.mod
-          cache: true
+          cache-dependency-path: core/go.sum
 
       - name: Integration tests
         working-directory: core
