@@ -119,7 +119,11 @@ func applyCmd() *cobra.Command {
 primary node, and updates the committed snapshot on success.
 
 Destructive operations are blocked unless --allow-destructive is set.
-Partition strategy changes additionally require --approve-partition-rebuild.`,
+Partition strategy changes additionally require --approve-partition-rebuild.
+
+With --dry-run, the migration is computed and printed but never executed.
+With --no-snapshot, the snapshot is not updated after a successful apply.
+With --strict, lint warnings are promoted to errors and block the apply.`,
 	}
 	cmd.Flags().String("cluster", "", "cluster to apply (required when multiple clusters exist)")
 	cmd.Flags().String("database", "", "database to apply (required when multiple databases exist)")
@@ -127,6 +131,9 @@ Partition strategy changes additionally require --approve-partition-rebuild.`,
 	cmd.Flags().Bool("allow-destructive", false, "allow destructive operations")
 	cmd.Flags().Bool("approve-partition-rebuild", false,
 		"allow partition strategy rebuild (implies --allow-destructive for partition ops)")
+	cmd.Flags().Bool("dry-run", false, "print the migration plan but do not execute or update the snapshot")
+	cmd.Flags().Bool("no-snapshot", false, "skip snapshot update after a successful apply")
+	cmd.Flags().Bool("strict", false, "treat lint warnings as errors (blocks apply if any exist)")
 	return cmd
 }
 
@@ -182,10 +189,13 @@ func fmtCmd() *cobra.Command {
 
 Without arguments, all .dpg files in the current project are formatted.
 With --check, exits 1 if any file would change (no files are written).
-With --diff, prints a unified diff of proposed changes (no files are written).`,
+With --diff, prints a unified diff of proposed changes (no files are written).
+With --stdin, reads source from stdin and writes formatted output to stdout
+(used by editor integrations such as Helix that pipe file content).`,
 	}
 	cmd.Flags().Bool("check", false, "exit 1 if any file would change (no files written)")
 	cmd.Flags().Bool("diff", false, "print unified diff of changes (no files written)")
+	cmd.Flags().Bool("stdin", false, "read from stdin, write formatted output to stdout")
 	return cmd
 }
 
@@ -195,10 +205,12 @@ func portabilityCmd() *cobra.Command {
 		Short: "Report PostgreSQL-specific constructs in use",
 		RunE:  noop,
 		Long: `Parses the .dpg source files and reports all constructs that are
-PostgreSQL-specific (not part of the ISO/IEC 9075 SQL standard).
+PostgreSQL-specific (not covered by ISO/IEC 9075 standard SQL), along
+with standard SQL alternatives where available.
 
-Each reported construct includes the source location and the standard SQL
-alternative where one exists. This command never blocks compilation.`,
+This command never blocks compilation or apply.
+
+Use --format json for machine-readable output suitable for CI or tooling.`,
 	}
 	cmd.Flags().String("cluster", "", "cluster to analyze (required when multiple clusters exist)")
 	cmd.Flags().String("database", "", "database to analyze (required when multiple databases exist)")
@@ -208,20 +220,25 @@ alternative where one exists. This command never blocks compilation.`,
 
 func validateCmd() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:   "validate",
+		Use:   "validate [file...]",
 		Short: "Validate .dpg source files offline without diffing",
 		RunE:  noop,
 		Long: `Parse and compile all .dpg source files and run the linter. No database
 connection or snapshot is required.
 
 Exits 0 when there are no errors. Lint warnings do not cause a non-zero exit
-unless --strict is passed to the linter (see dpg.toml [linter] settings).
+unless --strict is set, in which case warnings are promoted to errors.
+
+When one or more .dpg files are given as arguments, only those files are
+validated (no project discovery required). This mode is used by the LSP
+server to validate individual files or editor buffers.
 
 Use --format json for machine-readable output.`,
 	}
 	cmd.Flags().String("cluster", "", "cluster to validate (default: all)")
 	cmd.Flags().String("database", "", "database to validate (default: all)")
 	cmd.Flags().String("format", "text", "output format: text or json")
+	cmd.Flags().Bool("strict", false, "treat lint warnings as errors (non-zero exit)")
 	return cmd
 }
 

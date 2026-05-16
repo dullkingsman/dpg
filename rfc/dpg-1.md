@@ -4037,11 +4037,14 @@ Options:
 dpg dump [options]
 
 Options:
-  --cluster <name>   REQUIRED. The cluster to introspect.
-  --database <name>  REQUIRED. The database to introspect.
-  --out <dir>        Output directory for .dpg files (default: ./schemas).
-  --overwrite        Overwrite existing .dpg files.
+  --cluster <name>    REQUIRED. The cluster to introspect.
+  --database <name>   REQUIRED. The database to introspect.
+  --output / -o <dir> Output directory for .dpg files
+                      (default: <cluster>/<database>/ within project root).
 ```
+
+   Note: existing files are never overwritten; re-running `dpg dump`
+   on a directory that already contains `.dpg` files is safe.
 
    The dump output is a best-effort conversion.  Objects whose DDL
    cannot be cleanly reconstructed from catalog information are emitted

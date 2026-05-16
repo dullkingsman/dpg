@@ -28,6 +28,9 @@ func newApplyCmd() *cobra.Command {
 		yes                     bool
 		allowDestructive        bool
 		approvePartitionRebuild bool
+		dryRun                  bool
+		noSnapshot              bool
+		strict                  bool
 	)
 
 	cmd := &cobra.Command{
@@ -37,7 +40,11 @@ func newApplyCmd() *cobra.Command {
 primary node, and updates the committed snapshot on success.
 
 Destructive operations are blocked unless --allow-destructive is set.
-Partition strategy changes additionally require --approve-partition-rebuild.`,
+Partition strategy changes additionally require --approve-partition-rebuild.
+
+With --dry-run, the migration is computed and printed but never executed.
+With --no-snapshot, the snapshot is not updated after a successful apply.
+With --strict, lint warnings are promoted to errors and block the apply.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			proj, err := discoverProject()
 			if err != nil {
@@ -75,6 +82,9 @@ Partition strategy changes additionally require --approve-partition-rebuild.`,
 				yes:                     yes,
 				allowDestructive:        allowDestructive,
 				approvePartitionRebuild: approvePartitionRebuild,
+				dryRun:                  dryRun,
+				noSnapshot:              noSnapshot,
+				strict:                  strict,
 				migrationsDir:           proj.MigrationsDir(),
 				lintCfg:                 linterConfigFrom(proj.RootConfig.Linter),
 			}
@@ -107,6 +117,9 @@ Partition strategy changes additionally require --approve-partition-rebuild.`,
 	cmd.Flags().BoolVar(&allowDestructive, "allow-destructive", false, "allow destructive operations")
 	cmd.Flags().BoolVar(&approvePartitionRebuild, "approve-partition-rebuild", false,
 		"allow partition strategy rebuild (implies --allow-destructive for partition ops)")
+	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "print the migration plan but do not execute or update the snapshot")
+	cmd.Flags().BoolVar(&noSnapshot, "no-snapshot", false, "skip snapshot update after a successful apply")
+	cmd.Flags().BoolVar(&strict, "strict", false, "treat lint warnings as errors (blocks apply if any exist)")
 
 	return cmd
 }
@@ -115,6 +128,9 @@ type applyOptions struct {
 	yes                     bool
 	allowDestructive        bool
 	approvePartitionRebuild bool
+	dryRun                  bool
+	noSnapshot              bool
+	strict                  bool
 	migrationsDir           string
 	lintCfg                 pipeline.LinterConfig
 }
@@ -150,6 +166,11 @@ func runApply(
 		diags, lintErr := linter.Lint(desired, opts.lintCfg)
 		if lintErr != nil {
 			return lintErr
+		}
+		if opts.strict {
+			for i := range diags {
+				diags[i].IsError = true
+			}
 		}
 		if ui.PrintLintDiagnostics(os.Stderr, diags, errColor) {
 			return ui.ErrSilent
@@ -227,6 +248,11 @@ func runApply(
 		return err
 	}
 
+	if opts.dryRun {
+		ui.PrintInfo(os.Stdout, "dry-run", "migration not applied; snapshot not updated", color)
+		return nil
+	}
+
 	if !opts.yes {
 		fmt.Printf("\n%s [y/N] ", ui.Bold("Apply this migration?", color))
 		scanner := bufio.NewScanner(os.Stdin)
@@ -274,15 +300,22 @@ func runApply(
 		ui.PrintInfo(os.Stderr, "warn", "could not archive migration file: "+err.Error(), errColor)
 	}
 
-	newSnap := &pipeline.Snapshot{}
-	if err := snapshotpkg.Populate(newSnap, desired); err != nil {
-		return fmt.Errorf("build snapshot: %w", err)
-	}
-	if err := store.Save(cl.Name(), db.Name(), newSnap); err != nil {
-		return fmt.Errorf("save snapshot: %w", err)
+	if !opts.noSnapshot {
+		newSnap := &pipeline.Snapshot{}
+		if err := snapshotpkg.Populate(newSnap, desired); err != nil {
+			return fmt.Errorf("build snapshot: %w", err)
+		}
+		if err := store.Save(cl.Name(), db.Name(), newSnap); err != nil {
+			return fmt.Errorf("save snapshot: %w", err)
+		}
 	}
 
-	detail := cl.Name() + "/" + db.Name() + " — snapshot updated"
+	detail := cl.Name() + "/" + db.Name()
+	if opts.noSnapshot {
+		detail += " — snapshot not updated (--no-snapshot)"
+	} else {
+		detail += " — snapshot updated"
+	}
 	if migPath != "" {
 		detail += "\n         " + ui.Dim(migPath, color)
 	}
@@ -313,6 +346,11 @@ func runClusterApply(
 		diags, lintErr := linter.Lint(desired, opts.lintCfg)
 		if lintErr != nil {
 			return lintErr
+		}
+		if opts.strict {
+			for i := range diags {
+				diags[i].IsError = true
+			}
 		}
 		if ui.PrintLintDiagnostics(os.Stderr, diags, errColor) {
 			return ui.ErrSilent
@@ -378,6 +416,11 @@ func runClusterApply(
 		return err
 	}
 
+	if opts.dryRun {
+		ui.PrintInfo(os.Stdout, "dry-run", "migration not applied; snapshot not updated", color)
+		return nil
+	}
+
 	if !opts.yes {
 		fmt.Printf("\n%s [y/N] ", ui.Bold("Apply cluster changes?", color))
 		scanner := bufio.NewScanner(os.Stdin)
@@ -422,15 +465,22 @@ func runClusterApply(
 		ui.PrintInfo(os.Stderr, "warn", "could not archive cluster migration: "+err.Error(), errColor)
 	}
 
-	newSnap := &pipeline.Snapshot{}
-	if err := snapshotpkg.Populate(newSnap, desired); err != nil {
-		return fmt.Errorf("build cluster snapshot: %w", err)
-	}
-	if err := store.Save(cl.Name(), cl.ClusterSnapshotKey(), newSnap); err != nil {
-		return fmt.Errorf("save cluster snapshot: %w", err)
+	if !opts.noSnapshot {
+		newSnap := &pipeline.Snapshot{}
+		if err := snapshotpkg.Populate(newSnap, desired); err != nil {
+			return fmt.Errorf("build cluster snapshot: %w", err)
+		}
+		if err := store.Save(cl.Name(), cl.ClusterSnapshotKey(), newSnap); err != nil {
+			return fmt.Errorf("save cluster snapshot: %w", err)
+		}
 	}
 
-	detail := cl.Name() + " (cluster) — snapshot updated"
+	detail := cl.Name() + " (cluster)"
+	if opts.noSnapshot {
+		detail += " — snapshot not updated (--no-snapshot)"
+	} else {
+		detail += " — snapshot updated"
+	}
 	if migPath != "" {
 		detail += "\n         " + ui.Dim(migPath, color)
 	}

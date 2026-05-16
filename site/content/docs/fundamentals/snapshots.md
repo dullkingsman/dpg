@@ -27,6 +27,26 @@ dpg plan --live                              # source vs. live catalog
 dpg diff --from schemas/v1/ --to schemas/v2/ # two source directories, no snapshot
 ```
 
+### Watch mode
+
+`dpg plan --watch` polls every 500 ms and re-runs the plan whenever any source file changes. Use it during active schema development to see the generated SQL update in real time without re-typing the command.
+
+```bash
+dpg plan --watch
+dpg plan --watch --format json   # machine-readable output on each change
+```
+
+Press `Ctrl-C` to stop. The watch loop does not execute or apply anything — it only runs `plan`.
+
+### Dry-run apply
+
+`dpg apply --dry-run` computes and prints the migration exactly as `dpg apply` would, but stops before executing or updating the snapshot. Useful for reviewing in CI without a live database connection gate.
+
+```bash
+dpg apply --dry-run
+dpg apply --dry-run --allow-destructive   # preview even destructive ops
+```
+
 ## Snapshot format
 
 `.dpg/snapshots/<cluster>/<database>.json` — commit this file.

@@ -18,6 +18,7 @@ func newValidateCmd() *cobra.Command {
 		clusterName  string
 		databaseName string
 		format       string
+		strict       bool
 	)
 
 	cmd := &cobra.Command{
@@ -27,7 +28,7 @@ func newValidateCmd() *cobra.Command {
 connection or snapshot is required.
 
 Exits 0 when there are no errors. Lint warnings do not cause a non-zero exit
-unless --strict is passed to the linter (see dpg.toml [linter] settings).
+unless --strict is set, in which case warnings are promoted to errors.
 
 When one or more .dpg files are given as arguments, only those files are
 validated (no project discovery required). This mode is used by the LSP
@@ -41,7 +42,7 @@ Use --format json for machine-readable output.`,
 			if len(args) > 0 {
 				// Use the directory of the first file as dbDir so schema inference works.
 				dbDir := filepath.Dir(args[0])
-				errored, err := runValidate("(none)", "(standalone)", args, dbDir, linter, pipeline.LinterConfig{}, format)
+				errored, err := runValidate("(none)", "(standalone)", args, dbDir, linter, pipeline.LinterConfig{}, format, strict)
 				if err != nil {
 					return err
 				}
@@ -66,7 +67,7 @@ Use --format json for machine-readable output.`,
 			hasError := false
 			for _, cl := range clusters {
 				if len(cl.SourceFiles) > 0 {
-					errored, err := runValidate(cl.Name(), "(cluster)", cl.SourceFiles, cl.ObjectsDir, linter, lintCfg, format)
+					errored, err := runValidate(cl.Name(), "(cluster)", cl.SourceFiles, cl.ObjectsDir, linter, lintCfg, format, strict)
 					if err != nil {
 						return err
 					}
@@ -80,7 +81,7 @@ Use --format json for machine-readable output.`,
 					return err
 				}
 				for _, db := range databases {
-					errored, err := runValidate(cl.Name(), db.Name(), db.SourceFiles, db.Dir, linter, lintCfg, format)
+					errored, err := runValidate(cl.Name(), db.Name(), db.SourceFiles, db.Dir, linter, lintCfg, format, strict)
 					if err != nil {
 						return err
 					}
@@ -100,6 +101,7 @@ Use --format json for machine-readable output.`,
 	cmd.Flags().StringVar(&clusterName, "cluster", "", "cluster to validate (default: all)")
 	cmd.Flags().StringVar(&databaseName, "database", "", "database to validate (default: all)")
 	cmd.Flags().StringVar(&format, "format", "text", "output format: text or json")
+	cmd.Flags().BoolVar(&strict, "strict", false, "treat lint warnings as errors (non-zero exit)")
 	return cmd
 }
 
@@ -126,6 +128,7 @@ func runValidate(
 	linter pipeline.Linter,
 	lintCfg pipeline.LinterConfig,
 	format string,
+	strict bool,
 ) (bool, error) {
 	color := ui.IsColorEnabled(os.Stderr)
 
@@ -149,6 +152,13 @@ func runValidate(
 		diags, err = linter.Lint(desired, lintCfg)
 		if err != nil {
 			return true, err
+		}
+	}
+
+	// --strict promotes all warnings to errors.
+	if strict {
+		for i := range diags {
+			diags[i].IsError = true
 		}
 	}
 
