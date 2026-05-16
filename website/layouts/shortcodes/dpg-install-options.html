@@ -1,0 +1,14 @@
+{{- $v := site.Params.dpgVersion | default "dev" -}}
+{{- $code := `# Install a specific version
+bash <(curl -fsSL .../install.sh) --version VERSION
+
+# Override install directory
+bash <(curl -fsSL .../install.sh) --install-dir ~/.bin
+
+# Preview what would be installed (no changes made)
+bash <(curl -fsSL .../install.sh) --check
+
+# Install dpg + dpg-lsp in one step
+bash <(curl -fsSL .../install.sh) --with-lsp` -}}
+{{- $code = replace $code "VERSION" $v -}}
+{{ highlight $code "bash" "" }}

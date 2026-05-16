@@ -47,11 +47,25 @@ jobs:
         run: npm install
         working-directory: website
 
+      - name: Set release versions
+        run: |
+          echo "DOCS_VERSION=$(cat website/VERSION)" >> $GITHUB_ENV
+          echo "DPG_VERSION=${{ github.ref_name }}" >> $GITHUB_ENV
+          LSP_TAG=$(git describe --tags --match 'lsp-v*' --abbrev=0 2>/dev/null || echo "")
+          if [[ -n "$LSP_TAG" ]]; then
+            echo "LSP_VERSION=${LSP_TAG#lsp-}" >> $GITHUB_ENV
+          else
+            echo "LSP_VERSION=${{ github.ref_name }}" >> $GITHUB_ENV
+          fi
+
       - name: Build Hugo site
         run: hugo --minify
         working-directory: website
         env:
           HUGO_BASEURL: "https://dullkingsman.github.io/dpg/"
+          HUGO_PARAMS_DOCSVERSION: ${{ env.DOCS_VERSION }}
+          HUGO_PARAMS_DPGVERSION: ${{ env.DPG_VERSION }}
+          HUGO_PARAMS_LSPVERSION: ${{ env.LSP_VERSION }}
 
       - uses: actions/upload-artifact@v4
         with:

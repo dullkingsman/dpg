@@ -2,6 +2,10 @@ github_repo = "https://github.com/dullkingsman/dpg"
 github_project_repo = "https://github.com/dullkingsman/dpg"
 github_branch = "main"
 
+docsVersion = "dev"
+dpgVersion  = "dev"
+lspVersion  = "dev"
+
 # Offline search via Lunr.js (no Algolia required)
 offlineSearch = true
 offlineSearchSummaryLength = 200

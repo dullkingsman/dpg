@@ -399,10 +399,6 @@ make build-full   # embeds docs, requires Hugo + Node
 
 The binary embeds three values at link time:
 
-```bash
-make build VERSION=v0.8.0   # explicit version tag
-dpg --version
-# dpg version v0.8.0 (commit: a3f7c91, built: 2026-05-08T17:00:00Z)
-```
+{{< dpg-build-version >}}
 
 Without `VERSION`, it defaults to `git describe --tags --always --dirty` or `dev` if git is unavailable. The three values are injected via `-ldflags` into `internal/version/`.

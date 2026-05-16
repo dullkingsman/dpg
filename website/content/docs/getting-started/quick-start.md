@@ -30,10 +30,7 @@ make install
 
 Verify:
 
-```bash
-dpg --version
-# dpg version v0.8.0 (commit: a3f7c91, built: 2026-04-27T00:00:00Z)
-```
+{{< dpg-version-output >}}
 
 ### 2. Scaffold a New Project
 

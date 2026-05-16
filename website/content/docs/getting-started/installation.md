@@ -33,19 +33,7 @@ curl -fsSL https://raw.githubusercontent.com/dullkingsman/dpg/master/scripts/ins
 
 ### Install script options
 
-```bash
-# Install a specific version
-bash <(curl -fsSL .../install.sh) --version v0.8.0
-
-# Override install directory
-bash <(curl -fsSL .../install.sh) --install-dir ~/.bin
-
-# Preview what would be installed (no changes made)
-bash <(curl -fsSL .../install.sh) --check
-
-# Install dpg + dpg-lsp in one step
-bash <(curl -fsSL .../install.sh) --with-lsp
-```
+{{< dpg-install-options >}}
 
 ### Manual download
 
@@ -89,16 +77,7 @@ curl -fsSL https://raw.githubusercontent.com/dullkingsman/dpg/master/scripts/ins
 
 ### Install script options
 
-```bash
-# Install a specific version
-bash <(curl -fsSL .../install-lsp.sh) --version v0.2.0
-
-# Override install directory
-bash <(curl -fsSL .../install-lsp.sh) --install-dir ~/.bin
-
-# Preview what would be installed (no changes made)
-bash <(curl -fsSL .../install-lsp.sh) --check
-```
+{{< lsp-install-options >}}
 
 ### Manual download
 
@@ -168,14 +147,7 @@ make install        # installs to $(go env GOPATH)/bin
 
 The binary embeds version metadata at build time:
 
-```bash
-# Build with an explicit version tag
-make build VERSION=v0.8.0
-
-# The binary reports version info:
-dpg --version
-# dpg version v0.8.0 (commit: a3f7c91, built: 2026-04-27T00:00:00Z)
-```
+{{< dpg-build-version >}}
 
 If built without `VERSION`, the value defaults to `git describe --tags --always --dirty`, or `dev` if git is unavailable.
 

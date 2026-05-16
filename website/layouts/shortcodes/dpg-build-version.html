@@ -1,0 +1,9 @@
+{{- $v := site.Params.dpgVersion | default "dev" -}}
+{{- $code := `# Build with an explicit version tag
+make build VERSION=VERSION
+
+# The binary reports version info:
+dpg --version
+# dpg version VERSION (commit: a3f7c91, built: 2026-04-27T00:00:00Z)` -}}
+{{- $code = replace $code "VERSION" $v -}}
+{{ highlight $code "bash" "" }}

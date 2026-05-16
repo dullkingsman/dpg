@@ -13,6 +13,8 @@ LDFLAGS := -X '$(MODULE)/internal/version.Version=$(VERSION)' \
            -X '$(MODULE)/internal/version.Date=$(DATE)'
 
 WEBSITE_DIR := website
+DOCS_VERSION ?= $(shell cat website/VERSION 2>/dev/null || echo dev)
+LSP_VERSION  ?= $(shell git describe --tags --match 'lsp-v*' --abbrev=0 2>/dev/null | sed 's/^lsp-//' || echo dev)
 
 # Resolve hugo binary: prefer user-local installs (~/.local/bin) over system-
 # wide ones so that `make docs-site` uses the same binary setup.sh installs.
@@ -154,10 +156,18 @@ docs-cli:
 	go run ./tools/gendocs --output $(WEBSITE_DIR)/content/docs/cli
 
 docs-site: docs-cli
-	cd $(WEBSITE_DIR) && npm install && $(HUGO) --minify
+	cd $(WEBSITE_DIR) && npm install && \
+	HUGO_PARAMS_DOCSVERSION="$(DOCS_VERSION)" \
+	HUGO_PARAMS_DPGVERSION="$(VERSION)" \
+	HUGO_PARAMS_LSPVERSION="$(LSP_VERSION)" \
+	$(HUGO) --minify
 
 docs-serve: docs-cli
-	cd $(WEBSITE_DIR) && npm install && $(HUGO) serve --disableFastRender
+	cd $(WEBSITE_DIR) && npm install && \
+	HUGO_PARAMS_DOCSVERSION="$(DOCS_VERSION)" \
+	HUGO_PARAMS_DPGVERSION="$(VERSION)" \
+	HUGO_PARAMS_LSPVERSION="$(LSP_VERSION)" \
+	$(HUGO) serve --disableFastRender
 
 # ── Setup ─────────────────────────────────────────────────────────────────────
 

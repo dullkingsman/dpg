@@ -1,0 +1,5 @@
+{{- $v := site.Params.dpgVersion | default "dev" -}}
+{{- $code := `dpg --version
+# dpg version VERSION (commit: a3f7c91, built: 2026-04-27T00:00:00Z)` -}}
+{{- $code = replace $code "VERSION" $v -}}
+{{ highlight $code "bash" "" }}

@@ -1,0 +1,11 @@
+{{- $v := site.Params.lspVersion | default "dev" -}}
+{{- $code := `# Install a specific version
+bash <(curl -fsSL .../install-lsp.sh) --version VERSION
+
+# Override install directory
+bash <(curl -fsSL .../install-lsp.sh) --install-dir ~/.bin
+
+# Preview what would be installed (no changes made)
+bash <(curl -fsSL .../install-lsp.sh) --check` -}}
+{{- $code = replace $code "VERSION" $v -}}
+{{ highlight $code "bash" "" }}
