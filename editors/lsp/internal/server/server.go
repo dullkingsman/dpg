@@ -66,6 +66,16 @@ func newServer() *glspserver.Server {
 
 	handler.Shutdown = func(ctx *glsp.Context) error { return nil }
 
+	handler.SetTrace = func(ctx *glsp.Context, params *protocol.SetTraceParams) error { return nil }
+
+	handler.TextDocumentDidSave = func(ctx *glsp.Context, params *protocol.DidSaveTextDocumentParams) error {
+		return nil
+	}
+
+	handler.WorkspaceDidChangeWatchedFiles = func(ctx *glsp.Context, params *protocol.DidChangeWatchedFilesParams) error {
+		return nil
+	}
+
 	handler.TextDocumentDidOpen = func(ctx *glsp.Context, params *protocol.DidOpenTextDocumentParams) error {
 		path := uriToPath(string(params.TextDocument.URI))
 		ws.OpenDocument(path, params.TextDocument.Text)
