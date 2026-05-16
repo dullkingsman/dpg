@@ -160,11 +160,9 @@ fi
 info "Extracting..."
 tar -xzf "${TMP}/${ARCHIVE_NAME}" -C "${TMP}"
 
-# The archive contains a binary named dpg-<os>-<arch>; rename it to dpg.
-if [[ ! -f "${TMP}/${ASSET_NAME}" ]]; then
-  die "Expected ${ASSET_NAME} inside ${ARCHIVE_NAME}. Archive contents: $(tar -tzf "${TMP}/${ARCHIVE_NAME}" 2>/dev/null || echo 'unknown')"
+if [[ ! -f "${TMP}/${BINARY}" ]]; then
+  die "Expected ${BINARY} inside ${ARCHIVE_NAME}. Archive contents: $(tar -tzf "${TMP}/${ARCHIVE_NAME}" 2>/dev/null || echo 'unknown')"
 fi
-mv "${TMP}/${ASSET_NAME}" "${TMP}/${BINARY}"
 chmod +x "${TMP}/${BINARY}"
 
 info "Installing to ${INSTALL_DIR}/${BINARY}..."
