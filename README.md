@@ -123,6 +123,63 @@ See [docs/reference/project.md](docs/reference/project.md) for the full project 
 | [Portability](docs/reference/portability.md) | PostgreSQL-specific constructs and standard SQL alternatives |
 | [RFC DPG-1](rfc/dpg-1.md) | Full language specification |
 
+## Development
+
+### Setup
+
+```bash
+make setup
+```
+
+Installs Go, a C compiler (required by `pg_query_go`), Docker (integration tests), staticcheck, Hugo extended, and Node.js, then configures the git hooks. Safe to re-run.
+
+```bash
+make setup -- --check     # verify tools without installing anything
+make setup -- --no-docs   # skip Hugo + Node if you don't need the docs site
+```
+
+### Versioning
+
+The project uses three tag namespaces, each triggering its own CI workflow:
+
+| Tag format | Component | Workflow |
+|---|---|---|
+| `v1.2.3` | `dpg` CLI | Build + release binaries |
+| `lsp-v1.2.3` | `dpg-lsp` language server | Build + release LSP binaries |
+| `docs-v1.2.3` | Documentation site | Deploy to GitHub Pages |
+
+All three share a single `CHANGELOG.md`. LSP and docs entries keep their full prefix in the section header (`[lsp-v1.2.3]`, `[docs-v1.2.3]`) so you can tell at a glance which component each release covers. Main dpg entries use bare semver (`[1.2.3]`).
+
+### Changelog
+
+```bash
+make changelog            # refresh [Unreleased] from git log (dpg baseline)
+make changelog PREFIX=lsp-v   # use lsp-v* tags as the baseline instead
+make changelog PREFIX=docs-v  # use docs-v* tags as the baseline
+```
+
+Populates the `[Unreleased]` section in `CHANGELOG.md` with commits since the last tag of the given type, sorted into `### Added` (`feat:`), `### Fixed` (`fix:`), and `### Changed` (everything else). Internal commits (`chore:`, `test:`, `ci:`, `style:`, `build:`) are omitted. The `## [Unreleased]` header is preserved so you can run this any time during development.
+
+### Releasing
+
+```bash
+make tag TAG=v1.2.3
+make tag TAG=lsp-v1.2.3
+make tag TAG=docs-v1.2.3
+```
+
+1. Runs `make changelog` for the matching namespace to populate `[Unreleased]`.
+2. Replaces the `## [Unreleased]` header with the versioned header (e.g. `## [1.2.3] — 2026-05-16`) and inserts a fresh empty `## [Unreleased]` above it.
+3. Commits `CHANGELOG.md` as `chore: release <tag>` and creates the git tag.
+
+Then push:
+
+```bash
+git push && git push origin <tag>
+```
+
+CI picks up the tag and publishes the release automatically.
+
 ## Contributing
 
 See [CONTRIBUTING.md](CONTRIBUTING.md).

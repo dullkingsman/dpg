@@ -24,7 +24,7 @@ HUGO := $(shell PATH="$(HOME)/.local/bin:$(PATH)" sh -c 'command -v hugo 2>/dev/
         test test-verbose test-integration test-examples vet lint \
         test-lsp test-grammar test-nvim test-vscode test-idea test-helix test-editors \
         dist dist-linux dist-darwin dist-windows \
-        clean clean-dist clean-all version release \
+        clean clean-dist clean-all version release tag changelog \
         docs-cli docs-site docs-serve \
         setup
 
@@ -141,7 +141,14 @@ version:
 	@echo "Commit:  $(COMMIT)"
 	@echo "Date:    $(DATE)"
 
-# ── Release ───────────────────────────────────────────────────────────────────
+# ── Tag & Release ─────────────────────────────────────────────────────────────
+
+changelog:
+	@bash scripts/changelog.sh "$(or $(PREFIX),v)"
+
+tag:
+	@test -n "$(TAG)" || (echo "Usage: make tag TAG=v1.2.3  (also lsp-v1.2.3, docs-v1.2.3)"; exit 1)
+	@bash scripts/tag.sh "$(TAG)"
 
 release: dist
 	@for f in $(DIST)/$(BINARY)-*; do \
