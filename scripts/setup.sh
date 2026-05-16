@@ -493,6 +493,14 @@ main() {
     }
   fi
 
+  # ── Repo configuration ───────────────────────────────────────────────────────
+
+  echo
+  info "Configuring repository"
+  git -C "$REPO_ROOT" config core.hooksPath .githooks
+  chmod +x "$REPO_ROOT/.githooks/pre-commit"
+  ok "Git hooks configured (.githooks/pre-commit)"
+
   # ── Build verification ────────────────────────────────────────────────────────
 
   echo

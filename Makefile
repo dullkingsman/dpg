@@ -162,8 +162,7 @@ docs-serve: docs-cli
 # ── Setup ─────────────────────────────────────────────────────────────────────
 
 setup:
-	git config core.hooksPath .githooks
-	chmod +x .githooks/pre-commit
+	bash scripts/setup.sh
 
 # ── Clean ─────────────────────────────────────────────────────────────────────
 
