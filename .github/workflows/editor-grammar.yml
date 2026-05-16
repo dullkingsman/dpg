@@ -35,3 +35,11 @@ jobs:
       - name: Run corpus tests
         working-directory: editors/grammar
         run: npx tree-sitter test
+
+      - name: Check parser is up to date
+        working-directory: editors/grammar
+        run: |
+          if ! git diff --exit-code src/parser.c; then
+            echo "::error::parser.c is stale — run 'npx tree-sitter generate' in editors/grammar and commit the result"
+            exit 1
+          fi

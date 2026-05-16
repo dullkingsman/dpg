@@ -23,7 +23,8 @@ HUGO := $(shell PATH="$(HOME)/.local/bin:$(PATH)" sh -c 'command -v hugo 2>/dev/
         test-lsp test-grammar test-nvim test-vscode test-idea test-helix test-editors \
         dist dist-linux dist-darwin dist-windows \
         clean clean-dist clean-all version release \
-        docs-cli docs-site docs-serve
+        docs-cli docs-site docs-serve \
+        setup
 
 # ── Build ─────────────────────────────────────────────────────────────────────
 # Fast development build — documentation is NOT embedded.
@@ -157,6 +158,12 @@ docs-site: docs-cli
 
 docs-serve: docs-cli
 	cd $(WEBSITE_DIR) && npm install && $(HUGO) serve --disableFastRender
+
+# ── Setup ─────────────────────────────────────────────────────────────────────
+
+setup:
+	git config core.hooksPath .githooks
+	chmod +x .githooks/pre-commit
 
 # ── Clean ─────────────────────────────────────────────────────────────────────
 

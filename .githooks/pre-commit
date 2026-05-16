@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+set -e
+
+if git diff --cached --name-only | grep -q "^editors/grammar/grammar\.js$"; then
+    echo "grammar.js staged — regenerating parser.c..."
+    (cd editors/grammar && npx tree-sitter generate)
+    git add editors/grammar/src/parser.c
+    echo "parser.c updated and staged."
+fi
