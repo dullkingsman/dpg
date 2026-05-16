@@ -26,11 +26,12 @@ jobs:
 
       - uses: actions/setup-go@v5
         with:
-          go-version-file: go.mod
+          go-version-file: core/go.mod
           cache: true
 
       - name: Generate CLI documentation
-        run: go run ./tools/gendocs --output website/content/docs/cli
+        working-directory: core
+        run: go run ./tools/gendocs --output ../website/content/docs/cli
 
       - uses: peaceiris/actions-hugo@v3
         with:
@@ -74,7 +75,7 @@ jobs:
       - uses: actions/configure-pages@v4
       - uses: actions/upload-pages-artifact@v3
         with:
-          path: internal/docssite/public
+          path: core/internal/docssite/public
 
   deploy:
     environment:

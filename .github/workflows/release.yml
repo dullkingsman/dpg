@@ -21,11 +21,12 @@ jobs:
 
       - uses: actions/setup-go@v5
         with:
-          go-version-file: go.mod
+          go-version-file: core/go.mod
           cache: true
 
       - name: Generate CLI documentation
-        run: go run ./tools/gendocs --output website/content/docs/cli
+        working-directory: core
+        run: go run ./tools/gendocs --output ../website/content/docs/cli
 
       - uses: peaceiris/actions-hugo@v3
         with:
@@ -70,7 +71,7 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: docssite
-          path: internal/docssite/public/
+          path: core/internal/docssite/public/
           if-no-files-found: error
 
   build:
@@ -112,17 +113,18 @@ jobs:
 
       - uses: actions/setup-go@v5
         with:
-          go-version-file: go.mod
+          go-version-file: core/go.mod
           cache: true
 
       - name: Download documentation site
         uses: actions/download-artifact@v4
         with:
           name: docssite
-          path: internal/docssite/public/
+          path: core/internal/docssite/public/
 
       - name: Build (Unix)
         if: matrix.goos != 'windows'
+        working-directory: core
         shell: bash
         env:
           GOOS: ${{ matrix.goos }}
@@ -138,6 +140,7 @@ jobs:
 
       - name: Build (Windows)
         if: matrix.goos == 'windows'
+        working-directory: core
         shell: bash
         env:
           GOOS: windows
@@ -155,7 +158,7 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.archive }}
-          path: dist/${{ matrix.archive }}
+          path: core/dist/${{ matrix.archive }}
           if-no-files-found: error
 
   build-lsp:
@@ -182,7 +185,7 @@ jobs:
             -X 'github.com/dullkingsman/dpg-lsp/internal/version.Commit=${COMMIT}' \
             -X 'github.com/dullkingsman/dpg-lsp/internal/version.Date=${DATE}'"
 
-          mkdir -p ../../dist
+          mkdir -p dist
 
           targets=(
             "linux   amd64 dpg-lsp-linux-amd64.tar.gz"
@@ -199,18 +202,18 @@ jobs:
             else
               bin="dpg-lsp"
             fi
-            GOOS="$os" GOARCH="$arch" go build -trimpath -ldflags "$LDFLAGS" -o "../../dist/$bin" ./cmd/dpg-lsp
+            GOOS="$os" GOARCH="$arch" go build -trimpath -ldflags "$LDFLAGS" -o "dist/$bin" ./cmd/dpg-lsp
             if [ "$os" = "windows" ]; then
-              (cd ../../dist && zip "$archive" "$bin" && rm "$bin")
+              (cd dist && zip "$archive" "$bin" && rm "$bin")
             else
-              (cd ../../dist && tar czf "$archive" "$bin" && rm "$bin")
+              (cd dist && tar czf "$archive" "$bin" && rm "$bin")
             fi
           done
 
       - uses: actions/upload-artifact@v4
         with:
           name: dpg-lsp-archives
-          path: dist/dpg-lsp-*
+          path: lang/lsp/dist/dpg-lsp-*
           if-no-files-found: error
 
   release:

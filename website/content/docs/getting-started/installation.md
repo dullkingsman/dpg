@@ -54,7 +54,7 @@ Each archive contains a single binary. Extract it, rename it to `dpg` (or `dpg.e
 If you have Go 1.25+ and a C compiler installed:
 
 ```bash
-go install github.com/dullkingsman/dpg/cmd/dpg@latest
+go install github.com/dullkingsman/dpg/core/cmd/dpg@latest
 ```
 
 ---

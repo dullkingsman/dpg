@@ -12,6 +12,7 @@ LDFLAGS := -X '$(MODULE)/internal/version.Version=$(VERSION)' \
            -X '$(MODULE)/internal/version.Commit=$(COMMIT)'   \
            -X '$(MODULE)/internal/version.Date=$(DATE)'
 
+CORE        := core
 WEBSITE_DIR := website
 DOCS_VERSION ?= $(shell cat website/VERSION 2>/dev/null || echo dev)
 LSP_VERSION  ?= $(shell git describe --tags --match 'lsp-v*' --abbrev=0 2>/dev/null | sed 's/^lsp-//' || echo dev)
@@ -35,19 +36,19 @@ HUGO := $(shell PATH="$(HOME)/.local/bin:$(PATH)" sh -c 'command -v hugo 2>/dev/
 # dpg docs will print an error in binaries built this way.
 
 build:
-	go build -ldflags "$(LDFLAGS)" -o $(BUILD)/$(BINARY) $(CMD)
+	cd $(CORE) && go build -ldflags "$(LDFLAGS)" -o $(BUILD)/$(BINARY) $(CMD)
 
 install:
-	go install -ldflags "$(LDFLAGS)" $(CMD)
+	cd $(CORE) && go install -ldflags "$(LDFLAGS)" $(CMD)
 
 # Full build — builds the Hugo documentation site first, then embeds it.
 # Requires Hugo (extended), Node.js, and npm to be on PATH.
 
 build-full: docs-site
-	go build -tags embeddata -ldflags "$(LDFLAGS)" -o $(BUILD)/$(BINARY) $(CMD)
+	cd $(CORE) && go build -tags embeddata -ldflags "$(LDFLAGS)" -o $(BUILD)/$(BINARY) $(CMD)
 
 install-full: docs-site
-	go install -tags embeddata -ldflags "$(LDFLAGS)" $(CMD)
+	cd $(CORE) && go install -tags embeddata -ldflags "$(LDFLAGS)" $(CMD)
 
 # ── Test ──────────────────────────────────────────────────────────────────────
 
@@ -57,7 +58,7 @@ test:
 	# ---------------------------------------------
 	# UNIT TESTS
 	# ---------------------------------------------
-	go test ./...
+	cd $(CORE) && go test ./...
 
 test-verbose:
 	# ---
@@ -65,7 +66,7 @@ test-verbose:
 	# ---------------------------------------------
 	# VERBOSE UNIT TESTS
 	# ---------------------------------------------
-	go test ./... -v
+	cd $(CORE) && go test ./... -v
 
 test-integration:
 	# ---
@@ -73,7 +74,7 @@ test-integration:
 	# ---------------------------------------------
 	# INTEGRATION TESTS
 	# ---------------------------------------------
-	go test -tags integration -count=1 -timeout 5m ./...
+	cd $(CORE) && go test -tags integration -count=1 -timeout 5m ./...
 
 test-examples:
 	# ---
@@ -81,7 +82,7 @@ test-examples:
 	# ---------------------------------------------
 	# EXAMPLE TESTS
 	# ---------------------------------------------
-	go test ./examples/... -v
+	cd $(CORE) && go test ./examples/... -v
 
 test-dpg: test test-integration
 
@@ -162,15 +163,15 @@ test-plugins: test-nvim test-vscode test-idea test-helix
 # ── All Tests ─────────────────────────────────────────────────────────────────
 
 # Run every test suite — no tests spared
-test-all: test-dpg test-lang testplugins-
+test-all: test-dpg test-lang test-plugins
 
 # ── Quality ───────────────────────────────────────────────────────────────────
 
 vet:
-	go vet ./...
+	cd $(CORE) && go vet ./...
 
 lint:
-	staticcheck ./...
+	cd $(CORE) && staticcheck ./...
 
 # ── Distribution ──────────────────────────────────────────────────────────────
 # All dist targets embed the documentation site; run docs-site first.
@@ -178,28 +179,28 @@ lint:
 dist: docs-site dist-linux dist-darwin dist-windows
 
 dist-linux:
-	@mkdir -p $(DIST)
-	GOOS=linux GOARCH=amd64 \
+	@mkdir -p $(CORE)/$(DIST)
+	cd $(CORE) && GOOS=linux GOARCH=amd64 \
 		go build -tags embeddata -ldflags "$(LDFLAGS)" -o $(DIST)/$(BINARY)-linux-amd64 $(CMD)
 	@# linux/arm64 requires a native ARM64 host (CGo via pg_query_go prevents cross-compilation).
 	@# Build it on an arm64 machine or let the release CI handle it (ubuntu-24.04-arm runner).
 	@if [ "$$(uname -m)" = "aarch64" ] || [ "$$(uname -m)" = "arm64" ]; then \
-		GOOS=linux GOARCH=arm64 \
+		cd $(CORE) && GOOS=linux GOARCH=arm64 \
 			go build -tags embeddata -ldflags "$(LDFLAGS)" -o $(DIST)/$(BINARY)-linux-arm64 $(CMD); \
 	else \
 		echo "  skipping linux/arm64 (not on ARM64 host; CI builds it natively)"; \
 	fi
 
 dist-darwin:
-	@mkdir -p $(DIST)
-	GOOS=darwin GOARCH=amd64 \
+	@mkdir -p $(CORE)/$(DIST)
+	cd $(CORE) && GOOS=darwin GOARCH=amd64 \
 		go build -tags embeddata -ldflags "$(LDFLAGS)" -o $(DIST)/$(BINARY)-darwin-amd64 $(CMD)
-	GOOS=darwin GOARCH=arm64 \
+	cd $(CORE) && GOOS=darwin GOARCH=arm64 \
 		go build -tags embeddata -ldflags "$(LDFLAGS)" -o $(DIST)/$(BINARY)-darwin-arm64 $(CMD)
 
 dist-windows:
-	@mkdir -p $(DIST)
-	GOOS=windows GOARCH=amd64 \
+	@mkdir -p $(CORE)/$(DIST)
+	cd $(CORE) && GOOS=windows GOARCH=amd64 \
 		go build -tags embeddata -ldflags "$(LDFLAGS)" -o $(DIST)/$(BINARY)-windows-amd64.exe $(CMD)
 
 # ── Version ───────────────────────────────────────────────────────────────────
@@ -219,8 +220,8 @@ tag:
 	@bash scripts/tag.sh "$(TAG)"
 
 release: dist
-	@for f in $(DIST)/$(BINARY)-*; do \
-		tar czf $$f.tar.gz -C $(DIST) $$(basename $$f) && \
+	@for f in $(CORE)/$(DIST)/$(BINARY)-*; do \
+		tar czf $$f.tar.gz -C $(CORE)/$(DIST) $$(basename $$f) && \
 		echo "archived $$f.tar.gz"; \
 	done
 
@@ -228,7 +229,7 @@ release: dist
 
 docs-cli:
 	@mkdir -p $(WEBSITE_DIR)/content/docs/cli
-	go run ./tools/gendocs --output $(WEBSITE_DIR)/content/docs/cli
+	cd $(CORE) && go run ./tools/gendocs --output ../$(WEBSITE_DIR)/content/docs/cli
 
 docs-site: docs-cli
 	cd $(WEBSITE_DIR) && npm install && \
@@ -252,9 +253,9 @@ setup:
 # ── Clean ─────────────────────────────────────────────────────────────────────
 
 clean:
-	rm -f $(BUILD)/$(BINARY)
+	rm -f $(CORE)/$(BUILD)/$(BINARY)
 
 clean-dist:
-	rm -rf $(DIST)
+	rm -rf $(CORE)/$(DIST)
 
 clean-all: clean clean-dist

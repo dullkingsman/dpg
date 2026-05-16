@@ -6,10 +6,6 @@
 .env*
 !.env*.example
 
-# dpg build outputs
-/build
-/dist
-
 # agent / AI-tool artifacts
 .cursor/
 .clinerules

@@ -26,7 +26,7 @@ STATICCHECK_VERSION="latest"
 # Derived from go.mod so it never drifts.
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
-GO_VERSION="$(grep '^go ' "${REPO_ROOT}/go.mod" | awk '{print $2}')"
+GO_VERSION="$(grep '^go ' "${REPO_ROOT}/core/go.mod" | awk '{print $2}')"
 
 # ── Flags ────────────────────────────────────────────────────────────────────
 
@@ -439,7 +439,7 @@ install_staticcheck() {
 verify_build() {
   if $CHECK_ONLY; then return; fi
   info "Verifying build"
-  cd "$REPO_ROOT"
+  cd "$REPO_ROOT/core"
   go mod download -x 2>/dev/null | grep -E '^(go: downloading|done)' || true
   go build ./... && ok "go build ./... — all packages compile"
   go vet   ./... && ok "go vet ./...   — no issues"

@@ -33,7 +33,7 @@ jobs:
             -X 'github.com/dullkingsman/dpg-lsp/internal/version.Commit=${COMMIT}' \
             -X 'github.com/dullkingsman/dpg-lsp/internal/version.Date=${DATE}'"
 
-          mkdir -p ../../dist
+          mkdir -p dist
 
           targets=(
             "linux   amd64 dpg-lsp-linux-amd64.tar.gz"
@@ -50,17 +50,17 @@ jobs:
             else
               bin="dpg-lsp"
             fi
-            GOOS="$os" GOARCH="$arch" go build -trimpath -ldflags "$LDFLAGS" -o "../../dist/$bin" ./cmd/dpg-lsp
+            GOOS="$os" GOARCH="$arch" go build -trimpath -ldflags "$LDFLAGS" -o "dist/$bin" ./cmd/dpg-lsp
             if [ "$os" = "windows" ]; then
-              (cd ../../dist && zip "$archive" "$bin" && rm "$bin")
+              (cd dist && zip "$archive" "$bin" && rm "$bin")
             else
-              (cd ../../dist && tar czf "$archive" "$bin" && rm "$bin")
+              (cd dist && tar czf "$archive" "$bin" && rm "$bin")
             fi
           done
 
       - name: Checksums
         run: |
-          cd dist
+          cd lang/lsp/dist
           sha256sum * > checksums.txt
           cat checksums.txt
 
@@ -80,6 +80,6 @@ jobs:
           prerelease: ${{ steps.semver.outputs.prerelease }}
           generate_release_notes: true
           files: |
-            dist/dpg-lsp-*.tar.gz
-            dist/dpg-lsp-*.zip
-            dist/checksums.txt
+            lang/lsp/dist/dpg-lsp-*.tar.gz
+            lang/lsp/dist/dpg-lsp-*.zip
+            lang/lsp/dist/checksums.txt

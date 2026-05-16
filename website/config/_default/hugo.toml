@@ -1,7 +1,7 @@
 baseURL = "https://dullkingsman.github.io/dpg/"
 title = "DPG — Declarative PG"
 enableRobotsTXT = true
-publishDir = "../internal/docssite/public"
+publishDir = "../core/internal/docssite/public"
 
 [outputs]
   home = ["HTML", "RSS"]
