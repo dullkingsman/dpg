@@ -14,6 +14,9 @@ on:
       - "lang/syntaxes/**"
       - "lang/language-configuration.json"
 
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
 jobs:
   vscode:
     name: VS Code extension

@@ -10,6 +10,9 @@ on:
     paths:
       - "plugins/helix/**"
 
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
 jobs:
   helix:
     name: Helix config

@@ -1,0 +1,20 @@
+# TypeScript source (bundled into out/extension.js by esbuild)
+src/**
+
+# Source maps
+**/*.map
+
+# Test runner output
+out/test/**
+
+# Intermediate tsc output superseded by the esbuild bundle
+out/client.js
+
+# All node_modules — bundled into out/extension.js
+node_modules/**
+
+# Dev/config files
+tsconfig.json
+package-lock.json
+*.vsix
+.vscode/**

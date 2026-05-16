@@ -10,6 +10,9 @@ on:
     paths:
       - "lang/lsp/**"
 
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
 jobs:
   lsp:
     name: dpg-lsp Go server
