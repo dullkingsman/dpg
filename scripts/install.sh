@@ -190,14 +190,17 @@ fi
 if $WITH_LSP; then
   echo
   info "Installing dpg-lsp..."
-  LSP_ARGS=(--version "${VERSION}" --install-dir "${INSTALL_DIR}")
+  LSP_SCRIPT="${TMP}/install-lsp.sh"
   if command -v curl &>/dev/null; then
-    curl -fsSL "${LSP_INSTALL_SCRIPT}" | bash -s -- "${LSP_ARGS[@]}"
+    curl -fsSL "${LSP_INSTALL_SCRIPT}" -o "${LSP_SCRIPT}"
   elif command -v wget &>/dev/null; then
-    wget -qO- "${LSP_INSTALL_SCRIPT}" | bash -s -- "${LSP_ARGS[@]}"
+    wget -qO "${LSP_SCRIPT}" "${LSP_INSTALL_SCRIPT}"
   else
     warn "curl or wget is required to install dpg-lsp. Install it separately:"
     warn "  curl -fsSL ${LSP_INSTALL_SCRIPT} | bash"
+  fi
+  if [[ -f "${LSP_SCRIPT}" ]]; then
+    bash "${LSP_SCRIPT}" --version "${VERSION}" --install-dir "${INSTALL_DIR}"
   fi
 fi
 
