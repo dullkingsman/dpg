@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# Validates editors/helix/languages.toml for structural correctness.
+# Validates plugins/helix/languages.toml for structural correctness.
 # Requires either `taplo` (preferred) or Python 3 with tomllib (stdlib ≥ 3.11).
 #
 # Usage:
-#   ./editors/helix/validate.sh
+#   ./plugins/helix/validate.sh
 set -euo pipefail
 
 TOML="${1:-$(dirname "$0")/languages.toml}"

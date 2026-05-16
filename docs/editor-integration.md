@@ -62,7 +62,7 @@ code --install-extension dullkingsman.vscode-dpg
 **From source (VSIX):**
 
 ```bash
-cd editors/vscode
+cd plugins/vscode
 npm install
 npm run package        # produces vscode-dpg-*.vsix
 code --install-extension vscode-dpg-*.vsix
@@ -94,7 +94,7 @@ If `dpg` or `dpg-lsp` are not on your system `PATH`, set the full path in the co
 
 ## Neovim
 
-The Neovim plugin lives in `editors/nvim/` of the DPG repository. It requires **Neovim 0.10+** and optionally:
+The Neovim plugin lives in `plugins/nvim/` of the DPG repository. It requires **Neovim 0.10+** and optionally:
 
 - [`nvim-lspconfig`](https://github.com/neovim/nvim-lspconfig) — for LSP support
 - [`nvim-treesitter`](https://github.com/nvim-treesitter/nvim-treesitter) — for syntax highlighting
@@ -103,12 +103,12 @@ The Neovim plugin lives in `editors/nvim/` of the DPG repository. It requires **
 
 **Via lazy.nvim (recommended):**
 
-Clone the repo once (or use an existing clone), then point lazy at the `editors/nvim` subdirectory:
+Clone the repo once (or use an existing clone), then point lazy at the `plugins/nvim` subdirectory:
 
 ```lua
 -- In your lazy.nvim plugin spec:
 {
-  dir = vim.fn.stdpath("data") .. "/dpg/editors/nvim",
+  dir = vim.fn.stdpath("data") .. "/dpg/plugins/nvim",
   name = "dpg.nvim",
   config = function()
     require("dpg").setup()
@@ -129,8 +129,8 @@ git clone https://github.com/dullkingsman/dpg \
 # Clone anywhere
 git clone https://github.com/dullkingsman/dpg ~/.local/share/dpg
 
-# Add editors/nvim to the runtime path in init.lua
-vim.opt.rtp:prepend(vim.fn.expand("~/.local/share/dpg/editors/nvim"))
+# Add plugins/nvim to the runtime path in init.lua
+vim.opt.rtp:prepend(vim.fn.expand("~/.local/share/dpg/plugins/nvim"))
 require("dpg").setup()
 ```
 
@@ -248,7 +248,7 @@ idea installPlugin com.dullkingsman.dpg
 Build the plugin locally:
 
 ```bash
-cd editors/idea
+cd plugins/idea
 ./gradlew buildPlugin
 # produces build/distributions/dpg-*.zip
 ```

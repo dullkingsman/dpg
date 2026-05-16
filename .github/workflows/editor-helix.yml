@@ -4,11 +4,11 @@ on:
   push:
     branches: [master]
     paths:
-      - "editors/helix/**"
+      - "plugins/helix/**"
   pull_request:
     branches: [master]
     paths:
-      - "editors/helix/**"
+      - "plugins/helix/**"
 
 jobs:
   helix:
@@ -23,5 +23,5 @@ jobs:
           python-version: "3.11"
 
       - name: Validate languages.toml
-        working-directory: editors/helix
+        working-directory: plugins/helix
         run: bash validate.sh

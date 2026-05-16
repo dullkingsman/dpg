@@ -18,11 +18,11 @@ jobs:
 
       - uses: actions/setup-go@v5
         with:
-          go-version-file: editors/lsp/go.mod
+          go-version-file: lang/lsp/go.mod
           cache: true
 
       - name: Build dpg-lsp
-        working-directory: editors/lsp
+        working-directory: lang/lsp
         shell: bash
         run: |
           VERSION="${GITHUB_REF_NAME#lsp-}"

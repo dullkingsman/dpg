@@ -1,7 +1,7 @@
 // lsp-smoke is a minimal end-to-end test for dpg-lsp.
 //
 // It starts dpg-lsp on a TCP port, sends a small JSON-RPC sequence, and
-// asserts the expected responses. Run it from the editors/lsp/ directory:
+// asserts the expected responses. Run it from the lang/lsp/ directory:
 //
 //	go run ./cmd/lsp-smoke
 //
@@ -309,6 +309,6 @@ func findOrBuild() (string, error) {
 
 func lspRoot() string {
 	_, self, _, _ := runtime.Caller(0)
-	// editors/lsp/cmd/lsp-smoke/main.go → go up 2 levels → editors/lsp/
+	// lang/lsp/cmd/lsp-smoke/main.go → go up 2 levels → lang/lsp/
 	return filepath.Join(filepath.Dir(self), "..", "..")
 }

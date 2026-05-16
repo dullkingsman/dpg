@@ -4,15 +4,15 @@ on:
   push:
     branches: [master]
     paths:
-      - "editors/vscode/**"
-      - "editors/syntaxes/**"
-      - "editors/language-configuration.json"
+      - "plugins/vscode/**"
+      - "lang/syntaxes/**"
+      - "lang/language-configuration.json"
   pull_request:
     branches: [master]
     paths:
-      - "editors/vscode/**"
-      - "editors/syntaxes/**"
-      - "editors/language-configuration.json"
+      - "plugins/vscode/**"
+      - "lang/syntaxes/**"
+      - "lang/language-configuration.json"
 
 jobs:
   vscode:
@@ -26,12 +26,12 @@ jobs:
         with:
           node-version: "20"
           cache: npm
-          cache-dependency-path: editors/vscode/package-lock.json
+          cache-dependency-path: plugins/vscode/package-lock.json
 
       - name: Install dependencies
-        working-directory: editors/vscode
+        working-directory: plugins/vscode
         run: npm ci
 
       - name: Type-check
-        working-directory: editors/vscode
+        working-directory: plugins/vscode
         run: npm run compile

@@ -4,11 +4,11 @@ on:
   push:
     branches: [master]
     paths:
-      - "editors/idea/**"
+      - "plugins/idea/**"
   pull_request:
     branches: [master]
     paths:
-      - "editors/idea/**"
+      - "plugins/idea/**"
 
 jobs:
   idea:
@@ -30,5 +30,5 @@ jobs:
         uses: gradle/actions/setup-gradle@v3
 
       - name: Build plugin
-        working-directory: editors/idea
+        working-directory: plugins/idea
         run: ./gradlew build verifyPlugin --no-daemon

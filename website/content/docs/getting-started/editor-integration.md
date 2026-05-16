@@ -54,7 +54,7 @@ code --install-extension dullkingsman.vscode-dpg
 **From source (VSIX):**
 
 ```bash
-cd editors/vscode
+cd plugins/vscode
 npm install
 npm run package        # produces vscode-dpg-*.vsix
 code --install-extension vscode-dpg-*.vsix
@@ -86,7 +86,7 @@ If `dpg` or `dpg-lsp` are not on your system `PATH`, set the full absolute path 
 
 ## Neovim
 
-The Neovim plugin lives in `editors/nvim/` of the DPG repository. It requires **Neovim 0.10+** and optionally:
+The Neovim plugin lives in `plugins/nvim/` of the DPG repository. It requires **Neovim 0.10+** and optionally:
 
 - [`nvim-lspconfig`](https://github.com/neovim/nvim-lspconfig) — for LSP support
 - [`nvim-treesitter`](https://github.com/nvim-treesitter/nvim-treesitter) — for syntax highlighting
@@ -95,7 +95,7 @@ The Neovim plugin lives in `editors/nvim/` of the DPG repository. It requires **
 
 **Via lazy.nvim (recommended):**
 
-Clone the DPG repo, then point lazy.nvim at the `editors/nvim` subdirectory:
+Clone the DPG repo, then point lazy.nvim at the `plugins/nvim` subdirectory:
 
 ```bash
 git clone https://github.com/dullkingsman/dpg \
@@ -105,7 +105,7 @@ git clone https://github.com/dullkingsman/dpg \
 ```lua
 -- lazy.nvim plugin spec
 {
-  dir = vim.fn.expand("~/.local/share/dpg/editors/nvim"),
+  dir = vim.fn.expand("~/.local/share/dpg/plugins/nvim"),
   name = "dpg.nvim",
   config = function()
     require("dpg").setup()
@@ -117,7 +117,7 @@ git clone https://github.com/dullkingsman/dpg \
 
 ```lua
 -- init.lua
-vim.opt.rtp:prepend(vim.fn.expand("~/.local/share/dpg/editors/nvim"))
+vim.opt.rtp:prepend(vim.fn.expand("~/.local/share/dpg/plugins/nvim"))
 require("dpg").setup()
 ```
 
@@ -228,7 +228,7 @@ The JetBrains plugin works with IntelliJ IDEA, GoLand, DataGrip, PyCharm, and an
 Build the plugin locally:
 
 ```bash
-cd editors/idea
+cd plugins/idea
 ./gradlew buildPlugin
 # produces build/distributions/dpg-*.zip
 ```

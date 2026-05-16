@@ -23,7 +23,7 @@ HUGO := $(shell PATH="$(HOME)/.local/bin:$(PATH)" sh -c 'command -v hugo 2>/dev/
 .PHONY: build build-full install install-full \
         test test-verbose test-integration test-examples test-dpg vet lint \
         test-lsp test-lsp-smoke test-grammar test-lang \
-        test-nvim test-vscode test-idea test-helix test-editors \
+        test-nvim test-vscode test-idea test-helix test-plugins \
         test-all \
         dist dist-linux dist-darwin dist-windows \
         clean clean-dist clean-all version release tag changelog \
@@ -94,7 +94,7 @@ test-lsp:
 	# ---------------------------------------------
 	# LSP TESTS
 	# ---------------------------------------------
-	cd editors/lsp && go test ./internal/...
+	cd lang/lsp && go test ./internal/...
 
 # LSP end-to-end smoke test (builds dpg-lsp; requires dpg on PATH)
 test-lsp-smoke:
@@ -103,7 +103,7 @@ test-lsp-smoke:
 	# ---------------------------------------------
 	# LSP SMOKE TESTS
 	# ---------------------------------------------
-	cd editors/lsp && go test ./cmd/lsp-smoke/
+	cd lang/lsp && go test ./cmd/lsp-smoke/
 
 # Tree-sitter grammar (requires Node.js + tree-sitter-cli)
 test-grammar:
@@ -112,7 +112,7 @@ test-grammar:
 	# ---------------------------------------------
 	# GRAMMAR TESTS
 	# ---------------------------------------------
-	editors/grammar/scripts/test.sh
+	lang/grammar/scripts/test.sh
 
 test-lang: test-lsp test-lsp-smoke test-grammar
 
@@ -125,8 +125,8 @@ test-nvim:
 	# ---------------------------------------------
 	# NVIM TESTS
 	# ---------------------------------------------
-	nvim --headless --noplugin -u editors/nvim/tests/minimal_init.lua \
-	  -c "PlenaryBustedDirectory editors/nvim/tests/ {minimal_init='editors/nvim/tests/minimal_init.lua'}" \
+	nvim --headless --noplugin -u plugins/nvim/tests/minimal_init.lua \
+	  -c "PlenaryBustedDirectory plugins/nvim/tests/ {minimal_init='plugins/nvim/tests/minimal_init.lua'}" \
 	  -c "qa!"
 
 # VS Code extension tests (requires Node.js; downloads Electron on first run)
@@ -136,7 +136,7 @@ test-vscode:
 	# ---------------------------------------------
 	# VSCODE TESTS
 	# ---------------------------------------------
-	cd editors/vscode && npm install && npm run compile && npm test
+	cd plugins/vscode && npm install && npm run compile && npm test
 
 # JetBrains plugin tests (requires JDK 17+; downloads IntelliJ on first run)
 test-idea:
@@ -145,7 +145,7 @@ test-idea:
 	# ---------------------------------------------
 	# IDEA TESTS
 	# ---------------------------------------------
-	cd editors/idea && ./gradlew test
+	cd plugins/idea && ./gradlew test
 
 # Helix languages.toml structural validation (requires python3 or taplo)
 test-helix:
@@ -154,15 +154,15 @@ test-helix:
 	# ---------------------------------------------
 	# HELIX TESTS
 	# ---------------------------------------------
-	editors/helix/validate.sh
+	plugins/helix/validate.sh
 
 # Run all editor test suites
-test-editors: test-nvim test-vscode test-idea test-helix
+test-plugins: test-nvim test-vscode test-idea test-helix
 
 # ── All Tests ─────────────────────────────────────────────────────────────────
 
 # Run every test suite — no tests spared
-test-all: test-dpg test-lang test-editors
+test-all: test-dpg test-lang testplugins-
 
 # ── Quality ───────────────────────────────────────────────────────────────────
 

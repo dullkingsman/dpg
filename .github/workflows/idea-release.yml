@@ -49,26 +49,26 @@ jobs:
         uses: gradle/actions/setup-gradle@v3
 
       - name: Stamp version
-        working-directory: editors/idea
+        working-directory: plugins/idea
         run: |
           sed -i "s/^version = .*/version = \"${{ steps.meta.outputs.version }}\"/" build.gradle.kts
 
       - name: Build and verify plugin
-        working-directory: editors/idea
+        working-directory: plugins/idea
         run: ./gradlew build verifyPlugin --no-daemon
 
       - name: Publish to JetBrains Marketplace
-        working-directory: editors/idea
+        working-directory: plugins/idea
         env:
           JETBRAINS_TOKEN: ${{ secrets.JETBRAINS_TOKEN }}
         run: ./gradlew publishPlugin --no-daemon
 
       - name: Locate plugin archive
         id: archive
-        working-directory: editors/idea
+        working-directory: plugins/idea
         run: |
           DIST=$(ls build/distributions/intellij-dpg-*.zip | head -1)
-          echo "path=editors/idea/$DIST" >> $GITHUB_OUTPUT
+          echo "path=plugins/idea/$DIST" >> $GITHUB_OUTPUT
 
       - name: Upload plugin archive to GitHub Release
         uses: softprops/action-gh-release@v2

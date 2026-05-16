@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 # Run tree-sitter generate then tree-sitter test.
-# Must be called from the editors/grammar/ directory (or any directory that
+# Must be called from the lang/grammar/ directory (or any directory that
 # contains grammar.js), or with the grammar directory as the first argument.
 #
 # Usage:
-#   ./scripts/test.sh            # from editors/grammar/
-#   ./scripts/test.sh editors/grammar   # from repo root
+#   ./scripts/test.sh            # from lang/grammar/
+#   ./scripts/test.sh lang/grammar   # from repo root
 set -euo pipefail
 
 GRAMMAR_DIR="${1:-$(dirname "$0")/..}"

@@ -4,11 +4,11 @@ on:
   push:
     branches: [master]
     paths:
-      - "editors/lsp/**"
+      - "lang/lsp/**"
   pull_request:
     branches: [master]
     paths:
-      - "editors/lsp/**"
+      - "lang/lsp/**"
 
 jobs:
   lsp:
@@ -20,17 +20,17 @@ jobs:
 
       - uses: actions/setup-go@v5
         with:
-          go-version-file: editors/lsp/go.mod
+          go-version-file: lang/lsp/go.mod
           cache: true
 
       - name: Vet
-        working-directory: editors/lsp
+        working-directory: lang/lsp
         run: go vet ./...
 
       - name: Build
-        working-directory: editors/lsp
+        working-directory: lang/lsp
         run: go build ./...
 
       - name: Test
-        working-directory: editors/lsp
+        working-directory: lang/lsp
         run: go test ./...
