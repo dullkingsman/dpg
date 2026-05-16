@@ -89,7 +89,12 @@ GRANT SELECT ON "public"."remote_events" TO "app_readonly";
 
 ## Diffing behaviour
 
-- `SERVER OPTIONS` changes: `ALTER SERVER OPTIONS`.
-- `USER MAPPING OPTIONS` changes: `ALTER USER MAPPING OPTIONS`.
-- Foreign table column changes: `ALTER FOREIGN TABLE`.
-- All foreign data objects removed: `DROP` statements — `SAFE` (no local data stored).
+| Object | Change | Safety |
+|--------|--------|--------|
+| FDW | Any change | `DESTRUCTIVE` (drop + recreate) |
+| Server | OPTIONS changed | `SAFE` |
+| Server | FDW changed | `DESTRUCTIVE` (drop + recreate) |
+| Server | Removed | `DESTRUCTIVE` |
+| User mapping | OPTIONS changed | `SAFE` |
+| User mapping | Removed | `SAFE` |
+| Foreign table | Column changes | `ALTER FOREIGN TABLE` |

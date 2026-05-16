@@ -80,8 +80,8 @@ CREATE INDEX CONCURRENTLY IF NOT EXISTS "idx_covering"
 
 ```sql
 { INDICES {
-    idx_tags (tags)       USING gin;
-    idx_fts  (search_vec) USING gin;
+    idx_tags USING gin (tags);
+    idx_fts  USING gin (search_vec);
 } }
 ```
 
@@ -96,7 +96,7 @@ CREATE INDEX CONCURRENTLY IF NOT EXISTS "idx_fts"
 ## GiST index
 
 ```sql
-{ INDICES { idx_location (location) USING gist; } }
+{ INDICES { idx_location USING gist (location); } }
 ```
 
 ```sql
@@ -107,7 +107,7 @@ CREATE INDEX CONCURRENTLY IF NOT EXISTS "idx_location"
 ## BRIN index with storage parameter
 
 ```sql
-{ INDICES { idx_brin (created_at) USING brin WITH (pages_per_range = 128); } }
+{ INDICES { idx_brin USING brin (created_at) WITH (pages_per_range = 128); } }
 ```
 
 ```sql
@@ -139,7 +139,7 @@ CREATE INDEX IF NOT EXISTS "idx_email" ON "public"."users" ("email");
 
 ## Index removal
 
-Removing an index from the `INDICES` block emits a `DROP INDEX` — classified as `SAFE` (no data loss; the underlying data remains).
+Removing an index from the `INDICES` block emits `DROP INDEX` — classified as `CAUTION` (acquires `ACCESS EXCLUSIVE` lock; no data loss, but blocks concurrent reads during the drop).
 
 ```sql
 -- emits

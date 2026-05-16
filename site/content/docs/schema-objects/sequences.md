@@ -68,4 +68,4 @@ ALTER SEQUENCE "public"."order_number_seq" CACHE 100;
 
 ## Removing a sequence
 
-Removing a sequence from source emits `DROP SEQUENCE` — `SAFE` if unowned, `DESTRUCTIVE` if owned by a column.
+Removing a sequence from source emits `DROP SEQUENCE` — always `DESTRUCTIVE`.

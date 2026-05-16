@@ -29,9 +29,9 @@ CREATE TYPE "public"."address" AS (
 );
 ```
 
-## Adding or removing an attribute
+## Adding an attribute
 
-Composite type changes that add or remove attributes require `DROP TYPE CASCADE` then `CREATE TYPE` — this is classified as `DESTRUCTIVE`. Columns of this type in any table must be retyped.
+Adding an attribute emits `ALTER TYPE ... ADD ATTRIBUTE` — `SAFE`.
 
 ```sql
 -- before
@@ -42,11 +42,16 @@ TYPE contact AS (name TEXT, email TEXT, phone TEXT);
 ```
 
 ```sql
--- emits (DESTRUCTIVE)
-DROP TYPE "public"."contact" CASCADE;
-CREATE TYPE "public"."contact" AS (
-    "name"  text,
-    "email" text,
-    "phone" text
-);
+-- emits (SAFE)
+ALTER TYPE "public"."contact" ADD ATTRIBUTE "phone" text;
 ```
+
+## Removing or changing an attribute
+
+Removing an attribute or changing an attribute's type emits `DROP TYPE CASCADE` then `CREATE TYPE` — `DESTRUCTIVE`. All columns of this type in dependent tables must be retyped.
+
+| Change | DDL emitted | Safety |
+|--------|-------------|--------|
+| Attribute added | `ALTER TYPE name ADD ATTRIBUTE col type` | `SAFE` |
+| Attribute removed | `DROP TYPE CASCADE` + `CREATE TYPE` | `DESTRUCTIVE` |
+| Attribute type changed | `DROP TYPE CASCADE` + `CREATE TYPE` | `DESTRUCTIVE` |

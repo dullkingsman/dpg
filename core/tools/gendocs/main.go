@@ -158,7 +158,14 @@ func dumpCmd() *cobra.Command {
 		Short: "Introspect a live database and produce initial .dpg source files",
 		RunE:  noop,
 		Long: `Connects to the primary node, reads the live catalog, and writes
-initial .dpg source files and a snapshot. Use this to bootstrap a DPG project from an existing database.`,
+initial .dpg source files and a snapshot. Use this to bootstrap a DPG project from an existing database.
+
+Existing files are never overwritten; re-running dpg dump on a directory that already
+contains .dpg files is safe.
+
+Objects whose DDL cannot be cleanly reconstructed from catalog information are emitted
+as comments with a -- dpg:manual marker. Review these manually and replace them with
+proper DPG declarations.`,
 	}
 	cmd.Flags().String("cluster", "", "cluster to dump (required when multiple clusters exist)")
 	cmd.Flags().String("database", "", "database to dump (required when multiple databases exist)")

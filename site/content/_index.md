@@ -13,8 +13,8 @@ TABLE users (
     name TEXT NOT NULL,
     email TEXT NOT NULL
 ) {
-    UNIQUE INDEX users_email_idx ON (email);
-    GRANTS { SELECT, INSERT ON users TO app_role; }
+    INDICES { users_email_idx UNIQUE (email); }
+    GRANTS { SELECT, INSERT TO app_role; }
 }
 ```
 
@@ -39,6 +39,6 @@ Run `dpg plan` to see the SQL diff. Run `dpg apply` to execute it.
 | [Installation](docs/getting-started/installation/) | Build from source, system requirements |
 | [Quick Start](docs/getting-started/quick-start/) | Your first DPG project in 5 minutes |
 | [CLI Reference](docs/cli/) | All commands with flags |
-| [Language Reference](docs/reference/language/) | Two-part syntax, merge rules, structural scoping |
+| [Language Reference](docs/fundamentals/two-part-syntax/) | Two-part syntax, merge rules, structural scoping |
 | [Plugin API](docs/extending/) | Extend DPG via the public Go API |
 | [RFC DPG-001](rfc/dpg-1/) | Full specification |

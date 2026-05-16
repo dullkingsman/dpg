@@ -89,13 +89,13 @@ Milestone criteria for a stable release:
 
 ---
 
-## Ecosystem (post v1.0.0)
+## Ecosystem
 
-These projects are planned as separate repositories once the core tool is stable.
+The following components exist in this repository and are developed alongside the core tool.
 
-### Language Server (dpg-lsp)
+### Language Server (`lang/lsp/`)
 
-A Language Server Protocol implementation for `.dpg` files, enabling rich editor support across any LSP-compatible editor (VS Code, Neovim, Helix, JetBrains, etc.).
+A Language Server Protocol implementation for `.dpg` files (`dpg-lsp`), enabling rich editor support across any LSP-compatible editor (VS Code, Neovim, Helix, JetBrains, etc.).
 
 - Diagnostics: syntax errors, unresolved type references, linter warnings in-editor
 - Hover: column type, constraint details, object documentation
@@ -103,7 +103,7 @@ A Language Server Protocol implementation for `.dpg` files, enabling rich editor
 - Completions: table names, column names, constraint types, DPG keywords
 - Code actions: apply lint fixes, add missing `PRIMARY KEY`
 
-### Tree-sitter Grammar (tree-sitter-dpg)
+### Tree-sitter Grammar (`lang/grammar/`)
 
 A [tree-sitter](https://tree-sitter.github.io) grammar for `.dpg` files.
 
@@ -111,12 +111,14 @@ A [tree-sitter](https://tree-sitter.github.io) grammar for `.dpg` files.
 - Structural queries for the language server and other tooling
 - Foundation for `dpg fmt` parser-based formatting
 
-### IDE Plugins
+### IDE Plugins (`plugins/`)
 
-Built on top of the language server and tree-sitter grammar, as separate repositories per editor:
+Editor integrations built on top of the language server and tree-sitter grammar:
 
-- **VS Code** (`vscode-dpg`) — syntax highlighting, LSP client, schema explorer sidebar
-- **JetBrains** (`intellij-dpg`) — file type support, LSP integration, inspections
+- **VS Code** (`plugins/vscode/`) — syntax highlighting, LSP client, schema explorer sidebar
+- **JetBrains** (`plugins/idea/`) — file type support, LSP integration, inspections
+- **Neovim** (`plugins/nvim/`) — tree-sitter grammar, LSP config, and Telescope integration
+- **Helix** (`plugins/helix/`) — language configuration and queries
 
 ---
 

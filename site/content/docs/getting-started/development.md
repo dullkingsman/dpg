@@ -329,7 +329,7 @@ make docs-cli       # regenerate only the CLI markdown files
 
 1. Implement in `internal/linter/` (satisfies `pipeline.Linter` or extend `BuiltinLinter`)
 2. Add a unit test
-3. Document in `site/content/docs/reference/linter.md`
+3. Document in `site/content/docs/migrations/linting.md`
 
 ### Add a new IR object type
 
@@ -340,7 +340,7 @@ make docs-cli       # regenerate only the CLI markdown files
 5. Add emitter logic in `internal/emit/`
 6. Export via type alias in `pkg/dpg/dpg.go`
 7. Add integration test in `examples/` or `internal/` with `//go:build integration`
-8. Document in `docs/reference/objects.md`
+8. Document in `site/content/docs/schema-objects/`
 
 ---
 
@@ -400,3 +400,41 @@ The binary embeds three values at link time:
 {{< dpg-build-version >}}
 
 Without `VERSION`, it defaults to `git describe --tags --always --dirty` or `dev` if git is unavailable. The three values are injected via `-ldflags` into `internal/version/`.
+
+---
+
+## Compiler Error Codes
+
+DPG errors use structured codes of the form `DPG-Ennn`. The full reference:
+
+| Code | Name | Description |
+|------|------|-------------|
+| DPG-E001 | `unknown_config_key` | Unknown key in `dpg.toml`. |
+| DPG-E002 | `ambiguous_connection` | Both `url` and `link` set in cluster config. |
+| DPG-E003 | `no_connection_configured` | Command requires a connection but neither `url` nor `link` is set. |
+| DPG-E004 | `reserved_name_conflict` | A database directory name matches the cluster objects directory name. |
+| DPG-E005 | `conflicting_set_member` | Same-named set-valued property has conflicting definitions across files. |
+| DPG-E006 | `forbidden_verb` | `CREATE`, `ALTER`, or `DROP` at declaration level in a `.dpg` file. |
+| DPG-E007 | `macro_inside_block` | `MACRO` declaration found inside a block. |
+| DPG-E008 | `paren_macro_in_block` | Paren-body macro spread inside a `{ }` block. |
+| DPG-E009 | `brace_macro_in_paren` | Brace-body macro spread inside a `( )` list. |
+| DPG-E010 | `undefined_macro` | Spread of undefined macro name. |
+| DPG-E011 | `duplicate_macro` | Macro name redeclared in the same file. |
+| DPG-E012 | `circular_macro` | Circular macro reference detected. |
+| DPG-E013 | `enum_migration_data_remains` | Rows still hold a removed ENUM value after the `MIGRATE REMOVE` DML ran. |
+| DPG-E014 | `unguarded_enum_removal` | ENUM value removed without a `MIGRATE REMOVE` block. |
+| DPG-E015 | `invalid_virtual_type_directive` | `VIRTUAL TYPE { }` block contains a directive other than `COMMENT`. |
+| DPG-E016 | `not_valid_in_paren_list` | `NOT VALID` used in a column or constraint inside the `( )` list. |
+| DPG-E017 | `unresolvable_cycle` | Circular FK dependency with no `DEFERRABLE` FK to break the cycle. |
+| DPG-E018 | `unknown_column_reference` | `COLUMN name { }` block references a column not in the `( )` list. |
+| DPG-E019 | `stale_column_name_in_index` | Index or constraint references old column name after a rename. |
+| DPG-E020 | `statistics_target_out_of_range` | `STATISTICS n` value is outside `[-1, 10000]`. |
+| DPG-E021 | `stale_renamed_from` | `RENAMED FROM` references a name absent from both source and snapshot. |
+| DPG-E022 | `protected_drop_attempt` | Diff would drop a `PROTECTED` object. |
+| DPG-E023 | `temporary_table_declared` | `TEMPORARY TABLE` keyword found in a `.dpg` file. |
+| DPG-E024 | `unknown_block_directive` | Unknown directive for this object kind in a `{ }` block. |
+| DPG-E025 | `destructive_ops_blocked` | Migration contains `DESTRUCTIVE` ops but `--allow-destructive` not passed. |
+| DPG-E026 | `multiple_clusters_no_flag` | Multiple clusters found; `--cluster` required. |
+| DPG-E027 | `cluster_not_found` | `--cluster` value does not match any cluster. |
+| DPG-E028 | `multiple_databases_no_flag` | Multiple databases found; `--database` required. |
+| DPG-E029 | `database_not_found` | `--database` value does not match any database. |

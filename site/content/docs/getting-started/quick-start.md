@@ -72,7 +72,7 @@ TABLE users (
     CONSTRAINT pk_users       PRIMARY KEY (id),
     CONSTRAINT uq_users_email UNIQUE (email)
 ) {
-    INDEX idx_users_email ON (email);
+    INDICES { idx_users_email (email); }
     GRANTS {
         SELECT TO app_readonly;
         SELECT, INSERT, UPDATE TO app_service;
@@ -99,9 +99,14 @@ dpg plan
 Output:
 
 ```sql
--- Safety: SAFE
+-- DPG Migration
+-- Cluster:         production
+-- Database:        myapp
+
+-- transactional
 BEGIN;
 
+-- source: schemas/public/tables/users.dpg:1
 CREATE TABLE "public"."users" (
     "id"    bigint GENERATED ALWAYS AS IDENTITY,
     "email" text NOT NULL,
@@ -116,8 +121,9 @@ ALTER TABLE "public"."users" ENABLE ROW LEVEL SECURITY;
 
 COMMIT;
 
--- MANUAL steps (non-transactional, execute after COMMIT):
-CREATE INDEX CONCURRENTLY "idx_users_email" ON "public"."users" ("email");
+-- non-transactional
+-- source: schemas/public/tables/users.dpg:4, safety: MANUAL
+CREATE INDEX CONCURRENTLY IF NOT EXISTS "idx_users_email" ON "public"."users" ("email");
 ```
 
 No database connection required — the diff runs against the committed snapshot (empty on first run).
@@ -164,7 +170,7 @@ If you have an existing PostgreSQL database, use `dpg dump` to generate initial 
 dpg dump --cluster production --database myapp
 ```
 
-This connects to the database, reads the live catalog, and writes `.dpg` files and an initial snapshot. From there, treat the generated files as your source of truth and iterate with `dpg plan` and `dpg apply`.
+This connects to the database, reads the live catalog, and writes `.dpg` files and an initial snapshot. Objects that cannot be cleanly reconstructed from catalog data are emitted as commented-out stubs with a `-- dpg:manual` marker — review and replace those manually. From there, treat the generated files as your source of truth and iterate with `dpg plan` and `dpg apply`.
 
 ---
 

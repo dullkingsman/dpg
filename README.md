@@ -9,9 +9,9 @@ TABLE users (
     id    BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     email TEXT   NOT NULL UNIQUE
 ) {
-    INDEX idx_users_email (email);
+    INDICES { idx_users_email (email); }
     GRANTS { SELECT TO app_readonly; SELECT, INSERT, UPDATE TO app_service; }
-};
+}
 ```
 
 Run `dpg plan`:
@@ -84,7 +84,7 @@ dpg verify         # detect live drift against the committed snapshot
 | `dpg diff` | Diff two `.dpg` source directories and print the SQL between them. |
 | `dpg portability` | Report PostgreSQL-specific constructs that reduce portability. |
 
-All commands accept `--cluster` and `--database` flags when a project has multiple targets. See the [CLI reference](https://dullkingsman.github.io/dpg/docs/reference/commands/) for the full flag reference.
+All commands accept `--cluster` and `--database` flags when a project has multiple targets. See the [CLI reference](https://dullkingsman.github.io/dpg/docs/cli/) for the full flag reference.
 
 ## Project Layout
 
@@ -105,22 +105,20 @@ myproject/
     └── snapshots/                   # Committed snapshot (source of truth)
 ```
 
-See the [project structure reference](https://dullkingsman.github.io/dpg/docs/reference/project/) for the full project structure reference.
+See the [project structure guide](https://dullkingsman.github.io/dpg/docs/fundamentals/project-structure/) for the full directory layout.
 
 ## Documentation
 
 | Document | Contents |
 |---|---|
 | [Installation](https://dullkingsman.github.io/dpg/docs/getting-started/installation/) | Build requirements, make targets, cross-compilation |
-| [Project Structure](https://dullkingsman.github.io/dpg/docs/reference/project/) | Directory layout, dpg.toml, cluster and database config |
-| [Language Reference](https://dullkingsman.github.io/dpg/docs/reference/language/) | Two-part syntax, schema scoping, merge rules, dependency ordering |
-| [Object Reference](https://dullkingsman.github.io/dpg/docs/reference/objects/) | Tables, views, functions, types, sequences, roles, indexes, RLS, grants |
-| [CLI Reference](https://dullkingsman.github.io/dpg/docs/reference/commands/) | All commands and flags |
-| [Linter](https://dullkingsman.github.io/dpg/docs/reference/linter/) | Lint rules and configuration |
-| [Lifecycle Directives](https://dullkingsman.github.io/dpg/docs/reference/lifecycle/) | RENAMED FROM, DEPRECATED, PROTECTED, DROP CASCADE |
-| [Secrets](https://dullkingsman.github.io/dpg/docs/reference/secrets/) | env:, link:, plain-value passthrough |
-| [Snapshot Format](https://dullkingsman.github.io/dpg/docs/reference/snapshot/) | JSON structure and VCS commit strategy |
-| [Portability](https://dullkingsman.github.io/dpg/docs/reference/portability/) | PostgreSQL-specific constructs and standard SQL alternatives |
+| [Project Structure](https://dullkingsman.github.io/dpg/docs/fundamentals/project-structure/) | Directory layout, dpg.toml, cluster and database config |
+| [Two-Part Syntax](https://dullkingsman.github.io/dpg/docs/fundamentals/two-part-syntax/) | The `{ }` block model, merge rules, structural scoping |
+| [Schema Objects](https://dullkingsman.github.io/dpg/docs/schema-objects/) | Tables, views, functions, types, sequences, roles, indexes, RLS, grants |
+| [CLI Reference](https://dullkingsman.github.io/dpg/docs/cli/) | All commands and flags |
+| [Linting](https://dullkingsman.github.io/dpg/docs/migrations/linting/) | Lint rules and configuration |
+| [Lifecycle Directives](https://dullkingsman.github.io/dpg/docs/migrations/lifecycle/) | RENAMED FROM, DEPRECATED, PROTECTED, DROP CASCADE |
+| [Snapshots & Diffing](https://dullkingsman.github.io/dpg/docs/fundamentals/snapshots/) | JSON snapshot format, dry-run, watch mode |
 | [RFC DPG-1](rfc/dpg-1.md) | Full language specification |
 
 ## Development

@@ -14,7 +14,7 @@ The linter runs automatically as part of `dpg plan`, `dpg apply`, and `dpg valid
 warn_on_deprecated            = true   # default
 require_column_comments       = false  # default
 forbid_hardcoded_passwords    = true   # default
-max_columns_per_table         = 0      # default: 0 (disabled)
+max_columns_per_table         = 50     # default: 50 (0 = disabled)
 warn_on_scalar_merge_conflict = true   # default
 ```
 
@@ -88,11 +88,11 @@ AS $$ ... $$;
 
 ## `max-columns`
 
-**Severity:** Error — **Config:** `max_columns_per_table` — **Default:** `0` (disabled)
+**Severity:** Error — **Config:** `max_columns_per_table` — **Default:** `50` (set to `0` to disable)
 
 ```toml
 [linter]
-max_columns_per_table = 50
+max_columns_per_table = 50  # default; 0 = disabled
 ```
 
 ```

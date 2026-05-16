@@ -52,4 +52,4 @@ See [Tables Overview](../../schema-objects/tables/overview/) and [Indexes](../..
 
 - New tablespace: `CREATE TABLESPACE`.
 - Owner change: `ALTER TABLESPACE OWNER TO`.
-- Removed tablespace: `DROP TABLESPACE` — `CAUTION` (fails if any objects use it).
+- Removed tablespace: `DROP TABLESPACE` — `DESTRUCTIVE`. The compiler additionally emits a warning comment that the drop will fail at the PostgreSQL level if any objects still reside in the tablespace.
