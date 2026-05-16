@@ -7,19 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Added
+## [0.5.1-alpha.9-rc.6] — 2026-05-16
 
-- `pkg/dpg` — stable public API package: re-exports all IR types, `Compile`, `Lint`, and `Discover` for external consumers (language servers, editor plugins, CI integrations)
-- `dpg fmt` — comment-preserving formatter for `.dpg` source files: rewrites keyword case, normalises blank lines, and reconstructs declarations from the IR-derived parse tree
-  - `--check` flag: exits 1 if any file would change (CI gate, no files written)
-  - `--diff` flag: prints a unified diff of what would change (no files written)
-  - Configurable via `[fmt]` section in `dpg.toml`: `indent` (spaces per level) and `keyword_case` ("upper" / "lower")
-- `internal/scanutil` — shared byte-level scanning primitives (`SkipSingleQuoted`, `PeekDollarTag`, `SkipDollarQuoted`, `SkipLineComment`, `SkipBlockComment`) used by the format lexer
-- `internal/format` — standalone formatting pipeline: token-level lexer → FormatAST (with comment attachment) → canonical renderer
-
-### Fixed
-
-- Differ: `createOpaque` now returns an error when a pass-through object body was not captured, instead of silently emitting a SQL comment that would have been a no-op on apply
+- No changes.
 
 ## [0.1.0] — 2026-04-29
 
