@@ -3,7 +3,7 @@
   "displayName": "DPG — Declarative PG",
   "description": "Language support for .dpg (DPG / Declarative PG) source files",
   "version": "0.1.0",
-  "publisher": "dullkingsman",
+  "publisher": "thec1oud",
   "license": "MIT",
   "repository": {
     "type": "git",
