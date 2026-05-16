@@ -54,6 +54,14 @@ local plenary_candidates = {
 for _, p in ipairs(plenary_candidates) do
   if vim.fn.isdirectory(p) == 1 then
     vim.opt.runtimepath:append(p)
+    -- --noplugin skips plugin/ auto-loading, so source plenary's plugin file
+    -- explicitly to register PlenaryBustedDirectory and friends.
+    for _, pat in ipairs({ "/plugin/plenary.vim", "/plugin/plenary.lua" }) do
+      local f = p .. pat
+      if vim.fn.filereadable(f) == 1 then
+        vim.cmd("source " .. f)
+      end
+    end
     break
   end
 end

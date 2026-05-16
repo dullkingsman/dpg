@@ -44,18 +44,15 @@ describe("DPG LSP configuration", function()
   end)
 
   it("does not error when lspconfig is unavailable", function()
-    -- Temporarily hide lspconfig to simulate it not being installed
     local real = package.loaded["lspconfig"]
     package.loaded["lspconfig"] = nil
     package.preload["lspconfig"] = function() error("not installed") end
 
     assert.has_no_errors(function()
-      -- Re-require dpg.lsp so the pcall guard fires
       package.loaded["dpg.lsp"] = nil
       require("dpg.lsp").setup()
     end)
 
-    -- Restore
     package.loaded["lspconfig"] = real
     package.preload["lspconfig"] = nil
   end)

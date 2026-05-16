@@ -21,8 +21,10 @@ LSP_VERSION  ?= $(shell git describe --tags --match 'lsp-v*' --abbrev=0 2>/dev/n
 HUGO := $(shell PATH="$(HOME)/.local/bin:$(PATH)" sh -c 'command -v hugo 2>/dev/null || echo hugo')
 
 .PHONY: build build-full install install-full \
-        test test-verbose test-integration test-examples vet lint \
-        test-lsp test-grammar test-nvim test-vscode test-idea test-helix test-editors \
+        test test-verbose test-integration test-examples test-dpg vet lint \
+        test-lsp test-lsp-smoke test-grammar test-lang \
+        test-nvim test-vscode test-idea test-helix test-editors \
+        test-all \
         dist dist-linux dist-darwin dist-windows \
         clean clean-dist clean-all version release tag changelog \
         docs-cli docs-site docs-serve \
@@ -50,51 +52,117 @@ install-full: docs-site
 # ── Test ──────────────────────────────────────────────────────────────────────
 
 test:
+	# ---
+
+	# ---------------------------------------------
+	# UNIT TESTS
+	# ---------------------------------------------
 	go test ./...
 
 test-verbose:
+	# ---
+
+	# ---------------------------------------------
+	# VERBOSE UNIT TESTS
+	# ---------------------------------------------
 	go test ./... -v
 
 test-integration:
+	# ---
+
+	# ---------------------------------------------
+	# INTEGRATION TESTS
+	# ---------------------------------------------
 	go test -tags integration -count=1 -timeout 5m ./...
 
 test-examples:
+	# ---
+
+	# ---------------------------------------------
+	# EXAMPLE TESTS
+	# ---------------------------------------------
 	go test ./examples/... -v
 
-# ── Editor tests ──────────────────────────────────────────────────────────────
+test-dpg: test test-integration
+
+# ── Lang tests ────────────────────────────────────────────────────────────────
 
 # LSP Go unit tests (fast; no binaries required)
 test-lsp:
+	# ---
+
+	# ---------------------------------------------
+	# LSP TESTS
+	# ---------------------------------------------
 	cd editors/lsp && go test ./internal/...
 
 # LSP end-to-end smoke test (builds dpg-lsp; requires dpg on PATH)
 test-lsp-smoke:
+	# ---
+
+	# ---------------------------------------------
+	# LSP SMOKE TESTS
+	# ---------------------------------------------
 	cd editors/lsp && go test ./cmd/lsp-smoke/
 
 # Tree-sitter grammar (requires Node.js + tree-sitter-cli)
 test-grammar:
+	# ---
+
+	# ---------------------------------------------
+	# GRAMMAR TESTS
+	# ---------------------------------------------
 	editors/grammar/scripts/test.sh
+
+test-lang: test-lsp test-lsp-smoke test-grammar
+
+# ── Editor tests ──────────────────────────────────────────────────────────────
 
 # Neovim Lua specs (requires nvim 0.10+ and plenary.nvim)
 test-nvim:
-	nvim --headless -u editors/nvim/tests/minimal_init.lua \
+	# ---
+
+	# ---------------------------------------------
+	# NVIM TESTS
+	# ---------------------------------------------
+	nvim --headless --noplugin -u editors/nvim/tests/minimal_init.lua \
 	  -c "PlenaryBustedDirectory editors/nvim/tests/ {minimal_init='editors/nvim/tests/minimal_init.lua'}" \
 	  -c "qa!"
 
 # VS Code extension tests (requires Node.js; downloads Electron on first run)
 test-vscode:
+	# ---
+
+	# ---------------------------------------------
+	# VSCODE TESTS
+	# ---------------------------------------------
 	cd editors/vscode && npm install && npm run compile && npm test
 
 # JetBrains plugin tests (requires JDK 17+; downloads IntelliJ on first run)
 test-idea:
+	# ---
+
+	# ---------------------------------------------
+	# IDEA TESTS
+	# ---------------------------------------------
 	cd editors/idea && ./gradlew test
 
 # Helix languages.toml structural validation (requires python3 or taplo)
 test-helix:
+	# ---
+
+	# ---------------------------------------------
+	# HELIX TESTS
+	# ---------------------------------------------
 	editors/helix/validate.sh
 
 # Run all editor test suites
-test-editors: test-lsp test-grammar test-nvim test-vscode test-idea test-helix
+test-editors: test-nvim test-vscode test-idea test-helix
+
+# ── All Tests ─────────────────────────────────────────────────────────────────
+
+# Run every test suite — no tests spared
+test-all: test-dpg test-lang test-editors
 
 # ── Quality ───────────────────────────────────────────────────────────────────
 

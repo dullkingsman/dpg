@@ -6,6 +6,7 @@ function M.setup()
     group   = vim.api.nvim_create_augroup("DpgFmt", { clear = true }),
     pattern = "*.dpg",
     callback = function(ev)
+      if not vim.system then return end  -- vim.system requires Neovim 0.10+
       local path = vim.api.nvim_buf_get_name(ev.buf)
       if path == "" then return end
 
