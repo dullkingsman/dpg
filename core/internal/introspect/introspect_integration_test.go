@@ -32,7 +32,7 @@ func TestIntrospectTable(t *testing.T) {
 		t.Fatalf("create table: %v", err)
 	}
 
-	ci := New()
+	ci := introspect.New()
 	objects, err := ci.Introspect(ctx, conn)
 	if err != nil {
 		t.Fatalf("introspect: %v", err)
@@ -80,7 +80,7 @@ func TestIntrospectEnum(t *testing.T) {
 		t.Fatalf("create enum: %v", err)
 	}
 
-	ci := New()
+	ci := introspect.New()
 	objects, err := ci.Introspect(ctx, conn)
 	if err != nil {
 		t.Fatalf("introspect: %v", err)
@@ -129,7 +129,7 @@ func TestIntrospectView(t *testing.T) {
 		t.Fatalf("create view: %v", err)
 	}
 
-	ci := New()
+	ci := introspect.New()
 	objects, err := ci.Introspect(ctx, conn)
 	if err != nil {
 		t.Fatalf("introspect: %v", err)
