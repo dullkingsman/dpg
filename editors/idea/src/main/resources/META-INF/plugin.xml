@@ -1,11 +1,11 @@
 <idea-plugin>
   <id>com.dullkingsman.dpg</id>
-  <name>DPG — Declarative PG</name>
+  <name>DPG</name>
   <version>0.1.0</version>
   <vendor url="https://github.com/dullkingsman/dpg">dullkingsman</vendor>
 
   <description><![CDATA[
-    <p>Language support for <b>.dpg</b> (DPG / Declarative PG) source files.</p>
+    <p>Language support for <b>.dpg</b> (DPG / Declarative PostgreSQL) source files.</p>
     <ul>
       <li>Syntax highlighting via the DPG file type</li>
       <li>Format on save via <code>dpg fmt</code></li>
