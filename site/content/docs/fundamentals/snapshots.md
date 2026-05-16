@@ -31,64 +31,90 @@ dpg diff --from schemas/v1/ --to schemas/v2/ # two source directories, no snapsh
 
 `.dpg/snapshots/<cluster>/<database>.json` — commit this file.
 
+The `objects` field is a flat map keyed by each object's qualified name (e.g. `"public.users"`, `"public.get_user(text)"`). Every value is a discriminated union: a `kind` string selects which sibling field holds the object's data.
+
 ```json
 {
-  "dpg_version": "0.1.0",
+  "dpg_version": "0.5.2",
   "cluster": "production",
   "database": "myapp",
   "applied_at": "2025-09-15T14:32:00Z",
   "source_revision": "a3f7c91",
-  "schemas": {
+  "objects": {
     "public": {
-      "tables": {
-        "users": {
-          "owner": "app_role",
-          "comment": "Primary identity store",
-          "rls_enabled": true,
-          "columns": {
-            "id": {
-              "type": "bigint",
-              "identity": { "generation": "always", "start": 1, "increment": 1 },
-              "nullable": false
-            },
-            "email": {
-              "type": "text",
-              "nullable": false,
-              "statistics_target": 300,
-              "grants": [
-                { "grantee": "reporting_role", "privileges": ["SELECT"] }
-              ]
-            }
+      "kind": "schema",
+      "schema": { "name": "public" }
+    },
+    "public.users": {
+      "kind": "table",
+      "table": {
+        "schema": "public",
+        "name": "users",
+        "owner": "app_role",
+        "comment": "Primary identity store",
+        "rls_enabled": true,
+        "columns": [
+          {
+            "name": "id",
+            "type": "bigint",
+            "not_null": true,
+            "identity": "ALWAYS"
           },
-          "constraints": {
-            "pk_users":       { "type": "primary_key", "columns": ["id"] },
-            "uq_users_email": { "type": "unique",      "columns": ["email"] }
-          },
-          "indexes": {
-            "idx_users_email": {
-              "method": "btree",
-              "columns": [{ "name": "email", "direction": "asc" }]
-            }
-          },
-          "grants": [
-            { "grantee": "app_readonly", "privileges": ["SELECT"] }
-          ]
-        }
-      },
-      "functions": {
-        "get_user(text)": {
-          "return_type": "users",
-          "language": "plpgsql",
-          "body_hash": "sha256:a3f7c91...",
-          "grants": [{ "grantee": "app_service", "privileges": ["EXECUTE"] }]
-        }
+          {
+            "name": "email",
+            "type": "text",
+            "not_null": true,
+            "statistics": 300,
+            "grants": [
+              { "privileges": ["SELECT"], "roles": ["reporting_role"] }
+            ]
+          }
+        ],
+        "constraints": [
+          { "name": "pk_users",       "type": "primary_key" },
+          { "name": "uq_users_email", "type": "unique" }
+        ],
+        "indexes": [
+          { "name": "idx_users_email", "method": "btree", "columns": "email" }
+        ],
+        "grants": [
+          { "privileges": ["SELECT"], "roles": ["app_readonly"] }
+        ]
+      }
+    },
+    "public.get_user(text)": {
+      "kind": "function",
+      "function": {
+        "schema": "public",
+        "name": "get_user",
+        "args": "text",
+        "return_type": "users",
+        "language": "plpgsql",
+        "volatility": "volatile",
+        "body_hash": "a3f7c91d8e2b...",
+        "grants": [
+          { "privileges": ["EXECUTE"], "roles": ["app_service"] }
+        ]
       }
     }
   }
 }
 ```
 
-Function bodies are stored as a hash (`body_hash`). Any change to the body text causes `CREATE OR REPLACE FUNCTION` to be emitted.
+Function and procedure bodies are stored as a SHA-256 hex digest (`body_hash`). Any change to the body text causes `CREATE OR REPLACE FUNCTION` to be emitted.
+
+### Key field notes
+
+| Field | Type | Notes |
+|-------|------|-------|
+| `not_null` | bool | Omitted when false (Go zero-value omitempty) |
+| `identity` | string | `"ALWAYS"` or `"BY DEFAULT"` |
+| `statistics` | int | Per-column `ALTER COLUMN … SET STATISTICS` target |
+| `indexes[].columns` | string | Comma-separated column list |
+| `grants[].roles` | string array | One or more grantees |
+| `grants[].privileges` | string array | Omitted means `ALL` |
+
+Objects whose state is entirely captured by their body text (procedures, aggregates, tablespaces, FDW, foreign servers, event triggers, collations, operators, text search objects, etc.) are stored as `"kind": "<type>"` with an `opaque` field containing only `kind`, `name`, `schema`, and `body_hash`.
 
 ## Migration output format
 
