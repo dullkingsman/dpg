@@ -9,8 +9,7 @@ indent            = { tab-width = 4, unit = "    " }
 
 formatter = { command = "dpg", args = ["fmt", "--stdin"] }
 
-# Requires dpg-lsp on $PATH:
-#   go install github.com/dullkingsman/dpg-lsp/cmd/dpg-lsp@latest
+# Requires dpg-lsp on $PATH — download from https://github.com/dullkingsman/dpg/releases
 language-servers = ["dpg-lsp"]
 
 # Tree-sitter grammar — add to your languages.toml or wait for upstream inclusion.

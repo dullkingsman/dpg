@@ -11,8 +11,8 @@
       <li>Format on save via <code>dpg fmt</code></li>
       <li>Diagnostics, hover, go-to-definition, and completions via <code>dpg-lsp</code></li>
     </ul>
-    <p>Requires <code>dpg-lsp</code> on <code>$PATH</code>. Install with:<br/>
-    <code>go install github.com/dullkingsman/dpg-lsp/cmd/dpg-lsp@latest</code></p>
+    <p>Requires <code>dpg-lsp</code> on <code>$PATH</code>. Download the binary from the
+    <a href="https://github.com/dullkingsman/dpg/releases">GitHub Releases page</a>.</p>
   ]]></description>
 
   <depends>com.intellij.modules.platform</depends>

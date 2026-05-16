@@ -23,14 +23,7 @@ DPG ships native plugins for VS Code, Neovim, Helix, and JetBrains IDEs. Each pl
 `dpg-lsp` is the language server that powers diagnostics, hover, and completions. Install it once and all editors share it:
 
 ```bash
-go install github.com/dullkingsman/dpg-lsp/cmd/dpg-lsp@latest
-```
-
-Ensure `$(go env GOPATH)/bin` is on your `PATH`:
-
-```bash
-# Add to ~/.bashrc or ~/.zshrc
-export PATH="$(go env GOPATH)/bin:$PATH"
+curl -fsSL https://raw.githubusercontent.com/dullkingsman/dpg/master/scripts/install-lsp.sh | bash
 ```
 
 Verify both binaries are reachable:

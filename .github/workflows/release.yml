@@ -144,9 +144,64 @@ jobs:
           path: dist/${{ matrix.archive }}
           if-no-files-found: error
 
+  build-lsp:
+    name: Build dpg-lsp (all platforms)
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: editors/lsp/go.mod
+          cache: true
+
+      - name: Build dpg-lsp
+        working-directory: editors/lsp
+        shell: bash
+        run: |
+          VERSION="${{ github.ref_name }}"
+          COMMIT="${GITHUB_SHA:0:7}"
+          DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          LDFLAGS="-s -w \
+            -X 'github.com/dullkingsman/dpg-lsp/internal/version.Version=${VERSION}' \
+            -X 'github.com/dullkingsman/dpg-lsp/internal/version.Commit=${COMMIT}' \
+            -X 'github.com/dullkingsman/dpg-lsp/internal/version.Date=${DATE}'"
+
+          mkdir -p ../../dist
+
+          targets=(
+            "linux   amd64 dpg-lsp-linux-amd64.tar.gz"
+            "linux   arm64 dpg-lsp-linux-arm64.tar.gz"
+            "darwin  amd64 dpg-lsp-darwin-amd64.tar.gz"
+            "darwin  arm64 dpg-lsp-darwin-arm64.tar.gz"
+            "windows amd64 dpg-lsp-windows-amd64.zip"
+          )
+
+          for entry in "${targets[@]}"; do
+            read -r os arch archive <<< "$entry"
+            if [ "$os" = "windows" ]; then
+              bin="dpg-lsp.exe"
+            else
+              bin="dpg-lsp"
+            fi
+            GOOS="$os" GOARCH="$arch" go build -trimpath -ldflags "$LDFLAGS" -o "../../dist/$bin" ./cmd/dpg-lsp
+            if [ "$os" = "windows" ]; then
+              (cd ../../dist && zip "$archive" "$bin" && rm "$bin")
+            else
+              (cd ../../dist && tar czf "$archive" "$bin" && rm "$bin")
+            fi
+          done
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dpg-lsp-archives
+          path: dist/dpg-lsp-*
+          if-no-files-found: error
+
   release:
     name: Create Release
-    needs: build
+    needs: [build, build-lsp]
     runs-on: ubuntu-latest
 
     steps:

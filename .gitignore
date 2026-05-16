@@ -1,8 +1,11 @@
 # IDE configs
 .idea
 .vscode
+
+# artifacts
 **/*/node_modules
 **/*/.vscode-test
+**/*/*.vsix
 
 # envs
 .env*

@@ -41,7 +41,7 @@ bash scripts/install.sh --install-dir ~/.bin
 # Preview what would be installed (no changes made)
 bash scripts/install.sh --check
 
-# Install dpg + dpg-lsp in one step (requires Go on PATH)
+# Install dpg + dpg-lsp in one step
 bash scripts/install.sh --with-lsp
 ```
 
@@ -71,13 +71,48 @@ go install github.com/dullkingsman/dpg/cmd/dpg@latest
 
 ## Install the Language Server (dpg-lsp)
 
-`dpg-lsp` provides diagnostics, hover documentation, go-to-definition, and completions in editors. It is a separate binary that requires Go on `PATH`:
+`dpg-lsp` provides diagnostics, hover documentation, go-to-definition, and completions in editors.
+
+### One-line install (Linux / macOS)
 
 ```bash
-go install github.com/dullkingsman/dpg-lsp/cmd/dpg-lsp@latest
+curl -fsSL https://raw.githubusercontent.com/dullkingsman/dpg/master/scripts/install-lsp.sh | bash
 ```
 
-After installing, make sure `$(go env GOPATH)/bin` is on your `PATH`. Editor setup is covered in [Editor Integration](./editor-integration.md).
+Or install both `dpg` and `dpg-lsp` in one step:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/dullkingsman/dpg/master/scripts/install.sh | bash -s -- --with-lsp
+```
+
+### Install script options
+
+```bash
+# Install a specific version
+bash scripts/install-lsp.sh --version v0.2.0
+
+# Override install directory
+bash scripts/install-lsp.sh --install-dir ~/.bin
+
+# Preview what would be installed (no changes made)
+bash scripts/install-lsp.sh --check
+```
+
+### Manual download
+
+Download the binary directly from the [Releases page](https://github.com/dullkingsman/dpg/releases):
+
+| Platform | Archive |
+|---|---|
+| Linux amd64 | `dpg-lsp-linux-amd64.tar.gz` |
+| Linux arm64 | `dpg-lsp-linux-arm64.tar.gz` |
+| macOS Intel | `dpg-lsp-darwin-amd64.tar.gz` |
+| macOS Apple Silicon | `dpg-lsp-darwin-arm64.tar.gz` |
+| Windows amd64 | `dpg-lsp-windows-amd64.zip` |
+
+**Windows:** Extract `dpg-lsp.exe` from the zip and add its directory to your `PATH`.
+
+Editor setup is covered in [Editor Integration](./editor-integration.md).
 
 ---
 

@@ -16,18 +16,19 @@ DPG ships native plugins for VS Code, Neovim, Helix, and JetBrains IDEs. Each pl
 
 ### dpg-lsp
 
-`dpg-lsp` is the language server that powers diagnostics and completions. Install it once and all editors share it:
+`dpg-lsp` is the language server that powers diagnostics and completions. Download the pre-built binary for your platform from the [GitHub Releases page](https://github.com/dullkingsman/dpg/releases) and place it somewhere on your `PATH`.
+
+**Linux / macOS:**
 
 ```bash
-go install github.com/dullkingsman/dpg-lsp/cmd/dpg-lsp@latest
+# Replace <version> and <platform> (e.g. v0.2.0, linux-amd64 or darwin-arm64)
+curl -L https://github.com/dullkingsman/dpg/releases/download/<version>/dpg-lsp-<platform>.tar.gz \
+  | tar xz -C /usr/local/bin
 ```
 
-Ensure `$(go env GOPATH)/bin` is on your `PATH`:
+**Windows:**
 
-```bash
-# Add to ~/.bashrc or ~/.zshrc
-export PATH="$(go env GOPATH)/bin:$PATH"
-```
+Download `dpg-lsp-windows-amd64.zip` from the releases page, extract `dpg-lsp.exe`, and add its directory to your `PATH`.
 
 Verify both are available:
 
@@ -194,8 +195,7 @@ indent            = { tab-width = 4, unit = "    " }
 
 formatter = { command = "dpg", args = ["fmt", "--stdin"] }
 
-# Requires dpg-lsp on $PATH:
-#   go install github.com/dullkingsman/dpg-lsp/cmd/dpg-lsp@latest
+# Requires dpg-lsp on $PATH — download from https://github.com/dullkingsman/dpg/releases
 language-servers = ["dpg-lsp"]
 
 [language.grammar]

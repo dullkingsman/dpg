@@ -1,13 +1,12 @@
 #!/usr/bin/env bash
-# install.sh — download and install dpg from GitHub Releases.
+# install-lsp.sh — download and install dpg-lsp from GitHub Releases.
 #
 # One-liner:
-#   curl -fsSL https://raw.githubusercontent.com/dullkingsman/dpg/master/scripts/install.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/dullkingsman/dpg/master/scripts/install-lsp.sh | bash
 #
 # Options:
 #   --version <tag>    Install a specific release tag (default: latest)
 #   --install-dir <d>  Override install directory (default: /usr/local/bin or ~/.local/bin)
-#   --with-lsp         Also install dpg-lsp
 #   --check            Print what would be installed, then exit
 #
 # Supported platforms:
@@ -21,25 +20,21 @@ set -euo pipefail
 IFS=$'\n\t'
 
 REPO="dullkingsman/dpg"
-BINARY="dpg"
-LSP_BINARY="dpg-lsp"
-LSP_INSTALL_SCRIPT="https://raw.githubusercontent.com/dullkingsman/dpg/master/scripts/install-lsp.sh"
+BINARY="dpg-lsp"
 
 # ── Flags ────────────────────────────────────────────────────────────────────
 
 VERSION=""
 INSTALL_DIR=""
-WITH_LSP=false
 CHECK_ONLY=false
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --version)     VERSION="$2";      shift 2 ;;
     --install-dir) INSTALL_DIR="$2";  shift 2 ;;
-    --with-lsp)    WITH_LSP=true;     shift ;;
     --check)       CHECK_ONLY=true;   shift ;;
     --help|-h)
-      sed -n '/^# install.sh/,/^$/p' "$0" | sed 's/^# \?//'
+      sed -n '/^# install-lsp.sh/,/^$/p' "$0" | sed 's/^# \?//'
       exit 0
       ;;
     *) echo "Unknown option: $1" >&2; exit 1 ;;
@@ -77,7 +72,7 @@ case "$ARCH_RAW" in
   *)             die "Unsupported architecture: $ARCH_RAW" ;;
 esac
 
-ASSET_NAME="${BINARY}-${GOOS}-${GOARCH}"
+ARCHIVE_NAME="${BINARY}-${GOOS}-${GOARCH}.tar.gz"
 
 # ── Resolve version ──────────────────────────────────────────────────────────
 
@@ -98,7 +93,6 @@ if [[ -z "$VERSION" ]]; then
   [[ -z "$VERSION" ]] && die "Could not determine latest release. Specify --version <tag> explicitly."
 fi
 
-ARCHIVE_NAME="${ASSET_NAME}.tar.gz"
 DOWNLOAD_URL="https://github.com/${REPO}/releases/download/${VERSION}/${ARCHIVE_NAME}"
 
 # ── Resolve install directory ────────────────────────────────────────────────
@@ -121,12 +115,9 @@ fi
 if $CHECK_ONLY; then
   echo
   echo "${BOLD}Would install:${RESET}"
-  echo "  Binary    : ${BINARY} ${VERSION} (${GOOS}/${GOARCH})"
-  echo "  From      : ${DOWNLOAD_URL}"
-  echo "  To        : ${INSTALL_DIR}/${BINARY}"
-  if $WITH_LSP; then
-    echo "  LSP binary: ${LSP_BINARY} ${VERSION} (${GOOS}/${GOARCH}) — via install-lsp.sh"
-  fi
+  echo "  Binary : ${BINARY} ${VERSION} (${GOOS}/${GOARCH})"
+  echo "  From   : ${DOWNLOAD_URL}"
+  echo "  To     : ${INSTALL_DIR}/${BINARY}"
   echo
   exit 0
 fi
@@ -144,7 +135,7 @@ fi
 # ── Download and install ─────────────────────────────────────────────────────
 
 echo
-echo "${BOLD}Installing dpg ${VERSION} (${GOOS}/${GOARCH})${RESET}"
+echo "${BOLD}Installing dpg-lsp ${VERSION} (${GOOS}/${GOARCH})${RESET}"
 echo
 
 TMP="$(mktemp -d)"
@@ -160,11 +151,9 @@ fi
 info "Extracting..."
 tar -xzf "${TMP}/${ARCHIVE_NAME}" -C "${TMP}"
 
-# The archive contains a binary named dpg-<os>-<arch>; rename it to dpg.
-if [[ ! -f "${TMP}/${ASSET_NAME}" ]]; then
-  die "Expected ${ASSET_NAME} inside ${ARCHIVE_NAME}. Archive contents: $(tar -tzf "${TMP}/${ARCHIVE_NAME}" 2>/dev/null || echo 'unknown')"
+if [[ ! -f "${TMP}/${BINARY}" ]]; then
+  die "Expected ${BINARY} inside ${ARCHIVE_NAME}. Archive contents: $(tar -tzf "${TMP}/${ARCHIVE_NAME}" 2>/dev/null || echo 'unknown')"
 fi
-mv "${TMP}/${ASSET_NAME}" "${TMP}/${BINARY}"
 chmod +x "${TMP}/${BINARY}"
 
 info "Installing to ${INSTALL_DIR}/${BINARY}..."
@@ -175,7 +164,7 @@ else
   mv "${TMP}/${BINARY}" "${INSTALL_DIR}/${BINARY}"
 fi
 
-ok "dpg ${VERSION} installed to ${INSTALL_DIR}/${BINARY}"
+ok "dpg-lsp ${VERSION} installed to ${INSTALL_DIR}/${BINARY}"
 
 # ── PATH reminder (user-local installs) ──────────────────────────────────────
 
@@ -184,22 +173,6 @@ if [[ "$INSTALL_DIR" != "/usr/local/bin" ]]; then
     warn "${INSTALL_DIR} is not on your PATH."
     warn "Add the following to your shell profile (e.g. ~/.bashrc or ~/.zshrc):"
     warn "  export PATH=\"${INSTALL_DIR}:\${PATH}\""
-  fi
-fi
-
-# ── dpg-lsp (optional) ───────────────────────────────────────────────────────
-
-if $WITH_LSP; then
-  echo
-  info "Installing dpg-lsp..."
-  LSP_ARGS="--version ${VERSION} --install-dir ${INSTALL_DIR}"
-  if command -v curl &>/dev/null; then
-    curl -fsSL "${LSP_INSTALL_SCRIPT}" | bash -s -- ${LSP_ARGS}
-  elif command -v wget &>/dev/null; then
-    wget -qO- "${LSP_INSTALL_SCRIPT}" | bash -s -- ${LSP_ARGS}
-  else
-    warn "curl or wget is required to install dpg-lsp. Install it separately:"
-    warn "  curl -fsSL ${LSP_INSTALL_SCRIPT} | bash"
   fi
 fi
 
@@ -212,15 +185,5 @@ if command -v "${BINARY}" &>/dev/null || [[ -x "${INSTALL_DIR}/${BINARY}" ]]; th
 fi
 
 echo
-echo "${GREEN}${BOLD}Done!${RESET} Run ${BOLD}dpg --help${RESET} to get started."
-echo
-echo "Next steps:"
-echo "  dpg init          — initialise a new DPG project"
-echo "  dpg plan          — preview the SQL migration"
-echo "  dpg apply         — apply the migration"
-if ! $WITH_LSP; then
-  echo
-  echo "Install the language server for editor support:"
-  echo "  curl -fsSL ${LSP_INSTALL_SCRIPT} | bash"
-fi
+echo "${GREEN}${BOLD}Done!${RESET} ${BINARY} is ready. See ${BOLD}editor-integration docs${RESET} to wire it into your editor."
 echo

@@ -5,6 +5,7 @@ import (
 	"os/exec"
 
 	"github.com/dullkingsman/dpg-lsp/internal/analysis"
+	"github.com/dullkingsman/dpg-lsp/internal/version"
 	"github.com/dullkingsman/dpg-lsp/internal/workspace"
 	"github.com/tliron/commonlog"
 	"github.com/tliron/glsp"
@@ -13,7 +14,6 @@ import (
 )
 
 const serverName = "dpg-lsp"
-const serverVersion = "0.1.0"
 
 // RunStdio starts the LSP server over stdin/stdout.
 func RunStdio() error {
@@ -54,7 +54,7 @@ func newServer() *glspserver.Server {
 			},
 			ServerInfo: &protocol.InitializeResultServerInfo{
 				Name:    serverName,
-				Version: &[]string{serverVersion}[0],
+				Version: &[]string{version.Version}[0],
 			},
 		}, nil
 	}
