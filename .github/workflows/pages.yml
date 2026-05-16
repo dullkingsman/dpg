@@ -30,7 +30,7 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: core/go.mod
-          cache: true
+          cache-dependency-path: core/go.sum
 
       - name: Generate CLI documentation
         working-directory: core

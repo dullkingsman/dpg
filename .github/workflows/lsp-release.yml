@@ -22,7 +22,7 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: lang/lsp/go.mod
-          cache: true
+          cache-dependency-path: lang/lsp/go.sum
 
       - name: Build dpg-lsp
         working-directory: lang/lsp
