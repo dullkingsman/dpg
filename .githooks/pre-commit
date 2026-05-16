@@ -1,9 +1,19 @@
 #!/usr/bin/env bash
 set -e
 
+REPO_ROOT="$(git rev-parse --show-toplevel)"
+
 if git diff --cached --name-only | grep -q "^editors/grammar/grammar\.js$"; then
     echo "grammar.js staged — regenerating parser.c..."
     (cd editors/grammar && npx tree-sitter generate)
     git add editors/grammar/src/parser.c
     echo "parser.c updated and staged."
+fi
+
+# Regenerate CLI reference docs when any CLI source file is modified.
+if git diff --cached --name-only | grep -qE "^core/(cmd/dpg|tools/gendocs)/"; then
+    echo "CLI source changed — regenerating CLI reference docs..."
+    (cd "$REPO_ROOT" && make docs-cli)
+    git add "$REPO_ROOT/site/content/docs/cli/"
+    echo "CLI docs updated and staged."
 fi
