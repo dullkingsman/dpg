@@ -7,6 +7,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [lsp-v0.5.2-alpha.10] — 2026-05-17
+
+### Added
+
+- Introduce Name Maps with tool-specific naming conventions
+- Enhance syntax highlighting, macros, and object parsing
+- Support `PREFERRED JSON FORMAT` directive for virtual types
+- Add support for structured virtual types with JSONB resolution
+- Add support for nested macro expansion with circular reference detection
+- Enable project-scoped macro sharing across `.dpg` files
+- Add support for `DEFAULT PRIVILEGES` in snapshots and diffs
+- Add support for LSP methods `SetTrace`, `TextDocumentDidSave`, and `WorkspaceDidChangeWatchedFiles`
+
+### Fixed
+
+- Improve LSP script handling by downloading before execution
+- Correctly handle array expansion for LSP install arguments in install script
+- Update prerelease detection regex in release workflows
+
+### Changed
+
+- Switch COMMENT and DEPRECATED directives to single quotes for consistency
+- Update snapshot schema spec for enhanced readability and structure
+- Update `introspect_integration_test` to use `introspect.New()` instead of `New()` for improved clarity and consistency
+- Rename `website` to `site` for consistent naming convention
+- Move core logic and tests into `core` directory for better modularity
+- Standardize directory structure by renaming `editors` to `plugins` and `editors/lsp` to `lang/lsp`
+
 ## [grammar-v0.5.2-alpha.10] — 2026-05-17
 
 ### Added
