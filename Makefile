@@ -216,7 +216,7 @@ changelog:
 	@bash scripts/changelog.sh "$(or $(PREFIX),v)"
 
 tag:
-	@test -n "$(TAG)" || (echo "Usage: make tag TAG=v1.2.3  (also lsp-v1.2.3, docs-v1.2.3, vscode-v1.2.3, idea-v1.2.3)"; exit 1)
+	@test -n "$(TAG)" || (echo "Usage: make tag TAG=v1.2.3  (also lsp-v1.2.3, docs-v1.2.3, vscode-v1.2.3, idea-v1.2.3, grammar-v1.2.3, nvim-v1.2.3)"; exit 1)
 	@bash scripts/tag.sh "$(TAG)"
 
 release: dist

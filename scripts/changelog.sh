@@ -10,13 +10,15 @@ PREFIX="${1:-v}"
 CHANGELOG="CHANGELOG.md"
 
 case "$PREFIX" in
-  vscode-v) MATCH="vscode-v*" ;;
-  idea-v)   MATCH="idea-v*"   ;;
-  lsp-v)    MATCH="lsp-v*"    ;;
-  docs-v)   MATCH="docs-v*"   ;;
-  v)        MATCH="v[0-9]*"   ;;
+  vscode-v)  MATCH="vscode-v*"   ;;
+  idea-v)    MATCH="idea-v*"     ;;
+  lsp-v)     MATCH="lsp-v*"     ;;
+  docs-v)    MATCH="docs-v*"     ;;
+  grammar-v) MATCH="grammar-v*"  ;;
+  nvim-v)    MATCH="nvim-v*"     ;;
+  v)         MATCH="v[0-9]*"     ;;
   *)
-    echo "error: prefix must be v, lsp-v, docs-v, vscode-v, or idea-v" >&2
+    echo "error: prefix must be v, lsp-v, docs-v, vscode-v, idea-v, grammar-v, or nvim-v" >&2
     exit 1 ;;
 esac
 

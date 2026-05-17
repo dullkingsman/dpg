@@ -19,11 +19,12 @@ license.text = "MIT"
 readme = "README.md"
 
 [project.urls]
-Homepage = "https://github.com/tree-sitter/tree-sitter-dpg"
+Homepage = "https://github.com/dullkingsman/dpg"
+Repository = "https://github.com/dullkingsman/dpg"
 
 [project.optional-dependencies]
 core = ["tree-sitter~=0.21"]
 
 [tool.cibuildwheel]
-build = "cp38-*"
+build = "cp39-* cp310-* cp311-* cp312-* cp313-*"
 build-frontend = "build"

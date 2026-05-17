@@ -122,6 +122,30 @@ Editor integrations built on top of the language server and tree-sitter grammar:
 
 ---
 
+## Upstream Integration
+
+These items require PRs to external repositories. They are not blockers for any DPG release but improve discoverability and out-of-the-box experience. Each has prerequisites listed below.
+
+### GitHub Linguist — `.dpg` syntax recognition
+
+- **What**: Add DPG as a language in [github-linguist/linguist](https://github.com/github-linguist/linguist) so GitHub renders syntax highlighting and language statistics for `.dpg` files automatically.
+- **What's needed**: A stable `grammar-v*` tagged release; sample `.dpg` files added to `vendor/grammars/`; entry in `lib/linguist/languages.yml` pointing to the grammar.
+- **Prerequisites**: At least one `grammar-v*` release published; highlight queries reviewed and stable.
+
+### nvim-treesitter — `:TSInstall dpg`
+
+- **What**: Add DPG to the official parser list in [nvim-treesitter/nvim-treesitter](https://github.com/nvim-treesitter/nvim-treesitter) so users can install via `:TSInstall dpg` without any manual configuration.
+- **What's needed**: The monorepo grammar at a stable `grammar-v*` tag; `highlights.scm`, `injections.scm`, and `locals.scm` queries passing nvim-treesitter's CI; an entry in `lua/nvim-treesitter/parsers.lua` pointing to `lang/grammar` in this repo.
+- **Prerequisites**: `grammar-v*` releases stable for at least one minor version cycle; queries tested against a corpus of real `.dpg` files.
+
+### Helix — built-in language support
+
+- **What**: Add DPG as a built-in language in [helix-editor/helix](https://github.com/helix-editor/helix) so users get syntax highlighting, formatting, and LSP support without copying `languages.toml` manually.
+- **What's needed**: Grammar and queries accepted upstream; `languages.toml` entry (prepared in `plugins/helix/`) merged into Helix's `languages.toml`; `dpg-lsp` documented in Helix's language server registry.
+- **Prerequisites**: Helix's grammar review process requires the grammar to be stable and queries to be idiomatic (no regexes where structured rules suffice). At minimum one `grammar-v*` release; LSP tested against Helix's LSP client.
+
+---
+
 ## Not Planned
 
 - A graphical UI (the CLI is the interface)

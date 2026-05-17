@@ -1,0 +1,34 @@
+name: Editor / Neovim
+
+on:
+  push:
+    branches: [master]
+    paths:
+      - "plugins/nvim/**"
+  pull_request:
+    branches: [master]
+    paths:
+      - "plugins/nvim/**"
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+jobs:
+  nvim:
+    name: Neovim plugin
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Neovim
+        uses: rhysd/action-setup-vim@v1
+        with:
+          neovim: true
+          version: v0.10.4
+
+      - name: Install plenary.nvim
+        run: git clone --depth 1 https://github.com/nvim-lua/plenary.nvim /tmp/plenary
+
+      - name: Run tests
+        run: make test-nvim

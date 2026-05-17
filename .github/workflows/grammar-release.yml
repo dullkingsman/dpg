@@ -1,0 +1,184 @@
+name: Grammar Release
+
+on:
+  push:
+    tags:
+      - 'grammar-v[0-9]*.[0-9]*.[0-9]*'
+
+permissions:
+  contents: write
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+jobs:
+  # GitHub Release — uploads parser.c and node-types.json as pinned assets.
+  # Helix and other tools that clone the grammar can pin to a grammar-v* tag.
+  release:
+    name: Create GitHub Release
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: lang/grammar/package.json
+
+      - name: Install dependencies
+        working-directory: lang/grammar
+        run: npm install
+
+      - name: Generate parser
+        working-directory: lang/grammar
+        run: npx tree-sitter generate
+
+      - name: Detect pre-release
+        id: semver
+        run: |
+          VERSION="${GITHUB_REF_NAME#grammar-v}"
+          if [[ "$VERSION" == *-* ]]; then
+            echo "prerelease=true" >> $GITHUB_OUTPUT
+          else
+            echo "prerelease=false" >> $GITHUB_OUTPUT
+          fi
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          draft: false
+          prerelease: ${{ steps.semver.outputs.prerelease }}
+          generate_release_notes: true
+          files: |
+            lang/grammar/src/parser.c
+            lang/grammar/src/scanner.c
+            lang/grammar/src/node-types.json
+
+  publish-npm:
+    name: Publish to npm
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          registry-url: "https://registry.npmjs.org"
+          cache: npm
+          cache-dependency-path: lang/grammar/package.json
+
+      - name: Stamp version
+        working-directory: lang/grammar
+        run: |
+          VERSION="${GITHUB_REF_NAME#grammar-v}"
+          npm version "$VERSION" --no-git-tag-version
+
+      - name: Install dependencies
+        working-directory: lang/grammar
+        run: npm install
+
+      - name: Generate parser
+        working-directory: lang/grammar
+        run: npx tree-sitter generate
+
+      - name: Publish
+        working-directory: lang/grammar
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: npm publish --access public
+
+  publish-crate:
+    name: Publish to crates.io
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Stamp version
+        working-directory: lang/grammar
+        run: |
+          VERSION="${GITHUB_REF_NAME#grammar-v}"
+          sed -i "s/^version = .*/version = \"$VERSION\"/" Cargo.toml
+
+      - name: Publish
+        working-directory: lang/grammar
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: cargo publish --allow-dirty
+
+  build-wheels:
+    name: Build Python wheels (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Stamp version
+        working-directory: lang/grammar
+        shell: bash
+        run: |
+          VERSION="${GITHUB_REF_NAME#grammar-v}"
+          sed -i.bak "s/^version = .*/version = \"$VERSION\"/" pyproject.toml
+          rm -f pyproject.toml.bak
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@v2.21
+        with:
+          package-dir: lang/grammar
+          output-dir: dist/
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist-wheels-${{ matrix.os }}
+          path: dist/
+
+  build-sdist:
+    name: Build source distribution
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Stamp version
+        working-directory: lang/grammar
+        run: |
+          VERSION="${GITHUB_REF_NAME#grammar-v}"
+          sed -i "s/^version = .*/version = \"$VERSION\"/" pyproject.toml
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Build sdist
+        working-directory: lang/grammar
+        run: |
+          pip install build
+          python -m build --sdist --outdir ../../dist/
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist-sdist
+          path: dist/
+
+  upload-pypi:
+    name: Upload to PyPI
+    needs: [build-wheels, build-sdist]
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: dist-*
+          merge-multiple: true
+          path: dist/
+
+      - uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist/
+          password: ${{ secrets.PYPI_TOKEN }}

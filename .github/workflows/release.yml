@@ -288,3 +288,49 @@ jobs:
     with:
       tag: ${{ needs.check-editors.outputs.idea-tag }}
     secrets: inherit
+
+  update-homebrew:
+    name: Update Homebrew tap
+    needs: release
+    # Only stable releases — skip pre-releases (v0.5.2-alpha.4 etc.)
+    if: "!contains(github.ref_name, '-')"
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download checksums from release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release download "${{ github.ref_name }}" \
+            --repo dullkingsman/dpg \
+            --pattern checksums.txt \
+            --output checksums.txt
+
+      - name: Generate formula
+        run: |
+          VERSION="${{ github.ref_name }}"
+          VERSION="${VERSION#v}"
+          python3 scripts/homebrew/update-formula.py \
+            "$VERSION" \
+            checksums.txt \
+            scripts/homebrew/dpg.rb.tmpl \
+            Formula/dpg.rb
+
+      - name: Push to tap
+        env:
+          HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        run: |
+          VERSION="${{ github.ref_name }}"
+          VERSION="${VERSION#v}"
+          git clone \
+            "https://x-access-token:${HOMEBREW_TAP_TOKEN}@github.com/dullkingsman/homebrew-dpg.git" \
+            tap
+          cp Formula/dpg.rb tap/Formula/dpg.rb
+          cd tap
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git config user.name "github-actions[bot]"
+          git add Formula/dpg.rb
+          git commit -m "chore: bump dpg to v${VERSION}"
+          git push

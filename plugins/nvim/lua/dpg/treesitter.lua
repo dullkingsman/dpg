@@ -9,10 +9,11 @@ function M.setup()
 
   parsers.get_parser_configs().dpg = {
     install_info = {
-      url                   = "https://github.com/dullkingsman/tree-sitter-dpg",
-      files                 = { "src/parser.c", "src/scanner.c" },
-      branch                = "main",
-      generate_requires_npm = false,
+      url                            = "https://github.com/dullkingsman/dpg",
+      files                          = { "src/parser.c", "src/scanner.c" },
+      branch                         = "master",
+      subdir                         = "lang/grammar",
+      generate_requires_npm          = false,
       requires_generate_from_grammar = false,
     },
     filetype = "dpg",

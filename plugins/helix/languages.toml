@@ -13,8 +13,10 @@ formatter = { command = "dpg", args = ["fmt", "--stdin"] }
 language-servers = ["dpg-lsp"]
 
 # Tree-sitter grammar — add to your languages.toml or wait for upstream inclusion.
+# Requires Helix 24.03+ for subdir support.
+# Update rev to the latest grammar-v* tag: https://github.com/dullkingsman/dpg/releases
 [language.grammar]
-source = { git = "https://github.com/dullkingsman/tree-sitter-dpg", rev = "main" }
+source = { git = "https://github.com/dullkingsman/dpg", rev = "grammar-v0.1.0", subdir = "lang/grammar" }
 
 [language-server.dpg-lsp]
 command = "dpg-lsp"

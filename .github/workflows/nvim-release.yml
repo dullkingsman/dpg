@@ -1,0 +1,51 @@
+name: Neovim Plugin Release
+
+on:
+  push:
+    tags:
+      - 'nvim-v[0-9]*.[0-9]*.[0-9]*'
+
+permissions:
+  contents: write
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+jobs:
+  release:
+    name: Create release
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Detect pre-release
+        id: semver
+        run: |
+          VERSION="${GITHUB_REF_NAME#nvim-v}"
+          if [[ "$VERSION" == *-* ]]; then
+            echo "prerelease=true" >> $GITHUB_OUTPUT
+          else
+            echo "prerelease=false" >> $GITHUB_OUTPUT
+          fi
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          draft: false
+          prerelease: ${{ steps.semver.outputs.prerelease }}
+          generate_release_notes: true
+          body: |
+            Install with any Neovim plugin manager pointing at the monorepo:
+
+            **lazy.nvim**
+            ```lua
+            {
+              "dullkingsman/dpg",
+              tag = "${{ github.ref_name }}",
+              subdir = "plugins/nvim",
+              config = function() require("dpg").setup() end,
+            }
+            ```
+
+            **packer.nvim**
+            ```lua
+            use { "dullkingsman/dpg", tag = "${{ github.ref_name }}", rtp = "plugins/nvim" }
+            ```

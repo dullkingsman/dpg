@@ -1,0 +1,34 @@
+class Dpg < Formula
+  desc "Declarative, state-based superset of PostgreSQL SQL that compiles to idiomatic PG DDL"
+  homepage "https://dullkingsman.github.io/dpg/"
+  version "${VERSION}"
+  license "MIT"
+
+  on_macos do
+    if Hardware::CPU.arm?
+      url "https://github.com/dullkingsman/dpg/releases/download/v${VERSION}/dpg-darwin-arm64.tar.gz"
+      sha256 "${SHA_DARWIN_ARM64}"
+    else
+      url "https://github.com/dullkingsman/dpg/releases/download/v${VERSION}/dpg-darwin-amd64.tar.gz"
+      sha256 "${SHA_DARWIN_AMD64}"
+    end
+  end
+
+  on_linux do
+    if Hardware::CPU.arm?
+      url "https://github.com/dullkingsman/dpg/releases/download/v${VERSION}/dpg-linux-arm64.tar.gz"
+      sha256 "${SHA_LINUX_ARM64}"
+    else
+      url "https://github.com/dullkingsman/dpg/releases/download/v${VERSION}/dpg-linux-amd64.tar.gz"
+      sha256 "${SHA_LINUX_AMD64}"
+    end
+  end
+
+  def install
+    bin.install "dpg"
+  end
+
+  test do
+    system "#{bin}/dpg", "--version"
+  end
+end
