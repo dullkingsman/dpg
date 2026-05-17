@@ -10,68 +10,39 @@ env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
-  prepare-docs:
-    name: Build documentation site
+  resolve-versions:
+    name: Resolve versions
     runs-on: ubuntu-latest
+    outputs:
+      docs_version: ${{ steps.v.outputs.docs_version }}
+      dpg_version:  ${{ steps.v.outputs.dpg_version }}
+      lsp_version:  ${{ steps.v.outputs.lsp_version }}
 
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      - uses: actions/setup-go@v5
-        with:
-          go-version-file: core/go.mod
-          cache-dependency-path: core/go.sum
-
-      - name: Generate CLI documentation
-        working-directory: core
-        run: go run ./tools/gendocs --output ../site/content/docs/cli
-
-      - uses: peaceiris/actions-hugo@v3
-        with:
-          hugo-version: "0.147.0"
-          extended: true
-
-      - uses: actions/cache@v4
-        with:
-          path: ~/.cache/hugo_cache
-          key: hugo-${{ hashFiles('site/go.sum') }}
-          restore-keys: hugo-
-
-      - uses: actions/setup-node@v4
-        with:
-          node-version: "20"
-
-      - name: Install PostCSS dependencies
-        working-directory: site
-        run: npm install
-
-      - name: Set release versions
+      - name: Resolve versions
+        id: v
         run: |
-          echo "DOCS_VERSION=$(cat site/VERSION)" >> $GITHUB_ENV
-          echo "DPG_VERSION=${{ github.ref_name }}" >> $GITHUB_ENV
+          echo "docs_version=$(cat site/VERSION)" >> $GITHUB_OUTPUT
+          echo "dpg_version=${{ github.ref_name }}"  >> $GITHUB_OUTPUT
           LSP_TAG=$(git describe --tags --match 'lsp-v*' --abbrev=0 2>/dev/null || echo "")
           if [[ -n "$LSP_TAG" ]]; then
-            echo "LSP_VERSION=${LSP_TAG#lsp-}" >> $GITHUB_ENV
+            echo "lsp_version=${LSP_TAG#lsp-}" >> $GITHUB_OUTPUT
           else
-            echo "LSP_VERSION=${{ github.ref_name }}" >> $GITHUB_ENV
+            echo "lsp_version=${{ github.ref_name }}" >> $GITHUB_OUTPUT
           fi
 
-      - name: Build Hugo site
-        working-directory: site
-        run: hugo --minify
-        env:
-          HUGO_BASEURL: "https://dullkingsman.github.io/dpg/"
-          HUGO_PARAMS_DOCSVERSION: ${{ env.DOCS_VERSION }}
-          HUGO_PARAMS_DPGVERSION: ${{ env.DPG_VERSION }}
-          HUGO_PARAMS_LSPVERSION: ${{ env.LSP_VERSION }}
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: docssite
-          path: core/internal/docssite/public/
-          if-no-files-found: error
+  prepare-docs:
+    name: Build documentation site
+    needs: resolve-versions
+    uses: ./.github/workflows/build-docs.yml
+    with:
+      docs_version: ${{ needs.resolve-versions.outputs.docs_version }}
+      dpg_version:  ${{ needs.resolve-versions.outputs.dpg_version }}
+      lsp_version:  ${{ needs.resolve-versions.outputs.lsp_version }}
 
   build:
     name: Build ${{ matrix.goos }}/${{ matrix.goarch }}
