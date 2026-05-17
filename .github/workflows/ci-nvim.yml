@@ -14,6 +14,15 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: core/go.mod
+          cache-dependency-path: core/go.sum
+
+      - name: Build dpg
+        working-directory: core
+        run: go build -o /usr/local/bin/dpg ./cmd/dpg
+
       - name: Install Neovim
         uses: rhysd/action-setup-vim@v1
         with:

@@ -21,7 +21,7 @@ describe("DPG tree-sitter configuration", function()
     local parsers = require("nvim-treesitter.parsers")
     local install_info = parsers.get_parser_configs().dpg.install_info
     assert.is_not_nil(install_info)
-    assert.truthy(install_info.url:find("dullkingsman/tree-sitter-dpg", 1, true))
+    assert.truthy(install_info.url:find("dullkingsman/dpg", 1, true))
   end)
 
   it("includes both parser.c and scanner.c", function()

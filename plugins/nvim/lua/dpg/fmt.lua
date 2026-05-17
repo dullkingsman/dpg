@@ -7,6 +7,7 @@ function M.setup()
     pattern = "*.dpg",
     callback = function(ev)
       if not vim.system then return end  -- vim.system requires Neovim 0.10+
+      if vim.fn.executable("dpg") == 0 then return end
       local path = vim.api.nvim_buf_get_name(ev.buf)
       if path == "" then return end
 
