@@ -96,6 +96,8 @@ jobs:
     name: Publish to npm
     needs: [resolve-meta, generate]
     runs-on: ubuntu-latest
+    permissions:
+      id-token: write
 
     steps:
       - uses: actions/checkout@v4
@@ -123,9 +125,7 @@ jobs:
 
       - name: Publish
         working-directory: lang/grammar
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-        run: npm publish --access public
+        run: npm publish --access public --provenance
 
   publish-crate:
     name: Publish to crates.io
