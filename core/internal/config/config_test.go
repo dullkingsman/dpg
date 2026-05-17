@@ -195,6 +195,152 @@ default_schema = "app"
 	}
 }
 
+// ── NameMapsConfig ────────────────────────────────────────────────────────────
+
+func TestNameMaps_GlobalRules(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, dir, "dpg.toml", `
+[compiler]
+default_drop_behavior = "restrict"
+
+[namemaps]
+default = "LOWER_SNAKE_CASE"
+prisma  = "LOWER_CAMEL_CASE"
+`)
+	cfg, err := config.LoadRoot(dir)
+	if err != nil {
+		t.Fatalf("LoadRoot: %v", err)
+	}
+	if cfg.NameMaps.Global["default"] != "LOWER_SNAKE_CASE" {
+		t.Errorf("Global[default]: got %q", cfg.NameMaps.Global["default"])
+	}
+	if cfg.NameMaps.Global["prisma"] != "LOWER_CAMEL_CASE" {
+		t.Errorf("Global[prisma]: got %q", cfg.NameMaps.Global["prisma"])
+	}
+}
+
+func TestNameMaps_ByTypeRules(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, dir, "dpg.toml", `
+[compiler]
+default_drop_behavior = "restrict"
+
+[namemaps]
+default = "LOWER_SNAKE_CASE"
+
+[namemaps.column]
+prisma   = "LOWER_CAMEL_CASE"
+drizzle  = "LOWER_CAMEL_CASE"
+
+[namemaps.table]
+prisma = "UPPER_CAMEL_CASE"
+`)
+	cfg, err := config.LoadRoot(dir)
+	if err != nil {
+		t.Fatalf("LoadRoot: %v", err)
+	}
+	if cfg.NameMaps.Global["default"] != "LOWER_SNAKE_CASE" {
+		t.Errorf("Global[default]: got %q", cfg.NameMaps.Global["default"])
+	}
+	colMap := cfg.NameMaps.ByType["column"]
+	if colMap["prisma"] != "LOWER_CAMEL_CASE" {
+		t.Errorf("ByType[column][prisma]: got %q", colMap["prisma"])
+	}
+	if colMap["drizzle"] != "LOWER_CAMEL_CASE" {
+		t.Errorf("ByType[column][drizzle]: got %q", colMap["drizzle"])
+	}
+	tblMap := cfg.NameMaps.ByType["table"]
+	if tblMap["prisma"] != "UPPER_CAMEL_CASE" {
+		t.Errorf("ByType[table][prisma]: got %q", tblMap["prisma"])
+	}
+}
+
+func TestNameMaps_InvalidRule(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, dir, "dpg.toml", `
+[namemaps]
+default = "SNAKE_LOWER"
+`)
+	_, err := config.LoadRoot(dir)
+	if err == nil {
+		t.Fatal("expected error for unknown rule SNAKE_LOWER, got nil")
+	}
+}
+
+func TestNameMaps_InvalidRuleInByType(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, dir, "dpg.toml", `
+[namemaps.column]
+prisma = "NOT_A_RULE"
+`)
+	_, err := config.LoadRoot(dir)
+	if err == nil {
+		t.Fatal("expected error for unknown rule in [namemaps.column], got nil")
+	}
+}
+
+func TestNameMaps_EmptySection(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, dir, "dpg.toml", `
+[compiler]
+default_drop_behavior = "restrict"
+`)
+	cfg, err := config.LoadRoot(dir)
+	if err != nil {
+		t.Fatalf("LoadRoot: %v", err)
+	}
+	// NameMaps should be zero-value when no [namemaps] section is present.
+	if len(cfg.NameMaps.Global) != 0 {
+		t.Errorf("expected empty Global map, got %v", cfg.NameMaps.Global)
+	}
+	if len(cfg.NameMaps.ByType) != 0 {
+		t.Errorf("expected empty ByType map, got %v", cfg.NameMaps.ByType)
+	}
+}
+
+func TestNameMaps_ClusterConfig(t *testing.T) {
+	dir := t.TempDir()
+	path := writeFile(t, dir, "dpg.toml", `
+[cluster]
+name = "prod"
+url  = "postgres://localhost/prod"
+
+[namemaps]
+default = "LOWER_SNAKE_CASE"
+
+[namemaps.table]
+prisma = "UPPER_CAMEL_CASE"
+`)
+	cfg, err := config.LoadCluster(path)
+	if err != nil {
+		t.Fatalf("LoadCluster: %v", err)
+	}
+	if cfg.NameMaps.Global["default"] != "LOWER_SNAKE_CASE" {
+		t.Errorf("Global[default]: got %q", cfg.NameMaps.Global["default"])
+	}
+	if cfg.NameMaps.ByType["table"]["prisma"] != "UPPER_CAMEL_CASE" {
+		t.Errorf("ByType[table][prisma]: got %q", cfg.NameMaps.ByType["table"]["prisma"])
+	}
+}
+
+func TestNameMaps_DatabaseConfig(t *testing.T) {
+	dir := t.TempDir()
+	path := writeFile(t, dir, "dpg.toml", `
+[database]
+name = "mydb"
+
+[namemaps.column]
+default = "LOWER_CAMEL_CASE"
+`)
+	cfg, err := config.LoadDatabase(path)
+	if err != nil {
+		t.Fatalf("LoadDatabase: %v", err)
+	}
+	if cfg.NameMaps.ByType["column"]["default"] != "LOWER_CAMEL_CASE" {
+		t.Errorf("ByType[column][default]: got %q", cfg.NameMaps.ByType["column"]["default"])
+	}
+}
+
 func TestLoadDatabase_DefaultSchema(t *testing.T) {
 	dir := t.TempDir()
 	path := writeFile(t, dir, "dpg.toml", `

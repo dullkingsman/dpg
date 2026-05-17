@@ -562,6 +562,7 @@ func mergeTableBlock(tbl *Table, block pipeline.BlockAST) error {
 	tbl.DropCascade = block.DropCascade
 	tbl.RLSEnabled = block.EnableRLS
 	tbl.RLSForced = block.ForceRLS
+	tbl.NameMaps = block.NameMaps
 
 	// Indexes
 	for _, idx := range block.Indices {
@@ -629,6 +630,7 @@ func mergeTableBlock(tbl *Table, block pipeline.BlockAST) error {
 		for _, rv := range cb.Revocations {
 			col.Revocations = append(col.Revocations, blockRevocationToIR(rv))
 		}
+		col.NameMaps = append(col.NameMaps, cb.NameMaps...)
 	}
 
 	// Additional constraints from block.
@@ -767,6 +769,7 @@ func (b *Builder) buildView(vs *pg_query.ViewStmt, block pipeline.BlockAST, pos 
 	for _, r := range block.Revocations {
 		v.Revocations = append(v.Revocations, blockRevocationToIR(r))
 	}
+	v.NameMaps = block.NameMaps
 	return v, nil
 }
 
@@ -809,6 +812,7 @@ func (b *Builder) buildFunction(cfs *pg_query.CreateFunctionStmt, pg pipeline.PG
 	for _, g := range block.Grants {
 		fn.Grants = append(fn.Grants, blockGrantToIR(g))
 	}
+	fn.NameMaps = block.NameMaps
 	return fn, nil
 }
 
@@ -830,6 +834,7 @@ func (b *Builder) buildProcedure(cfs *pg_query.CreateFunctionStmt, _ *pg_query.P
 	for _, g := range block.Grants {
 		proc.Grants = append(proc.Grants, blockGrantToIR(g))
 	}
+	proc.NameMaps = block.NameMaps
 	return proc, nil
 }
 
@@ -939,6 +944,7 @@ func (b *Builder) buildEnum(cs *pg_query.CreateEnumStmt, block pipeline.BlockAST
 	if block.MigrateRemove != nil {
 		t.MigrateRemove = block.MigrateRemove
 	}
+	t.NameMaps = block.NameMaps
 	return t, nil
 }
 
@@ -972,6 +978,7 @@ func (b *Builder) buildSchema(cs *pg_query.CreateSchemaStmt, block pipeline.Bloc
 	if block.RenamedFrom != nil {
 		s.RenamedFrom = &block.RenamedFrom.Name
 	}
+	s.NameMaps = block.NameMaps
 	return s, nil
 }
 
@@ -996,6 +1003,7 @@ func (b *Builder) buildExtension(cs *pg_query.CreateExtensionStmt, block pipelin
 			}
 		}
 	}
+	e.NameMaps = block.NameMaps
 	return e, nil
 }
 
@@ -1016,6 +1024,7 @@ func (b *Builder) buildSequence(cs *pg_query.CreateSeqStmt, block pipeline.Block
 	for _, g := range block.Grants {
 		s.Grants = append(s.Grants, blockGrantToIR(g))
 	}
+	s.NameMaps = block.NameMaps
 	for _, opt := range cs.Options {
 		de := opt.GetDefElem()
 		if de == nil {
@@ -1069,6 +1078,7 @@ func (b *Builder) buildRole(cs *pg_query.CreateRoleStmt, block pipeline.BlockAST
 	if block.Comment != nil {
 		r.Comment = &block.Comment.Value
 	}
+	r.NameMaps = block.NameMaps
 	return r, nil
 }
 
@@ -1127,6 +1137,7 @@ func (b *Builder) buildDomain(cs *pg_query.CreateDomainStmt, block pipeline.Bloc
 	if block.Comment != nil {
 		t.Comment = &block.Comment.Value
 	}
+	t.NameMaps = block.NameMaps
 	return t, nil
 }
 
@@ -1189,6 +1200,7 @@ func (b *Builder) buildDefineStmt(ds *pg_query.DefineStmt, block pipeline.BlockA
 		} else {
 			t.Variant = "BASE"
 		}
+		t.NameMaps = block.NameMaps
 		return t, nil
 
 	case pg_query.ObjectType_OBJECT_AGGREGATE:
@@ -1204,6 +1216,7 @@ func (b *Builder) buildDefineStmt(ds *pg_query.DefineStmt, block pipeline.BlockA
 		for _, g := range block.Grants {
 			agg.Grants = append(agg.Grants, blockGrantToIR(g))
 		}
+		agg.NameMaps = block.NameMaps
 		return agg, nil
 
 	case pg_query.ObjectType_OBJECT_OPERATOR:
@@ -1526,6 +1539,7 @@ func (b *Builder) buildVirtualType(part1 string, block pipeline.BlockAST, pos pi
 	if block.Comment != nil {
 		vt.Comment = &block.Comment.Value
 	}
+	vt.NameMaps = block.NameMaps
 	return vt, nil
 }
 

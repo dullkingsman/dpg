@@ -52,6 +52,14 @@
         "named": true
       },
       {
+        "type": "name_map_directive",
+        "named": true
+      },
+      {
+        "type": "name_maps_block",
+        "named": true
+      },
+      {
         "type": "not_null_directive",
         "named": true
       },
@@ -445,6 +453,14 @@
         },
         {
           "type": "identifier",
+          "named": true
+        },
+        {
+          "type": "name_map_directive",
+          "named": true
+        },
+        {
+          "type": "name_maps_block",
           "named": true
         },
         {
@@ -1249,6 +1265,81 @@
       "types": [
         {
           "type": "sql_expression",
+          "named": true
+        }
+      ]
+    }
+  },
+  {
+    "type": "name_map_directive",
+    "named": true,
+    "fields": {
+      "tool": {
+        "multiple": false,
+        "required": false,
+        "types": [
+          {
+            "type": "identifier",
+            "named": true
+          }
+        ]
+      },
+      "value": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "identifier",
+            "named": true
+          },
+          {
+            "type": "string_literal",
+            "named": true
+          }
+        ]
+      }
+    }
+  },
+  {
+    "type": "name_map_entry",
+    "named": true,
+    "fields": {
+      "tool": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "identifier",
+            "named": true
+          }
+        ]
+      },
+      "value": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "identifier",
+            "named": true
+          },
+          {
+            "type": "string_literal",
+            "named": true
+          }
+        ]
+      }
+    }
+  },
+  {
+    "type": "name_maps_block",
+    "named": true,
+    "fields": {},
+    "children": {
+      "multiple": true,
+      "required": false,
+      "types": [
+        {
+          "type": "name_map_entry",
           "named": true
         }
       ]
@@ -2877,7 +2968,15 @@
     "named": false
   },
   {
+    "type": "MAP",
+    "named": false
+  },
+  {
     "type": "MAPPING",
+    "named": false
+  },
+  {
+    "type": "MAPS",
     "named": false
   },
   {
@@ -2894,6 +2993,10 @@
   },
   {
     "type": "MINVALUE",
+    "named": false
+  },
+  {
+    "type": "NAME",
     "named": false
   },
   {

@@ -492,6 +492,162 @@ func TestPreferredJsonFormatMissingKeywords(t *testing.T) {
 	}
 }
 
+// ── NAME MAP / NAME MAPS ──────────────────────────────────────────────────────
+
+func TestNameMapDefaultImplicit(t *testing.T) {
+	ast := parse(t, `NAME MAP TO LOWER_SNAKE_CASE;`)
+	if len(ast.NameMaps) != 1 {
+		t.Fatalf("expected 1 NameMap entry, got %d", len(ast.NameMaps))
+	}
+	e := ast.NameMaps[0]
+	if e.Tool != "default" {
+		t.Errorf("Tool: got %q, want %q", e.Tool, "default")
+	}
+	if e.Value != "LOWER_SNAKE_CASE" {
+		t.Errorf("Value: got %q, want %q", e.Value, "LOWER_SNAKE_CASE")
+	}
+	if e.IsLiteral {
+		t.Error("expected IsLiteral=false for a rule")
+	}
+}
+
+func TestNameMapDefaultExplicit(t *testing.T) {
+	ast := parse(t, `NAME MAP default TO UPPER_CAMEL_CASE;`)
+	if len(ast.NameMaps) != 1 {
+		t.Fatalf("expected 1 NameMap entry, got %d", len(ast.NameMaps))
+	}
+	e := ast.NameMaps[0]
+	if e.Tool != "default" {
+		t.Errorf("Tool: got %q, want %q", e.Tool, "default")
+	}
+	if e.Value != "UPPER_CAMEL_CASE" {
+		t.Errorf("Value: got %q, want %q", e.Value, "UPPER_CAMEL_CASE")
+	}
+}
+
+func TestNameMapToolWithRule(t *testing.T) {
+	ast := parse(t, `NAME MAP prisma TO LOWER_CAMEL_CASE;`)
+	if len(ast.NameMaps) != 1 {
+		t.Fatalf("expected 1 NameMap entry, got %d", len(ast.NameMaps))
+	}
+	e := ast.NameMaps[0]
+	if e.Tool != "prisma" {
+		t.Errorf("Tool: got %q, want %q", e.Tool, "prisma")
+	}
+	if e.Value != "LOWER_CAMEL_CASE" {
+		t.Errorf("Value: got %q, want %q", e.Value, "LOWER_CAMEL_CASE")
+	}
+	if e.IsLiteral {
+		t.Error("expected IsLiteral=false for a rule")
+	}
+}
+
+func TestNameMapToolWithLiteralName(t *testing.T) {
+	ast := parse(t, `NAME MAP prisma TO "ProductVariant";`)
+	if len(ast.NameMaps) != 1 {
+		t.Fatalf("expected 1 NameMap entry, got %d", len(ast.NameMaps))
+	}
+	e := ast.NameMaps[0]
+	if e.Tool != "prisma" {
+		t.Errorf("Tool: got %q, want %q", e.Tool, "prisma")
+	}
+	if e.Value != "ProductVariant" {
+		t.Errorf("Value: got %q, want %q", e.Value, "ProductVariant")
+	}
+	if !e.IsLiteral {
+		t.Error("expected IsLiteral=true for a double-quoted name")
+	}
+}
+
+func TestNameMapsBlock(t *testing.T) {
+	src := `NAME MAPS {
+		default TO LOWER_SNAKE_CASE;
+		prisma  TO "Order";
+		drizzle TO LOWER_CAMEL_CASE;
+	}`
+	ast := parse(t, src)
+	if len(ast.NameMaps) != 3 {
+		t.Fatalf("expected 3 NameMap entries, got %d", len(ast.NameMaps))
+	}
+	if ast.NameMaps[0].Tool != "default" || ast.NameMaps[0].Value != "LOWER_SNAKE_CASE" || ast.NameMaps[0].IsLiteral {
+		t.Errorf("entry[0]: %+v", ast.NameMaps[0])
+	}
+	if ast.NameMaps[1].Tool != "prisma" || ast.NameMaps[1].Value != "Order" || !ast.NameMaps[1].IsLiteral {
+		t.Errorf("entry[1]: %+v", ast.NameMaps[1])
+	}
+	if ast.NameMaps[2].Tool != "drizzle" || ast.NameMaps[2].Value != "LOWER_CAMEL_CASE" || ast.NameMaps[2].IsLiteral {
+		t.Errorf("entry[2]: %+v", ast.NameMaps[2])
+	}
+}
+
+func TestNameMapMultipleSingular(t *testing.T) {
+	src := `NAME MAP default TO LOWER_SNAKE_CASE;
+		NAME MAP prisma TO "User";`
+	ast := parse(t, src)
+	if len(ast.NameMaps) != 2 {
+		t.Fatalf("expected 2 NameMap entries, got %d", len(ast.NameMaps))
+	}
+}
+
+func TestNameMapUnknownRuleErrors(t *testing.T) {
+	err := parseErr(t, `NAME MAP default TO SNAKE_LOWER;`)
+	if err == nil {
+		t.Error("expected error for unknown rule, got nil")
+	}
+}
+
+func TestNameMapColumnBlock(t *testing.T) {
+	src := `COLUMN created_at {
+		NAME MAP default TO LOWER_SNAKE_CASE;
+		NAME MAP prisma TO "createdAt";
+	}`
+	ast := parse(t, src)
+	if len(ast.Columns) != 1 {
+		t.Fatalf("expected 1 column, got %d", len(ast.Columns))
+	}
+	col := ast.Columns[0]
+	if len(col.NameMaps) != 2 {
+		t.Fatalf("expected 2 column NameMap entries, got %d", len(col.NameMaps))
+	}
+	if col.NameMaps[0].Tool != "default" || col.NameMaps[0].Value != "LOWER_SNAKE_CASE" {
+		t.Errorf("column entry[0]: %+v", col.NameMaps[0])
+	}
+	if col.NameMaps[1].Tool != "prisma" || col.NameMaps[1].Value != "createdAt" || !col.NameMaps[1].IsLiteral {
+		t.Errorf("column entry[1]: %+v", col.NameMaps[1])
+	}
+}
+
+func TestNameMapsColumnBlock(t *testing.T) {
+	src := `COLUMN user_id {
+		NAME MAPS {
+			default TO LOWER_SNAKE_CASE;
+			drizzle TO "userId";
+		}
+	}`
+	ast := parse(t, src)
+	if len(ast.Columns) != 1 {
+		t.Fatalf("expected 1 column, got %d", len(ast.Columns))
+	}
+	if len(ast.Columns[0].NameMaps) != 2 {
+		t.Fatalf("expected 2 column NameMap entries, got %d", len(ast.Columns[0].NameMaps))
+	}
+}
+
+func TestAllRules(t *testing.T) {
+	rules := []string{
+		"LOWER_SNAKE_CASE", "UPPER_SNAKE_CASE", "LOWER_CAMEL_CASE", "UPPER_CAMEL_CASE",
+		"LOWER_KEBAB_CASE", "UPPER_KEBAB_CASE", "TRAIN_CASE", "LOWER_CASE",
+		"UPPER_CASE", "PASCAL_SNAKE_CASE",
+	}
+	for _, rule := range rules {
+		src := "NAME MAP TO " + rule + ";"
+		a := parse(t, src)
+		if len(a.NameMaps) != 1 || a.NameMaps[0].Value != rule {
+			t.Errorf("rule %q: got %+v", rule, a.NameMaps)
+		}
+	}
+}
+
 // ── registry ──────────────────────────────────────────────────────────────────
 
 func TestRegistration(t *testing.T) {

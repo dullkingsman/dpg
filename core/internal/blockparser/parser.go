@@ -471,6 +471,25 @@ func (b *blockParser) parseBlock(pos pipeline.SourcePos) (pipeline.BlockAST, err
 			}
 		case "PREFERRED":
 			ast.PreferredJsonFormat, err = b.parsePreferredJsonFormat(dirPos)
+		case "NAME":
+			b.skipWS()
+			w2 := strings.ToUpper(b.readWord())
+			switch w2 {
+			case "MAP":
+				var entry pipeline.NameMapEntry
+				entry, err = b.parseNameMapSingular(dirPos)
+				if err == nil {
+					ast.NameMaps = append(ast.NameMaps, entry)
+				}
+			case "MAPS":
+				var entries []pipeline.NameMapEntry
+				entries, err = b.parseNameMapsBlock(dirPos)
+				if err == nil {
+					ast.NameMaps = append(ast.NameMaps, entries...)
+				}
+			default:
+				err = fmt.Errorf("%s: expected MAP or MAPS after NAME, got %q", dirPos, w2)
+			}
 		default:
 			return ast, fmt.Errorf("%s: unknown block directive %q", dirPos, word)
 		}
@@ -865,6 +884,27 @@ func (b *blockParser) fillColumnBlock(col *pipeline.ColumnBlock) error {
 				err = e2
 			} else {
 				col.Revocations = append(col.Revocations, revs...)
+			}
+		case "NAME":
+			b.skipWS()
+			w2 := strings.ToUpper(b.readWord())
+			switch w2 {
+			case "MAP":
+				entry, e2 := b.parseNameMapSingular(dirPos)
+				if e2 != nil {
+					err = e2
+				} else {
+					col.NameMaps = append(col.NameMaps, entry)
+				}
+			case "MAPS":
+				entries, e2 := b.parseNameMapsBlock(dirPos)
+				if e2 != nil {
+					err = e2
+				} else {
+					col.NameMaps = append(col.NameMaps, entries...)
+				}
+			default:
+				err = fmt.Errorf("%s: expected MAP or MAPS after NAME, got %q", dirPos, w2)
 			}
 		default:
 			return fmt.Errorf("%s: unknown column directive %q", dirPos, word)
@@ -1565,6 +1605,93 @@ func (b *blockParser) parseDefaultPrivileges(pos pipeline.SourcePos) (pipeline.D
 	}
 	b.advance()
 	return dp, nil
+}
+
+// ── NAME MAP / NAME MAPS ──────────────────────────────────────────────────────
+
+// parseNameMapSingular parses the tail of a NAME MAP directive:
+//
+//	TO <value> ;               (implicit "default" tool)
+//	<tool> TO <value> ;        (explicit tool name)
+func (b *blockParser) parseNameMapSingular(pos pipeline.SourcePos) (pipeline.NameMapEntry, error) {
+	b.skipWS()
+	c := b.cur()
+	next := strings.ToUpper(b.peekWord())
+	var tool string
+	if next == "TO" {
+		b.readWord() // consume TO
+		tool = "default"
+	} else {
+		b.restore(c)
+		tool = strings.ToLower(b.readWord())
+		if tool == "" {
+			return pipeline.NameMapEntry{}, b.errorf("expected tool name or TO after NAME MAP")
+		}
+		if err := b.expect("TO"); err != nil {
+			return pipeline.NameMapEntry{}, err
+		}
+	}
+	return b.parseNameMapValue(pos, tool)
+}
+
+// parseNameMapsBlock parses a grouped NAME MAPS { ... } block where each
+// entry is: <tool> TO <value> ;
+func (b *blockParser) parseNameMapsBlock(pos pipeline.SourcePos) ([]pipeline.NameMapEntry, error) {
+	if err := b.consumeBrace(); err != nil {
+		return nil, err
+	}
+	var entries []pipeline.NameMapEntry
+	for {
+		b.skipWS()
+		if b.eof() || b.peek() == '}' {
+			break
+		}
+		entryPos := b.srcPos()
+		tool := strings.ToLower(b.readWord())
+		if tool == "" {
+			return nil, b.errorf("expected tool name in NAME MAPS block")
+		}
+		if err := b.expect("TO"); err != nil {
+			return nil, err
+		}
+		entry, err := b.parseNameMapValue(entryPos, tool)
+		if err != nil {
+			return nil, err
+		}
+		entries = append(entries, entry)
+	}
+	b.skipWS()
+	if b.peek() != '}' {
+		return nil, b.errorf("expected '}' to close NAME MAPS block")
+	}
+	b.advance()
+	return entries, nil
+}
+
+// parseNameMapValue parses the value part of a NAME MAP directive:
+//
+//	"LiteralName" ;   → IsLiteral=true
+//	RULE_KEYWORD ;    → IsLiteral=false, must be in ValidNameMapRules
+func (b *blockParser) parseNameMapValue(pos pipeline.SourcePos, tool string) (pipeline.NameMapEntry, error) {
+	b.skipWS()
+	if b.peek() == '"' {
+		name, err := b.readQuotedString()
+		if err != nil {
+			return pipeline.NameMapEntry{}, err
+		}
+		if err := b.expectSemi(); err != nil {
+			return pipeline.NameMapEntry{}, err
+		}
+		return pipeline.NameMapEntry{Tool: tool, Value: name, IsLiteral: true, Pos: pos}, nil
+	}
+	rule := strings.ToUpper(b.readWord())
+	if !pipeline.ValidNameMapRules[rule] {
+		return pipeline.NameMapEntry{}, fmt.Errorf("%s: unknown name map rule %q; valid rules: LOWER_SNAKE_CASE, UPPER_SNAKE_CASE, LOWER_CAMEL_CASE, UPPER_CAMEL_CASE, LOWER_KEBAB_CASE, UPPER_KEBAB_CASE, TRAIN_CASE, LOWER_CASE, UPPER_CASE, PASCAL_SNAKE_CASE", pos, rule)
+	}
+	if err := b.expectSemi(); err != nil {
+		return pipeline.NameMapEntry{}, err
+	}
+	return pipeline.NameMapEntry{Tool: tool, Value: rule, IsLiteral: false, Pos: pos}, nil
 }
 
 // ── TEXT SEARCH MAPPING ───────────────────────────────────────────────────────

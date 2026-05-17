@@ -74,6 +74,16 @@
 (not_null_directive "NOT" @keyword.directive "NULL" @keyword.directive)
 (check_directive "CHECK" @keyword.directive)
 (mapping_directive "MAPPING" @keyword.directive)
+(name_map_directive "NAME" @keyword.directive "MAP" @keyword.directive)
+(name_maps_block "NAME" @keyword.directive "MAPS" @keyword.directive)
+
+; Name map entries — tool names and target values
+(name_map_directive tool: (identifier) @variable)
+(name_map_directive value: (identifier) @constant)
+(name_map_directive value: (string_literal) @string)
+(name_map_entry tool: (identifier) @variable)
+(name_map_entry value: (identifier) @constant)
+(name_map_entry value: (string_literal) @string)
 
 ; Nested block section keywords
 (indices_block "INDICES" @keyword.block)

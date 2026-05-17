@@ -8,6 +8,12 @@ REPO_ROOT="$(git rev-parse --show-toplevel)"
 # and GOPATH-managed binaries.
 export PATH="/usr/local/go/bin:${HOME}/.local/bin:${HOME}/go/bin:${PATH}"
 
+# nvm installs node/npx under ~/.nvm/versions/node/<version>/bin; find and add it.
+if [ -d "${HOME}/.nvm/versions/node" ]; then
+    NVM_NODE_BIN="$(ls -1d "${HOME}/.nvm/versions/node"/*/bin 2>/dev/null | tail -1)"
+    [ -n "$NVM_NODE_BIN" ] && export PATH="${NVM_NODE_BIN}:${PATH}"
+fi
+
 if ! command -v go >/dev/null 2>&1; then
     echo "pre-commit: 'go' not found on PATH — skipping CLI doc regeneration." >&2
     echo "  Install Go or add it to PATH to enable auto-regeneration." >&2

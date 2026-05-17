@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Name Maps**: attach tool-specific naming conventions to any DPG object or column
+  - Inline block directives: `NAME MAP TO <rule>`, `NAME MAP <tool> TO <rule>`, `NAME MAP <tool> TO "LiteralName"`, and grouped `NAME MAPS { ... }`
+  - `[namemaps]` TOML section in root, cluster, and database `dpg.toml`; global rules and per-object-type subtables (`[namemaps.column]`, `[namemaps.table]`, etc.)
+  - Ten canonical rule keywords: `LOWER_SNAKE_CASE`, `UPPER_SNAKE_CASE`, `LOWER_CAMEL_CASE`, `UPPER_CAMEL_CASE`, `LOWER_KEBAB_CASE`, `UPPER_KEBAB_CASE`, `TRAIN_CASE`, `LOWER_CASE`, `UPPER_CASE`, `PASCAL_SNAKE_CASE`
+  - Resolution order: block-level → database config → cluster config → root config (most specific wins, per tool key per type)
+  - `name_maps` field serialised on all snapshot object types (`SnapTable`, `SnapColumn`, `SnapView`, `SnapFunction`, `SnapType`, `SnapSchema`, `SnapExtension`, `SnapSequence`, `SnapRole`, `SnapVirtualType`, `SnapOpaque`)
+  - Tree-sitter grammar: `name_map_directive` and `name_maps_block` rules with syntax highlighting
+  - RFC §D.10 added documenting the full specification
+
 ## [0.5.2-alpha.2] — 2026-05-17
 
 ### Added

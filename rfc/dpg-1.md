@@ -204,6 +204,7 @@ Appendix D.  Corrections and Additions to Earlier Sections ....... 138
     D.7.  Additional CLI Error Codes .............................. 147
     D.8.  Root dpg.toml Missing Sections ......................... 148
     D.9.  CLI Command Corrections ................................ 149
+    D.10. Name Maps .............................................. 150
 Appendix E.  Revision History ..................................... 151
 Normative References .............................................. 152
 Informative References ............................................ 153
@@ -5763,6 +5764,219 @@ Options:
 
 ---
 
+### D.10. Name Maps
+
+   Name Maps provide a mechanism for attaching tool-specific naming
+   conventions to DPG schema objects.  They allow downstream consumers
+   — ORM generators, type-safe query builders, API code generators —
+   to transform DPG identifier names into the naming convention
+   appropriate for their target language or framework, without
+   requiring any changes to the DPG source files.
+
+   Name Maps operate at two orthogonal layers:
+
+   -   **Configuration layer** (`dpg.toml`): project-wide defaults,
+       settable at root, cluster, and database scope.
+   -   **Block layer** (the `{ }` DPG block): per-object or per-column
+       overrides declared inline in the source file.
+
+   Resolution is most-specific-wins: block-level beats database
+   config, database config beats cluster config, cluster config beats
+   root config.  Resolution is applied independently per tool key per
+   object type.
+
+#### D.10.1. Rule Keywords
+
+   DPG defines a closed set of naming-convention rule keywords.  All
+   keywords are case-insensitive in TOML config but stored and
+   validated in their canonical upper-case form.  A rule keyword MUST
+   be written without quotation marks in the DPG block syntax.
+
+   | Rule Keyword | Example transformation of `user_profile_id` |
+   |---|---|
+   | `LOWER_SNAKE_CASE` | `user_profile_id` |
+   | `UPPER_SNAKE_CASE` | `USER_PROFILE_ID` |
+   | `LOWER_CAMEL_CASE` | `userProfileId` |
+   | `UPPER_CAMEL_CASE` | `UserProfileId` |
+   | `LOWER_KEBAB_CASE` | `user-profile-id` |
+   | `UPPER_KEBAB_CASE` | `USER-PROFILE-ID` |
+   | `TRAIN_CASE` | `User-Profile-Id` |
+   | `LOWER_CASE` | `userprofileid` |
+   | `UPPER_CASE` | `USERPROFILEID` |
+   | `PASCAL_SNAKE_CASE` | `User_Profile_Id` |
+
+   A literal target name (not a rule) is written as a double-quoted
+   identifier in the DPG block syntax (e.g., `"MySpecialName"`).
+   Literal names are stored verbatim in the snapshot and are passed
+   through to consumers unchanged.  Literal names are only supported
+   in the block layer, not in `dpg.toml`.
+
+   The reserved tool key `default` MUST NOT be used as an actual tool
+   name.  It represents the catch-all rule applied by any tool for
+   which no explicit rule is configured.
+
+#### D.10.2. Configuration Layer (`dpg.toml`)
+
+   All three configuration files (root, cluster, database) accept a
+   `[namemaps]` section.  Within this section:
+
+   -   Scalar string entries are **global rules** keyed by tool name.
+   -   Subtable entries (`[namemaps.<type>]`) are **per-object-type
+       rules** keyed by tool name, where `<type>` matches the DPG
+       object-type identifier (e.g., `column`, `table`, `view`).
+
+   Deeper configuration scopes override shallower ones for the same
+   (tool, type) pair.
+
+```toml
+# Root dpg.toml — project-wide defaults
+[namemaps]
+default  = "LOWER_SNAKE_CASE"   # catch-all for all tools
+prisma   = "LOWER_CAMEL_CASE"   # Prisma-specific global rule
+drizzle  = "LOWER_CAMEL_CASE"
+
+[namemaps.table]
+prisma  = "UPPER_CAMEL_CASE"    # Prisma table names: PascalCase
+drizzle = "LOWER_CAMEL_CASE"    # Drizzle table names: camelCase
+
+[namemaps.column]
+prisma  = "LOWER_CAMEL_CASE"
+drizzle = "LOWER_CAMEL_CASE"
+```
+
+```toml
+# Cluster or database dpg.toml — narrows/overrides root config
+[namemaps]
+sqlc = "LOWER_SNAKE_CASE"
+
+[namemaps.function]
+sqlc = "LOWER_SNAKE_CASE"
+```
+
+   Rules MUST be one of the ten keywords listed in §D.10.1.  Unknown
+   keywords MUST cause a validation error (DPG-E030).  Literal names
+   are NOT supported in `dpg.toml`; only rule keywords are accepted.
+
+#### D.10.3. Block Layer — Inline Directives
+
+   Name map directives appear inside any DPG `{ }` block (object-level
+   or column-level).  Two forms are supported.
+
+**Singular form:**
+
+```
+NAME MAP TO <rule> ;
+NAME MAP <tool> TO <rule> ;
+NAME MAP <tool> TO "LiteralName" ;
+```
+
+   -   When `<tool>` is omitted, the directive applies to the `default`
+       tool key.
+   -   `<rule>` is an unquoted rule keyword (case-insensitive).
+   -   `"LiteralName"` is a double-quoted literal target identifier.
+       Double quotes follow the PostgreSQL identifier quoting convention
+       (identifiers, not string values).
+
+**Grouped form:**
+
+```
+NAME MAPS {
+  <tool> TO <rule> ;
+  <tool> TO "LiteralName" ;
+  ...
+}
+```
+
+   -   The `NAME MAPS { }` form requires explicit tool names; the
+       implicit `default` shorthand is NOT available inside the group.
+   -   Multiple singular `NAME MAP` directives and `NAME MAPS` blocks
+       MAY be mixed freely within the same `{ }` block.
+   -   If the same tool key appears more than once in a single `{ }`
+       block the last entry wins.
+
+**Examples:**
+
+```sql
+TABLE users (
+  id       BIGINT GENERATED ALWAYS AS IDENTITY,
+  email    TEXT NOT NULL,
+  username TEXT NOT NULL
+) {
+  -- All tools: use LOWER_SNAKE_CASE (default catch-all)
+  NAME MAP TO LOWER_SNAKE_CASE;
+
+  -- Prisma and drizzle: override to camelCase
+  NAME MAPS {
+    prisma  TO LOWER_CAMEL_CASE;
+    drizzle TO LOWER_CAMEL_CASE;
+  }
+
+  COLUMNS {
+    username {
+      -- Override: literal name for the sqlc tool only
+      NAME MAP sqlc TO "UserName";
+    }
+  }
+}
+```
+
+```sql
+ENUM user_status ('active', 'inactive', 'banned') {
+  NAME MAP prisma TO UPPER_CAMEL_CASE;
+}
+```
+
+#### D.10.4. Snapshot Representation
+
+   Name maps are serialised to the snapshot `name_maps` array field
+   present on all typed snap objects (`SnapTable`, `SnapColumn`,
+   `SnapView`, `SnapFunction`, `SnapType`, `SnapSchema`, `SnapExtension`,
+   `SnapSequence`, `SnapRole`, `SnapVirtualType`, `SnapOpaque`).
+
+   Each entry is a `SnapNameMapEntry`:
+
+```json
+{
+  "tool": "prisma",
+  "rule": "LOWER_CAMEL_CASE"
+}
+```
+
+   or, for a literal name:
+
+```json
+{
+  "tool": "sqlc",
+  "name": "UserName"
+}
+```
+
+   Fields:
+
+   | Field | Type | Required | Description |
+   |-------|------|----------|-------------|
+   | `tool` | string | YES | Tool key (e.g., `"prisma"`, `"default"`). |
+   | `rule` | string | one of rule/name | One of the ten rule keywords. Present when the value is a rule. |
+   | `name` | string | one of rule/name | Literal target identifier. Present when the value is a literal. |
+
+   Exactly one of `rule` or `name` MUST be non-empty.  Both being
+   populated in the same entry is invalid.  The `name_maps` field is
+   omitted entirely from the JSON when the array is empty (`omitempty`).
+
+   The differ does not generate SQL for name map changes — name maps
+   are metadata annotations consumed by downstream tools, not by
+   PostgreSQL.  A change to `name_maps` triggers a snapshot update
+   only (no SQL emitted, no migration step added).
+
+#### D.10.5. Error Codes
+
+   | Error ID | Code String | Condition |
+   |----------|-------------|-----------|
+   | DPG-E030 | `invalid_namemap_rule` | Unknown rule keyword in `[namemaps]` config or `NAME MAP` block directive. |
+   | DPG-E031 | `duplicate_namemap_tool` | Same tool key specified more than once at the same block level (warning only; last entry wins). |
+
+---
+
 ## Appendix E. Revision History
 
    This appendix records all substantive changes to this document after
@@ -5773,6 +5987,7 @@ Options:
    | E.1 | 2026-05-13 | Initial publication. Formal IETF-style RFC superseding the informal design document `rfc/v0.8.0.md`. All sections written from scratch with normative RFC 2119 language, ABNF grammars, and exhaustive per-object specifications. |
    | E.2 | 2026-05-13 | Appendix D added. Corrections to §16 (snapshot wire format: `SnapObject` discriminated union, `SnapOpaque`, corrected field names), §18 (`--format text` default, `--watch` flag, `.env` loading protocol, `planJSON` schema, target auto-selection), §19 (linter rule IDs use hyphens). Pipeline Registry key constants table and SecretResolver protocol specification added. Source revision detection algorithm formalised. |
    | E.3 | 2026-05-13 | §D.8–§D.9 added. Root `dpg.toml` `[fmt]` and `[migrations]` sections documented. CLI corrections: `dpg validate` JSON schema, `dpg portability` flag set, `dpg init` default cluster name (`"production"`), `dpg fmt` TOML key names. ToC updated to include Appendix D subsections. |
+   | E.4 | 2026-05-17 | §D.10 added. Name Maps feature specified: ten rule keywords, `[namemaps]` TOML config at all three levels (global + per-object-type rules), inline `NAME MAP` and `NAME MAPS` block directives, literal target name support via double-quoted identifiers, resolution order (block > database > cluster > root), snapshot `name_maps` array field on all object types, error codes DPG-E030 and DPG-E031. |
 
 ---
 

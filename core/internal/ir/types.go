@@ -60,6 +60,7 @@ type Column struct {
 	Using       *string // USING expression for ALTER COLUMN TYPE
 	Grants      []Grant
 	Revocations []Revocation
+	NameMaps    []pipeline.NameMapEntry
 	SrcPos      pipeline.SourcePos
 }
 
@@ -180,6 +181,7 @@ type Schema struct {
 	Owner       *string
 	Comment     *string
 	RenamedFrom *string
+	NameMaps    []pipeline.NameMapEntry
 	SrcPos      pipeline.SourcePos
 }
 
@@ -189,10 +191,11 @@ func (s *Schema) irObject()               {}
 
 // Extension is a CREATE EXTENSION declaration.
 type Extension struct {
-	Name    string
-	Schema  *string
-	Version *string
-	SrcPos  pipeline.SourcePos
+	Name     string
+	Schema   *string
+	Version  *string
+	NameMaps []pipeline.NameMapEntry
+	SrcPos   pipeline.SourcePos
 }
 
 func (e *Extension) QualifiedName() string   { return e.Name }
@@ -226,6 +229,7 @@ type Table struct {
 	Partitions    []*Partition
 	StorageParams map[string]string
 	Tablespace    *string
+	NameMaps      []pipeline.NameMapEntry
 	SrcPos        pipeline.SourcePos
 }
 
@@ -247,6 +251,7 @@ type View struct {
 	Grants       []Grant
 	Revocations  []Revocation
 	WithNoData   bool // MATERIALIZED VIEW ... WITH NO DATA
+	NameMaps     []pipeline.NameMapEntry
 	SrcPos       pipeline.SourcePos
 }
 
@@ -266,6 +271,7 @@ type Function struct {
 	Deprecated  *string
 	RenamedFrom *string
 	Grants      []Grant
+	NameMaps    []pipeline.NameMapEntry
 	SrcPos      pipeline.SourcePos
 }
 
@@ -284,6 +290,7 @@ type Procedure struct {
 	BodyHash string // SHA-256 of normalised body
 	Comment  *string
 	Grants   []Grant
+	NameMaps []pipeline.NameMapEntry
 	SrcPos   pipeline.SourcePos
 }
 
@@ -295,13 +302,14 @@ func (p *Procedure) irObject()               {}
 
 // Aggregate is a CREATE AGGREGATE declaration.
 type Aggregate struct {
-	Schema  string
-	Name    string
-	Args    []FuncArg
-	Body    string // raw aggregate definition options text
-	Comment *string
-	Grants  []Grant
-	SrcPos  pipeline.SourcePos
+	Schema   string
+	Name     string
+	Args     []FuncArg
+	Body     string // raw aggregate definition options text
+	Comment  *string
+	Grants   []Grant
+	NameMaps []pipeline.NameMapEntry
+	SrcPos   pipeline.SourcePos
 }
 
 func (a *Aggregate) QualifiedName() string {
@@ -322,6 +330,7 @@ type Type struct {
 	Owner          *string
 	Deprecated     *string
 	MigrateRemove  *pipeline.MigrateRemoveBlock // ENUM only: MIGRATE REMOVE { } block
+	NameMaps       []pipeline.NameMapEntry
 	SrcPos         pipeline.SourcePos
 }
 
@@ -331,11 +340,12 @@ func (t *Type) irObject()               {}
 
 // Sequence is a CREATE SEQUENCE declaration.
 type Sequence struct {
-	Schema  string
-	Name    string
-	Owner   *string
-	Comment *string
-	Grants  []Grant
+	Schema   string
+	Name     string
+	Owner    *string
+	Comment  *string
+	Grants   []Grant
+	NameMaps []pipeline.NameMapEntry
 	// Options (nil = use PostgreSQL default for that parameter)
 	IncrementBy *int64
 	MinValue    *int64
@@ -352,10 +362,11 @@ func (s *Sequence) irObject()               {}
 
 // Role is a CREATE ROLE declaration.
 type Role struct {
-	Name    string
-	Body    string // raw Part1 options text
-	Comment *string
-	SrcPos  pipeline.SourcePos
+	Name     string
+	Body     string // raw Part1 options text
+	Comment  *string
+	NameMaps []pipeline.NameMapEntry
+	SrcPos   pipeline.SourcePos
 }
 
 func (r *Role) QualifiedName() string   { return r.Name }
@@ -626,6 +637,7 @@ type VirtualType struct {
 	Body       VtypeBody // structured body: VtypeTypeRef | VtypeComposite | VtypeUnion
 	JsonFormat string    // "json" or "jsonb"; empty means default (jsonb)
 	Comment    *string
+	NameMaps   []pipeline.NameMapEntry
 	SrcPos     pipeline.SourcePos
 }
 

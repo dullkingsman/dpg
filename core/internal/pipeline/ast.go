@@ -106,6 +106,7 @@ type ColumnBlock struct {
 	Using       *RawExpr
 	Grants      []GrantEntry
 	Revocations []RevocationEntry
+	NameMaps    []NameMapEntry
 	Pos         SourcePos
 }
 
@@ -155,6 +156,33 @@ type TSMappingDef struct {
 	Pos        SourcePos
 }
 
+// NameMapEntry is a single NAME MAP directive inside a { } block.
+// Tool is the target tool identifier (e.g. "default", "prisma").
+// IsLiteral=false: Value is a rule keyword (e.g. "LOWER_SNAKE_CASE").
+// IsLiteral=true: Value is a literal target name (from a double-quoted string).
+type NameMapEntry struct {
+	Tool      string
+	Value     string
+	IsLiteral bool
+	Pos       SourcePos
+}
+
+// ValidNameMapRules is the closed set of DPG-defined naming convention rules.
+// Rule values in [namemaps] config sections and NAME MAP block directives must
+// be one of these identifiers.
+var ValidNameMapRules = map[string]bool{
+	"LOWER_SNAKE_CASE":  true,
+	"UPPER_SNAKE_CASE":  true,
+	"LOWER_CAMEL_CASE":  true,
+	"UPPER_CAMEL_CASE":  true,
+	"LOWER_KEBAB_CASE":  true,
+	"UPPER_KEBAB_CASE":  true,
+	"TRAIN_CASE":        true,
+	"LOWER_CASE":        true,
+	"UPPER_CASE":        true,
+	"PASCAL_SNAKE_CASE": true,
+}
+
 // BlockAST is the parsed representation of a DPG { } block.
 // Populated by the BlockParser (Phase 4b). Fields absent from a given block
 // remain at their zero value.
@@ -180,4 +208,5 @@ type BlockAST struct {
 	DefaultPrivileges   []DefaultPrivilegesBlock
 	Mappings            []TSMappingDef
 	PreferredJsonFormat string // "json" or "jsonb"; empty = not set (default jsonb)
+	NameMaps            []NameMapEntry
 }

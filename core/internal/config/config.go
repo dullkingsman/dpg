@@ -3,9 +3,63 @@ package config
 import (
 	"fmt"
 	"path/filepath"
+	"strings"
 
 	"github.com/BurntSushi/toml"
+	"github.com/dullkingsman/dpg/internal/pipeline"
 )
+
+// NameMapsConfig holds the parsed [namemaps] configuration at any config level.
+// Global maps tool name to rule for all object types (from direct key-value
+// pairs in [namemaps]). ByType maps object-type name to (tool → rule), from
+// [namemaps.<type>] subsections (e.g. [namemaps.column]).
+// Only rule keywords are permitted at the config level; literal names may only
+// be specified in block-level NAME MAP directives.
+type NameMapsConfig struct {
+	Global map[string]string
+	ByType map[string]map[string]string
+}
+
+// UnmarshalTOML implements toml.Unmarshaler so that a mixed [namemaps] table
+// (string values for global rules + subtables for per-type rules) decodes
+// into the structured NameMapsConfig.
+func (n *NameMapsConfig) UnmarshalTOML(data interface{}) error {
+	m, ok := data.(map[string]interface{})
+	if !ok {
+		return nil
+	}
+	for k, v := range m {
+		switch val := v.(type) {
+		case string:
+			rule := strings.ToUpper(val)
+			if !pipeline.ValidNameMapRules[rule] {
+				return fmt.Errorf("[namemaps]: unknown rule %q for tool %q", val, k)
+			}
+			if n.Global == nil {
+				n.Global = make(map[string]string)
+			}
+			n.Global[k] = rule
+		case map[string]interface{}:
+			typeMap := make(map[string]string)
+			for tool, ruleVal := range val {
+				r, ok := ruleVal.(string)
+				if !ok {
+					return fmt.Errorf("[namemaps.%s]: expected string rule for tool %q", k, tool)
+				}
+				rule := strings.ToUpper(r)
+				if !pipeline.ValidNameMapRules[rule] {
+					return fmt.Errorf("[namemaps.%s]: unknown rule %q for tool %q", k, r, tool)
+				}
+				typeMap[tool] = rule
+			}
+			if n.ByType == nil {
+				n.ByType = make(map[string]map[string]string)
+			}
+			n.ByType[k] = typeMap
+		}
+	}
+	return nil
+}
 
 // RootConfig represents the contents of dpg.toml at the project root.
 type RootConfig struct {
@@ -14,6 +68,7 @@ type RootConfig struct {
 	Fmt        FmtConfig        `toml:"fmt"`
 	Snapshots  SnapshotsConfig  `toml:"snapshots"`
 	Migrations MigrationsConfig `toml:"migrations"`
+	NameMaps   NameMapsConfig   `toml:"namemaps"`
 }
 
 // FmtConfig holds formatter settings (dpg fmt).
@@ -110,7 +165,8 @@ func (c CompilerConfig) validate() error {
 
 // ClusterConfig represents the dpg.toml file inside a cluster directory.
 type ClusterConfig struct {
-	Cluster ClusterDef `toml:"cluster"`
+	Cluster  ClusterDef     `toml:"cluster"`
+	NameMaps NameMapsConfig `toml:"namemaps"`
 }
 
 // ClusterDef holds the cluster connection and options.
@@ -174,7 +230,8 @@ func (c ClusterDef) validate(path string) error {
 
 // DatabaseConfig represents the dpg.toml file inside a database directory.
 type DatabaseConfig struct {
-	Database DatabaseDef `toml:"database"`
+	Database DatabaseDef    `toml:"database"`
+	NameMaps NameMapsConfig `toml:"namemaps"`
 }
 
 // DatabaseDef holds per-database settings.

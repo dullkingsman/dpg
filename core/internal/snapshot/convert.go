@@ -9,6 +9,22 @@ import (
 	"github.com/dullkingsman/dpg/internal/pipeline"
 )
 
+// toSnapNameMaps converts a slice of pipeline.NameMapEntry to the snapshot form.
+func toSnapNameMaps(entries []pipeline.NameMapEntry) []SnapNameMapEntry {
+	if len(entries) == 0 {
+		return nil
+	}
+	out := make([]SnapNameMapEntry, len(entries))
+	for i, e := range entries {
+		if e.IsLiteral {
+			out[i] = SnapNameMapEntry{Tool: e.Tool, Name: e.Value}
+		} else {
+			out[i] = SnapNameMapEntry{Tool: e.Tool, Rule: e.Value}
+		}
+	}
+	return out
+}
+
 // hashBodyStr returns a SHA-256 hex digest of the body string (trimmed).
 // Returns "" for empty strings.
 func hashBodyStr(s string) string {
@@ -55,6 +71,7 @@ func toSnapObject(obj pipeline.IRObject) *SnapObject {
 		so := &SnapOpaque{
 			Kind: "procedure", Schema: o.Schema, Name: o.Name,
 			Args: ir.ArgsKey(o.Args), BodyHash: o.BodyHash, Comment: o.Comment,
+			NameMaps: toSnapNameMaps(o.NameMaps),
 		}
 		for _, g := range o.Grants {
 			so.Grants = append(so.Grants, toSnapGrant(g))
@@ -64,6 +81,7 @@ func toSnapObject(obj pipeline.IRObject) *SnapObject {
 		so := &SnapOpaque{
 			Kind: "aggregate", Schema: o.Schema, Name: o.Name,
 			Args: ir.ArgsKey(o.Args), BodyHash: hashBodyStr(o.Body), Comment: o.Comment,
+			NameMaps: toSnapNameMaps(o.NameMaps),
 		}
 		for _, g := range o.Grants {
 			so.Grants = append(so.Grants, toSnapGrant(g))
@@ -162,6 +180,7 @@ func toSnapObject(obj pipeline.IRObject) *SnapObject {
 			Body:       toSnapVtypeBody(o.Body),
 			JsonFormat: o.JsonFormat,
 			Comment:    o.Comment,
+			NameMaps:   toSnapNameMaps(o.NameMaps),
 		}}
 	default:
 		return nil
@@ -199,14 +218,16 @@ func toSnapSchema(o *ir.Schema) *SnapSchema {
 		Owner:       o.Owner,
 		Comment:     o.Comment,
 		RenamedFrom: o.RenamedFrom,
+		NameMaps:    toSnapNameMaps(o.NameMaps),
 	}
 }
 
 func toSnapExtension(o *ir.Extension) *SnapExtension {
 	return &SnapExtension{
-		Name:    o.Name,
-		Schema:  o.Schema,
-		Version: o.Version,
+		Name:     o.Name,
+		Schema:   o.Schema,
+		Version:  o.Version,
+		NameMaps: toSnapNameMaps(o.NameMaps),
 	}
 }
 
@@ -254,6 +275,7 @@ func toSnapTable(o *ir.Table) *SnapTable {
 	for _, g := range o.Grants {
 		t.Grants = append(t.Grants, toSnapGrant(g))
 	}
+	t.NameMaps = toSnapNameMaps(o.NameMaps)
 	return t
 }
 
@@ -285,6 +307,7 @@ func toSnapColumn(col *ir.Column) SnapColumn {
 	for _, g := range col.Grants {
 		sc.Grants = append(sc.Grants, toSnapGrant(g))
 	}
+	sc.NameMaps = toSnapNameMaps(col.NameMaps)
 	return sc
 }
 
@@ -365,6 +388,7 @@ func toSnapView(o *ir.View) *SnapView {
 	for _, g := range o.Grants {
 		sv.Grants = append(sv.Grants, toSnapGrant(g))
 	}
+	sv.NameMaps = toSnapNameMaps(o.NameMaps)
 	return sv
 }
 
@@ -382,6 +406,7 @@ func toSnapFunction(o *ir.Function) *SnapFunction {
 	for _, g := range o.Grants {
 		sf.Grants = append(sf.Grants, toSnapGrant(g))
 	}
+	sf.NameMaps = toSnapNameMaps(o.NameMaps)
 	return sf
 }
 
@@ -396,6 +421,7 @@ func toSnapType(o *ir.Type) *SnapType {
 	for _, attr := range o.CompositeAttrs {
 		st.CompositeAttrs = append(st.CompositeAttrs, toSnapColumn(attr))
 	}
+	st.NameMaps = toSnapNameMaps(o.NameMaps)
 	return st
 }
 
@@ -410,12 +436,14 @@ func toSnapSequence(o *ir.Sequence) *SnapSequence {
 		StartValue:  o.StartValue,
 		Cache:       o.Cache,
 		Cycle:       o.Cycle,
+		NameMaps:    toSnapNameMaps(o.NameMaps),
 	}
 }
 
 func toSnapRole(o *ir.Role) *SnapRole {
 	return &SnapRole{
-		Name:    o.Name,
-		Comment: o.Comment,
+		Name:     o.Name,
+		Comment:  o.Comment,
+		NameMaps: toSnapNameMaps(o.NameMaps),
 	}
 }

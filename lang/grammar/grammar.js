@@ -614,6 +614,8 @@ module.exports = grammar({
       $.not_null_directive,
       $.check_directive,
       $.mapping_directive,
+      $.name_map_directive,
+      $.name_maps_block,
     ),
 
     comment_directive: $ => seq(
@@ -723,6 +725,8 @@ module.exports = grammar({
       seq(kw("STORAGE"), $.identifier, ";"),
       seq(kw("COMPRESSION"), $.identifier, ";"),
       seq(kw("USING"), $.sql_expression, ";"),
+      $.name_map_directive,
+      $.name_maps_block,
     ),
 
     constraints_block: $ => seq(
@@ -792,6 +796,30 @@ module.exports = grammar({
       "{",
       repeat(seq($.sql_expression, ";")),
       "}",
+    ),
+
+    // NAME MAP [tool] TO <rule|"LiteralName"> ;
+    name_map_directive: $ => seq(
+      kw("NAME"), kw("MAP"),
+      optional(field("tool", $.identifier)),
+      kw("TO"),
+      field("value", choice($.identifier, $.string_literal)),
+      ";",
+    ),
+
+    // NAME MAPS { <tool> TO <rule|"LiteralName"> ; ... }
+    name_maps_block: $ => seq(
+      kw("NAME"), kw("MAPS"),
+      "{",
+      repeat($.name_map_entry),
+      "}",
+    ),
+
+    name_map_entry: $ => seq(
+      field("tool", $.identifier),
+      kw("TO"),
+      field("value", choice($.identifier, $.string_literal)),
+      ";",
     ),
 
     // ─── Shared helpers ───────────────────────────────────────────────────────
