@@ -231,6 +231,42 @@ func TestPopulateVirtualTypeSchemaQualifiedRef(t *testing.T) {
 	}
 }
 
+func TestPopulateVirtualTypeJsonFormat(t *testing.T) {
+	snap := &pipeline.Snapshot{}
+	objects := []pipeline.IRObject{
+		&ir.VirtualType{
+			Schema:     "public",
+			Name:       "event",
+			Body:       ir.VtypeTypeRef{Name: "text"},
+			JsonFormat: "json",
+		},
+	}
+	if err := Populate(snap, objects); err != nil {
+		t.Fatal(err)
+	}
+	var so SnapObject
+	_ = json.Unmarshal(snap.Objects["public.event"], &so)
+	if so.VirtualType.JsonFormat != "json" {
+		t.Errorf("JsonFormat: got %q, want %q", so.VirtualType.JsonFormat, "json")
+	}
+}
+
+func TestPopulateVirtualTypeJsonFormatDefaultOmitted(t *testing.T) {
+	// When JsonFormat is empty (default), the json_format field is omitted from JSON.
+	snap := &pipeline.Snapshot{}
+	objects := []pipeline.IRObject{
+		&ir.VirtualType{Schema: "public", Name: "tag", Body: ir.VtypeTypeRef{Name: "text"}},
+	}
+	if err := Populate(snap, objects); err != nil {
+		t.Fatal(err)
+	}
+	var so SnapObject
+	_ = json.Unmarshal(snap.Objects["public.tag"], &so)
+	if so.VirtualType.JsonFormat != "" {
+		t.Errorf("JsonFormat: got %q, want empty (default jsonb)", so.VirtualType.JsonFormat)
+	}
+}
+
 func TestPopulateVirtualTypeWithComment(t *testing.T) {
 	comment := "user profile shape"
 	snap := &pipeline.Snapshot{}

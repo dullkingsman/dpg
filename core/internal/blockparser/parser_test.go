@@ -437,6 +437,61 @@ func TestFullTableBlock(t *testing.T) {
 	}
 }
 
+// ── PREFERRED JSON FORMAT ─────────────────────────────────────────────────────
+
+func TestPreferredJsonFormatJsonb(t *testing.T) {
+	p := blockparser.New()
+	ast, err := p.Parse(pipeline.KindVirtualType, `PREFERRED JSON FORMAT jsonb;`, zeroPos)
+	if err != nil {
+		t.Fatalf("parse error: %v", err)
+	}
+	if ast.PreferredJsonFormat != "jsonb" {
+		t.Errorf("PreferredJsonFormat: got %q, want %q", ast.PreferredJsonFormat, "jsonb")
+	}
+}
+
+func TestPreferredJsonFormatJson(t *testing.T) {
+	p := blockparser.New()
+	ast, err := p.Parse(pipeline.KindVirtualType, `PREFERRED JSON FORMAT json;`, zeroPos)
+	if err != nil {
+		t.Fatalf("parse error: %v", err)
+	}
+	if ast.PreferredJsonFormat != "json" {
+		t.Errorf("PreferredJsonFormat: got %q, want %q", ast.PreferredJsonFormat, "json")
+	}
+}
+
+func TestPreferredJsonFormatWithComment(t *testing.T) {
+	p := blockparser.New()
+	ast, err := p.Parse(pipeline.KindVirtualType,
+		`COMMENT "some type"; PREFERRED JSON FORMAT json;`, zeroPos)
+	if err != nil {
+		t.Fatalf("parse error: %v", err)
+	}
+	if ast.PreferredJsonFormat != "json" {
+		t.Errorf("PreferredJsonFormat: got %q, want json", ast.PreferredJsonFormat)
+	}
+	if ast.Comment == nil || ast.Comment.Value != "some type" {
+		t.Errorf("Comment: got %v", ast.Comment)
+	}
+}
+
+func TestPreferredJsonFormatInvalidValue(t *testing.T) {
+	p := blockparser.New()
+	_, err := p.Parse(pipeline.KindVirtualType, `PREFERRED JSON FORMAT text;`, zeroPos)
+	if err == nil {
+		t.Error("expected error for invalid format value, got nil")
+	}
+}
+
+func TestPreferredJsonFormatMissingKeywords(t *testing.T) {
+	p := blockparser.New()
+	_, err := p.Parse(pipeline.KindVirtualType, `PREFERRED jsonb;`, zeroPos)
+	if err == nil {
+		t.Error("expected error for missing JSON keyword, got nil")
+	}
+}
+
 // ── registry ──────────────────────────────────────────────────────────────────
 
 func TestRegistration(t *testing.T) {

@@ -1325,13 +1325,17 @@ vtype-composite = "(" vtype-field *( "," WSP vtype-field ) ")"
 vtype-field     = identifier WSP vtype-typeref
 vtype-typeref   = [ schema-name "." ] identifier [ "[]" ]
 
-vtype-block = *( comment-dir ";" )
+vtype-block = *( comment-dir / preferred-json-format-dir ) ";"
+
+preferred-json-format-dir = "PREFERRED" WSP "JSON" WSP "FORMAT" WSP
+                            ( "json" / "jsonb" )
 ```
 
    The compiler MUST parse and validate the body.  A `vtype-typeref`
    that appears in a column or composite attribute position resolves to
-   `jsonb` or `jsonb[]` in SQL output; the virtual type name is never
-   written to the database.
+   the virtual type's preferred JSON format (`json` or `jsonb`, default
+   `jsonb`) in SQL output; the virtual type name is never written to the
+   database.
 
    **Body forms:**
 
@@ -1401,8 +1405,12 @@ vtype-block = *( comment-dir ";" )
        type, the generated SQL uses `jsonb` / `jsonb[]`.  The virtual
        type name is never written to the database catalog.
 
-   -   The `{ }` block accepts ONLY `COMMENT`.  Any other directive is
-       a compiler error (DPG-E015).
+   -   The `{ }` block accepts `COMMENT` and `PREFERRED JSON FORMAT`.
+       Any other directive is a compiler error (DPG-E015).
+
+   -   `PREFERRED JSON FORMAT json` causes DPG to emit `json` / `json[]`
+       instead of the default `jsonb` / `jsonb[]` when this virtual type
+       is used as a column or attribute type.
 
 ---
 

@@ -934,6 +934,91 @@ func TestCompositeTypeWithVirtualTypeAttrResolvesToJsonb(t *testing.T) {
 	}
 }
 
+func TestCreateTableVirtualTypePreferredJson(t *testing.T) {
+	// PREFERRED JSON FORMAT json → column emits json, not jsonb.
+	d := New()
+	desired := []pipeline.IRObject{
+		&ir.VirtualType{
+			Schema:     "public",
+			Name:       "event_payload",
+			Body:       ir.VtypeTypeRef{Name: "text"},
+			JsonFormat: "json",
+		},
+		&ir.Table{
+			Schema: "public",
+			Name:   "events",
+			Columns: []*ir.Column{
+				{Name: "id", Type: ir.TypeRef{Name: "bigint"}},
+				{Name: "payload", Type: ir.TypeRef{Name: "event_payload"}},
+			},
+		},
+	}
+	ops, err := d.Diff(desired, &pipeline.Snapshot{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	combined := strings.Join(sqlList(ops), " ")
+	if !strings.Contains(combined, `"payload" json`) {
+		t.Errorf("expected 'json' column type for PREFERRED JSON FORMAT json, got: %s", combined)
+	}
+	if strings.Contains(combined, `"payload" jsonb`) {
+		t.Errorf("unexpected 'jsonb' in SQL for json-preferred virtual type: %s", combined)
+	}
+}
+
+func TestCreateTableVirtualTypePreferredJsonArray(t *testing.T) {
+	// PREFERRED JSON FORMAT json with [] → json[].
+	d := New()
+	desired := []pipeline.IRObject{
+		&ir.VirtualType{
+			Schema:     "public",
+			Name:       "event_payload",
+			Body:       ir.VtypeTypeRef{Name: "text"},
+			JsonFormat: "json",
+		},
+		&ir.Table{
+			Schema: "public",
+			Name:   "events",
+			Columns: []*ir.Column{
+				{Name: "payloads", Type: ir.TypeRef{Name: "event_payload", ArrayDims: 1}},
+			},
+		},
+	}
+	ops, err := d.Diff(desired, &pipeline.Snapshot{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	combined := strings.Join(sqlList(ops), " ")
+	if !strings.Contains(combined, "json[]") {
+		t.Errorf("expected json[] for json-preferred virtual type array, got: %s", combined)
+	}
+	if strings.Contains(combined, "jsonb[]") {
+		t.Errorf("unexpected jsonb[] for json-preferred virtual type: %s", combined)
+	}
+}
+
+func TestCreateTableVirtualTypeDefaultIsJsonb(t *testing.T) {
+	// No PREFERRED JSON FORMAT → defaults to jsonb.
+	d := New()
+	desired := []pipeline.IRObject{
+		&ir.VirtualType{Schema: "public", Name: "tag", Body: ir.VtypeTypeRef{Name: "text"}},
+		&ir.Table{
+			Schema: "public", Name: "items",
+			Columns: []*ir.Column{
+				{Name: "meta", Type: ir.TypeRef{Name: "tag"}},
+			},
+		},
+	}
+	ops, err := d.Diff(desired, &pipeline.Snapshot{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	combined := strings.Join(sqlList(ops), " ")
+	if !strings.Contains(combined, `"meta" jsonb`) {
+		t.Errorf("expected jsonb default for virtual type, got: %s", combined)
+	}
+}
+
 func TestNonVirtualTypeColumnNotAffected(t *testing.T) {
 	// A real PG type column (e.g. text) must not be changed to jsonb.
 	d := New()

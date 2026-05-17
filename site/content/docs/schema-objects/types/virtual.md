@@ -108,12 +108,35 @@ CREATE TYPE "public"."full_address" AS (
 
 ---
 
+## Preferred JSON format
+
+By default, virtual type references resolve to `jsonb`. Use `PREFERRED JSON FORMAT` in the `{}` block to choose `json` instead:
+
+```sql
+VIRTUAL TYPE raw_event AS (type text, data text) {
+    PREFERRED JSON FORMAT json;
+}
+```
+
+```sql
+-- column using raw_event emits json, not jsonb
+CREATE TABLE "public"."ingest" (
+    "id"      bigint,
+    "event"   json,
+    "history" json[]
+);
+```
+
+Both `json` and `jsonb` are valid values. The directive has no effect on snapshot content — it only controls what DPG writes in generated DDL.
+
+---
+
 ## Rules
 
 - The body is parsed and validated by the compiler. It is one of: a type reference, a composite definition, or a union of those.
 - `VIRTUAL TYPE` may be schema-qualified; if unqualified it defaults to `default_schema`.
-- When used as a column or attribute type, `[]` suffix causes DPG to emit `jsonb[]` instead of `jsonb`.
-- Virtual types appear in the snapshot under `"kind": "virtual_type"` so code-generation tools can read them.
+- When used as a column or attribute type, `[]` suffix causes DPG to emit `<format>[]` where `<format>` is `jsonb` (default) or `json` (if `PREFERRED JSON FORMAT json` is declared).
+- Virtual types appear in the snapshot under `"kind": "virtual_type"` so code-generation tools can read them. The `json_format` field is stored when explicitly set.
 - `dpg plan` produces no SQL for additions, modifications, or removals of virtual types.
-- The `{ }` block accepts only `COMMENT`.
+- The `{}` block accepts `COMMENT` and `PREFERRED JSON FORMAT`. Any other directive is a compiler error.
 - Downstream tooling consumes virtual types via the snapshot JSON or the `pkg/dpg` Go API. See [Plugin API](../../../extending/plugin-api/).

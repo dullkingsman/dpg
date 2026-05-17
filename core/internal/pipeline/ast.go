@@ -159,24 +159,25 @@ type TSMappingDef struct {
 // Populated by the BlockParser (Phase 4b). Fields absent from a given block
 // remain at their zero value.
 type BlockAST struct {
-	Pos               SourcePos
-	Comment           *StringLit
-	Owner             *Identifier
-	RenamedFrom       *Identifier
-	Protected         bool
-	Deprecated        *StringLit
-	DropCascade       bool
-	Indices           []IndexDef
-	Policies          []PolicyDef
-	Triggers          []TriggerDef
-	Grants            []GrantEntry
-	Revocations       []RevocationEntry
-	Columns           []ColumnBlock
-	Constraints       []ConstraintDef
-	EnableRLS         bool
-	ForceRLS          bool
-	Partitions        *PartitionDef
-	MigrateRemove     *MigrateRemoveBlock
-	DefaultPrivileges []DefaultPrivilegesBlock
-	Mappings          []TSMappingDef
+	Pos                 SourcePos
+	Comment             *StringLit
+	Owner               *Identifier
+	RenamedFrom         *Identifier
+	Protected           bool
+	Deprecated          *StringLit
+	DropCascade         bool
+	Indices             []IndexDef
+	Policies            []PolicyDef
+	Triggers            []TriggerDef
+	Grants              []GrantEntry
+	Revocations         []RevocationEntry
+	Columns             []ColumnBlock
+	Constraints         []ConstraintDef
+	EnableRLS           bool
+	ForceRLS            bool
+	Partitions          *PartitionDef
+	MigrateRemove       *MigrateRemoveBlock
+	DefaultPrivileges   []DefaultPrivilegesBlock
+	Mappings            []TSMappingDef
+	PreferredJsonFormat string // "json" or "jsonb"; empty = not set (default jsonb)
 }

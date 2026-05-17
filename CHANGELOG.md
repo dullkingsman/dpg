@@ -12,6 +12,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Cross-file macro sharing** — macros defined in any `.dpg` file within a compilation scope are now available to every other file in that scope. The compiler performs a global collection pre-pass over all source files before tokenization begins. File-local declarations take precedence over same-named cross-file macros.
 - **Nested macro expansion** — a macro body may now spread other macros (`...name` inside a paren-body or brace-body). Expansion is recursive to arbitrary depth. Circular references are detected at compile time and reported as DPG-E012.
 - **Structured virtual types** — `VIRTUAL TYPE` bodies are now fully parsed and validated by the compiler. A virtual type body is one of: a type reference (`text`, `billing.payment_method`), an inline composite `(field type, ...)`, or a union of those joined with `|`. Virtual types may be used directly as column or composite attribute types; DPG resolves them to `jsonb` / `jsonb[]` in all generated SQL. Adding `[]` to the reference emits `jsonb[]`. The structured body is stored in the snapshot for downstream consumers (ORMs, type-safe query builders).
+- **`PREFERRED JSON FORMAT` directive** — Virtual type `{}` blocks now accept `PREFERRED JSON FORMAT json` or `PREFERRED JSON FORMAT jsonb` to control whether DPG emits `json` or `jsonb` (default) when the virtual type is used as a column or composite attribute type.
 
 ### Changed
 

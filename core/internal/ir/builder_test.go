@@ -536,6 +536,49 @@ func TestBuildVirtualTypeWithComment(t *testing.T) {
 	}
 }
 
+func TestBuildVirtualTypePreferredJsonFormatJsonb(t *testing.T) {
+	obj := buildObject(t, pipeline.KindVirtualType,
+		`payload AS (kind text, data text)`,
+		`PREFERRED JSON FORMAT jsonb;`)
+	vt := obj.(*ir.VirtualType)
+	if vt.JsonFormat != "jsonb" {
+		t.Errorf("JsonFormat: got %q, want %q", vt.JsonFormat, "jsonb")
+	}
+}
+
+func TestBuildVirtualTypePreferredJsonFormatJson(t *testing.T) {
+	obj := buildObject(t, pipeline.KindVirtualType,
+		`payload AS (kind text, data text)`,
+		`PREFERRED JSON FORMAT json;`)
+	vt := obj.(*ir.VirtualType)
+	if vt.JsonFormat != "json" {
+		t.Errorf("JsonFormat: got %q, want %q", vt.JsonFormat, "json")
+	}
+}
+
+func TestBuildVirtualTypeDefaultJsonFormat(t *testing.T) {
+	// No PREFERRED JSON FORMAT → JsonFormat is empty (caller defaults to jsonb).
+	obj := buildObject(t, pipeline.KindVirtualType, `tag AS text`, ``)
+	vt := obj.(*ir.VirtualType)
+	if vt.JsonFormat != "" {
+		t.Errorf("JsonFormat: got %q, want empty (default)", vt.JsonFormat)
+	}
+}
+
+func TestBuildVirtualTypeCommentAndFormat(t *testing.T) {
+	// Both COMMENT and PREFERRED JSON FORMAT can coexist in the {} block.
+	obj := buildObject(t, pipeline.KindVirtualType,
+		`event AS (type text, ts bigint)`,
+		`COMMENT "App event"; PREFERRED JSON FORMAT json;`)
+	vt := obj.(*ir.VirtualType)
+	if vt.Comment == nil || *vt.Comment != "App event" {
+		t.Errorf("Comment: got %v", vt.Comment)
+	}
+	if vt.JsonFormat != "json" {
+		t.Errorf("JsonFormat: got %q, want json", vt.JsonFormat)
+	}
+}
+
 func TestBuildVirtualTypeSchemaQualifiedName(t *testing.T) {
 	p := pgparser.New()
 	pgResult, err := p.Parse(pipeline.KindVirtualType, `billing.status AS text`, zeroPos)

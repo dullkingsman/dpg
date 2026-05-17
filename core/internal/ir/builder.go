@@ -1517,10 +1517,11 @@ func (b *Builder) buildVirtualType(part1 string, block pipeline.BlockAST, pos pi
 	}
 
 	vt := &VirtualType{
-		Schema: schema,
-		Name:   name,
-		Body:   body,
-		SrcPos: pos,
+		Schema:     schema,
+		Name:       name,
+		Body:       body,
+		JsonFormat: block.PreferredJsonFormat,
+		SrcPos:     pos,
 	}
 	if block.Comment != nil {
 		vt.Comment = &block.Comment.Value

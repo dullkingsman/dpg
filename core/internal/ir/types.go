@@ -621,11 +621,12 @@ func (u VtypeUnion) vtypeBody() {}
 // body is stored in the snapshot for downstream consumers (ORMs, type-safe query
 // builders) that read the DPG snapshot or IR via the pkg/dpg API.
 type VirtualType struct {
-	Schema  string
-	Name    string
-	Body    VtypeBody // structured body: VtypeTypeRef | VtypeComposite | VtypeUnion
-	Comment *string
-	SrcPos  pipeline.SourcePos
+	Schema     string
+	Name       string
+	Body       VtypeBody // structured body: VtypeTypeRef | VtypeComposite | VtypeUnion
+	JsonFormat string    // "json" or "jsonb"; empty means default (jsonb)
+	Comment    *string
+	SrcPos     pipeline.SourcePos
 }
 
 func (v *VirtualType) QualifiedName() string   { return qualName(v.Schema, v.Name) }

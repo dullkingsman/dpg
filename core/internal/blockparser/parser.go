@@ -469,6 +469,8 @@ func (b *blockParser) parseBlock(pos pipeline.SourcePos) (pipeline.BlockAST, err
 			} else {
 				_ = n // statistics at object level is ignored; only meaningful in COLUMN
 			}
+		case "PREFERRED":
+			ast.PreferredJsonFormat, err = b.parsePreferredJsonFormat(dirPos)
 		default:
 			return ast, fmt.Errorf("%s: unknown block directive %q", dirPos, word)
 		}
@@ -480,6 +482,27 @@ func (b *blockParser) parseBlock(pos pipeline.SourcePos) (pipeline.BlockAST, err
 }
 
 // ── simple directives ─────────────────────────────────────────────────────────
+
+// parsePreferredJsonFormat reads: JSON FORMAT ( json | jsonb ) ;
+func (b *blockParser) parsePreferredJsonFormat(pos pipeline.SourcePos) (string, error) {
+	b.skipWS()
+	if strings.ToUpper(b.readWord()) != "JSON" {
+		return "", b.errorf("PREFERRED: expected JSON after PREFERRED at %s", pos)
+	}
+	b.skipWS()
+	if strings.ToUpper(b.readWord()) != "FORMAT" {
+		return "", b.errorf("PREFERRED JSON: expected FORMAT at %s", pos)
+	}
+	b.skipWS()
+	val := strings.ToLower(b.readWord())
+	if val != "json" && val != "jsonb" {
+		return "", b.errorf("PREFERRED JSON FORMAT: expected 'json' or 'jsonb', got %q at %s", val, pos)
+	}
+	if err := b.expectSemi(); err != nil {
+		return "", err
+	}
+	return val, nil
+}
 
 // parseStringDirective reads: "text"; and returns a *StringLit.
 func (b *blockParser) parseStringDirective(pos pipeline.SourcePos) (*pipeline.StringLit, error) {

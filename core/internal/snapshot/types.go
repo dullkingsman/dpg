@@ -203,10 +203,11 @@ type SnapVtypeField struct {
 // resolves those to jsonb / jsonb[] in generated SQL.  The structured body is
 // stored here for downstream consumers (ORMs, type-safe query builders).
 type SnapVirtualType struct {
-	Schema  string        `json:"schema,omitempty"`
-	Name    string        `json:"name"`
-	Body    SnapVtypeBody `json:"body"`
-	Comment *string       `json:"comment,omitempty"`
+	Schema     string        `json:"schema,omitempty"`
+	Name       string        `json:"name"`
+	Body       SnapVtypeBody `json:"body"`
+	JsonFormat string        `json:"json_format,omitempty"` // "json" or "jsonb"; empty = default (jsonb)
+	Comment    *string       `json:"comment,omitempty"`
 }
 
 // SnapDefaultPrivileges is the snapshot form of a DEFAULT PRIVILEGES declaration.
