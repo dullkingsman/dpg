@@ -1,4 +1,4 @@
-name: VS Code Release
+name: Release / VS Code
 
 on:
   push:

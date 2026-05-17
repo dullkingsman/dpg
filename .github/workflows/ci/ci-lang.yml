@@ -1,0 +1,13 @@
+name: CI / Language
+
+on:
+  workflow_call:
+
+jobs:
+  grammar:
+    name: Grammar
+    uses: ./.github/workflows/ci/ci-grammar.yml
+
+  lsp:
+    name: LSP
+    uses: ./.github/workflows/ci/ci-lsp.yml

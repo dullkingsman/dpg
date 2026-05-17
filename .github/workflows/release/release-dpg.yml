@@ -1,9 +1,7 @@
-name: Release
+name: Release / DPG
 
 on:
-  push:
-    tags:
-      - 'v[0-9]*.[0-9]*.[0-9]*'
+  workflow_call:
 
 permissions:
   contents: write
@@ -12,7 +10,6 @@ env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
-  # Build the Hugo documentation site once; all platform builds download and embed it.
   prepare-docs:
     name: Build documentation site
     runs-on: ubuntu-latest
@@ -42,14 +39,13 @@ jobs:
           key: hugo-${{ hashFiles('site/go.sum') }}
           restore-keys: hugo-
 
-
       - uses: actions/setup-node@v4
         with:
           node-version: "20"
 
       - name: Install PostCSS dependencies
-        run: npm install
         working-directory: site
+        run: npm install
 
       - name: Set release versions
         run: |
@@ -63,8 +59,8 @@ jobs:
           fi
 
       - name: Build Hugo site
-        run: hugo --minify
         working-directory: site
+        run: hugo --minify
         env:
           HUGO_BASEURL: "https://dullkingsman.github.io/dpg/"
           HUGO_PARAMS_DOCSVERSION: ${{ env.DOCS_VERSION }}
@@ -164,64 +160,9 @@ jobs:
           path: core/dist/${{ matrix.archive }}
           if-no-files-found: error
 
-  build-lsp:
-    name: Build dpg-lsp (all platforms)
-    runs-on: ubuntu-latest
-
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-go@v5
-        with:
-          go-version-file: lang/lsp/go.mod
-          cache-dependency-path: lang/lsp/go.sum
-
-      - name: Build dpg-lsp
-        working-directory: lang/lsp
-        shell: bash
-        run: |
-          VERSION="${{ github.ref_name }}"
-          COMMIT="${GITHUB_SHA:0:7}"
-          DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-          LDFLAGS="-s -w \
-            -X 'github.com/dullkingsman/dpg-lsp/internal/version.Version=${VERSION}' \
-            -X 'github.com/dullkingsman/dpg-lsp/internal/version.Commit=${COMMIT}' \
-            -X 'github.com/dullkingsman/dpg-lsp/internal/version.Date=${DATE}'"
-
-          mkdir -p dist
-
-          targets=(
-            "linux   amd64 dpg-lsp-linux-amd64.tar.gz"
-            "linux   arm64 dpg-lsp-linux-arm64.tar.gz"
-            "darwin  amd64 dpg-lsp-darwin-amd64.tar.gz"
-            "darwin  arm64 dpg-lsp-darwin-arm64.tar.gz"
-            "windows amd64 dpg-lsp-windows-amd64.zip"
-          )
-
-          for entry in "${targets[@]}"; do
-            read -r os arch archive <<< "$entry"
-            if [ "$os" = "windows" ]; then
-              bin="dpg-lsp.exe"
-            else
-              bin="dpg-lsp"
-            fi
-            GOOS="$os" GOARCH="$arch" go build -trimpath -ldflags "$LDFLAGS" -o "dist/$bin" ./cmd/dpg-lsp
-            if [ "$os" = "windows" ]; then
-              (cd dist && zip "$archive" "$bin" && rm "$bin")
-            else
-              (cd dist && tar czf "$archive" "$bin" && rm "$bin")
-            fi
-          done
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: dpg-lsp-archives
-          path: lang/lsp/dist/dpg-lsp-*
-          if-no-files-found: error
-
   release:
     name: Create Release
-    needs: [build, build-lsp]
+    needs: build
     runs-on: ubuntu-latest
 
     steps:
@@ -246,91 +187,3 @@ jobs:
             dist/*.tar.gz
             dist/*.zip
             dist/checksums.txt
-
-  check-editors:
-    name: Find unreleased editor tags
-    runs-on: ubuntu-latest
-    outputs:
-      vscode-tag: ${{ steps.find.outputs.vscode_tag }}
-      idea-tag: ${{ steps.find.outputs.idea_tag }}
-
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
-      - name: Detect unreleased vscode-v* and idea-v* tags
-        id: find
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          for prefix in vscode idea; do
-            TAG=$(git tag --list "${prefix}-v*" --sort=-version:refname | head -1)
-            if [[ -n "$TAG" ]] && ! gh release view "$TAG" --json tagName &>/dev/null; then
-              echo "${prefix}_tag=$TAG" >> $GITHUB_OUTPUT
-            fi
-          done
-
-  publish-vscode:
-    name: Publish VS Code extension
-    needs: check-editors
-    if: needs.check-editors.outputs.vscode-tag != ''
-    uses: ./.github/workflows/vscode-release.yml
-    with:
-      tag: ${{ needs.check-editors.outputs.vscode-tag }}
-    secrets: inherit
-
-  publish-idea:
-    name: Publish JetBrains plugin
-    needs: check-editors
-    if: needs.check-editors.outputs.idea-tag != ''
-    uses: ./.github/workflows/idea-release.yml
-    with:
-      tag: ${{ needs.check-editors.outputs.idea-tag }}
-    secrets: inherit
-
-  update-homebrew:
-    name: Update Homebrew tap
-    needs: release
-    # Only stable releases — skip pre-releases (v0.5.2-alpha.4 etc.)
-    if: "!contains(github.ref_name, '-')"
-    runs-on: ubuntu-latest
-
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Download checksums from release
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          gh release download "${{ github.ref_name }}" \
-            --repo dullkingsman/dpg \
-            --pattern checksums.txt \
-            --output checksums.txt
-
-      - name: Generate formula
-        run: |
-          VERSION="${{ github.ref_name }}"
-          VERSION="${VERSION#v}"
-          python3 scripts/homebrew/update-formula.py \
-            "$VERSION" \
-            checksums.txt \
-            scripts/homebrew/dpg.rb.tmpl \
-            Formula/dpg.rb
-
-      - name: Push to tap
-        env:
-          HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
-        run: |
-          VERSION="${{ github.ref_name }}"
-          VERSION="${VERSION#v}"
-          git clone \
-            "https://x-access-token:${HOMEBREW_TAP_TOKEN}@github.com/dullkingsman/homebrew-dpg.git" \
-            tap
-          cp Formula/dpg.rb tap/Formula/dpg.rb
-          cd tap
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git config user.name "github-actions[bot]"
-          git add Formula/dpg.rb
-          git commit -m "chore: bump dpg to v${VERSION}"
-          git push

@@ -1,0 +1,61 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v[0-9]*.[0-9]*.[0-9]*'
+
+jobs:
+  dpg:
+    name: Build and release DPG
+    uses: ./.github/workflows/release/release-dpg.yml
+
+  check-editors:
+    name: Find unreleased editor tags
+    runs-on: ubuntu-latest
+    outputs:
+      vscode-tag: ${{ steps.find.outputs.vscode_tag }}
+      idea-tag: ${{ steps.find.outputs.idea_tag }}
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Detect unreleased vscode-v* and idea-v* tags
+        id: find
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          for prefix in vscode idea; do
+            TAG=$(git tag --list "${prefix}-v*" --sort=-version:refname | head -1)
+            if [[ -n "$TAG" ]] && ! gh release view "$TAG" --json tagName &>/dev/null; then
+              echo "${prefix}_tag=$TAG" >> $GITHUB_OUTPUT
+            fi
+          done
+
+  publish-vscode:
+    name: Publish VS Code extension
+    needs: check-editors
+    if: needs.check-editors.outputs.vscode-tag != ''
+    uses: ./.github/workflows/release/release-vscode.yml
+    with:
+      tag: ${{ needs.check-editors.outputs.vscode-tag }}
+    secrets: inherit
+
+  publish-idea:
+    name: Publish JetBrains plugin
+    needs: check-editors
+    if: needs.check-editors.outputs.idea-tag != ''
+    uses: ./.github/workflows/release/release-idea.yml
+    with:
+      tag: ${{ needs.check-editors.outputs.idea-tag }}
+    secrets: inherit
+
+  update-homebrew:
+    name: Update Homebrew tap
+    needs: dpg
+    # Only stable releases — skip pre-releases (v0.5.2-alpha.4 etc.)
+    if: "!contains(github.ref_name, '-')"
+    uses: ./.github/workflows/release/release-homebrew.yml
+    secrets: inherit

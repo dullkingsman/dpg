@@ -1,14 +1,7 @@
-name: Editor / IntelliJ
+name: CI / IntelliJ
 
 on:
-  push:
-    branches: [master]
-    paths:
-      - "plugins/idea/**"
-  pull_request:
-    branches: [master]
-    paths:
-      - "plugins/idea/**"
+  workflow_call:
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true

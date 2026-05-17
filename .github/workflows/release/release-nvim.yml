@@ -1,4 +1,4 @@
-name: Neovim Plugin Release
+name: Release / Neovim
 
 on:
   push:

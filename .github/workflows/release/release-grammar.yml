@@ -1,4 +1,4 @@
-name: Grammar Release
+name: Release / Grammar
 
 on:
   push:

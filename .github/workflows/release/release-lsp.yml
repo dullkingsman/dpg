@@ -1,4 +1,4 @@
-name: LSP Release
+name: Release / LSP
 
 on:
   push:

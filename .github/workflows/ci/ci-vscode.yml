@@ -1,18 +1,7 @@
-name: Editor / VS Code
+name: CI / VS Code
 
 on:
-  push:
-    branches: [master]
-    paths:
-      - "plugins/vscode/**"
-      - "lang/syntaxes/**"
-      - "lang/language-configuration.json"
-  pull_request:
-    branches: [master]
-    paths:
-      - "plugins/vscode/**"
-      - "lang/syntaxes/**"
-      - "lang/language-configuration.json"
+  workflow_call:
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true

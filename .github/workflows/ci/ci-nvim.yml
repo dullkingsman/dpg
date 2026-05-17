@@ -1,14 +1,7 @@
-name: Editor / Neovim
+name: CI / Neovim
 
 on:
-  push:
-    branches: [master]
-    paths:
-      - "plugins/nvim/**"
-  pull_request:
-    branches: [master]
-    paths:
-      - "plugins/nvim/**"
+  workflow_call:
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true

@@ -1,4 +1,4 @@
-name: IntelliJ Release
+name: Release / IntelliJ
 
 on:
   push:

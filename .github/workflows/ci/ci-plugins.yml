@@ -1,0 +1,21 @@
+name: CI / Plugins
+
+on:
+  workflow_call:
+
+jobs:
+  helix:
+    name: Helix
+    uses: ./.github/workflows/ci/ci-helix.yml
+
+  idea:
+    name: IntelliJ
+    uses: ./.github/workflows/ci/ci-idea.yml
+
+  nvim:
+    name: Neovim
+    uses: ./.github/workflows/ci/ci-nvim.yml
+
+  vscode:
+    name: VS Code
+    uses: ./.github/workflows/ci/ci-vscode.yml
