@@ -76,7 +76,11 @@ jobs:
         working-directory: plugins/vscode
         env:
           VSCE_PAT: ${{ secrets.VSCE_PAT }}
-        run: npx vsce publish ${{ steps.meta.outputs.vsce_flags }} --pat "$VSCE_PAT"
+        run: |
+          output=$(npx vsce publish ${{ steps.meta.outputs.vsce_flags }} --pat "$VSCE_PAT" 2>&1) && echo "$output" || {
+            echo "$output"
+            echo "$output" | grep -q 'already exists'
+          }
 
       - name: Upload .vsix to GitHub Release
         uses: softprops/action-gh-release@v2

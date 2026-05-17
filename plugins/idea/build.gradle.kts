@@ -36,6 +36,10 @@ tasks.patchPluginXml {
     untilBuild.set("")
 }
 
+tasks.signPlugin {
+    enabled = false
+}
+
 tasks.publishPlugin {
     token.set(System.getenv("JETBRAINS_TOKEN") ?: "")
 }
