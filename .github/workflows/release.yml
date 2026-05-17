@@ -99,4 +99,6 @@ jobs:
     # Only stable releases — skip pre-releases (v0.5.2-alpha.4 etc.)
     if: "!contains(github.ref_name, '-')"
     uses: ./.github/workflows/release-homebrew.yml
+    permissions:
+      contents: read
     secrets: inherit

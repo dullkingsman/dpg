@@ -42,10 +42,13 @@ jobs:
           git clone \
             "https://x-access-token:${HOMEBREW_TAP_TOKEN}@github.com/dullkingsman/homebrew-dpg.git" \
             tap
+          mkdir -p tap/Formula
           cp Formula/dpg.rb tap/Formula/dpg.rb
           cd tap
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git config user.name "github-actions[bot]"
           git add Formula/dpg.rb
+          git diff --cached --quiet && echo "Formula unchanged, skipping push" && exit 0
           git commit -m "chore: bump dpg to v${VERSION}"
+          git pull --rebase origin HEAD || true
           git push
