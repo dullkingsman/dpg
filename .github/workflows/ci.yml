@@ -16,5 +16,5 @@ jobs:
     uses: ./.github/workflows/ci-lang.yml
 
   plugins:
-    name: Editor plugins
+    name: Plugins
     uses: ./.github/workflows/ci-plugins.yml

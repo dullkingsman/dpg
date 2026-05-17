@@ -34,10 +34,14 @@ jobs:
           VERSION="${TAG#vscode-v}"
           echo "tag=$TAG"         >> $GITHUB_OUTPUT
           echo "version=$VERSION" >> $GITHUB_OUTPUT
-          if [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+- ]]; then
+          if [[ "$VERSION" =~ ^([0-9]+)\.([0-9]+)\.([0-9]+)-.*\.([0-9]+)$ ]]; then
+            # VS Marketplace rejects pre-release suffixes; encode alpha number into patch
+            # e.g. 0.5.2-alpha.9 → 0.5.9
+            echo "marketplace_version=${BASH_REMATCH[1]}.${BASH_REMATCH[2]}.${BASH_REMATCH[4]}" >> $GITHUB_OUTPUT
             echo "prerelease=true"           >> $GITHUB_OUTPUT
             echo "vsce_flags=--pre-release"  >> $GITHUB_OUTPUT
           else
+            echo "marketplace_version=$VERSION" >> $GITHUB_OUTPUT
             echo "prerelease=false" >> $GITHUB_OUTPUT
             echo "vsce_flags="      >> $GITHUB_OUTPUT
           fi
@@ -58,7 +62,7 @@ jobs:
 
       - name: Stamp version
         working-directory: plugins/vscode
-        run: npm version "${{ steps.meta.outputs.version }}" --no-git-tag-version
+        run: npm version "${{ steps.meta.outputs.marketplace_version }}" --no-git-tag-version
 
       - name: Bundle extension
         working-directory: plugins/vscode
