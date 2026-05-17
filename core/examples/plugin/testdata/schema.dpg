@@ -11,5 +11,5 @@ TABLE logs (
   message TEXT   NOT NULL
 )
 {
-  COMMENT "Application event log";
+  COMMENT 'Application event log';
 }

@@ -31,7 +31,7 @@ Schema block with comment and owner
 =====================================
 
 SCHEMA analytics {
-    COMMENT "analytics schema";
+    COMMENT 'analytics schema';
     OWNER analyst_role;
 }
 
@@ -79,7 +79,7 @@ Role with password
 
 ROLE app_user LOGIN NOSUPERUSER PASSWORD 'env:APP_USER_PASSWORD'
 {
-    COMMENT "application runtime user";
+    COMMENT 'application runtime user';
 }
 
 -------------------------------------

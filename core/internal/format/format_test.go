@@ -386,7 +386,7 @@ func TestFormat_RenamedFromFirstInBlock(t *testing.T) {
 	src := `TABLE users (
     id BIGINT NOT NULL
 ) {
-    COMMENT "The users table";
+    COMMENT 'The users table';
     GRANTS { SELECT TO reader; }
     RENAMED FROM old_users;
 }`
@@ -408,7 +408,7 @@ func TestFormat_BlockDirectiveCanonicalOrder(t *testing.T) {
 	src := `TABLE t (id BIGINT NOT NULL) {
     GRANTS { SELECT TO r; }
     OWNER TO dba;
-    COMMENT "t";
+    COMMENT 't';
     RENAMED FROM old_t;
 }`
 	out := formatSrc(t, src, defaultOpts)
@@ -429,7 +429,7 @@ func TestFormat_BlockDirectiveOrderIdempotent(t *testing.T) {
 	src := `TABLE t (id BIGINT NOT NULL) {
     GRANTS { SELECT TO r; }
     OWNER TO dba;
-    COMMENT "t";
+    COMMENT 't';
     RENAMED FROM old_t;
 }`
 	first := formatSrc(t, src, defaultOpts)
@@ -443,7 +443,7 @@ func TestFormat_BlockDirectiveAlreadySortedIsNoop(t *testing.T) {
 	// When directives are already in canonical order, output should be identical.
 	src := `TABLE t (id BIGINT NOT NULL) {
     RENAMED FROM old_t;
-    COMMENT "t";
+    COMMENT 't';
     GRANTS { SELECT TO r; }
 }`
 	first := formatSrc(t, src, defaultOpts)
@@ -461,7 +461,7 @@ func TestFormat_OpaqueBlockRenamedFromFirst(t *testing.T) {
 	src := `ROLE analyst NOLOGIN {
     GRANTS { USAGE ON SCHEMA public TO analyst; }
     RENAMED FROM old_analyst;
-    COMMENT "Analytics read role";
+    COMMENT 'Analytics read role';
 }`
 	out := formatSrc(t, src, defaultOpts)
 	renamedPos := strings.Index(out, "RENAMED")

@@ -24,7 +24,7 @@ Table with dpg block comment and owner
 TABLE orders (
     id bigint NOT NULL
 ) {
-    COMMENT "order records";
+    COMMENT 'order records';
     OWNER app_user;
 }
 

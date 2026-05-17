@@ -148,7 +148,7 @@ TABLE legacy_data (
     id BIGINT GENERATED ALWAYS AS IDENTITY,
     CONSTRAINT pk_legacy_data PRIMARY KEY (id)
 ) {
-    DEPRECATED "replaced by new_data";
+    DEPRECATED 'replaced by new_data';
 }
 }`
 	dpgFile := filepath.Join(dir, "schema.dpg")

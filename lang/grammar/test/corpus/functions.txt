@@ -40,7 +40,7 @@ BEGIN
 END;
 $$
 {
-    COMMENT "fetch user email by id";
+    COMMENT 'fetch user email by id';
 }
 
 -------------------------------------
@@ -93,7 +93,7 @@ Function with deprecated directive
 
 FUNCTION legacy_compute(x integer) RETURNS integer LANGUAGE sql AS $$ SELECT x $$
 {
-    DEPRECATED "use new_compute instead";
+    DEPRECATED 'use new_compute instead';
 }
 
 -------------------------------------

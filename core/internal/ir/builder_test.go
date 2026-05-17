@@ -80,9 +80,9 @@ func TestBuildTableWithBlock(t *testing.T) {
 			email TEXT NOT NULL
 		)`,
 		`
-			COMMENT "Primary user store";
+			COMMENT 'Primary user store';
 			OWNER   "app_role";
-			COLUMN email { COMMENT "Email address"; STATISTICS 300; }
+			COLUMN email { COMMENT 'Email address'; STATISTICS 300; }
 			INDICES { idx_email (email); }
 			ENABLE ROW LEVEL SECURITY;
 			GRANTS { SELECT TO app_readonly; }
@@ -175,7 +175,7 @@ func TestBuildIdentityColumn(t *testing.T) {
 func TestBuildView(t *testing.T) {
 	obj := buildObject(t, pipeline.KindView,
 		`users_summary AS SELECT id, email FROM users`,
-		`COMMENT "Summary view"; GRANTS { SELECT TO app_readonly; }`,
+		`COMMENT 'Summary view'; GRANTS { SELECT TO app_readonly; }`,
 	)
 	v, ok := obj.(*ir.View)
 	if !ok {
@@ -197,7 +197,7 @@ func TestBuildView(t *testing.T) {
 func TestBuildEnum(t *testing.T) {
 	obj := buildObject(t, pipeline.KindEnum,
 		`status AS ENUM ('active', 'pending', 'inactive')`,
-		`COMMENT "User lifecycle states";`,
+		`COMMENT 'User lifecycle states';`,
 	)
 	tp, ok := obj.(*ir.Type)
 	if !ok {
@@ -222,7 +222,7 @@ func TestBuildEnum(t *testing.T) {
 func TestBuildSchema(t *testing.T) {
 	obj := buildObject(t, pipeline.KindSchema,
 		`billing`,
-		`OWNER "finance_role"; COMMENT "Billing schema";`,
+		`OWNER "finance_role"; COMMENT 'Billing schema';`,
 	)
 	s, ok := obj.(*ir.Schema)
 	if !ok {
@@ -241,7 +241,7 @@ func TestBuildSchema(t *testing.T) {
 func TestBuildFunction(t *testing.T) {
 	obj := buildObject(t, pipeline.KindFunction,
 		`add(a INT, b INT) RETURNS INT LANGUAGE sql AS $$ SELECT a + b $$;`,
-		`COMMENT "Adds two integers";`,
+		`COMMENT 'Adds two integers';`,
 	)
 	fn, ok := obj.(*ir.Function)
 	if !ok {
@@ -332,7 +332,7 @@ func TestBuildTableAcceptsKnownColumnBlock(t *testing.T) {
 			id          BIGINT,
 			locality_id BIGINT
 		)`,
-		`COLUMN locality_id { COMMENT "geo locality"; }`,
+		`COLUMN locality_id { COMMENT 'geo locality'; }`,
 	)
 	tbl := obj.(*ir.Table)
 	col := findCol(tbl.Columns, "locality_id")
@@ -529,7 +529,7 @@ func TestBuildVirtualTypeUnionTypeRefs(t *testing.T) {
 func TestBuildVirtualTypeWithComment(t *testing.T) {
 	obj := buildObject(t, pipeline.KindVirtualType,
 		`user_state AS text`,
-		`COMMENT "User lifecycle state";`)
+		`COMMENT 'User lifecycle state';`)
 	vt := obj.(*ir.VirtualType)
 	if vt.Comment == nil || *vt.Comment != "User lifecycle state" {
 		t.Errorf("Comment: got %v", vt.Comment)
@@ -569,7 +569,7 @@ func TestBuildVirtualTypeCommentAndFormat(t *testing.T) {
 	// Both COMMENT and PREFERRED JSON FORMAT can coexist in the {} block.
 	obj := buildObject(t, pipeline.KindVirtualType,
 		`event AS (type text, ts bigint)`,
-		`COMMENT "App event"; PREFERRED JSON FORMAT json;`)
+		`COMMENT 'App event'; PREFERRED JSON FORMAT json;`)
 	vt := obj.(*ir.VirtualType)
 	if vt.Comment == nil || *vt.Comment != "App event" {
 		t.Errorf("Comment: got %v", vt.Comment)

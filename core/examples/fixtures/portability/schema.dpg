@@ -9,7 +9,7 @@ SCHEMA public {
     -- ENUM type: PostgreSQL-specific, no equivalent in standard SQL.
     ENUM order_status AS ENUM ('pending', 'paid', 'shipped', 'cancelled');
     {
-        COMMENT "Lifecycle states for orders";
+        COMMENT 'Lifecycle states for orders';
     }
 
     -- UNLOGGED TABLE: PG-specific; data lost on crash, faster writes.
@@ -28,7 +28,7 @@ SCHEMA public {
         CONSTRAINT pk_events PRIMARY KEY (id)
     )
     {
-        COMMENT "Application event log — payload uses jsonb (PG-specific)";
+        COMMENT 'Application event log — payload uses jsonb (PG-specific)';
     }
 
     -- plpgsql: PostgreSQL's procedural language, not ANSI standard.

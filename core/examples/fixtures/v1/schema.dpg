@@ -9,12 +9,12 @@ EXTENSION pgcrypto;
 
 ROLE app_readonly NOLOGIN
 {
-    COMMENT "Read-only access for analytics and reporting";
+    COMMENT 'Read-only access for analytics and reporting';
 }
 
 ROLE app_service LOGIN CONNECTION LIMIT 20
 {
-    COMMENT "Application service account";
+    COMMENT 'Application service account';
 }
 
 SCHEMA public {
@@ -29,7 +29,7 @@ SCHEMA public {
         CONSTRAINT uq_users_email UNIQUE (email)
     )
     {
-        COMMENT "Registered user accounts";
+        COMMENT 'Registered user accounts';
         INDICES { idx_users_email (email); }
         GRANTS  { SELECT TO app_readonly; SELECT, INSERT, UPDATE TO app_service; }
     }
@@ -86,7 +86,7 @@ SCHEMA public {
         SELECT COUNT(*) FROM orders WHERE user_id = p_user_id;
     $$;
     {
-        COMMENT "Returns the total number of orders placed by a user";
+        COMMENT 'Returns the total number of orders placed by a user';
         GRANTS  { EXECUTE TO app_service; }
     }
 }

@@ -523,10 +523,10 @@ func (b *blockParser) parsePreferredJsonFormat(pos pipeline.SourcePos) (string, 
 	return val, nil
 }
 
-// parseStringDirective reads: "text"; and returns a *StringLit.
+// parseStringDirective reads: 'text'; and returns a *StringLit.
 func (b *blockParser) parseStringDirective(pos pipeline.SourcePos) (*pipeline.StringLit, error) {
 	b.skipWS()
-	val, err := b.readQuotedString()
+	val, err := b.readSingleQuotedString()
 	if err != nil {
 		return nil, err
 	}

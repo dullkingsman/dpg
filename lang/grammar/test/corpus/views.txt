@@ -17,7 +17,7 @@ View with dpg block
 
 VIEW user_summary AS SELECT id FROM users
 {
-    COMMENT "summarised user info";
+    COMMENT 'summarised user info';
     GRANTS {
         SELECT TO reporter;
     }

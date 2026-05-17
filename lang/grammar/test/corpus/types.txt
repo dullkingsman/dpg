@@ -86,7 +86,7 @@ Virtual type
 
 VIRTUAL TYPE user_input AS jsonb
 {
-    COMMENT "validated user input shape";
+    COMMENT 'validated user input shape';
 }
 
 -------------------------------------

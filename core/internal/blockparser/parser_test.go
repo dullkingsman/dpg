@@ -45,7 +45,7 @@ func TestBlankBlock(t *testing.T) {
 // ── simple directives ─────────────────────────────────────────────────────────
 
 func TestComment(t *testing.T) {
-	ast := parse(t, `COMMENT "hello world";`)
+	ast := parse(t, `COMMENT 'hello world';`)
 	if ast.Comment == nil || ast.Comment.Value != "hello world" {
 		t.Errorf("Comment: got %v", ast.Comment)
 	}
@@ -73,7 +73,7 @@ func TestProtected(t *testing.T) {
 }
 
 func TestDeprecated(t *testing.T) {
-	ast := parse(t, `DEPRECATED "Use new_table instead";`)
+	ast := parse(t, `DEPRECATED 'Use new_table instead';`)
 	if ast.Deprecated == nil || ast.Deprecated.Value != "Use new_table instead" {
 		t.Errorf("Deprecated: got %v", ast.Deprecated)
 	}
@@ -169,7 +169,7 @@ func TestMultipleIndices(t *testing.T) {
 // ── COLUMN ────────────────────────────────────────────────────────────────────
 
 func TestColumnComment(t *testing.T) {
-	src := `COLUMN email { COMMENT "Primary email address"; }`
+	src := `COLUMN email { COMMENT 'Primary email address'; }`
 	ast := parse(t, src)
 	if len(ast.Columns) != 1 {
 		t.Fatalf("expected 1 column block, got %d", len(ast.Columns))
@@ -203,7 +203,7 @@ func TestColumnRenamedFrom(t *testing.T) {
 
 func TestColumnsBlock(t *testing.T) {
 	src := `COLUMNS {
-		email { COMMENT "Email"; }
+		email { COMMENT 'Email'; }
 		status { STATISTICS 500; }
 	}`
 	ast := parse(t, src)
@@ -372,11 +372,11 @@ func TestMigrateRemove(t *testing.T) {
 
 func TestFullTableBlock(t *testing.T) {
 	src := `
-		COMMENT "Primary identity store";
+		COMMENT 'Primary identity store';
 		OWNER   "app_role";
 
 		COLUMN email {
-			COMMENT    "Verified email address";
+			COMMENT    'Verified email address';
 			STATISTICS 300;
 		}
 
@@ -464,7 +464,7 @@ func TestPreferredJsonFormatJson(t *testing.T) {
 func TestPreferredJsonFormatWithComment(t *testing.T) {
 	p := blockparser.New()
 	ast, err := p.Parse(pipeline.KindVirtualType,
-		`COMMENT "some type"; PREFERRED JSON FORMAT json;`, zeroPos)
+		`COMMENT 'some type'; PREFERRED JSON FORMAT json;`, zeroPos)
 	if err != nil {
 		t.Fatalf("parse error: %v", err)
 	}

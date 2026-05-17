@@ -875,8 +875,9 @@ module.exports = grammar({
 
     identifier: _ => /[a-zA-Z_][a-zA-Z0-9_$]*/,
 
-    // DPG uses double-quoted strings for directive messages (COMMENT, DEPRECATED)
-    // and single-quoted strings for SQL string literals.  Both parse as string_literal.
+    // DPG uses single-quoted strings for directive messages (COMMENT, DEPRECATED)
+    // matching real PostgreSQL string literal syntax.  Double-quoted strings for
+    // identifiers (OWNER, NAME MAP literals) are also accepted as string_literal.
     string_literal: _ => choice(
       seq("'", /[^']*/, "'"),
       seq('"', /[^"]*/, '"'),

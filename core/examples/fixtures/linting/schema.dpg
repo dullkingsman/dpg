@@ -12,7 +12,7 @@ SCHEMA public {
         CONSTRAINT pk_legacy_sessions PRIMARY KEY (id)
     )
     {
-        DEPRECATED "Use the jwt_tokens table instead";
+        DEPRECATED 'Use the jwt_tokens table instead';
     }
 
     -- Rule: hardcoded-password — default value looks like a password literal.

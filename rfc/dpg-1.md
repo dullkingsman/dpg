@@ -827,7 +827,7 @@ AS $$
     SELECT 'hello';
 $$;
 {
-    COMMENT "Returns hello";
+    COMMENT 'Returns hello';
 }
 
 -- T1: table with no { } block
@@ -1083,8 +1083,8 @@ enum-decl     = "ENUM" WSP identifier WSP
                 "(" enum-values ")" ";"
                 [ "{" enum-block "}" ]
 
-enum-values   = DQUOTE identifier DQUOTE
-                *( "," WSP DQUOTE identifier DQUOTE )
+enum-values   = SQUOTE identifier SQUOTE
+                *( "," WSP SQUOTE identifier SQUOTE )
 
 enum-block    = *( enum-directive ";" )
 
@@ -1101,13 +1101,13 @@ ENUM user_status ('active', 'suspended', 'deleted');
 -- ENUM with comment
 ENUM invoice_status ('draft', 'sent', 'paid', 'void', 'overdue');
 {
-    COMMENT "Billing lifecycle states for customer invoices";
+    COMMENT 'Billing lifecycle states for customer invoices';
 }
 
 -- ENUM with value removal
 ENUM order_status ('pending', 'confirmed', 'shipped', 'delivered');
 {
-    COMMENT "Order lifecycle states";
+    COMMENT 'Order lifecycle states';
     MIGRATE REMOVE ('cancelled') {
         UPDATE orders SET status = 'delivered' WHERE status = 'cancelled';
     }
@@ -1446,7 +1446,7 @@ SCHEMA public {
 
 SCHEMA analytics {
     OWNER "analytics_role";
-    COMMENT "Derived tables and event aggregations";
+    COMMENT 'Derived tables and event aggregations';
 
     TABLE events ( ... ) { ... }
     FUNCTION compute_daily() RETURNS VOID LANGUAGE plpgsql AS $$ ... $$;
@@ -1744,11 +1744,11 @@ col-named-block = col-name WSP "{" col-block-body "}"
 col-block-body  = *( col-block-directive ";" )
 
 col-block-directive
-    = "COMMENT" WSP DQUOTE text DQUOTE
+    = "COMMENT" WSP SQUOTE text SQUOTE
     / "STATISTICS" WSP integer
     / "COMPRESSION" WSP method
     / "STORAGE" WSP storage-type
-    / "DEPRECATED" WSP DQUOTE text DQUOTE
+    / "DEPRECATED" WSP SQUOTE text SQUOTE
     / "USING" WSP expr
     / "RENAMED FROM" WSP col-name
     / grants-block
@@ -1759,11 +1759,11 @@ col-block-directive
 
    | Directive | PostgreSQL DDL emitted |
    |-----------|------------------------|
-   | `COMMENT "text"` | `COMMENT ON COLUMN t.c IS '...'` |
+   | `COMMENT 'text'` | `COMMENT ON COLUMN t.c IS '...'` |
    | `STATISTICS n` | `ALTER TABLE t ALTER COLUMN c SET STATISTICS n` |
    | `COMPRESSION method` | `ALTER TABLE t ALTER COLUMN c SET COMPRESSION m` |
    | `STORAGE type` | `ALTER TABLE t ALTER COLUMN c SET STORAGE s` |
-   | `DEPRECATED "msg"` | `COMMENT ON COLUMN t.c IS '[DEPRECATED] msg'` |
+   | `DEPRECATED 'msg'` | `COMMENT ON COLUMN t.c IS '[DEPRECATED] msg'` |
    | `USING expr` | `ALTER TABLE t ALTER COLUMN c TYPE ... USING expr` |
    | `RENAMED FROM old` | `ALTER TABLE t RENAME COLUMN old TO new` |
    | `GRANTS { ... }` | `GRANT priv (col) ON TABLE t TO role` |
@@ -1848,7 +1848,7 @@ TABLE users (
 {
     COLUMN email_address {
         RENAMED FROM email;
-        COMMENT "Verified email address";
+        COMMENT 'Verified email address';
     }
 }
 ```
@@ -2131,10 +2131,10 @@ privilege      = "SELECT" / "INSERT" / "UPDATE" / "DELETE" /
 ```abnf
 renamed-from-dir = "RENAMED FROM" WSP identifier
 protected-dir    = "PROTECTED"
-deprecated-dir   = "DEPRECATED" WSP DQUOTE text DQUOTE
+deprecated-dir   = "DEPRECATED" WSP SQUOTE text SQUOTE
 drop-cascade-dir = "DROP CASCADE"
 owner-dir        = "OWNER" WSP DQUOTE identifier DQUOTE
-comment-dir      = "COMMENT" WSP DQUOTE text DQUOTE
+comment-dir      = "COMMENT" WSP SQUOTE text SQUOTE
 ```
 
    **`PROTECTED`:** The compiler MUST refuse to emit a `DROP TABLE`
@@ -2143,7 +2143,7 @@ comment-dir      = "COMMENT" WSP DQUOTE text DQUOTE
    `PROTECTED` directive.  Safety: any attempt to drop a protected
    table is error DPG-E022.
 
-   **`DEPRECATED "msg"`:** The compiler emits a `COMMENT ON TABLE`
+   **`DEPRECATED 'msg'`:** The compiler emits a `COMMENT ON TABLE`
    prefixed with `[DEPRECATED]` and the message text.  The linter emits
    a warning when any other object references a deprecated table
    (if `warn_on_deprecated = true`).
@@ -2184,7 +2184,7 @@ FOREIGN TABLE remote_events (
     created_at TIMESTAMPTZ
 ) SERVER log_server OPTIONS (table_name 'events', schema_name 'public')
 {
-    COLUMN id { COMMENT "Remote event primary key"; }
+    COLUMN id { COMMENT 'Remote event primary key'; }
     GRANTS { SELECT TO app_readonly; }
 }
 ```
@@ -2326,7 +2326,7 @@ SCHEMA public {
     VIEW admin_summary AS
         SELECT id, email, created_at FROM users WHERE role = 'admin';
     {
-        COMMENT "Admin user summary view";
+        COMMENT 'Admin user summary view';
         GRANTS { SELECT TO app_readonly; }
     }
 }
@@ -2527,7 +2527,7 @@ SCHEMA public {
     END;
     $$;
     {
-        COMMENT "Fetch a user record by verified email address";
+        COMMENT 'Fetch a user record by verified email address';
         GRANTS { EXECUTE TO app_service; }
     }
 
@@ -2608,7 +2608,7 @@ SCHEMA public {
         INITCOND = '1'
     )
     {
-        COMMENT "Multiplicative aggregate over DOUBLE PRECISION values";
+        COMMENT 'Multiplicative aggregate over DOUBLE PRECISION values';
         GRANTS { EXECUTE TO app_service; }
     }
 }
@@ -2764,7 +2764,7 @@ env-uri    = SQUOTE "env:" identifier SQUOTE
 
 ROLE app_readonly {
     NOLOGIN;
-    COMMENT "Read-only access for reporting tools";
+    COMMENT 'Read-only access for reporting tools';
 }
 
 ROLE app_service {
@@ -3037,7 +3037,7 @@ PUBLICATION user_data
     FOR TABLE users, profiles
     WITH (publish = 'insert, update, delete');
 {
-    COMMENT "Primary replication stream for user data";
+    COMMENT 'Primary replication stream for user data';
 }
 
 PUBLICATION all_tables FOR ALL TABLES;
@@ -4598,8 +4598,8 @@ serial_sequence_declared      = "off"
    | Column `COMPRESSION` | Declared, Diffed | `COLUMN c { COMPRESSION m; }` |
    | Column `STORAGE` | Declared, Diffed | `COLUMN c { STORAGE s; }` |
    | Column statistics targets | Declared, Diffed | `COLUMN c { STATISTICS n; }` |
-   | Column comments | Declared, Diffed | `COLUMN c { COMMENT "..."; }` |
-   | Column `DEPRECATED` | Declared, Diffed | `COLUMN c { DEPRECATED "..."; }` |
+   | Column comments | Declared, Diffed | `COLUMN c { COMMENT '...'; }` |
+   | Column `DEPRECATED` | Declared, Diffed | `COLUMN c { DEPRECATED '...'; }` |
    | Column `USING` (type change) | Declared, Diffed | `COLUMN c { USING expr; }` |
    | Column renames | Declared, Diffed | `COLUMN new { RENAMED FROM old; }` |
    | Column-level grants | Declared, Diffed | `COLUMN c { GRANTS { ... } }` |
@@ -4706,10 +4706,10 @@ safe-char   = <any Unicode character except DQUOTE>
 
 ; Common directives
 owner-dir        = "OWNER" WSP DQUOTE identifier DQUOTE
-comment-dir      = "COMMENT" WSP DQUOTE <text> DQUOTE
+comment-dir      = "COMMENT" WSP SQUOTE <text> SQUOTE
 renamed-from-dir = "RENAMED FROM" WSP identifier
 protected-dir    = "PROTECTED"
-deprecated-dir   = "DEPRECATED" WSP DQUOTE <text> DQUOTE
+deprecated-dir   = "DEPRECATED" WSP SQUOTE <text> SQUOTE
 drop-cascade-dir = "DROP CASCADE"
 
 ; Dollar-quoted string
@@ -4808,12 +4808,12 @@ EXTENSION pg_trgm CASCADE;
 SCHEMA public {
     ENUM account_status ('trial', 'active', 'suspended', 'cancelled');
     {
-        COMMENT "Top-level account lifecycle states";
+        COMMENT 'Top-level account lifecycle states';
     }
 
     ENUM invoice_status ('draft', 'sent', 'paid', 'void', 'overdue');
     {
-        COMMENT "Billing lifecycle states for customer invoices";
+        COMMENT 'Billing lifecycle states for customer invoices';
     }
 
     DOMAIN positive_money AS NUMERIC(12, 2) {
@@ -4838,7 +4838,7 @@ SCHEMA public {
         ...audit_timestamps
     )
     {
-        COMMENT "Top-level tenant accounts";
+        COMMENT 'Top-level tenant accounts';
         ENABLE ROW LEVEL SECURITY;
 
         COLUMN status     { STATISTICS 300; }

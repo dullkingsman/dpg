@@ -194,7 +194,7 @@ BEGIN
 END;
 $$;
 {
-    COMMENT "Fetch user by email";
+    COMMENT 'Fetch user by email';
     GRANTS { EXECUTE TO app_service; }
 }`
 	obj := assertOne(t, scan(t, src))
@@ -239,7 +239,7 @@ func TestEnum(t *testing.T) {
 func TestEnumWithBlock(t *testing.T) {
 	obj := assertOne(t, scan(t, `ENUM invoice_status ('draft', 'sent', 'paid', 'void');
 {
-    COMMENT "Billing lifecycle states";
+    COMMENT 'Billing lifecycle states';
 }`))
 	assertKind(t, obj, pipeline.KindEnum)
 	assertPart2Contains(t, obj, "Billing lifecycle states")
@@ -276,7 +276,7 @@ func TestDomainType(t *testing.T) {
 func TestSchema(t *testing.T) {
 	src := `SCHEMA analytics {
     OWNER "analytics_role";
-    COMMENT "Derived tables and event aggregations";
+    COMMENT 'Derived tables and event aggregations';
 }`
 	objs := scan(t, src)
 	if len(objs) != 1 {
@@ -369,7 +369,7 @@ func TestSequence(t *testing.T) {
 func TestRole(t *testing.T) {
 	obj := assertOne(t, scan(t, `ROLE app_readonly {
     NOLOGIN;
-    COMMENT "Read-only access";
+    COMMENT 'Read-only access';
 }`))
 	assertKind(t, obj, pipeline.KindRole)
 	assertPart1Contains(t, obj, "app_readonly")
@@ -717,7 +717,7 @@ func TestScanVirtualType(t *testing.T) {
 
 func TestScanVirtualTypeWithBlock(t *testing.T) {
 	obj := assertOne(t, scan(t,
-		`VIRTUAL TYPE user_id_variants AS integer | bigint { COMMENT "ID type union"; }`))
+		`VIRTUAL TYPE user_id_variants AS integer | bigint { COMMENT 'ID type union'; }`))
 	assertKind(t, obj, pipeline.KindVirtualType)
 	assertPart1Contains(t, obj, "user_id_variants")
 	assertPart2Contains(t, obj, "COMMENT")
