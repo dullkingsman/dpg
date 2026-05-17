@@ -31,6 +31,7 @@ var blockDirectiveKeywords = []string{
 	"INDICES", "POLICIES", "TRIGGERS", "COLUMNS", "CONSTRAINTS",
 	"GRANTS", "REVOCATIONS", "PARTITIONS",
 	"MIGRATE REMOVE",
+	"PREFERRED JSON FORMAT",
 }
 
 var pgBuiltinTypes = []string{
@@ -141,7 +142,7 @@ func typeCompletions(ws *workspace.Workspace, path, text string) []protocol.Comp
 	// Add custom types from the current file
 	for _, obj := range workspace.ParseObjects(text, path) {
 		switch obj.Kind {
-		case "ENUM", "TYPE", "DOMAIN":
+		case "ENUM", "TYPE", "DOMAIN", "VIRTUAL TYPE":
 			obj := obj
 			items = append(items, protocol.CompletionItem{Label: obj.Name, Kind: &kind})
 		}

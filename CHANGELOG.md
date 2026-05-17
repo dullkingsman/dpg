@@ -17,6 +17,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - **Default privileges diffing** — `DEFAULT PRIVILEGES` declarations are now diffed structurally (per-grant and per-revocation) rather than by opaque body hash. Changes to individual grants or revocations produce minimal `GRANT`/`REVOKE` statements instead of regenerating the entire block.
+- **Grammar / syntax highlighting** — `PREFERRED JSON FORMAT` is now highlighted as a block directive keyword; `JSON` and `JSONB` are highlighted as SQL keywords throughout `.dpg` files.
+- **Formatter** — `PREFERRED`, `FORMAT`, `JSON`, and `JSONB` are recognised as keywords by `dpg fmt` (enabling keyword-case normalisation). `PREFERRED JSON FORMAT` is sorted after `REVOCATIONS` within a `{}` block in canonical order.
+- **LSP completions** — `PREFERRED JSON FORMAT` is offered as a completion inside `{}` blocks. Virtual types are now included in column/attribute type completions alongside enums, composite types, and domains.
+- **LSP hover** — `VIRTUAL TYPE` hover text updated to reflect structured body forms and `jsonb`/`json` resolution. `PREFERRED` shows inline documentation for the directive. `MACRO` hover text corrected from "file-scoped" to "project-scoped" and now mentions nested expansion and DPG-E012.
+- **LSP object index** — `ParseObjects` now reports compound kinds (`UNLOGGED TABLE`, `MATERIALIZED VIEW`, `RECURSIVE VIEW`, `VIRTUAL TYPE`) instead of the bare base keyword, and indexes `MACRO` declarations so spread targets (`...name`) resolve to their definition.
 
 ## [0.5.2] — 2026-05-16
 

@@ -198,11 +198,11 @@ MATERIALIZED VIEW mv AS SELECT 1;
 	if len(objs) != 2 {
 		t.Fatalf("len = %d, want 2", len(objs))
 	}
-	if objs[0].Kind != "TABLE" {
-		t.Errorf("Kind = %q, want TABLE", objs[0].Kind)
+	if objs[0].Kind != "UNLOGGED TABLE" {
+		t.Errorf("Kind = %q, want UNLOGGED TABLE", objs[0].Kind)
 	}
-	if objs[1].Kind != "VIEW" {
-		t.Errorf("Kind = %q, want VIEW", objs[1].Kind)
+	if objs[1].Kind != "MATERIALIZED VIEW" {
+		t.Errorf("Kind = %q, want MATERIALIZED VIEW", objs[1].Kind)
 	}
 }
 

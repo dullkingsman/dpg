@@ -1,6 +1,6 @@
 ---
 title: "Macros"
-description: "Named reusable fragments spread into column lists or block bodies with the `...name` operator."
+description: "Project-scoped reusable fragments spread into column lists or block bodies with `...name`. Supports nested expansion; circular references are DPG-E012."
 weight: 3
 ---
 
@@ -110,6 +110,44 @@ TABLE orders (
 
 A file-local `MACRO` declaration with the same name as a cross-file macro takes precedence, so individual files can specialise a shared definition without affecting others.
 
+## Nested expansion
+
+A macro body may itself spread other macros. Expansion is recursive to arbitrary depth.
+
+```sql
+-- macros.dpg
+MACRO timestamps (
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at TIMESTAMPTZ
+)
+
+MACRO soft_delete (
+    deleted_at TIMESTAMPTZ,
+    ...timestamps
+)
+
+TABLE events (
+    id    BIGINT GENERATED ALWAYS AS IDENTITY,
+    name  TEXT NOT NULL,
+    ...soft_delete,
+    CONSTRAINT pk_events PRIMARY KEY (id)
+);
+```
+
+```sql
+-- emits (both macros expanded inline)
+CREATE TABLE "public"."events" (
+    "id"         bigint GENERATED ALWAYS AS IDENTITY,
+    "name"       text NOT NULL,
+    "deleted_at" timestamptz,
+    "created_at" timestamptz NOT NULL DEFAULT now(),
+    "updated_at" timestamptz,
+    CONSTRAINT "pk_events" PRIMARY KEY ("id")
+);
+```
+
+A macro may not spread itself, and no macro in a spread chain may eventually spread back to a macro that already appears earlier in the chain. The compiler detects circular references at compile time and reports **DPG-E012**.
+
 ## Rules
 
 - A paren-body macro may only be spread inside a `( )` list.
@@ -117,4 +155,5 @@ A file-local `MACRO` declaration with the same name as a cross-file macro takes 
 - Spreading an undefined macro name is a compile-time error.
 - Macros are **project-scoped**: a macro defined in any `.dpg` file is available in every other file within the same compilation scope (all files for a given database). Declaration order across files does not matter.
 - A file-local `MACRO` declaration overrides a same-named macro from another file, letting individual files specialise a shared definition.
+- A macro body may spread other macros (nested expansion). Circular references — where A spreads B and B eventually spreads A — are a compile-time error (DPG-E012).
 - `MACRO` does not violate the no-verb mandate; it is a DPG preprocessor keyword, not a PostgreSQL keyword.

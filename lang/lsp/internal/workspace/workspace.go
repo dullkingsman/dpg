@@ -211,24 +211,29 @@ type ObjectInfo struct {
 func ParseObjects(text, filePath string) []ObjectInfo {
 	var objs []ObjectInfo
 	lines := strings.Split(text, "\n")
-	objectKeywords := []string{
-		"TABLE", "VIEW", "FUNCTION", "PROCEDURE", "AGGREGATE",
-		"ENUM", "TYPE", "DOMAIN", "SCHEMA", "SEQUENCE", "ROLE",
-		"EXTENSION", "PUBLICATION", "SUBSCRIPTION",
+
+	// Compound keywords checked before single-word keywords.
+	type kwEntry struct {
+		prefix string // full prefix to match (uppercased), e.g. "VIRTUAL TYPE "
+		kind   string // reported Kind, e.g. "VIRTUAL TYPE"
+		nameAt int    // byte offset past the prefix to start extracting the name
 	}
+	var kwEntries []kwEntry
+	for _, compound := range []string{"UNLOGGED TABLE", "FOREIGN TABLE", "MATERIALIZED VIEW", "RECURSIVE VIEW", "VIRTUAL TYPE"} {
+		kwEntries = append(kwEntries, kwEntry{compound + " ", compound, len(compound) + 1})
+	}
+	for _, simple := range []string{"TABLE", "VIEW", "FUNCTION", "PROCEDURE", "AGGREGATE",
+		"ENUM", "TYPE", "DOMAIN", "SCHEMA", "SEQUENCE", "ROLE",
+		"EXTENSION", "PUBLICATION", "SUBSCRIPTION", "MACRO"} {
+		kwEntries = append(kwEntries, kwEntry{simple + " ", simple, len(simple) + 1})
+	}
+
 	for i, line := range lines {
 		trimmed := strings.TrimSpace(line)
 		upper := strings.ToUpper(trimmed)
-		for _, kw := range objectKeywords {
-			if strings.HasPrefix(upper, kw+" ") ||
-				strings.HasPrefix(upper, "UNLOGGED "+kw+" ") ||
-				strings.HasPrefix(upper, "FOREIGN "+kw+" ") ||
-				strings.HasPrefix(upper, "MATERIALIZED "+kw+" ") ||
-				strings.HasPrefix(upper, "RECURSIVE "+kw+" ") ||
-				strings.HasPrefix(upper, "VIRTUAL "+kw+" ") {
-				// Extract name: first token after the keyword(s)
-				rest := trimmed[strings.Index(upper, kw)+len(kw):]
-				rest = strings.TrimSpace(rest)
+		for _, e := range kwEntries {
+			if strings.HasPrefix(upper, e.prefix) {
+				rest := strings.TrimSpace(trimmed[e.nameAt:])
 				fields := strings.Fields(rest)
 				if len(fields) > 0 {
 					name := fields[0]
@@ -236,7 +241,7 @@ func ParseObjects(text, filePath string) []ObjectInfo {
 						name = name[:idx]
 					}
 					objs = append(objs, ObjectInfo{
-						Kind: kw,
+						Kind: e.kind,
 						Name: name,
 						File: filePath,
 						Line: i + 1,

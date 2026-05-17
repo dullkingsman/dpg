@@ -102,7 +102,7 @@ func keywordDoc(word string) string {
 		"AGGREGATE":    "**AGGREGATE** — declares a user-defined aggregate function (DPG §3.6)",
 		"ENUM":         "**ENUM** — declares an enumerated type (DPG §3.8)",
 		"TYPE":         "**TYPE** — declares a composite, range, or base type (DPG §3.9)",
-		"VIRTUAL":      "**VIRTUAL TYPE** — DPG virtual type alias (DPG §3.9)",
+		"VIRTUAL":      "**VIRTUAL TYPE** — gives a structural schema to a `jsonb`/`json` column. Emits no SQL; resolves to `jsonb` (or `json`) when used as a column/composite-attribute type. Body: a type reference, composite `(field type, ...)`, or `|`-separated union. (DPG §5.6)",
 		"DOMAIN":       "**DOMAIN** — declares a domain (constrained base type) (DPG §3.10)",
 		"SEQUENCE":     "**SEQUENCE** — declares a sequence generator (DPG §3.11)",
 		"SCHEMA":       "**SCHEMA** — declares a named schema namespace (DPG §3.12)",
@@ -116,7 +116,9 @@ func keywordDoc(word string) string {
 		"OPERATOR":     "**OPERATOR** — declares a user-defined operator",
 		"CAST":         "**CAST** — declares a type-cast between two types",
 		"STATISTICS":   "**STATISTICS** — extended statistics object for the planner",
-		"MACRO":        "**MACRO** — file-scoped column-list or block template (DPG §6)",
+		"MACRO":        "**MACRO** — project-scoped column-list or block template. Defined in any `.dpg` file; available to every other file in the compilation scope. Expanded with `...name`. Nested spreads supported; circular references are a compiler error (DPG-E012). (DPG §4.7)",
+		// Virtual type block directives
+		"PREFERRED": "`PREFERRED JSON FORMAT json|jsonb;` — controls whether virtual type references resolve to `json` or `jsonb` (default) in generated SQL",
 		// Block directives
 		"INDICES":     "`INDICES { }` — index definitions block",
 		"POLICIES":    "`POLICIES { }` — row-level security policy block",

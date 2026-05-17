@@ -128,6 +128,8 @@ func blockDirPriority(firstKw string) int {
 		return 12
 	case "REVOCATIONS", "REVOKE":
 		return 13
+	case "PREFERRED":
+		return 14
 	default:
 		return 99
 	}
