@@ -1,42 +1,119 @@
 ---
 title: "Virtual"
-description: "`VIRTUAL TYPE` — DPG-only annotation that generates no SQL, used for code generation."
+description: "`VIRTUAL TYPE` — typed schema for JSON/JSONB columns, resolved to jsonb in SQL."
 weight: 5
 ---
 
-Virtual types are DPG-native annotations. They generate no SQL whatsoever — no `CREATE TYPE`, `ALTER TYPE`, or `DROP TYPE` is ever emitted. They exist to carry type information for code-generation tools that read the DPG snapshot or IR.
+Virtual types are DPG DDL constructs that give a structural schema to `JSON`/`JSONB` columns and JSON array columns. They generate no PostgreSQL DDL — no `CREATE TYPE`, `ALTER TYPE`, or `DROP TYPE` is ever emitted. When a column or composite type attribute is typed as a virtual type, DPG resolves it to `jsonb` (or `jsonb[]`) in all generated SQL.
 
-## String union
+The structured body is stored in the snapshot so downstream consumers — ORMs, type-safe query builders — can read type information via the snapshot JSON or the `pkg/dpg` Go API.
+
+---
+
+## Body forms
+
+### Type reference
+
+A single native PostgreSQL type or another declared `VIRTUAL TYPE`:
 
 ```sql
-VIRTUAL TYPE user_state AS "active" | "suspended" | "deleted";
+VIRTUAL TYPE label AS text;
+VIRTUAL TYPE metric AS numeric;
+VIRTUAL TYPE named_point AS point;   -- references virtual type "point"
+VIRTUAL TYPE tags AS text[];         -- array form
 ```
 
 ```sql
 -- emits nothing
 ```
 
-## Discriminated union with comment
+### Composite
+
+An inline record with named, typed fields. Field types may themselves be virtual type references:
 
 ```sql
-VIRTUAL TYPE billing.payment_method AS
-    { kind: "card", last4: string, brand: string }
-    | { kind: "bank_ach", routing: string }
-    | { kind: "wallet" };
+VIRTUAL TYPE point AS (x float8, y float8);
+
+VIRTUAL TYPE line_item AS (
+    sku      text,
+    quantity integer,
+    price    numeric
+);
+```
+
+```sql
+-- emits nothing
+```
+
+### Union
+
+Two or more terms joined with `|`. Any mix of composites and type references is valid:
+
+```sql
+VIRTUAL TYPE payment AS
+    (kind text, amount numeric, currency text)
+    | (kind text, token text)
+    | text;
 {
-    COMMENT "Payment method discriminated union for type generation";
+    COMMENT "Discriminated union for payment method";
 }
 ```
 
 ```sql
 -- emits nothing
--- (COMMENT is stored in the snapshot for tooling consumers, not emitted as SQL)
+-- (COMMENT stored in snapshot for tooling consumers)
 ```
+
+---
+
+## Using a virtual type as a column type
+
+Declare the column type as the virtual type name. DPG emits `jsonb` in the generated SQL. Add `[]` to get `jsonb[]`:
+
+```sql
+TABLE orders (
+    id    bigint,
+    meta  line_item,    -- single JSON object  → jsonb
+    items line_item[]   -- JSON array          → jsonb[]
+) { }
+```
+
+```sql
+-- emits
+CREATE TABLE "public"."orders" (
+    "id"    bigint,
+    "meta"  jsonb,
+    "items" jsonb[]
+);
+```
+
+---
+
+## Using a virtual type as a composite attribute type
+
+```sql
+TYPE full_address AS (
+    street text,
+    detail address_detail   -- virtual type ref → jsonb
+);
+```
+
+```sql
+-- emits
+CREATE TYPE "public"."full_address" AS (
+    "street" text,
+    "detail" jsonb
+);
+```
+
+---
 
 ## Rules
 
-- The body after `AS` is arbitrary text stored verbatim. The compiler does not interpret it.
+- The body is parsed and validated by the compiler. It is one of: a type reference, a composite definition, or a union of those.
+- `VIRTUAL TYPE` may be schema-qualified; if unqualified it defaults to `default_schema`.
+- When used as a column or attribute type, `[]` suffix causes DPG to emit `jsonb[]` instead of `jsonb`.
 - Virtual types appear in the snapshot under `"kind": "virtual_type"` so code-generation tools can read them.
 - `dpg plan` produces no SQL for additions, modifications, or removals of virtual types.
 - The `{ }` block accepts only `COMMENT`.
-- Code-generation tools consume virtual types via the snapshot JSON or the `pkg/dpg` Go API. See [Plugin API](../../../extending/plugin-api/).
+- Downstream tooling consumes virtual types via the snapshot JSON or the `pkg/dpg` Go API. See [Plugin API](../../../extending/plugin-api/).

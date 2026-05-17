@@ -63,6 +63,9 @@ func (d *Differ) Diff(desired []pipeline.IRObject, snap *pipeline.Snapshot) ([]p
 	// consumed tracks snapshot keys claimed by a rename, so they are not dropped.
 	consumed := make(map[string]bool)
 
+	// Build virtual type set up-front so all passes can resolve jsonb references.
+	vtypes := buildVTypeSet(desired)
+
 	// Pass 1: handle object renames.
 	//
 	// A rename is detected when desired has RenamedFrom, the snapshot has the
@@ -108,7 +111,7 @@ func (d *Differ) Diff(desired []pipeline.IRObject, snap *pipeline.Snapshot) ([]p
 		consumed[oldKey] = true
 		// Route to diffObject; individual diff functions emit RENAME when
 		// the snap name differs from the desired name.
-		alterOps, err := diffObject(obj, &oldSnap, snap)
+		alterOps, err := diffObject(obj, &oldSnap, snap, vtypes)
 		if err != nil {
 			return nil, err
 		}
@@ -143,13 +146,13 @@ func (d *Differ) Diff(desired []pipeline.IRObject, snap *pipeline.Snapshot) ([]p
 			return nil, fmt.Errorf("diff: decoding snapshot for %q: %w", key, err)
 		}
 		if !found {
-			createOps, err := createObject(obj)
+			createOps, err := createObject(obj, vtypes)
 			if err != nil {
 				return nil, err
 			}
 			ops = append(ops, createOps...)
 		} else {
-			alterOps, err := diffObject(obj, &so, snap)
+			alterOps, err := diffObject(obj, &so, snap, vtypes)
 			if err != nil {
 				return nil, err
 			}
@@ -158,6 +161,36 @@ func (d *Differ) Diff(desired []pipeline.IRObject, snap *pipeline.Snapshot) ([]p
 	}
 
 	return ops, nil
+}
+
+// buildVTypeSet collects all virtual type qualified and unqualified names from
+// the desired IR so they can be resolved to jsonb in SQL generation.
+func buildVTypeSet(desired []pipeline.IRObject) map[string]bool {
+	vtypes := make(map[string]bool)
+	for _, obj := range desired {
+		if vt, ok := obj.(*ir.VirtualType); ok {
+			vtypes[vt.QualifiedName()] = true
+			vtypes[vt.Name] = true
+		}
+	}
+	return vtypes
+}
+
+// resolveColType returns the SQL type string for a column TypeRef, substituting
+// jsonb (or jsonb[]) when the type refers to a declared virtual type.
+func resolveColType(t ir.TypeRef, vtypes map[string]bool) string {
+	key := t.Name
+	if t.Schema != "" {
+		key = t.Schema + "." + t.Name
+	}
+	if vtypes[key] {
+		s := "jsonb"
+		for i := 0; i < t.ArrayDims; i++ {
+			s += "[]"
+		}
+		return s
+	}
+	return t.String()
 }
 
 // renamedFromKey returns the snapshot key under the OLD name for objects that
@@ -511,20 +544,20 @@ func dropObject(so *snapshot.SnapObject) []pipeline.DiffOp {
 
 // ── CREATE operations ─────────────────────────────────────────────────────────
 
-func createObject(obj pipeline.IRObject) ([]pipeline.DiffOp, error) {
+func createObject(obj pipeline.IRObject, vtypes map[string]bool) ([]pipeline.DiffOp, error) {
 	switch o := obj.(type) {
 	case *ir.Schema:
 		return createSchema(o), nil
 	case *ir.Extension:
 		return createExtension(o), nil
 	case *ir.Table:
-		return createTable(o), nil
+		return createTable(o, vtypes), nil
 	case *ir.View:
 		return createView(o), nil
 	case *ir.Function:
 		return createFunction(o), nil
 	case *ir.Type:
-		return createType(o), nil
+		return createType(o, vtypes), nil
 	case *ir.Sequence:
 		return createSequence(o), nil
 	case *ir.Role:
@@ -853,7 +886,7 @@ func createExtension(o *ir.Extension) []pipeline.DiffOp {
 	return []pipeline.DiffOp{safeOp(b.String(), o.SrcPos)}
 }
 
-func createTable(o *ir.Table) []pipeline.DiffOp {
+func createTable(o *ir.Table, vtypes map[string]bool) []pipeline.DiffOp {
 	var b strings.Builder
 	switch {
 	case o.Unlogged:
@@ -939,7 +972,7 @@ func createTable(o *ir.Table) []pipeline.DiffOp {
 		b.WriteString("\n    ")
 		b.WriteString(quoteIdent(col.Name))
 		b.WriteString(" ")
-		b.WriteString(col.Type.String())
+		b.WriteString(resolveColType(col.Type, vtypes))
 		// Suppress NOT NULL for PK columns — PRIMARY KEY already implies it.
 		if col.NotNull && !pkColSet[col.Name] {
 			b.WriteString(" NOT NULL")
@@ -1345,7 +1378,7 @@ func buildFunctionSQL(o *ir.Function) string {
 	return b.String()
 }
 
-func createType(o *ir.Type) []pipeline.DiffOp {
+func createType(o *ir.Type, vtypes map[string]bool) []pipeline.DiffOp {
 	var ops []pipeline.DiffOp
 	switch o.Variant {
 	case "ENUM":
@@ -1362,7 +1395,7 @@ func createType(o *ir.Type) []pipeline.DiffOp {
 		b.WriteString(");")
 		ops = append(ops, safeOp(b.String(), o.SrcPos))
 	case "COMPOSITE":
-		ops = append(ops, safeOp(buildCompositeTypeSQL(o), o.SrcPos))
+		ops = append(ops, safeOp(buildCompositeTypeSQL(o, vtypes), o.SrcPos))
 	case "DOMAIN":
 		body := o.Body
 		// rawSQL produces "CREATE DOMAIN unqualname AS ..."; qualify the name when schema is set.
@@ -1396,7 +1429,7 @@ func createType(o *ir.Type) []pipeline.DiffOp {
 	return ops
 }
 
-func buildCompositeTypeSQL(o *ir.Type) string {
+func buildCompositeTypeSQL(o *ir.Type, vtypes map[string]bool) string {
 	var b strings.Builder
 	b.WriteString("CREATE TYPE ")
 	b.WriteString(qualIdent(o.Schema, o.Name))
@@ -1407,7 +1440,7 @@ func buildCompositeTypeSQL(o *ir.Type) string {
 		}
 		b.WriteString(quoteIdent(attr.Name))
 		b.WriteString(" ")
-		b.WriteString(attr.Type.String())
+		b.WriteString(resolveColType(attr.Type, vtypes))
 	}
 	b.WriteString(");")
 	return b.String()
@@ -1467,7 +1500,7 @@ func createRole(o *ir.Role) []pipeline.DiffOp {
 
 // ── DIFF / ALTER operations ───────────────────────────────────────────────────
 
-func diffObject(desired pipeline.IRObject, snap *snapshot.SnapObject, fullSnap *pipeline.Snapshot) ([]pipeline.DiffOp, error) {
+func diffObject(desired pipeline.IRObject, snap *snapshot.SnapObject, fullSnap *pipeline.Snapshot, vtypes map[string]bool) ([]pipeline.DiffOp, error) {
 	switch o := desired.(type) {
 	case *ir.Extension:
 		if snap.Extension == nil {
@@ -1493,7 +1526,7 @@ func diffObject(desired pipeline.IRObject, snap *snapshot.SnapObject, fullSnap *
 		if snap.Table == nil {
 			return nil, nil
 		}
-		return diffTable(o, snap.Table)
+		return diffTable(o, snap.Table, vtypes)
 	case *ir.View:
 		if snap.View == nil {
 			return nil, nil
@@ -1508,7 +1541,7 @@ func diffObject(desired pipeline.IRObject, snap *snapshot.SnapObject, fullSnap *
 		if snap.Type == nil {
 			return nil, nil
 		}
-		return diffType(o, snap.Type, fullSnap)
+		return diffType(o, snap.Type, fullSnap, vtypes)
 	case *ir.Procedure:
 		if snap.Opaque == nil {
 			return nil, nil
@@ -1824,7 +1857,7 @@ func diffFunction(o *ir.Function, snap *snapshot.SnapFunction) []pipeline.DiffOp
 	return ops
 }
 
-func diffType(o *ir.Type, snap *snapshot.SnapType, fullSnap *pipeline.Snapshot) ([]pipeline.DiffOp, error) {
+func diffType(o *ir.Type, snap *snapshot.SnapType, fullSnap *pipeline.Snapshot, vtypes map[string]bool) ([]pipeline.DiffOp, error) {
 	var ops []pipeline.DiffOp
 	pos := o.SrcPos
 	typeIdent := qualIdent(o.Schema, o.Name)
@@ -1836,7 +1869,7 @@ func diffType(o *ir.Type, snap *snapshot.SnapType, fullSnap *pipeline.Snapshot) 
 			ops = append(ops,
 				destructiveOp(fmt.Sprintf("DROP TYPE IF EXISTS %s;", typeIdent), pos),
 			)
-			ops = append(ops, safeOp(buildCompositeTypeSQL(o), pos))
+			ops = append(ops, safeOp(buildCompositeTypeSQL(o, vtypes), pos))
 		}
 		if !ptrEq(o.Comment, snap.Comment) {
 			if o.Comment != nil {
@@ -2001,7 +2034,7 @@ func enumTypeMatch(colType, schema, name string) bool {
 		colType == qn+"[]" || colType == name+"[]"
 }
 
-func diffTable(o *ir.Table, snap *snapshot.SnapTable) ([]pipeline.DiffOp, error) {
+func diffTable(o *ir.Table, snap *snapshot.SnapTable, vtypes map[string]bool) ([]pipeline.DiffOp, error) {
 	var ops []pipeline.DiffOp
 	pos := o.SrcPos
 	tbl := qualIdent(o.Schema, o.Name)
@@ -2036,7 +2069,7 @@ func diffTable(o *ir.Table, snap *snapshot.SnapTable) ([]pipeline.DiffOp, error)
 		ops = append(ops, safeOp(fmt.Sprintf("ALTER TABLE %s NO FORCE ROW LEVEL SECURITY;", tbl), pos))
 	}
 
-	colOps, renamedCols, droppedCols, err := diffColumns(tbl, o, snap)
+	colOps, renamedCols, droppedCols, err := diffColumns(tbl, o, snap, vtypes)
 	if err != nil {
 		return nil, err
 	}
@@ -2145,7 +2178,7 @@ func diffTableInherits(tbl string, o *ir.Table, snap *snapshot.SnapTable, pos pi
 // for the NEW name would make every directive a one-shot. The collision check
 // (RENAMED FROM names a column ALSO present in the desired DDL) stays
 // snapshot-independent because it's incoherent intent regardless of state.
-func diffColumns(tbl string, o *ir.Table, snap *snapshot.SnapTable) ([]pipeline.DiffOp, map[string]string, map[string]bool, error) {
+func diffColumns(tbl string, o *ir.Table, snap *snapshot.SnapTable, vtypes map[string]bool) ([]pipeline.DiffOp, map[string]string, map[string]bool, error) {
 	var ops []pipeline.DiffOp
 
 	// PostgreSQL PRIMARY KEY implies NOT NULL. Snapshots written before this
@@ -2244,7 +2277,7 @@ func diffColumns(tbl string, o *ir.Table, snap *snapshot.SnapTable) ([]pipeline.
 		if !exists {
 			// ADD COLUMN
 			var b strings.Builder
-			fmt.Fprintf(&b, "ALTER TABLE %s ADD COLUMN %s %s", tbl, quoteIdent(col.Name), col.Type.String())
+			fmt.Fprintf(&b, "ALTER TABLE %s ADD COLUMN %s %s", tbl, quoteIdent(col.Name), resolveColType(col.Type, vtypes))
 			if col.NotNull {
 				b.WriteString(" NOT NULL")
 			}
@@ -2279,14 +2312,15 @@ func diffColumns(tbl string, o *ir.Table, snap *snapshot.SnapTable) ([]pipeline.
 		}
 
 		// Alter existing column.
-		if col.Type.String() != sc.Type {
+		resolvedType := resolveColType(col.Type, vtypes)
+		if resolvedType != sc.Type {
 			using := ""
 			if col.Using != nil {
 				using = " USING " + *col.Using
 			}
 			ops = append(ops, destructiveOp(
 				fmt.Sprintf("ALTER TABLE %s ALTER COLUMN %s TYPE %s%s;",
-					tbl, quoteIdent(col.Name), col.Type.String(), using),
+					tbl, quoteIdent(col.Name), resolvedType, using),
 				col.SrcPos,
 			))
 		}

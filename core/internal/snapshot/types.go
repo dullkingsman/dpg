@@ -178,14 +178,35 @@ type SnapRole struct {
 	Comment *string `json:"comment,omitempty"`
 }
 
+// SnapVtypeBody is the serialised form of an ir.VtypeBody discriminated union.
+// Kind is one of "type_ref", "composite", or "union".
+type SnapVtypeBody struct {
+	Kind string `json:"kind"`
+	// type_ref fields
+	Schema  string `json:"schema,omitempty"`
+	Name    string `json:"name,omitempty"`
+	IsArray bool   `json:"array,omitempty"`
+	// composite fields
+	Fields []SnapVtypeField `json:"fields,omitempty"`
+	// union fields
+	Members []SnapVtypeBody `json:"members,omitempty"`
+}
+
+// SnapVtypeField is one named field inside a SnapVtypeBody composite.
+type SnapVtypeField struct {
+	Name string        `json:"name"`
+	Type SnapVtypeBody `json:"type"`
+}
+
 // SnapVirtualType is the snapshot form of a VIRTUAL TYPE declaration.
-// It is stored for downstream consumers (ORM generators, type checkers) but
-// never included in SQL migrations.
+// Columns and composite type attributes may reference a virtual type; DPG
+// resolves those to jsonb / jsonb[] in generated SQL.  The structured body is
+// stored here for downstream consumers (ORMs, type-safe query builders).
 type SnapVirtualType struct {
-	Schema  string  `json:"schema,omitempty"`
-	Name    string  `json:"name"`
-	Body    string  `json:"body"`
-	Comment *string `json:"comment,omitempty"`
+	Schema  string        `json:"schema,omitempty"`
+	Name    string        `json:"name"`
+	Body    SnapVtypeBody `json:"body"`
+	Comment *string       `json:"comment,omitempty"`
 }
 
 // SnapDefaultPrivileges is the snapshot form of a DEFAULT PRIVILEGES declaration.

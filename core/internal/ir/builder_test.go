@@ -394,27 +394,141 @@ func TestArgsKey(t *testing.T) {
 
 // ── VirtualType ───────────────────────────────────────────────────────────────
 
-func TestBuildVirtualType(t *testing.T) {
-	obj := buildObject(t, pipeline.KindVirtualType,
-		`status AS "active" | "pending" | "inactive"`, ``)
+func TestBuildVirtualTypeTypeRef(t *testing.T) {
+	obj := buildObject(t, pipeline.KindVirtualType, `label AS text`, ``)
 	vt, ok := obj.(*ir.VirtualType)
 	if !ok {
 		t.Fatalf("expected *ir.VirtualType, got %T", obj)
 	}
-	if vt.Name != "status" {
-		t.Errorf("Name: got %q, want %q", vt.Name, "status")
+	if vt.Name != "label" {
+		t.Errorf("Name: got %q, want %q", vt.Name, "label")
 	}
-	if !strings.Contains(vt.Body, "active") {
-		t.Errorf("Body should contain 'active', got %q", vt.Body)
-	}
-	if vt.QualifiedName() != "public.status" {
+	if vt.QualifiedName() != "public.label" {
 		t.Errorf("QualifiedName: got %q", vt.QualifiedName())
+	}
+	ref, ok := vt.Body.(ir.VtypeTypeRef)
+	if !ok {
+		t.Fatalf("Body: expected VtypeTypeRef, got %T", vt.Body)
+	}
+	if ref.Name != "text" {
+		t.Errorf("Body.Name: got %q, want %q", ref.Name, "text")
+	}
+	if ref.IsArray {
+		t.Errorf("Body.IsArray: want false")
+	}
+}
+
+func TestBuildVirtualTypeTypeRefArray(t *testing.T) {
+	obj := buildObject(t, pipeline.KindVirtualType, `tags AS text[]`, ``)
+	vt := obj.(*ir.VirtualType)
+	ref, ok := vt.Body.(ir.VtypeTypeRef)
+	if !ok {
+		t.Fatalf("Body: expected VtypeTypeRef, got %T", vt.Body)
+	}
+	if ref.Name != "text" || !ref.IsArray {
+		t.Errorf("Body: got name=%q array=%v, want name=text array=true", ref.Name, ref.IsArray)
+	}
+}
+
+func TestBuildVirtualTypeSchemaQualifiedRef(t *testing.T) {
+	obj := buildObject(t, pipeline.KindVirtualType, `status AS billing.payment_method`, ``)
+	vt := obj.(*ir.VirtualType)
+	ref, ok := vt.Body.(ir.VtypeTypeRef)
+	if !ok {
+		t.Fatalf("Body: expected VtypeTypeRef, got %T", vt.Body)
+	}
+	if ref.Schema != "billing" || ref.Name != "payment_method" {
+		t.Errorf("Body: got schema=%q name=%q, want billing/payment_method", ref.Schema, ref.Name)
+	}
+}
+
+func TestBuildVirtualTypeComposite(t *testing.T) {
+	obj := buildObject(t, pipeline.KindVirtualType, `point AS (x float8, y float8)`, ``)
+	vt := obj.(*ir.VirtualType)
+	comp, ok := vt.Body.(ir.VtypeComposite)
+	if !ok {
+		t.Fatalf("Body: expected VtypeComposite, got %T", vt.Body)
+	}
+	if len(comp.Fields) != 2 {
+		t.Fatalf("Fields: got %d, want 2", len(comp.Fields))
+	}
+	if comp.Fields[0].Name != "x" || comp.Fields[0].Type.Name != "float8" {
+		t.Errorf("Fields[0]: got %+v", comp.Fields[0])
+	}
+	if comp.Fields[1].Name != "y" || comp.Fields[1].Type.Name != "float8" {
+		t.Errorf("Fields[1]: got %+v", comp.Fields[1])
+	}
+}
+
+func TestBuildVirtualTypeCompositeWithArrayField(t *testing.T) {
+	obj := buildObject(t, pipeline.KindVirtualType, `order_summary AS (id bigint, items line_item[])`, ``)
+	vt := obj.(*ir.VirtualType)
+	comp, ok := vt.Body.(ir.VtypeComposite)
+	if !ok {
+		t.Fatalf("Body: expected VtypeComposite, got %T", vt.Body)
+	}
+	if len(comp.Fields) != 2 {
+		t.Fatalf("Fields: got %d, want 2", len(comp.Fields))
+	}
+	itemsField := comp.Fields[1]
+	if itemsField.Name != "items" || itemsField.Type.Name != "line_item" || !itemsField.Type.IsArray {
+		t.Errorf("Fields[1]: got name=%q type=%q array=%v", itemsField.Name, itemsField.Type.Name, itemsField.Type.IsArray)
+	}
+}
+
+func TestBuildVirtualTypeUnion(t *testing.T) {
+	obj := buildObject(t, pipeline.KindVirtualType,
+		`shape AS (x float8, y float8) | (width float8, height float8) | text`, ``)
+	vt := obj.(*ir.VirtualType)
+	union, ok := vt.Body.(ir.VtypeUnion)
+	if !ok {
+		t.Fatalf("Body: expected VtypeUnion, got %T", vt.Body)
+	}
+	if len(union.Members) != 3 {
+		t.Fatalf("Members: got %d, want 3", len(union.Members))
+	}
+	// First two should be composites, last a type ref.
+	if _, ok := union.Members[0].(ir.VtypeComposite); !ok {
+		t.Errorf("Members[0]: expected VtypeComposite, got %T", union.Members[0])
+	}
+	if _, ok := union.Members[1].(ir.VtypeComposite); !ok {
+		t.Errorf("Members[1]: expected VtypeComposite, got %T", union.Members[1])
+	}
+	ref, ok := union.Members[2].(ir.VtypeTypeRef)
+	if !ok {
+		t.Errorf("Members[2]: expected VtypeTypeRef, got %T", union.Members[2])
+	}
+	if ref.Name != "text" {
+		t.Errorf("Members[2].Name: got %q, want %q", ref.Name, "text")
+	}
+}
+
+func TestBuildVirtualTypeUnionTypeRefs(t *testing.T) {
+	obj := buildObject(t, pipeline.KindVirtualType, `metric AS integer | numeric | text`, ``)
+	vt := obj.(*ir.VirtualType)
+	union, ok := vt.Body.(ir.VtypeUnion)
+	if !ok {
+		t.Fatalf("Body: expected VtypeUnion, got %T", vt.Body)
+	}
+	if len(union.Members) != 3 {
+		t.Fatalf("Members: got %d, want 3", len(union.Members))
+	}
+	names := []string{"integer", "numeric", "text"}
+	for i, m := range union.Members {
+		ref, ok := m.(ir.VtypeTypeRef)
+		if !ok {
+			t.Errorf("Members[%d]: expected VtypeTypeRef, got %T", i, m)
+			continue
+		}
+		if ref.Name != names[i] {
+			t.Errorf("Members[%d].Name: got %q, want %q", i, ref.Name, names[i])
+		}
 	}
 }
 
 func TestBuildVirtualTypeWithComment(t *testing.T) {
 	obj := buildObject(t, pipeline.KindVirtualType,
-		`user_state AS active | inactive`,
+		`user_state AS text`,
 		`COMMENT "User lifecycle state";`)
 	vt := obj.(*ir.VirtualType)
 	if vt.Comment == nil || *vt.Comment != "User lifecycle state" {
@@ -422,13 +536,13 @@ func TestBuildVirtualTypeWithComment(t *testing.T) {
 	}
 }
 
-func TestBuildVirtualTypeSchemaQualified(t *testing.T) {
+func TestBuildVirtualTypeSchemaQualifiedName(t *testing.T) {
 	p := pgparser.New()
-	pgResult, err := p.Parse(pipeline.KindVirtualType, `billing.status AS paid | pending`, zeroPos)
+	pgResult, err := p.Parse(pipeline.KindVirtualType, `billing.status AS text`, zeroPos)
 	if err != nil {
 		t.Fatalf("pg parse error: %v", err)
 	}
-	// Set an explicit schema context — should NOT override the qualified name.
+	// Explicit schema context must NOT override the qualified name.
 	pgResult.SchemaContext = "public"
 	bp := blockparser.New()
 	blockAST, _ := bp.Parse(pipeline.KindVirtualType, ``, zeroPos)
@@ -442,6 +556,53 @@ func TestBuildVirtualTypeSchemaQualified(t *testing.T) {
 	}
 	if vt.Name != "status" {
 		t.Errorf("Name: got %q, want %q", vt.Name, "status")
+	}
+}
+
+func TestBuildVirtualTypeSchemaContext(t *testing.T) {
+	p := pgparser.New()
+	pgResult, err := p.Parse(pipeline.KindVirtualType, `status AS text`, zeroPos)
+	if err != nil {
+		t.Fatalf("pg parse error: %v", err)
+	}
+	pgResult.SchemaContext = "myschema"
+	bp := blockparser.New()
+	blockAST, _ := bp.Parse(pipeline.KindVirtualType, ``, zeroPos)
+	obj, buildErr := ir.NewBuilder().Build(pgResult, blockAST)
+	if buildErr != nil {
+		t.Fatalf("build error: %v", buildErr)
+	}
+	vt := obj.(*ir.VirtualType)
+	if vt.Schema != "myschema" {
+		t.Errorf("Schema: got %q, want %q", vt.Schema, "myschema")
+	}
+}
+
+func TestBuildVirtualTypeEmptyBodyError(t *testing.T) {
+	p := pgparser.New()
+	pgResult, err := p.Parse(pipeline.KindVirtualType, `bad AS`, zeroPos)
+	if err != nil {
+		t.Fatalf("pg parse error: %v", err)
+	}
+	bp := blockparser.New()
+	blockAST, _ := bp.Parse(pipeline.KindVirtualType, ``, zeroPos)
+	_, buildErr := ir.NewBuilder().Build(pgResult, blockAST)
+	if buildErr == nil {
+		t.Error("expected error for empty body, got nil")
+	}
+}
+
+func TestBuildVirtualTypeMissingASError(t *testing.T) {
+	p := pgparser.New()
+	pgResult, err := p.Parse(pipeline.KindVirtualType, `noashere`, zeroPos)
+	if err != nil {
+		t.Fatalf("pg parse error: %v", err)
+	}
+	bp := blockparser.New()
+	blockAST, _ := bp.Parse(pipeline.KindVirtualType, ``, zeroPos)
+	_, buildErr := ir.NewBuilder().Build(pgResult, blockAST)
+	if buildErr == nil {
+		t.Error("expected error for missing AS keyword, got nil")
 	}
 }
 

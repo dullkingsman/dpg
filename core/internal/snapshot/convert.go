@@ -159,11 +159,36 @@ func toSnapObject(obj pipeline.IRObject) *SnapObject {
 		return &SnapObject{Kind: "virtual_type", VirtualType: &SnapVirtualType{
 			Schema:  o.Schema,
 			Name:    o.Name,
-			Body:    o.Body,
+			Body:    toSnapVtypeBody(o.Body),
 			Comment: o.Comment,
 		}}
 	default:
 		return nil
+	}
+}
+
+// toSnapVtypeBody converts an ir.VtypeBody to its serialisable snapshot form.
+func toSnapVtypeBody(body ir.VtypeBody) SnapVtypeBody {
+	switch b := body.(type) {
+	case ir.VtypeTypeRef:
+		return SnapVtypeBody{Kind: "type_ref", Schema: b.Schema, Name: b.Name, IsArray: b.IsArray}
+	case ir.VtypeComposite:
+		fields := make([]SnapVtypeField, len(b.Fields))
+		for i, f := range b.Fields {
+			fields[i] = SnapVtypeField{
+				Name: f.Name,
+				Type: SnapVtypeBody{Kind: "type_ref", Schema: f.Type.Schema, Name: f.Type.Name, IsArray: f.Type.IsArray},
+			}
+		}
+		return SnapVtypeBody{Kind: "composite", Fields: fields}
+	case ir.VtypeUnion:
+		members := make([]SnapVtypeBody, len(b.Members))
+		for i, m := range b.Members {
+			members[i] = toSnapVtypeBody(m)
+		}
+		return SnapVtypeBody{Kind: "union", Members: members}
+	default:
+		return SnapVtypeBody{Kind: "type_ref", Name: "unknown"}
 	}
 }
 

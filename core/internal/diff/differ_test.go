@@ -735,6 +735,230 @@ func TestDiffColumnDropSuppressesCascadedConstraint(t *testing.T) {
 	}
 }
 
+// ── Virtual type JSONB resolution ─────────────────────────────────────────────
+
+// makeVtype is a helper to build a VirtualType with a simple type-ref body.
+func makeVtype(schema, name string, body ir.VtypeBody) *ir.VirtualType {
+	return &ir.VirtualType{Schema: schema, Name: name, Body: body}
+}
+
+func TestVirtualTypeNoSQL(t *testing.T) {
+	// VIRTUAL TYPE declarations generate no SQL whatsoever.
+	d := New()
+	desired := []pipeline.IRObject{
+		makeVtype("public", "user_state", ir.VtypeTypeRef{Name: "text"}),
+	}
+	ops, err := d.Diff(desired, &pipeline.Snapshot{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ops) != 0 {
+		t.Errorf("expected 0 ops for VIRTUAL TYPE, got %d: %v", len(ops), sqlList(ops))
+	}
+}
+
+func TestVirtualTypeNoSQLOnChange(t *testing.T) {
+	// Changes to VIRTUAL TYPE also produce no SQL.
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.user_state", &snapshot.SnapObject{
+		Kind: "virtual_type",
+		VirtualType: &snapshot.SnapVirtualType{
+			Schema: "public",
+			Name:   "user_state",
+			Body:   snapshot.SnapVtypeBody{Kind: "type_ref", Name: "text"},
+		},
+	})
+	desired := []pipeline.IRObject{
+		makeVtype("public", "user_state", ir.VtypeComposite{
+			Fields: []ir.VtypeField{{Name: "val", Type: ir.VtypeTypeRef{Name: "integer"}}},
+		}),
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ops) != 0 {
+		t.Errorf("expected 0 ops for VIRTUAL TYPE change, got %d", len(ops))
+	}
+}
+
+func TestCreateTableWithVirtualTypeColumn(t *testing.T) {
+	// A column typed as a virtual type must emit jsonb in CREATE TABLE.
+	d := New()
+	desired := []pipeline.IRObject{
+		makeVtype("public", "user_profile", ir.VtypeComposite{
+			Fields: []ir.VtypeField{
+				{Name: "name", Type: ir.VtypeTypeRef{Name: "text"}},
+				{Name: "age", Type: ir.VtypeTypeRef{Name: "integer"}},
+			},
+		}),
+		&ir.Table{
+			Schema: "public",
+			Name:   "users",
+			Columns: []*ir.Column{
+				{Name: "id", Type: ir.TypeRef{Name: "bigint"}},
+				{Name: "profile", Type: ir.TypeRef{Name: "user_profile"}},
+			},
+		},
+	}
+	ops, err := d.Diff(desired, &pipeline.Snapshot{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	combined := strings.Join(sqlList(ops), " ")
+	if !strings.Contains(combined, "jsonb") {
+		t.Errorf("expected jsonb in CREATE TABLE SQL, got: %s", combined)
+	}
+	if strings.Contains(combined, "user_profile") {
+		t.Errorf("unexpected virtual type name in SQL (should be jsonb): %s", combined)
+	}
+}
+
+func TestCreateTableWithVirtualTypeArrayColumn(t *testing.T) {
+	// A column typed as virtual_type[] must emit jsonb[] in CREATE TABLE.
+	d := New()
+	desired := []pipeline.IRObject{
+		makeVtype("public", "line_item", ir.VtypeComposite{
+			Fields: []ir.VtypeField{
+				{Name: "sku", Type: ir.VtypeTypeRef{Name: "text"}},
+				{Name: "qty", Type: ir.VtypeTypeRef{Name: "integer"}},
+			},
+		}),
+		&ir.Table{
+			Schema: "public",
+			Name:   "orders",
+			Columns: []*ir.Column{
+				{Name: "id", Type: ir.TypeRef{Name: "bigint"}},
+				{Name: "items", Type: ir.TypeRef{Name: "line_item", ArrayDims: 1}},
+			},
+		},
+	}
+	ops, err := d.Diff(desired, &pipeline.Snapshot{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	combined := strings.Join(sqlList(ops), " ")
+	if !strings.Contains(combined, "jsonb[]") {
+		t.Errorf("expected jsonb[] in CREATE TABLE SQL, got: %s", combined)
+	}
+}
+
+func TestCreateTableWithSchemaQualifiedVirtualTypeColumn(t *testing.T) {
+	// Schema-qualified virtual type reference: billing.payment_method → jsonb.
+	d := New()
+	desired := []pipeline.IRObject{
+		makeVtype("billing", "payment_method", ir.VtypeTypeRef{Name: "text"}),
+		&ir.Table{
+			Schema: "public",
+			Name:   "invoices",
+			Columns: []*ir.Column{
+				{Name: "id", Type: ir.TypeRef{Name: "bigint"}},
+				{Name: "payment", Type: ir.TypeRef{Schema: "billing", Name: "payment_method"}},
+			},
+		},
+	}
+	ops, err := d.Diff(desired, &pipeline.Snapshot{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	combined := strings.Join(sqlList(ops), " ")
+	if !strings.Contains(combined, "jsonb") {
+		t.Errorf("expected jsonb in CREATE TABLE SQL for schema-qualified virtual type, got: %s", combined)
+	}
+}
+
+func TestAddColumnWithVirtualTypeResolvesToJsonb(t *testing.T) {
+	// ADD COLUMN with a virtual type reference must use jsonb.
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.orders", &snapshot.SnapObject{
+		Kind: "table",
+		Table: &snapshot.SnapTable{
+			Schema: "public", Name: "orders",
+			Columns: []snapshot.SnapColumn{
+				{Name: "id", Type: "bigint"},
+			},
+		},
+	})
+	desired := []pipeline.IRObject{
+		makeVtype("public", "line_item", ir.VtypeComposite{
+			Fields: []ir.VtypeField{{Name: "sku", Type: ir.VtypeTypeRef{Name: "text"}}},
+		}),
+		&ir.Table{
+			Schema: "public",
+			Name:   "orders",
+			Columns: []*ir.Column{
+				{Name: "id", Type: ir.TypeRef{Name: "bigint"}},
+				{Name: "items", Type: ir.TypeRef{Name: "line_item", ArrayDims: 1}},
+			},
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	combined := strings.Join(sqlList(ops), " ")
+	if !strings.Contains(combined, "ADD COLUMN") || !strings.Contains(combined, "jsonb[]") {
+		t.Errorf("expected ADD COLUMN ... jsonb[], got: %s", combined)
+	}
+}
+
+func TestCompositeTypeWithVirtualTypeAttrResolvesToJsonb(t *testing.T) {
+	// A composite type attribute typed as a virtual type must emit jsonb.
+	d := New()
+	desired := []pipeline.IRObject{
+		makeVtype("public", "address_detail", ir.VtypeComposite{
+			Fields: []ir.VtypeField{{Name: "line", Type: ir.VtypeTypeRef{Name: "text"}}},
+		}),
+		&ir.Type{
+			Schema:  "public",
+			Name:    "full_address",
+			Variant: "COMPOSITE",
+			CompositeAttrs: []*ir.Column{
+				{Name: "street", Type: ir.TypeRef{Name: "text"}},
+				{Name: "detail", Type: ir.TypeRef{Name: "address_detail"}},
+			},
+		},
+	}
+	ops, err := d.Diff(desired, &pipeline.Snapshot{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	combined := strings.Join(sqlList(ops), " ")
+	if !strings.Contains(combined, "jsonb") {
+		t.Errorf("expected jsonb in CREATE TYPE SQL for virtual type attr, got: %s", combined)
+	}
+	if strings.Contains(combined, "address_detail") {
+		t.Errorf("unexpected virtual type name in SQL: %s", combined)
+	}
+}
+
+func TestNonVirtualTypeColumnNotAffected(t *testing.T) {
+	// A real PG type column (e.g. text) must not be changed to jsonb.
+	d := New()
+	desired := []pipeline.IRObject{
+		makeVtype("public", "tag", ir.VtypeTypeRef{Name: "text"}),
+		&ir.Table{
+			Schema: "public",
+			Name:   "products",
+			Columns: []*ir.Column{
+				{Name: "id", Type: ir.TypeRef{Name: "bigint"}},
+				{Name: "name", Type: ir.TypeRef{Name: "text"}},
+			},
+		},
+	}
+	ops, err := d.Diff(desired, &pipeline.Snapshot{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, op := range ops {
+		if strings.Contains(op.SQL(), "\"name\" jsonb") {
+			t.Errorf("plain text column was wrongly resolved to jsonb: %s", op.SQL())
+		}
+	}
+}
+
 func sqlList(ops []pipeline.DiffOp) []string {
 	out := make([]string, len(ops))
 	for i, o := range ops {

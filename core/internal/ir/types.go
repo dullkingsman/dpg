@@ -566,13 +566,64 @@ func (t *TSTemplate) QualifiedName() string   { return qualName(t.Schema, t.Name
 func (t *TSTemplate) Pos() pipeline.SourcePos { return t.SrcPos }
 func (t *TSTemplate) irObject()               {}
 
-// VirtualType is a VIRTUAL TYPE declaration — a DPG-native type annotation that
-// has no backing PostgreSQL DDL. It is stored in the snapshot for downstream
-// consumers (ORM generators, type checkers) but never included in migrations.
+// ── VtypeBody — virtual type body DSL ────────────────────────────────────────
+
+// VtypeBody is a discriminated union for the body of a VIRTUAL TYPE declaration.
+// It is one of VtypeTypeRef, VtypeComposite, or VtypeUnion.
+type VtypeBody interface{ vtypeBody() }
+
+// VtypeTypeRef references a PostgreSQL built-in type or another declared
+// VIRTUAL TYPE.  IsArray marks a [] suffix (used when assigning as a column
+// type to get jsonb[] instead of jsonb).
+type VtypeTypeRef struct {
+	Schema  string // empty for unqualified references
+	Name    string
+	IsArray bool
+}
+
+func (r VtypeTypeRef) vtypeBody() {}
+
+func (r VtypeTypeRef) String() string {
+	s := qualName(r.Schema, r.Name)
+	if r.IsArray {
+		s += "[]"
+	}
+	return s
+}
+
+// VtypeField is a named field inside a VtypeComposite body.
+type VtypeField struct {
+	Name string
+	Type VtypeTypeRef // field types are simple type references
+}
+
+// VtypeComposite is an inline record definition: (field1 TYPE1, field2 TYPE2, ...).
+type VtypeComposite struct {
+	Fields []VtypeField
+}
+
+func (c VtypeComposite) vtypeBody() {}
+
+// VtypeUnion is a union of two or more VtypeBody terms joined with |.
+type VtypeUnion struct {
+	Members []VtypeBody // each member is VtypeComposite or VtypeTypeRef
+}
+
+func (u VtypeUnion) vtypeBody() {}
+
+// ── VirtualType ───────────────────────────────────────────────────────────────
+
+// VirtualType is a VIRTUAL TYPE declaration — a DPG-native construct that gives
+// a structural schema to JSON/JSONB columns and JSON array columns.  It has no
+// backing PostgreSQL DDL (no CREATE/ALTER/DROP TYPE is ever emitted).  Columns
+// and composite type attributes may reference a virtual type directly; DPG
+// resolves those references to jsonb / jsonb[] in generated SQL.  The structured
+// body is stored in the snapshot for downstream consumers (ORMs, type-safe query
+// builders) that read the DPG snapshot or IR via the pkg/dpg API.
 type VirtualType struct {
 	Schema  string
 	Name    string
-	Body    string // raw text after AS (e.g. "active" | "pending")
+	Body    VtypeBody // structured body: VtypeTypeRef | VtypeComposite | VtypeUnion
 	Comment *string
 	SrcPos  pipeline.SourcePos
 }

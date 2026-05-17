@@ -1304,37 +1304,86 @@ SCHEMA public {
 
 ### 5.6. Virtual Types
 
-   Virtual types are DPG-native annotations with no PostgreSQL
-   equivalent.  They generate NO SQL whatsoever.  Their purpose is to
-   carry type information for downstream consumers such as ORM generators
-   and type-safe query builders that read the DPG snapshot or IR via
-   the `pkg/dpg` API.
+   Virtual types are DPG-native DDL constructs that give a structural
+   schema to `JSON` / `JSONB` columns and `JSON` array columns.  They
+   have no backing PostgreSQL type — no `CREATE TYPE`, `ALTER TYPE`, or
+   `DROP TYPE` is ever emitted.  A table column or composite type
+   attribute may declare its type as a virtual type name; DPG resolves
+   that reference to `jsonb` (scalar) or `jsonb[]` (array) in all
+   generated SQL.  The structured body is stored in the snapshot so
+   downstream consumers (ORM generators, type-safe query builders) can
+   read type information via the `pkg/dpg` API or the snapshot JSON.
 
 ```abnf
-virtual-type-decl = "VIRTUAL TYPE" WSP schema-name WSP "AS" WSP vtype-body ";"
-                    [ "{" vtype-block "}" ]
+virtual-type-decl = "VIRTUAL TYPE" WSP schema-name WSP "AS" WSP
+                    vtype-body ";" [ "{" vtype-block "}" ]
 
-vtype-body  = <arbitrary text not containing ";" or "{"
-               at brace depth 0>
+vtype-body      = vtype-union
+vtype-union     = vtype-term *( WSP "|" WSP vtype-term )
+vtype-term      = vtype-composite / vtype-typeref
+vtype-composite = "(" vtype-field *( "," WSP vtype-field ) ")"
+vtype-field     = identifier WSP vtype-typeref
+vtype-typeref   = [ schema-name "." ] identifier [ "[]" ]
+
 vtype-block = *( comment-dir ";" )
 ```
 
-   The body after `AS` is stored verbatim.  The compiler MUST NOT
-   interpret or validate it.  No type checking is performed.
+   The compiler MUST parse and validate the body.  A `vtype-typeref`
+   that appears in a column or composite attribute position resolves to
+   `jsonb` or `jsonb[]` in SQL output; the virtual type name is never
+   written to the database.
 
-   Examples:
+   **Body forms:**
 
-```sql
-VIRTUAL TYPE user_state AS "active" | "suspended" | "deleted";
+   -   **Type reference** — a single PG built-in or user-defined type
+       name, or a reference to another declared `VIRTUAL TYPE`:
 
-VIRTUAL TYPE billing.payment_method AS
-    { kind: "card", last4: string, brand: string }
-    | { kind: "bank_ach", routing: string }
-    | { kind: "wallet" };
-{
-    COMMENT "Payment method discriminated union for type generation";
-}
-```
+       ```sql
+       VIRTUAL TYPE label AS text;
+       VIRTUAL TYPE metric AS numeric;
+       VIRTUAL TYPE named_point AS point;        -- references virtual type "point"
+       VIRTUAL TYPE tags AS text[];              -- array form
+       ```
+
+   -   **Composite** — an inline record with named, typed fields.
+       Field types MAY themselves be virtual type references:
+
+       ```sql
+       VIRTUAL TYPE point AS (x float8, y float8);
+
+       VIRTUAL TYPE line_item AS (
+           sku      text,
+           quantity integer,
+           price    numeric
+       );
+       ```
+
+   -   **Union** — two or more terms joined with `|`.  Any combination
+       of composites and type references is valid:
+
+       ```sql
+       VIRTUAL TYPE payment AS
+           (kind text, amount numeric, currency text)
+           | (kind text, token text)
+           | text;
+       ```
+
+   **Usage as a column or field type:**
+
+   ```sql
+   TABLE orders (
+       id    bigint,
+       items line_item[]   -- virtual type ref: emits "jsonb[]" in SQL
+   ) { }
+
+   TYPE address AS (
+       street text,
+       detail address_detail   -- virtual type ref: emits "jsonb"
+   );
+   ```
+
+   Adding `[]` to the reference signals a JSON array column and causes
+   DPG to emit `jsonb[]` instead of `jsonb`.
 
    **Rules:**
 
@@ -1347,6 +1396,10 @@ VIRTUAL TYPE billing.payment_method AS
    -   Virtual types appear in the snapshot under `"kind": "virtual_type"`
        for round-trip consistency.  `dpg plan` produces no SQL for
        additions, modifications, or removals of virtual types.
+
+   -   When a column or composite attribute type resolves to a virtual
+       type, the generated SQL uses `jsonb` / `jsonb[]`.  The virtual
+       type name is never written to the database catalog.
 
    -   The `{ }` block accepts ONLY `COMMENT`.  Any other directive is
        a compiler error (DPG-E015).

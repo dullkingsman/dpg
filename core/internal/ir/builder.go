@@ -1464,21 +1464,17 @@ func blockTriggerToIR(tr pipeline.TriggerDef) *Trigger {
 
 // buildVirtualType parses a VIRTUAL TYPE declaration from the raw Part1 text.
 // Part1 format: [schema.]name AS body
-// The body (after AS) is stored verbatim for downstream consumers; DPG generates
-// no SQL for virtual types.
 func (b *Builder) buildVirtualType(part1 string, block pipeline.BlockAST, pos pipeline.SourcePos, schemaCtx string) (*VirtualType, error) {
 	// Find the standalone AS keyword by scanning word-by-word.
 	upper := strings.ToUpper(part1)
 	asIdx := -1
 	for i := 0; i < len(upper); {
-		// Skip whitespace.
 		for i < len(upper) && isWS(upper[i]) {
 			i++
 		}
 		if i >= len(upper) {
 			break
 		}
-		// If this character starts a word, read it.
 		if isWordChar(upper[i]) {
 			start := i
 			for i < len(upper) && isWordChar(upper[i]) {
@@ -1489,7 +1485,7 @@ func (b *Builder) buildVirtualType(part1 string, block pipeline.BlockAST, pos pi
 				break
 			}
 		} else {
-			i++ // skip any non-word, non-whitespace character (e.g. '.')
+			i++ // skip non-word characters (e.g. '.')
 		}
 	}
 	if asIdx < 0 {
@@ -1497,7 +1493,7 @@ func (b *Builder) buildVirtualType(part1 string, block pipeline.BlockAST, pos pi
 	}
 
 	namePart := strings.TrimSpace(part1[:asIdx])
-	body := strings.TrimSpace(part1[asIdx+2:]) // skip "AS"
+	bodyText := strings.TrimSpace(part1[asIdx+2:]) // skip "AS"
 
 	// Parse the name (possibly schema-qualified: schema.name).
 	var schema, name string
@@ -1515,6 +1511,11 @@ func (b *Builder) buildVirtualType(part1 string, block pipeline.BlockAST, pos pi
 		}
 	}
 
+	body, err := parseVtypeBody(bodyText, pos)
+	if err != nil {
+		return nil, err
+	}
+
 	vt := &VirtualType{
 		Schema: schema,
 		Name:   name,
@@ -1525,6 +1526,184 @@ func (b *Builder) buildVirtualType(part1 string, block pipeline.BlockAST, pos pi
 		vt.Comment = &block.Comment.Value
 	}
 	return vt, nil
+}
+
+// parseVtypeBody parses the body expression of a VIRTUAL TYPE declaration.
+// Grammar:
+//
+//	vtype-body  = vtype-union
+//	vtype-union = vtype-term *( "|" vtype-term )
+//	vtype-term  = vtype-composite | vtype-typeref
+//	vtype-composite = "(" vtype-field *( "," vtype-field ) ")"
+//	vtype-field = identifier vtype-typeref
+//	vtype-typeref = [ schema "." ] name [ "[]" ]
+func parseVtypeBody(s string, pos pipeline.SourcePos) (VtypeBody, error) {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return nil, pipeline.Errorf(pos, "VIRTUAL TYPE: body must not be empty")
+	}
+	members, err := splitVtypeUnion(s, pos)
+	if err != nil {
+		return nil, err
+	}
+	if len(members) == 1 {
+		return parseVtypeTerm(members[0], pos)
+	}
+	union := VtypeUnion{Members: make([]VtypeBody, 0, len(members))}
+	for _, m := range members {
+		term, err := parseVtypeTerm(m, pos)
+		if err != nil {
+			return nil, err
+		}
+		union.Members = append(union.Members, term)
+	}
+	return union, nil
+}
+
+// splitVtypeUnion splits a vtype body string by | at parenthesis depth 0.
+func splitVtypeUnion(s string, pos pipeline.SourcePos) ([]string, error) {
+	var parts []string
+	depth := 0
+	start := 0
+	for i := 0; i < len(s); i++ {
+		switch s[i] {
+		case '(':
+			depth++
+		case ')':
+			depth--
+			if depth < 0 {
+				return nil, pipeline.Errorf(pos, "VIRTUAL TYPE: unmatched ')' in body")
+			}
+		case '|':
+			if depth == 0 {
+				part := strings.TrimSpace(s[start:i])
+				if part == "" {
+					return nil, pipeline.Errorf(pos, "VIRTUAL TYPE: empty union member")
+				}
+				parts = append(parts, part)
+				start = i + 1
+			}
+		}
+	}
+	if depth != 0 {
+		return nil, pipeline.Errorf(pos, "VIRTUAL TYPE: unclosed '(' in body")
+	}
+	last := strings.TrimSpace(s[start:])
+	if last == "" {
+		return nil, pipeline.Errorf(pos, "VIRTUAL TYPE: empty union member")
+	}
+	parts = append(parts, last)
+	return parts, nil
+}
+
+// parseVtypeTerm parses a single union member: composite or type ref.
+func parseVtypeTerm(s string, pos pipeline.SourcePos) (VtypeBody, error) {
+	s = strings.TrimSpace(s)
+	if strings.HasPrefix(s, "(") {
+		return parseVtypeComposite(s, pos)
+	}
+	return parseVtypeTypeRef(s, pos)
+}
+
+// parseVtypeComposite parses "(field1 TYPE1, field2 TYPE2, ...)".
+func parseVtypeComposite(s string, pos pipeline.SourcePos) (VtypeComposite, error) {
+	if !strings.HasPrefix(s, "(") || !strings.HasSuffix(s, ")") {
+		return VtypeComposite{}, pipeline.Errorf(pos, "VIRTUAL TYPE: composite body must be wrapped in parentheses, got %q", s)
+	}
+	inner := strings.TrimSpace(s[1 : len(s)-1])
+	if inner == "" {
+		return VtypeComposite{}, pipeline.Errorf(pos, "VIRTUAL TYPE: composite body must have at least one field")
+	}
+	fieldStrs, err := splitVtypeFields(inner, pos)
+	if err != nil {
+		return VtypeComposite{}, err
+	}
+	comp := VtypeComposite{Fields: make([]VtypeField, 0, len(fieldStrs))}
+	for _, f := range fieldStrs {
+		field, err := parseVtypeField(f, pos)
+		if err != nil {
+			return VtypeComposite{}, err
+		}
+		comp.Fields = append(comp.Fields, field)
+	}
+	return comp, nil
+}
+
+// splitVtypeFields splits composite fields by comma at depth 0.
+func splitVtypeFields(s string, pos pipeline.SourcePos) ([]string, error) {
+	var parts []string
+	depth := 0
+	start := 0
+	for i := 0; i < len(s); i++ {
+		switch s[i] {
+		case '(':
+			depth++
+		case ')':
+			depth--
+		case ',':
+			if depth == 0 {
+				part := strings.TrimSpace(s[start:i])
+				if part == "" {
+					return nil, pipeline.Errorf(pos, "VIRTUAL TYPE: empty composite field")
+				}
+				parts = append(parts, part)
+				start = i + 1
+			}
+		}
+	}
+	last := strings.TrimSpace(s[start:])
+	if last == "" {
+		return nil, pipeline.Errorf(pos, "VIRTUAL TYPE: empty composite field")
+	}
+	parts = append(parts, last)
+	return parts, nil
+}
+
+// parseVtypeField parses "fieldname TypeRef".
+func parseVtypeField(s string, pos pipeline.SourcePos) (VtypeField, error) {
+	s = strings.TrimSpace(s)
+	// Split on first whitespace: name is before, type is after.
+	idx := strings.IndexFunc(s, func(r rune) bool {
+		return r == ' ' || r == '\t'
+	})
+	if idx < 0 {
+		return VtypeField{}, pipeline.Errorf(pos, "VIRTUAL TYPE: field %q missing type", s)
+	}
+	fieldName := strings.TrimSpace(s[:idx])
+	typeStr := strings.TrimSpace(s[idx+1:])
+	if fieldName == "" {
+		return VtypeField{}, pipeline.Errorf(pos, "VIRTUAL TYPE: empty field name")
+	}
+	typeRef, err := parseVtypeTypeRef(typeStr, pos)
+	if err != nil {
+		return VtypeField{}, err
+	}
+	return VtypeField{Name: strings.ToLower(fieldName), Type: typeRef}, nil
+}
+
+// parseVtypeTypeRef parses a type reference: [schema.]name[[]].
+func parseVtypeTypeRef(s string, pos pipeline.SourcePos) (VtypeTypeRef, error) {
+	s = strings.TrimSpace(s)
+	isArray := false
+	if strings.HasSuffix(s, "[]") {
+		isArray = true
+		s = strings.TrimSpace(s[:len(s)-2])
+	}
+	if s == "" {
+		return VtypeTypeRef{}, pipeline.Errorf(pos, "VIRTUAL TYPE: empty type reference")
+	}
+	// Validate: only word chars and one optional dot for schema qualification.
+	var schema, name string
+	if dotIdx := strings.LastIndex(s, "."); dotIdx >= 0 {
+		schema = s[:dotIdx]
+		name = s[dotIdx+1:]
+	} else {
+		name = s
+	}
+	if name == "" {
+		return VtypeTypeRef{}, pipeline.Errorf(pos, "VIRTUAL TYPE: empty type name in reference %q", s)
+	}
+	return VtypeTypeRef{Schema: strings.ToLower(schema), Name: strings.ToLower(name), IsArray: isArray}, nil
 }
 
 func isWS(b byte) bool {
