@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.2-alpha.4] — 2026-05-17
+
+### Changed
+
+- Switch COMMENT and DEPRECATED directives to single quotes for consistency
+
 ## [0.5.2-alpha.3] — 2026-05-17
 
 ### Added
