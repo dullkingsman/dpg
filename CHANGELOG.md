@@ -10,6 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - **Cross-file macro sharing** — macros defined in any `.dpg` file within a compilation scope are now available to every other file in that scope. The compiler performs a global collection pre-pass over all source files before tokenization begins. File-local declarations take precedence over same-named cross-file macros.
+- **Nested macro expansion** — a macro body may now spread other macros (`...name` inside a paren-body or brace-body). Expansion is recursive to arbitrary depth. Circular references are detected at compile time and reported as DPG-E012.
 
 ### Changed
 

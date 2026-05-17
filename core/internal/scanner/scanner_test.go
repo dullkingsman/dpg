@@ -886,6 +886,79 @@ func TestGlobalMacro_MultipleFiles(t *testing.T) {
 	}
 }
 
+// ── nested macro tests ────────────────────────────────────────────────────────
+
+func TestNestedMacro_ParenInParen(t *testing.T) {
+	src := `
+MACRO base_cols (id UUID NOT NULL)
+MACRO extended_cols (...base_cols, name TEXT NOT NULL)
+
+TABLE users (
+    ...extended_cols,
+    CONSTRAINT pk PRIMARY KEY (id)
+);`
+	objs := scan(t, src)
+	obj := assertOne(t, objs)
+	if !strings.Contains(obj.Part1, "id UUID NOT NULL") {
+		t.Errorf("expected base_cols expanded, got %q", obj.Part1)
+	}
+	if !strings.Contains(obj.Part1, "name TEXT NOT NULL") {
+		t.Errorf("expected extended_cols own cols, got %q", obj.Part1)
+	}
+}
+
+func TestNestedMacro_BraceInBrace(t *testing.T) {
+	src := `
+MACRO base_block {
+    OWNER "admin";
+}
+MACRO full_block {
+    ...base_block
+    ENABLE ROW LEVEL SECURITY;
+}
+
+TABLE orders (id BIGINT PRIMARY KEY) { ...full_block }`
+	objs := scan(t, src)
+	obj := assertOne(t, objs)
+	if !strings.Contains(obj.Part2, "OWNER") {
+		t.Errorf("expected base_block expanded into full_block, Part2=%q", obj.Part2)
+	}
+	if !strings.Contains(obj.Part2, "ENABLE ROW LEVEL SECURITY") {
+		t.Errorf("expected full_block own content, Part2=%q", obj.Part2)
+	}
+}
+
+func TestNestedMacro_ThreeLevels(t *testing.T) {
+	src := `
+MACRO a (x INT)
+MACRO b (...a, y TEXT)
+MACRO c (...b, z BOOL)
+
+TABLE t (...c);`
+	objs := scan(t, src)
+	obj := assertOne(t, objs)
+	for _, col := range []string{"x INT", "y TEXT", "z BOOL"} {
+		if !strings.Contains(obj.Part1, col) {
+			t.Errorf("expected %q in Part1, got %q", col, obj.Part1)
+		}
+	}
+}
+
+func TestNestedMacro_CircularIsError(t *testing.T) {
+	src := `
+MACRO a (...b, x INT)
+MACRO b (...a, y TEXT)
+
+TABLE t (...a);`
+	err := scanErr(t, src)
+	if err == nil {
+		t.Fatal("expected error for circular macro reference, got nil")
+	}
+	if !strings.Contains(err.Error(), "circular") && !strings.Contains(err.Error(), "E012") {
+		t.Errorf("expected circular reference error, got %v", err)
+	}
+}
+
 // ── helper ───────────────────────────────────────────────────────────────────
 
 func kindList(objs []pipeline.RawObject) []string {

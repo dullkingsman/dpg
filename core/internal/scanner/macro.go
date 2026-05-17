@@ -40,6 +40,9 @@ func preprocessMacrosWithGlobal(src []byte, global macroStore) ([]byte, error) {
 			store[k] = v
 		}
 	}
+	if err := resolveStoreBodies(store); err != nil {
+		return nil, err
+	}
 	return expandMacros(src, store)
 }
 
@@ -249,6 +252,113 @@ func expandMacros(src []byte, store macroStore) ([]byte, error) {
 		p.advance()
 	}
 	return []byte(out.String()), nil
+}
+
+// resolveStoreBodies fully expands all macro bodies in-place so that nested
+// ...name spreads inside a body work correctly. It uses DFS over the store;
+// if a cycle is detected it returns a DPG-E012 error.
+func resolveStoreBodies(store macroStore) error {
+	resolved := make(map[string]bool, len(store))
+	visiting := make(map[string]bool)
+
+	var resolve func(name string) error
+	resolve = func(name string) error {
+		if resolved[name] {
+			return nil
+		}
+		if visiting[name] {
+			return fmt.Errorf("spread ...%s: circular macro reference (DPG-E012)", name)
+		}
+		visiting[name] = true
+		def := store[name]
+		body, err := expandBodyText(def.Body, store, resolve)
+		if err != nil {
+			return fmt.Errorf("macro %q: %w", name, err)
+		}
+		def.Body = body
+		store[name] = def
+		visiting[name] = false
+		resolved[name] = true
+		return nil
+	}
+
+	for name := range store {
+		if err := resolve(name); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// expandBodyText expands ...name spreads within a macro body string, using
+// resolve to ensure each referenced macro is itself fully resolved first.
+// String literals, dollar-quoted strings, and comments are preserved verbatim.
+func expandBodyText(body string, store macroStore, resolve func(string) error) (string, error) {
+	p := &macroParser{src: []byte(body)}
+	var out strings.Builder
+	for !p.eof() {
+		if p.peek() == '\'' {
+			start := p.pos
+			if err := p.skipSingleQuoted(); err != nil {
+				return "", err
+			}
+			out.Write(p.src[start:p.pos])
+			continue
+		}
+		if tag, ok := p.peekDollarTag(); ok {
+			start := p.pos
+			if err := p.skipDollarQuoted(tag); err != nil {
+				return "", err
+			}
+			out.Write(p.src[start:p.pos])
+			continue
+		}
+		if p.peek() == '-' && p.peekAt(1) == '-' {
+			start := p.pos
+			for !p.eof() && p.peek() != '\n' {
+				p.advance()
+			}
+			out.Write(p.src[start:p.pos])
+			continue
+		}
+		if p.peek() == '/' && p.peekAt(1) == '*' {
+			start := p.pos
+			p.advance()
+			p.advance()
+			for !p.eof() {
+				if p.peek() == '*' && p.peekAt(1) == '/' {
+					p.advance()
+					p.advance()
+					break
+				}
+				p.advance()
+			}
+			out.Write(p.src[start:p.pos])
+			continue
+		}
+		if p.peek() == '.' && p.peekAt(1) == '.' && p.peekAt(2) == '.' {
+			p.advance()
+			p.advance()
+			p.advance()
+			p.skipWS()
+			name := p.readWord()
+			if name == "" {
+				out.WriteString("...")
+				continue
+			}
+			if _, ok := store[name]; !ok {
+				return "", fmt.Errorf("spread ...%s: macro %q is not defined", name, name)
+			}
+			if err := resolve(name); err != nil {
+				return "", err
+			}
+			out.WriteString(store[name].Body)
+			continue
+		}
+		out.WriteByte(p.src[p.pos])
+		p.advance()
+	}
+	return out.String(), nil
 }
 
 // ── macroParser ───────────────────────────────────────────────────────────────
