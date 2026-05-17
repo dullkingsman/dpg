@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [vscode-v0.5.2-alpha.10] — 2026-05-17
+
+- No changes.
+
 ## [nvim-v0.5.2-alpha.10] — 2026-05-17
 
 ### Added
