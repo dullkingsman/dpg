@@ -4,6 +4,11 @@
   "description": "Tree-sitter grammar for DPG (.dpg) source files",
   "main": "bindings/node",
   "types": "bindings/node",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/dullkingsman/dpg",
+    "directory": "lang/grammar"
+  },
   "keywords": [
     "tree-sitter",
     "dpg",
