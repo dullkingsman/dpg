@@ -9,6 +9,8 @@ jobs:
   dpg:
     name: Build and release DPG
     uses: ./.github/workflows/release-dpg.yml
+    permissions:
+      contents: write
 
   check-editors:
     name: Find unreleased editor tags
