@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # Usage: changelog.sh [prefix]
-# prefix: v (default), lsp-v, docs-v
+# prefix: v (default), lsp-v, docs-v, vscode-v, idea-v
 # Populates the body of ## [Unreleased] in CHANGELOG.md from git log
 # since the last tag of the same type. The header line is preserved.
 
@@ -10,11 +10,13 @@ PREFIX="${1:-v}"
 CHANGELOG="CHANGELOG.md"
 
 case "$PREFIX" in
-  lsp-v)  MATCH="lsp-v*"  ;;
-  docs-v) MATCH="docs-v*" ;;
-  v)      MATCH="v[0-9]*" ;;
+  vscode-v) MATCH="vscode-v*" ;;
+  idea-v)   MATCH="idea-v*"   ;;
+  lsp-v)    MATCH="lsp-v*"    ;;
+  docs-v)   MATCH="docs-v*"   ;;
+  v)        MATCH="v[0-9]*"   ;;
   *)
-    echo "error: prefix must be v, lsp-v, or docs-v" >&2
+    echo "error: prefix must be v, lsp-v, docs-v, vscode-v, or idea-v" >&2
     exit 1 ;;
 esac
 

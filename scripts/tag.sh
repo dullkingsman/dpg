@@ -1,17 +1,19 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-TAG="${1:?Usage: scripts/tag.sh <tag>  (e.g. v1.2.3, lsp-v1.2.3, docs-v1.2.3)}"
+TAG="${1:?Usage: scripts/tag.sh <tag>  (e.g. v1.2.3, lsp-v1.2.3, docs-v1.2.3, vscode-v1.2.3, idea-v1.2.3)}"
 TODAY=$(date +%Y-%m-%d)
 CHANGELOG="CHANGELOG.md"
 SCRIPTS="$(cd "$(dirname "$0")" && pwd)"
 
 case "$TAG" in
-  lsp-v[0-9]*)  PREFIX="lsp-v" ;;
-  docs-v[0-9]*) PREFIX="docs-v" ;;
-  v[0-9]*)      PREFIX="v" ;;
+  vscode-v[0-9]*) PREFIX="vscode-v" ;;
+  idea-v[0-9]*)   PREFIX="idea-v" ;;
+  lsp-v[0-9]*)    PREFIX="lsp-v" ;;
+  docs-v[0-9]*)   PREFIX="docs-v" ;;
+  v[0-9]*)        PREFIX="v" ;;
   *)
-    echo "error: tag must start with v<semver>, lsp-v<semver>, or docs-v<semver>" >&2
+    echo "error: tag must start with v<semver>, lsp-v<semver>, docs-v<semver>, vscode-v<semver>, or idea-v<semver>" >&2
     exit 1 ;;
 esac
 
