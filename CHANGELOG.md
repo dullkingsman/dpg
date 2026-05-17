@@ -7,21 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.2-alpha.2] — 2026-05-17
+
 ### Added
 
-- **Cross-file macro sharing** — macros defined in any `.dpg` file within a compilation scope are now available to every other file in that scope. The compiler performs a global collection pre-pass over all source files before tokenization begins. File-local declarations take precedence over same-named cross-file macros.
-- **Nested macro expansion** — a macro body may now spread other macros (`...name` inside a paren-body or brace-body). Expansion is recursive to arbitrary depth. Circular references are detected at compile time and reported as DPG-E012.
-- **Structured virtual types** — `VIRTUAL TYPE` bodies are now fully parsed and validated by the compiler. A virtual type body is one of: a type reference (`text`, `billing.payment_method`), an inline composite `(field type, ...)`, or a union of those joined with `|`. Virtual types may be used directly as column or composite attribute types; DPG resolves them to `jsonb` / `jsonb[]` in all generated SQL. Adding `[]` to the reference emits `jsonb[]`. The structured body is stored in the snapshot for downstream consumers (ORMs, type-safe query builders).
-- **`PREFERRED JSON FORMAT` directive** — Virtual type `{}` blocks now accept `PREFERRED JSON FORMAT json` or `PREFERRED JSON FORMAT jsonb` to control whether DPG emits `json` or `jsonb` (default) when the virtual type is used as a column or composite attribute type.
+- Enhance syntax highlighting, macros, and object parsing
+- Support `PREFERRED JSON FORMAT` directive for virtual types
+- Add support for structured virtual types with JSONB resolution
+- Add support for nested macro expansion with circular reference detection
+- Enable project-scoped macro sharing across `.dpg` files
+- Add support for `DEFAULT PRIVILEGES` in snapshots and diffs
 
 ### Changed
 
-- **Default privileges diffing** — `DEFAULT PRIVILEGES` declarations are now diffed structurally (per-grant and per-revocation) rather than by opaque body hash. Changes to individual grants or revocations produce minimal `GRANT`/`REVOKE` statements instead of regenerating the entire block.
-- **Grammar / syntax highlighting** — `PREFERRED JSON FORMAT` is now highlighted as a block directive keyword; `JSON` and `JSONB` are highlighted as SQL keywords throughout `.dpg` files.
-- **Formatter** — `PREFERRED`, `FORMAT`, `JSON`, and `JSONB` are recognised as keywords by `dpg fmt` (enabling keyword-case normalisation). `PREFERRED JSON FORMAT` is sorted after `REVOCATIONS` within a `{}` block in canonical order.
-- **LSP completions** — `PREFERRED JSON FORMAT` is offered as a completion inside `{}` blocks. Virtual types are now included in column/attribute type completions alongside enums, composite types, and domains.
-- **LSP hover** — `VIRTUAL TYPE` hover text updated to reflect structured body forms and `jsonb`/`json` resolution. `PREFERRED` shows inline documentation for the directive. `MACRO` hover text corrected from "file-scoped" to "project-scoped" and now mentions nested expansion and DPG-E012.
-- **LSP object index** — `ParseObjects` now reports compound kinds (`UNLOGGED TABLE`, `MATERIALIZED VIEW`, `RECURSIVE VIEW`, `VIRTUAL TYPE`) instead of the bare base keyword, and indexes `MACRO` declarations so spread targets (`...name`) resolve to their definition.
+- Update snapshot schema spec for enhanced readability and structure
+- Update `introspect_integration_test` to use `introspect.New()` instead of `New()` for improved clarity and consistency
+- Rename `website` to `site` for consistent naming convention
+- Move core logic and tests into `core` directory for better modularity
+- Standardize directory structure by renaming `editors` to `plugins` and `editors/lsp` to `lang/lsp`
 
 ## [0.5.2] — 2026-05-16
 
