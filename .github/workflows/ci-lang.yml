@@ -6,8 +6,8 @@ on:
 jobs:
   grammar:
     name: Grammar
-    uses: ./.github/workflows/ci/ci-grammar.yml
+    uses: ./.github/workflows/ci-grammar.yml
 
   lsp:
     name: LSP
-    uses: ./.github/workflows/ci/ci-lsp.yml
+    uses: ./.github/workflows/ci-lsp.yml

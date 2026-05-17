@@ -8,7 +8,7 @@ on:
 jobs:
   dpg:
     name: Build and release DPG
-    uses: ./.github/workflows/release/release-dpg.yml
+    uses: ./.github/workflows/release-dpg.yml
 
   check-editors:
     name: Find unreleased editor tags
@@ -38,7 +38,7 @@ jobs:
     name: Publish VS Code extension
     needs: check-editors
     if: needs.check-editors.outputs.vscode-tag != ''
-    uses: ./.github/workflows/release/release-vscode.yml
+    uses: ./.github/workflows/release-vscode.yml
     with:
       tag: ${{ needs.check-editors.outputs.vscode-tag }}
     secrets: inherit
@@ -47,7 +47,7 @@ jobs:
     name: Publish JetBrains plugin
     needs: check-editors
     if: needs.check-editors.outputs.idea-tag != ''
-    uses: ./.github/workflows/release/release-idea.yml
+    uses: ./.github/workflows/release-idea.yml
     with:
       tag: ${{ needs.check-editors.outputs.idea-tag }}
     secrets: inherit
@@ -57,5 +57,5 @@ jobs:
     needs: dpg
     # Only stable releases — skip pre-releases (v0.5.2-alpha.4 etc.)
     if: "!contains(github.ref_name, '-')"
-    uses: ./.github/workflows/release/release-homebrew.yml
+    uses: ./.github/workflows/release-homebrew.yml
     secrets: inherit

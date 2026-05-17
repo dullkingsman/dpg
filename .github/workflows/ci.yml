@@ -9,12 +9,12 @@ on:
 jobs:
   dpg:
     name: DPG core
-    uses: ./.github/workflows/ci/ci-dpg.yml
+    uses: ./.github/workflows/ci-dpg.yml
 
   lang:
     name: Language tools
-    uses: ./.github/workflows/ci/ci-lang.yml
+    uses: ./.github/workflows/ci-lang.yml
 
   plugins:
     name: Editor plugins
-    uses: ./.github/workflows/ci/ci-plugins.yml
+    uses: ./.github/workflows/ci-plugins.yml
