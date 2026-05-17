@@ -4,6 +4,12 @@ on:
   push:
     tags:
       - 'nvim-v[0-9]*.[0-9]*.[0-9]*'
+  workflow_call:
+    inputs:
+      tag:
+        description: 'nvim-v* tag to release (e.g. nvim-v0.1.0)'
+        required: true
+        type: string
 
 permissions:
   contents: write
@@ -17,10 +23,13 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Detect pre-release
-        id: semver
+      - name: Resolve tag metadata
+        id: meta
         run: |
-          VERSION="${GITHUB_REF_NAME#nvim-v}"
+          TAG="${{ inputs.tag || github.ref_name }}"
+          VERSION="${TAG#nvim-v}"
+          echo "tag=$TAG"         >> $GITHUB_OUTPUT
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
           if [[ "$VERSION" == *-* ]]; then
             echo "prerelease=true" >> $GITHUB_OUTPUT
           else
@@ -29,8 +38,9 @@ jobs:
 
       - uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ steps.meta.outputs.tag }}
           draft: false
-          prerelease: ${{ steps.semver.outputs.prerelease }}
+          prerelease: ${{ steps.meta.outputs.prerelease }}
           generate_release_notes: true
           body: |
             Install with any Neovim plugin manager pointing at the monorepo:
@@ -39,7 +49,7 @@ jobs:
             ```lua
             {
               "dullkingsman/dpg",
-              tag = "${{ github.ref_name }}",
+              tag = "${{ steps.meta.outputs.tag }}",
               subdir = "plugins/nvim",
               config = function() require("dpg").setup() end,
             }
@@ -47,5 +57,5 @@ jobs:
 
             **packer.nvim**
             ```lua
-            use { "dullkingsman/dpg", tag = "${{ github.ref_name }}", rtp = "plugins/nvim" }
+            use { "dullkingsman/dpg", tag = "${{ steps.meta.outputs.tag }}", rtp = "plugins/nvim" }
             ```

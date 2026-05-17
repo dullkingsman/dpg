@@ -16,18 +16,21 @@ jobs:
     name: Find latest plugin tags
     runs-on: ubuntu-latest
     outputs:
-      vscode-tag: ${{ steps.find.outputs.vscode_tag }}
-      idea-tag: ${{ steps.find.outputs.idea_tag }}
+      vscode-tag:   ${{ steps.find.outputs.vscode_tag }}
+      idea-tag:     ${{ steps.find.outputs.idea_tag }}
+      lsp-tag:      ${{ steps.find.outputs.lsp_tag }}
+      nvim-tag:     ${{ steps.find.outputs.nvim_tag }}
+      grammar-tag:  ${{ steps.find.outputs.grammar_tag }}
 
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      - name: Find latest vscode-v* and idea-v* tags
+      - name: Find latest plugin tags
         id: find
         run: |
-          for prefix in vscode idea; do
+          for prefix in vscode idea lsp nvim grammar; do
             TAG=$(git tag --list "${prefix}-v*" --sort=-version:refname | head -1)
             if [[ -n "$TAG" ]]; then
               echo "${prefix}_tag=$TAG" >> $GITHUB_OUTPUT
@@ -54,6 +57,39 @@ jobs:
       contents: write
     with:
       tag: ${{ needs.check-plugins.outputs.idea-tag }}
+    secrets: inherit
+
+  publish-lsp:
+    name: Release LSP
+    needs: check-plugins
+    if: needs.check-plugins.outputs.lsp-tag != ''
+    uses: ./.github/workflows/release-lsp.yml
+    permissions:
+      contents: write
+    with:
+      tag: ${{ needs.check-plugins.outputs.lsp-tag }}
+    secrets: inherit
+
+  publish-nvim:
+    name: Release Neovim plugin
+    needs: check-plugins
+    if: needs.check-plugins.outputs.nvim-tag != ''
+    uses: ./.github/workflows/release-nvim.yml
+    permissions:
+      contents: write
+    with:
+      tag: ${{ needs.check-plugins.outputs.nvim-tag }}
+    secrets: inherit
+
+  publish-grammar:
+    name: Release Grammar
+    needs: check-plugins
+    if: needs.check-plugins.outputs.grammar-tag != ''
+    uses: ./.github/workflows/release-grammar.yml
+    permissions:
+      contents: write
+    with:
+      tag: ${{ needs.check-plugins.outputs.grammar-tag }}
     secrets: inherit
 
   update-homebrew:
