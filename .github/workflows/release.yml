@@ -41,6 +41,8 @@ jobs:
     needs: check-editors
     if: needs.check-editors.outputs.vscode-tag != ''
     uses: ./.github/workflows/release-vscode.yml
+    permissions:
+      contents: write
     with:
       tag: ${{ needs.check-editors.outputs.vscode-tag }}
     secrets: inherit
@@ -50,6 +52,8 @@ jobs:
     needs: check-editors
     if: needs.check-editors.outputs.idea-tag != ''
     uses: ./.github/workflows/release-idea.yml
+    permissions:
+      contents: write
     with:
       tag: ${{ needs.check-editors.outputs.idea-tag }}
     secrets: inherit
