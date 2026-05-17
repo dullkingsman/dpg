@@ -7,6 +7,68 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [nvim-v0.5.2-alpha.10] — 2026-05-17
+
+### Added
+
+- Introduce Name Maps with tool-specific naming conventions
+- Enhance syntax highlighting, macros, and object parsing
+- Support `PREFERRED JSON FORMAT` directive for virtual types
+- Add support for structured virtual types with JSONB resolution
+- Add support for nested macro expansion with circular reference detection
+- Enable project-scoped macro sharing across `.dpg` files
+- Add support for `DEFAULT PRIVILEGES` in snapshots and diffs
+- Add support for LSP methods `SetTrace`, `TextDocumentDidSave`, and `WorkspaceDidChangeWatchedFiles`
+- Add shortcodes, workflows, and versioning improvements for docs and LSP
+- Add install-lsp script and integrate versioning enhancements for dpg-lsp
+- Enable local-first Gradle distribution for faster offline builds
+- Add test data and refactor LSP smoke testing root logic
+- Add installer script and documentation for streamlined binary installation
+- Add workflow support and bindings for editor integrations
+- Add comprehensive DPG support to editors, tests, and tooling
+- Introduce RFC DPG-1 specification for Declarative PG
+- Add RFC for Declarative PG (DPG) specification
+- Add comprehensive documentation for all schema objects and advanced features
+- Add RenderAll for multi-migration output and refactor migration planning
+- Add `VIRTUAL TYPE` and macro preprocessing support
+- Inline single-column constraints and suppress redundant NOT NULL for PostgreSQL
+- Normalize NOT NULL handling for PostgreSQL PRIMARY KEY columns
+- Add macro preprocessing and support for virtual type declaration
+- Improve introspection and schema handling for PostgreSQL
+- Add minimal home page layout for website
+- Add new commands and editor integration for improved `.dpg` workflow
+- Add plugin example for custom linter registration and chaining
+- Enhance aggregate and enum diffing with grants and migration support
+- Enhance column and partition handling in snapshot diffing
+- Enhance snapshot diffing with grant tracking and structural updates
+- Introduce base infrastructure for DPG compiler, formatter, and public API
+
+### Fixed
+
+- Improve LSP script handling by downloading before execution
+- Correctly handle array expansion for LSP install arguments in install script
+- Update prerelease detection regex in release workflows
+- Return error for missing body in `createOpaque` to prevent silent no-op
+
+### Changed
+
+- Switch COMMENT and DEPRECATED directives to single quotes for consistency
+- Update snapshot schema spec for enhanced readability and structure
+- Update `introspect_integration_test` to use `introspect.New()` instead of `New()` for improved clarity and consistency
+- Rename `website` to `site` for consistent naming convention
+- Move core logic and tests into `core` directory for better modularity
+- Standardize directory structure by renaming `editors` to `plugins` and `editors/lsp` to `lang/lsp`
+- Simplify argument signature generation with ArgsKey and dropObject cleanup
+- prefer user-local Hugo binary in Makefile and setup script
+- Add editor integration guide and extend `dpg fmt` documentation
+- Improve `setup.sh` script and update website configs
+- add development guide and setup script
+- add CLI documentation generation and embedding in release builds
+- Add comprehensive CLI and documentation overhaul
+- Update documentation for commands, directory structure, and test workflows
+- Filled in gaps and added test containers for integrations tests
+- Enforce column existence and reject unknown columns in TABLE builds per RFC §7.2
+
 ## [lsp-v0.5.2-alpha.10] — 2026-05-17
 
 ### Added
