@@ -127,7 +127,11 @@ jobs:
         working-directory: lang/grammar
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-        run: npm publish --access public --provenance
+        run: |
+          output=$(npm publish --access public --provenance 2>&1) && echo "$output" || {
+            echo "$output"
+            echo "$output" | grep -qE 'already exists|cannot publish over'
+          }
 
   publish-crate:
     name: Publish to crates.io
