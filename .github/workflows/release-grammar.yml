@@ -125,6 +125,8 @@ jobs:
 
       - name: Publish
         working-directory: lang/grammar
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: npm publish --access public --provenance
 
   publish-crate:
