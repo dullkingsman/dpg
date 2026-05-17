@@ -3,7 +3,6 @@ name = "tree-sitter-dpg"
 description = "Dpg grammar for tree-sitter"
 version = "0.0.1"
 license = "MIT"
-readme = "README.md"
 keywords = ["incremental", "parsing", "tree-sitter", "dpg"]
 categories = ["parsing", "text-editors"]
 repository = "https://github.com/dullkingsman/dpg"
