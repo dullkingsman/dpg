@@ -77,14 +77,18 @@ ARCHIVE_NAME="${BINARY}-${GOOS}-${GOARCH}.tar.gz"
 # ── Resolve version ──────────────────────────────────────────────────────────
 
 resolve_latest_version() {
-  local url="https://api.github.com/repos/${REPO}/releases/latest"
+  local url="https://api.github.com/repos/${REPO}/releases?per_page=50"
+  local raw
   if command -v curl &>/dev/null; then
-    curl -fsSL "$url" | grep '"tag_name"' | sed -E 's/.*"tag_name": *"([^"]+)".*/\1/'
+    raw="$(curl -fsSL "$url")"
   elif command -v wget &>/dev/null; then
-    wget -qO- "$url" | grep '"tag_name"' | sed -E 's/.*"tag_name": *"([^"]+)".*/\1/'
+    raw="$(wget -qO- "$url")"
   else
     die "curl or wget is required"
   fi
+  # Find the first lsp-v* tag (releases are newest-first)
+  echo "$raw" | grep '"tag_name"' | sed -E 's/.*"tag_name": *"([^"]+)".*/\1/' \
+    | grep '^lsp-v' | head -1
 }
 
 if [[ -z "$VERSION" ]]; then
@@ -93,6 +97,12 @@ if [[ -z "$VERSION" ]]; then
   [[ -z "$VERSION" ]] && die "Could not determine latest release. Specify --version <tag> explicitly."
 fi
 
+# Normalise: accept bare v* tags and add the lsp- prefix
+if [[ "$VERSION" != lsp-* ]]; then
+  VERSION="lsp-${VERSION}"
+fi
+
+DISPLAY_VERSION="${VERSION#lsp-}"
 DOWNLOAD_URL="https://github.com/${REPO}/releases/download/${VERSION}/${ARCHIVE_NAME}"
 
 # ── Resolve install directory ────────────────────────────────────────────────
@@ -115,7 +125,7 @@ fi
 if $CHECK_ONLY; then
   echo
   echo "${BOLD}Would install:${RESET}"
-  echo "  Binary : ${BINARY} ${VERSION} (${GOOS}/${GOARCH})"
+  echo "  Binary : ${BINARY} ${DISPLAY_VERSION} (${GOOS}/${GOARCH})"
   echo "  From   : ${DOWNLOAD_URL}"
   echo "  To     : ${INSTALL_DIR}/${BINARY}"
   echo
@@ -135,7 +145,7 @@ fi
 # ── Download and install ─────────────────────────────────────────────────────
 
 echo
-echo "${BOLD}Installing dpg-lsp ${VERSION} (${GOOS}/${GOARCH})${RESET}"
+echo "${BOLD}Installing dpg-lsp ${DISPLAY_VERSION} (${GOOS}/${GOARCH})${RESET}"
 echo
 
 TMP="$(mktemp -d)"
@@ -164,7 +174,7 @@ else
   mv "${TMP}/${BINARY}" "${INSTALL_DIR}/${BINARY}"
 fi
 
-ok "dpg-lsp ${VERSION} installed to ${INSTALL_DIR}/${BINARY}"
+ok "dpg-lsp ${DISPLAY_VERSION} installed to ${INSTALL_DIR}/${BINARY}"
 
 # ── PATH reminder (user-local installs) ──────────────────────────────────────
 

@@ -82,14 +82,18 @@ ASSET_NAME="${BINARY}-${GOOS}-${GOARCH}"
 # ── Resolve version ──────────────────────────────────────────────────────────
 
 resolve_latest_version() {
-  local url="https://api.github.com/repos/${REPO}/releases/latest"
+  local url="https://api.github.com/repos/${REPO}/releases?per_page=50"
+  local raw
   if command -v curl &>/dev/null; then
-    curl -fsSL "$url" | grep '"tag_name"' | sed -E 's/.*"tag_name": *"([^"]+)".*/\1/'
+    raw="$(curl -fsSL "$url")"
   elif command -v wget &>/dev/null; then
-    wget -qO- "$url" | grep '"tag_name"' | sed -E 's/.*"tag_name": *"([^"]+)".*/\1/'
+    raw="$(wget -qO- "$url")"
   else
     die "curl or wget is required"
   fi
+  # Find the first bare v* tag (releases are newest-first); excludes lsp-v*, nvim-v*, etc.
+  echo "$raw" | grep '"tag_name"' | sed -E 's/.*"tag_name": *"([^"]+)".*/\1/' \
+    | grep '^v[0-9]' | head -1
 }
 
 if [[ -z "$VERSION" ]]; then
@@ -125,7 +129,7 @@ if $CHECK_ONLY; then
   echo "  From      : ${DOWNLOAD_URL}"
   echo "  To        : ${INSTALL_DIR}/${BINARY}"
   if $WITH_LSP; then
-    echo "  LSP binary: ${LSP_BINARY} ${VERSION} (${GOOS}/${GOARCH}) — via install-lsp.sh"
+    echo "  LSP binary: ${LSP_BINARY} (latest lsp-v* release) — via install-lsp.sh"
   fi
   echo
   exit 0
@@ -200,7 +204,7 @@ if $WITH_LSP; then
     warn "  curl -fsSL ${LSP_INSTALL_SCRIPT} | bash"
   fi
   if [[ -f "${LSP_SCRIPT}" ]]; then
-    bash "${LSP_SCRIPT}" --version "${VERSION}" --install-dir "${INSTALL_DIR}"
+    bash "${LSP_SCRIPT}" --install-dir "${INSTALL_DIR}"
   fi
 fi
 
