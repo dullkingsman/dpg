@@ -251,8 +251,7 @@ func (p *parser) buildAll(raws []pipeline.RawObject, macros []macroDecl, fileLea
 }
 
 // buildSchemaNode creates a SchemaBlockNode from the schema's RawObject and its
-// nested children. schemaEndLine is the last line of the schema declaration itself,
-// used as the baseline for collecting leading comments of the first child.
+// nested children. raw.Pos.Line is used as the baseline for child comment collection.
 func (p *parser) buildSchemaNode(raw pipeline.RawObject, nested []pipeline.RawObject, leading []string) ObjectNode {
 	childNodes := p.buildNodes(nested, raw.Pos.Line)
 	return &SchemaBlockNode{
