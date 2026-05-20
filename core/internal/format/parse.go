@@ -232,7 +232,7 @@ func (p *parser) buildAll(raws []pipeline.RawObject, macros []macroDecl, fileLea
 					nested = append(nested, raw)
 				}
 			}
-			node := p.buildSchemaNode(it.raw, nested, leading, prevEndLine)
+			node := p.buildSchemaNode(it.raw, nested, leading)
 			nodes = append(nodes, node)
 			if len(nested) > 0 {
 				prevEndLine = objectEndLine(nested[len(nested)-1])
@@ -253,7 +253,7 @@ func (p *parser) buildAll(raws []pipeline.RawObject, macros []macroDecl, fileLea
 // buildSchemaNode creates a SchemaBlockNode from the schema's RawObject and its
 // nested children. schemaEndLine is the last line of the schema declaration itself,
 // used as the baseline for collecting leading comments of the first child.
-func (p *parser) buildSchemaNode(raw pipeline.RawObject, nested []pipeline.RawObject, leading []string, _ int) ObjectNode {
+func (p *parser) buildSchemaNode(raw pipeline.RawObject, nested []pipeline.RawObject, leading []string) ObjectNode {
 	childNodes := p.buildNodes(nested, raw.Pos.Line)
 	return &SchemaBlockNode{
 		baseNode: baseNode{LeadingComments: leading},

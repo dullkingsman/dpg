@@ -562,6 +562,19 @@ func TestFormat_SchemaBlockPreservesNesting(t *testing.T) {
 	}
 }
 
+func TestFormat_SchemaAttrsAndObjectsBlankLine(t *testing.T) {
+	src := `SCHEMA public {
+    OWNER "postgres";
+
+    TABLE t (id BIGINT NOT NULL);
+}`
+	out := formatSrc(t, src, defaultOpts)
+	// There must be a blank line between the OWNER directive and the first nested declaration.
+	if !strings.Contains(out, ";\n\n") {
+		t.Errorf("expected blank line between OWNER attr and TABLE, got:\n%s", out)
+	}
+}
+
 func TestFormat_SchemaOwnerIndented(t *testing.T) {
 	src := `SCHEMA public {
     OWNER "postgres";

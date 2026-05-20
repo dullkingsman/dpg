@@ -159,7 +159,10 @@ func renderSchemaBlock(b *strings.Builder, n *SchemaBlockNode, opts Options, dep
 		}
 	}
 
-	for _, child := range n.Objects {
+	for i, child := range n.Objects {
+		if i == 0 && n.RawAttrs != "" {
+			b.WriteByte('\n') // blank line between schema attrs and first nested object
+		}
 		b.WriteByte('\n')
 		renderObject(b, child, opts, depth+1)
 		b.WriteByte('\n')
