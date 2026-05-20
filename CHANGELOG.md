@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [lsp-v0.5.5-alpha.1] — 2026-05-21
+
+- No changes.
+
 ## [lsp-v0.5.2-alpha.11] — 2026-05-21
 
 ### Added
