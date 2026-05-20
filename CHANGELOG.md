@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [idea-v0.5.2-alpha.12] — 2026-05-20
+
+### Added
+
+- Add support for macro references, completions, and spread expressions in IDEA plugin
+
 ## [idea-v0.5.2-alpha.11] — 2026-05-20
 
 ### Changed
