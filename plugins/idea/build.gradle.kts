@@ -4,25 +4,21 @@ plugins {
 }
 
 group   = "com.dullkingsman"
-version = "0.1.0"
+version = "0.2.0"
 
 repositories {
     mavenCentral()
 }
 
-// If a locally-extracted IntelliJ IDEA Community 2023.1 distribution exists on
-// this machine, use it directly (no network required).  Otherwise fall back to
-// the standard version + type download, which works in CI and on any machine
-// with JetBrains CDN access.
-val localIdeaDir = file(
-    System.getenv("IDEA_LOCAL_PATH")
-        ?: "/interface/home-ext/.gradle/caches/transforms-4/" +
-           "55ea6ae129d4b50147d0e63ca731128b/transformed/ideaIC-2023.1"
-)
+// If IDEA_LOCAL_PATH points to a locally-extracted IntelliJ IDEA Community
+// 2023.1 distribution, use it directly (no network required).  Otherwise fall
+// back to the standard version + type download, which works in CI and on any
+// machine with JetBrains CDN access.
+val ideaLocalPath = System.getenv("IDEA_LOCAL_PATH")
 
 intellij {
-    if (localIdeaDir.isDirectory) {
-        localPath.set(localIdeaDir.absolutePath)
+    if (ideaLocalPath != null && file(ideaLocalPath).isDirectory) {
+        localPath.set(ideaLocalPath)
     } else {
         version.set("2023.1")
         type.set("IC")

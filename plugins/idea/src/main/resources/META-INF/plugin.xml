@@ -1,29 +1,82 @@
 <idea-plugin>
   <id>com.dullkingsman.dpg</id>
   <name>DPG</name>
-  <version>0.1.0</version>
+  <version>0.2.0</version>
   <vendor url="https://github.com/dullkingsman/dpg">dullkingsman</vendor>
 
   <description><![CDATA[
-    <p>Language support for <b>.dpg</b> (DPG / Declarative PostgreSQL) source files.</p>
+    <p>Native language support for <b>.dpg</b> (DPG / Declarative PostgreSQL) source files.</p>
     <ul>
-      <li>Syntax highlighting via the DPG file type</li>
-      <li>Format on save via <code>dpg fmt</code></li>
-      <li>Diagnostics, hover, go-to-definition, and completions via <code>dpg-lsp</code></li>
+      <li>Syntax highlighting — DPG object keywords, block directives, SQL bodies, dollar-quoted strings</li>
+      <li>Brace and parenthesis matching</li>
+      <li>Code folding for <code>{ }</code> blocks and dollar-quoted function bodies</li>
+      <li>Structure view — schema/object hierarchy in the Project sidebar</li>
+      <li>Code completion — DPG object types and block directives</li>
+      <li>Error annotations — DPG-E006 forbidden verbs, DPG-E007 MACRO inside block</li>
+      <li>Find Usages for named objects</li>
+      <li>Line and block comment actions (<code>-- …</code> and <code>/* … */</code>)</li>
+      <li>Customisable colours in Settings → Editor → Color Scheme → DPG</li>
     </ul>
-    <p>Requires <code>dpg-lsp</code> on <code>$PATH</code>. Download the binary from the
-    <a href="https://github.com/dullkingsman/dpg/releases">GitHub Releases page</a>.</p>
+    <p>All features work offline with no external binary required.</p>
   ]]></description>
 
   <depends>com.intellij.modules.platform</depends>
-  <depends optional="true" config-file="dpg-lsp-optional.xml">com.intellij.platform.lsp</depends>
 
   <extensions defaultExtensionNs="com.intellij">
+
+    <!-- ── File type ──────────────────────────────────────────────────────── -->
     <fileType
         name="DPG"
         implementationClass="com.dullkingsman.dpg.DpgFileType"
         language="DPG"
         extensions="dpg"
         fieldName="INSTANCE"/>
+
+    <!-- ── Language foundation ───────────────────────────────────────────── -->
+    <lang.parserDefinition
+        language="DPG"
+        implementationClass="com.dullkingsman.dpg.lang.DpgParserDefinition"/>
+
+    <!-- ── Syntax highlighting ───────────────────────────────────────────── -->
+    <lang.syntaxHighlighterFactory
+        language="DPG"
+        implementationClass="com.dullkingsman.dpg.highlight.DpgSyntaxHighlighterFactory"/>
+
+    <colorSettingsPage
+        implementation="com.dullkingsman.dpg.highlight.DpgColorSettingsPage"/>
+
+    <!-- ── Editor services ───────────────────────────────────────────────── -->
+    <lang.commenter
+        language="DPG"
+        implementationClass="com.dullkingsman.dpg.editor.DpgCommenter"/>
+
+    <lang.braceMatcher
+        language="DPG"
+        implementationClass="com.dullkingsman.dpg.editor.DpgBraceMatcher"/>
+
+    <lang.foldingBuilder
+        language="DPG"
+        implementationClass="com.dullkingsman.dpg.editor.DpgFoldingBuilder"/>
+
+    <!-- ── Structure view ────────────────────────────────────────────────── -->
+    <lang.psiStructureViewFactory
+        language="DPG"
+        implementationClass="com.dullkingsman.dpg.structure.DpgStructureViewFactory"/>
+
+    <!-- ── Code completion ───────────────────────────────────────────────── -->
+    <completion.contributor
+        language="DPG"
+        implementationClass="com.dullkingsman.dpg.completion.DpgCompletionContributor"/>
+
+    <!-- ── Semantic annotations ──────────────────────────────────────────── -->
+    <annotator
+        language="DPG"
+        implementationClass="com.dullkingsman.dpg.annotator.DpgAnnotator"/>
+
+    <!-- ── Find Usages ───────────────────────────────────────────────────── -->
+    <lang.findUsagesProvider
+        language="DPG"
+        implementationClass="com.dullkingsman.dpg.findusages.DpgFindUsagesProvider"/>
+
   </extensions>
 </idea-plugin>
