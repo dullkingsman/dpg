@@ -52,6 +52,8 @@ func renderObject(b *strings.Builder, obj ObjectNode, opts Options, depth int) {
 		renderTable(b, n, opts, ind)
 	case *SchemaBlockNode:
 		renderSchemaBlock(b, n, opts, depth)
+	case *MacroNode:
+		renderMacro(b, n, opts, ind)
 	}
 }
 
@@ -125,17 +127,38 @@ func renderTable(b *strings.Builder, n *TableNode, opts Options, ind string) {
 	}
 }
 
+func renderMacro(b *strings.Builder, n *MacroNode, opts Options, ind string) {
+	b.WriteString(ind)
+	b.WriteString(opts.keyword("MACRO"))
+	b.WriteByte(' ')
+	b.WriteString(n.RawAfterKeyword)
+}
+
 func renderSchemaBlock(b *strings.Builder, n *SchemaBlockNode, opts Options, depth int) {
 	ind := strings.Repeat(opts.indent(), depth)
+	innerInd := strings.Repeat(opts.indent(), depth+1)
+
 	b.WriteString(ind)
 	b.WriteString(opts.keyword("SCHEMA"))
 	b.WriteByte(' ')
 	b.WriteString(n.Name)
 	b.WriteString(" {")
+
 	if n.RawAttrs != "" {
-		b.WriteString("\n")
-		b.WriteString(n.RawAttrs)
+		// Split schema-level directives into chunks, sort them, and render each
+		// at the inner indentation level.
+		chunks, _ := splitBlockDirectives(sortBlock(n.RawAttrs))
+		for _, chunk := range chunks {
+			trimmed := strings.TrimLeft(chunk.text, " \t\r\n")
+			if trimmed == "" {
+				continue
+			}
+			b.WriteByte('\n')
+			b.WriteString(innerInd)
+			b.WriteString(rekeyword(trimmed, opts))
+		}
 	}
+
 	for _, child := range n.Objects {
 		b.WriteByte('\n')
 		renderObject(b, child, opts, depth+1)

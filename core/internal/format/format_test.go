@@ -456,6 +456,145 @@ func TestFormat_BlockDirectiveAlreadySortedIsNoop(t *testing.T) {
 	}
 }
 
+// ── MACRO preservation ────────────────────────────────────────────────────────
+
+func TestFormat_MacroDeclarationPreserved(t *testing.T) {
+	src := `MACRO common_cols (
+    id BIGINT NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL
+)
+
+TABLE users (
+    email TEXT NOT NULL,
+    id BIGINT NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL
+);`
+	out := formatSrc(t, src, defaultOpts)
+	if !strings.Contains(out, "MACRO") {
+		t.Errorf("MACRO declaration was removed, got:\n%s", out)
+	}
+	if !strings.Contains(out, "common_cols") {
+		t.Errorf("MACRO name 'common_cols' missing, got:\n%s", out)
+	}
+}
+
+func TestFormat_MacroBraceStylePreserved(t *testing.T) {
+	src := `MACRO block_attrs {
+    COMMENT 'standard comment';
+    DEPRECATED 'old';
+}
+
+EXTENSION pgcrypto;`
+	out := formatSrc(t, src, defaultOpts)
+	if !strings.Contains(out, "MACRO") {
+		t.Errorf("MACRO declaration was removed, got:\n%s", out)
+	}
+	if !strings.Contains(out, "block_attrs") {
+		t.Errorf("MACRO name 'block_attrs' missing, got:\n%s", out)
+	}
+}
+
+func TestFormat_MacroKeywordCased(t *testing.T) {
+	src := `macro items (id bigint not null);`
+	out := formatSrc(t, src, defaultOpts)
+	if !strings.Contains(out, "MACRO") {
+		t.Errorf("MACRO keyword not uppercased, got:\n%s", out)
+	}
+}
+
+func TestFormat_MacroIdempotent(t *testing.T) {
+	src := `MACRO items (
+    id BIGINT NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL
+)
+
+TABLE t (id BIGINT NOT NULL);`
+	first := formatSrc(t, src, defaultOpts)
+	second := formatSrc(t, first, defaultOpts)
+	if first != second {
+		t.Errorf("format with MACRO is not idempotent.\nFirst:\n%s\nSecond:\n%s", first, second)
+	}
+}
+
+// ── VIRTUAL TYPE ──────────────────────────────────────────────────────────────
+
+func TestFormat_VirtualTypeKeywordPreserved(t *testing.T) {
+	src := `VIRTUAL TYPE money_amount (
+    INPUT = money_in,
+    OUTPUT = money_out
+);`
+	out := formatSrc(t, src, defaultOpts)
+	if !strings.Contains(out, "VIRTUAL") {
+		t.Errorf("VIRTUAL keyword missing, got:\n%s", out)
+	}
+	if !strings.Contains(out, "TYPE") {
+		t.Errorf("TYPE keyword missing, got:\n%s", out)
+	}
+	if !strings.Contains(out, "money_amount") {
+		t.Errorf("type name 'money_amount' missing, got:\n%s", out)
+	}
+}
+
+// ── SCHEMA block nesting ──────────────────────────────────────────────────────
+
+func TestFormat_SchemaBlockPreservesNesting(t *testing.T) {
+	src := `SCHEMA public {
+    OWNER "postgres";
+
+    TABLE users (
+        id BIGINT NOT NULL,
+        CONSTRAINT pk_users PRIMARY KEY (id)
+    );
+}`
+	out := formatSrc(t, src, defaultOpts)
+	// TABLE should appear inside SCHEMA, not at the top level.
+	schemaPos := strings.Index(out, "SCHEMA")
+	tablePos := strings.Index(out, "TABLE")
+	closingBrace := strings.LastIndex(out, "}")
+	if schemaPos < 0 || tablePos < 0 || closingBrace < 0 {
+		t.Fatalf("missing expected tokens in:\n%s", out)
+	}
+	if tablePos < schemaPos {
+		t.Errorf("TABLE appears before SCHEMA — nesting is broken:\n%s", out)
+	}
+	if tablePos > closingBrace {
+		t.Errorf("TABLE appears after the closing '}' — nesting is broken:\n%s", out)
+	}
+}
+
+func TestFormat_SchemaOwnerIndented(t *testing.T) {
+	src := `SCHEMA public {
+    OWNER "postgres";
+
+    TABLE t (id BIGINT NOT NULL);
+}`
+	out := formatSrc(t, src, defaultOpts)
+	for _, line := range strings.Split(out, "\n") {
+		if strings.Contains(line, "OWNER") {
+			if !strings.HasPrefix(line, "    ") {
+				t.Errorf("OWNER directive not indented inside SCHEMA:\n%s", out)
+			}
+			break
+		}
+	}
+}
+
+func TestFormat_SchemaBlockIdempotent(t *testing.T) {
+	src := `SCHEMA public {
+    OWNER "postgres";
+
+    TABLE users (
+        id         BIGINT NOT NULL,
+        CONSTRAINT pk_users PRIMARY KEY (id)
+    );
+}`
+	first := formatSrc(t, src, defaultOpts)
+	second := formatSrc(t, first, defaultOpts)
+	if first != second {
+		t.Errorf("schema block format is not idempotent.\nFirst:\n%s\nSecond:\n%s", first, second)
+	}
+}
+
 func TestFormat_OpaqueBlockRenamedFromFirst(t *testing.T) {
 	// Block sorting also applies to opaque (non-table) objects.
 	src := `ROLE analyst NOLOGIN {

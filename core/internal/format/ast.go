@@ -66,6 +66,17 @@ type TableNode struct {
 
 func (n *TableNode) objectNode() {}
 
+// MacroNode preserves a MACRO declaration verbatim. The formatter keeps macro
+// bodies exactly as written since they are templates, not independent objects.
+type MacroNode struct {
+	baseNode
+	// RawAfterKeyword is the text following the MACRO keyword — the name and
+	// body (including the opening/closing delimiter), trimmed of leading space.
+	RawAfterKeyword string
+}
+
+func (n *MacroNode) objectNode() {}
+
 // ColumnNode is one column in a TABLE Part 1. It is not a top-level ObjectNode.
 type ColumnNode struct {
 	// BlankLineBefore is true when a blank line (empty line) precedes this
