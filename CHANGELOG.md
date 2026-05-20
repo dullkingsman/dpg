@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.5-alpha.1] — 2026-05-21
+
+### Added
+
+- Enforce blank line between schema attributes and first nested object in formatter and add related test
+- Add support for DPG code formatting in IDEA plugin, including indentation, blank lines, and spacing adjustments
+- Add support for macro declarations, rendering, and schema-level nesting in formatter
+- Add support for macro references, completions, and spread expressions in IDEA plugin
+
+### Changed
+
+- Simplify schema node comment collection logic in parser
+- Migrated idea plugin from LSP-based implementation to plugin-native parsing, highlighting, and tooling
+
 ## [lsp-v0.5.5-alpha.1] — 2026-05-21
 
 - No changes.
