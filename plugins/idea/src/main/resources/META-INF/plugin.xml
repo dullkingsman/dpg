@@ -14,6 +14,7 @@
       <li>Code completion — DPG object types and block directives</li>
       <li>Error annotations — DPG-E006 forbidden verbs, DPG-E007 MACRO inside block</li>
       <li>Find Usages for named objects</li>
+      <li>Code formatting — blank lines between objects, indented <code>{ }</code> block content (Ctrl+Alt+L)</li>
       <li>Line and block comment actions (<code>-- …</code> and <code>/* … */</code>)</li>
       <li>Customisable colours in Settings → Editor → Color Scheme → DPG</li>
     </ul>
@@ -82,6 +83,14 @@
     <psi.referenceContributor
         language="DPG"
         implementation="com.dullkingsman.dpg.reference.DpgReferenceContributor"/>
+
+    <!-- ── Formatting ───────────────────────────────────────────────────── -->
+    <lang.formatter
+        language="DPG"
+        implementationClass="com.dullkingsman.dpg.formatter.DpgFormattingModelBuilder"/>
+
+    <externalFormatProcessor
+        implementation="com.dullkingsman.dpg.formatter.DpgExternalFormatter"/>
 
   </extensions>
 </idea-plugin>
