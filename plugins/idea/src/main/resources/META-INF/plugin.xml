@@ -78,5 +78,10 @@
         language="DPG"
         implementationClass="com.dullkingsman.dpg.findusages.DpgFindUsagesProvider"/>
 
+    <!-- ── References (go-to-definition) ────────────────────────────────── -->
+    <psi.referenceContributor
+        language="DPG"
+        implementation="com.dullkingsman.dpg.reference.DpgReferenceContributor"/>
+
   </extensions>
 </idea-plugin>

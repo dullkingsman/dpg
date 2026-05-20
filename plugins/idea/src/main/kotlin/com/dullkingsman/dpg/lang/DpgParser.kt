@@ -119,6 +119,9 @@ class DpgParser : PsiParser {
                 b.tokenType == T.MACRO_KW  -> parseMacroDeclaration(b)
                 b.tokenType == T.SCHEMA_KW -> parseSchemaBlock(b)
                 b.isObjectKeyword()        -> parseObjectDeclaration(b)
+                b.isPluralBlockKeyword()   -> parseNestedBlock(b)
+                b.isBlockDirectiveKw()     -> parseBlockDirective(b)
+                b.tokenType == T.SPREAD    -> parseSpreadExpression(b)
                 else -> {
                     b.error("Unexpected '${b.tokenText}' inside SCHEMA block")
                     b.advanceLexer()

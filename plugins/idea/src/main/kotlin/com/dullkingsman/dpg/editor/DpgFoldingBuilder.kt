@@ -1,6 +1,7 @@
 package com.dullkingsman.dpg.editor
 
 import com.dullkingsman.dpg.lang.DpgElementTypes.DOLLAR_QUOTE_BODY
+import com.dullkingsman.dpg.lang.DpgElementTypes.PAREN_BODY
 import com.dullkingsman.dpg.lang.DpgElementTypes.PART2_BLOCK
 import com.dullkingsman.dpg.lang.DpgElementTypes.SCHEMA_BLOCK
 import com.dullkingsman.dpg.lang.DpgTokenTypes.BLOCK_COMMENT
@@ -31,6 +32,12 @@ class DpgFoldingBuilder : FoldingBuilderEx(), DumbAware {
 
             // Part-2 { … } blocks (covers both object blocks and schema bodies)
             PART2_BLOCK -> foldBraces(node, result)
+
+            // Paren bodies: column lists, function argument lists
+            PAREN_BODY -> {
+                val range = node.textRange
+                if (range.length > 4) result += FoldingDescriptor(node, range)
+            }
 
             // Dollar-quoted function bodies: fold the whole body node
             DOLLAR_QUOTE_BODY -> {
@@ -64,6 +71,7 @@ class DpgFoldingBuilder : FoldingBuilderEx(), DumbAware {
     override fun getPlaceholderText(node: ASTNode): String? = when (node.elementType) {
         DOLLAR_QUOTE_BODY -> "$$...$$"
         BLOCK_COMMENT     -> "/*...*/"
+        PAREN_BODY        -> "(...)"
         else              -> "{...}"
     }
 
