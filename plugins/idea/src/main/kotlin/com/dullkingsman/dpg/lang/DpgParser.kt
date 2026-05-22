@@ -50,7 +50,9 @@ class DpgParser : PsiParser {
 
     private fun parseMacroDeclaration(b: PsiBuilder) {
         val m = b.mark()
+        val kwm = b.mark()
         b.advanceLexer() // MACRO_KW
+        kwm.done(E.OBJECT_KEYWORD_SEQ)
         b.skipTrivia()
         if (b.tokenType == T.IDENTIFIER) {
             val nm = b.mark()
@@ -267,6 +269,7 @@ class DpgParser : PsiParser {
             when (b.tokenType) {
                 T.LPAREN -> { depth++; b.advanceLexer() }
                 T.RPAREN -> { depth--; b.advanceLexer() }
+                T.SPREAD -> parseSpreadExpression(b)
                 T.DOLLAR_QUOTE -> {
                     b.advanceLexer()
                     while (!b.eof() && b.tokenType == T.DOLLAR_QUOTE_CONTENT) b.advanceLexer()

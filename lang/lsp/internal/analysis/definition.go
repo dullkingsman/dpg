@@ -20,8 +20,15 @@ func Definition(ws *workspace.Workspace, path string, pos protocol.Position) *pr
 		return nil
 	}
 
+	// Spread expressions (...macroName) must resolve only to MACRO declarations,
+	// not to tables or other objects that happen to share the name.
+	requiredKind := ""
+	if isSpreadContext(text, pos) {
+		requiredKind = "MACRO"
+	}
+
 	// Search the current file first
-	if loc := searchFile(ws, path, text, word); loc != nil {
+	if loc := searchFile(ws, path, text, word, requiredKind); loc != nil {
 		return loc
 	}
 
@@ -39,16 +46,44 @@ func Definition(ws *workspace.Workspace, path string, pos protocol.Position) *pr
 			continue
 		}
 		t := ws.GetText(f)
-		if loc := searchFile(ws, f, t, word); loc != nil {
+		if loc := searchFile(ws, f, t, word, requiredKind); loc != nil {
 			return loc
 		}
 	}
 	return nil
 }
 
-func searchFile(ws *workspace.Workspace, filePath, text, word string) *protocol.Location {
+// isSpreadContext reports whether the identifier at pos is immediately preceded
+// by '...', i.e. the cursor is on a macro spread reference.
+func isSpreadContext(text string, pos protocol.Position) bool {
+	lines := strings.Split(text, "\n")
+	if int(pos.Line) >= len(lines) {
+		return false
+	}
+	line := lines[pos.Line]
+	col := int(pos.Character)
+	if col > len(line) {
+		col = len(line)
+	}
+
+	isIdent := func(c byte) bool {
+		return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+			(c >= '0' && c <= '9') || c == '_' || c == '$'
+	}
+
+	start := col
+	for start > 0 && isIdent(line[start-1]) {
+		start--
+	}
+	return start >= 3 && line[start-3:start] == "..."
+}
+
+func searchFile(ws *workspace.Workspace, filePath, text, word, requiredKind string) *protocol.Location {
 	objs := workspace.ParseObjects(text, filePath)
 	for _, obj := range objs {
+		if requiredKind != "" && !strings.EqualFold(obj.Kind, requiredKind) {
+			continue
+		}
 		bare := obj.Name
 		if idx := strings.LastIndex(bare, "."); idx >= 0 {
 			bare = bare[idx+1:]

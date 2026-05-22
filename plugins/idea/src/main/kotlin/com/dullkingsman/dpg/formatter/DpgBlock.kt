@@ -95,7 +95,14 @@ class DpgBlock(
                 singleSpace()
 
             // ── MACRO_DECLARATION internal spacing ───────────────────────────
-            parent == E.MACRO_DECLARATION && c1.elementType == T.MACRO_KW ->
+            parent == E.MACRO_DECLARATION
+                && c1.elementType == E.OBJECT_KEYWORD_SEQ
+                && c2.elementType == E.QUALIFIED_NAME ->
+                singleSpace()
+
+            parent == E.MACRO_DECLARATION
+                && c1.elementType == E.QUALIFIED_NAME
+                && (c2.elementType == E.MACRO_PAREN_BODY || c2.elementType == E.MACRO_BRACE_BODY) ->
                 singleSpace()
 
             // ── PART2_BLOCK interior ─────────────────────────────────────────

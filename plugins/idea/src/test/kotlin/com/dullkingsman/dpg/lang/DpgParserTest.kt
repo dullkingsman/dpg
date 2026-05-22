@@ -1,10 +1,13 @@
 package com.dullkingsman.dpg.lang
 
 import com.dullkingsman.dpg.lang.DpgElementTypes.MACRO_DECLARATION
+import com.dullkingsman.dpg.lang.DpgElementTypes.OBJECT_KEYWORD_SEQ
 import com.dullkingsman.dpg.lang.DpgElementTypes.PART2_BLOCK
 import com.dullkingsman.dpg.lang.DpgElementTypes.SCHEMA_BLOCK
+import com.dullkingsman.dpg.lang.DpgElementTypes.SPREAD_EXPRESSION
 import com.dullkingsman.dpg.lang.psi.DpgFile
 import com.dullkingsman.dpg.lang.psi.DpgObjectDeclaration
+import com.dullkingsman.dpg.lang.psi.DpgPsiElement
 import com.intellij.psi.util.PsiTreeUtil
 import com.intellij.testFramework.ParsingTestCase
 
@@ -151,7 +154,35 @@ class DpgParserTest : ParsingTestCase("", "dpg", DpgParserDefinition()) {
             MACRO timestamps (created_at TIMESTAMPTZ)
             TABLE t (id BIGINT, ...timestamps);
         """.trimIndent()
-        assertNotNull(parseFile("spread", src))
+        val file = parseFile("spread", src)
+        assertNotNull(file)
+        val spreadExprs = PsiTreeUtil.findChildrenOfType(file, DpgPsiElement::class.java)
+            .filter { it.node.elementType == SPREAD_EXPRESSION }
+        assertEquals("Expected one SPREAD_EXPRESSION node inside paren body", 1, spreadExprs.size)
+    }
+
+    fun testSpreadExpressionInSchemaBlock() {
+        val src = """
+            MACRO ts (x INT)
+            SCHEMA public {
+                ...ts;
+            }
+        """.trimIndent()
+        val file = parseFile("spread_schema", src)
+        assertNotNull(file)
+        val spreadExprs = PsiTreeUtil.findChildrenOfType(file, DpgPsiElement::class.java)
+            .filter { it.node.elementType == SPREAD_EXPRESSION }
+        assertEquals("Expected one SPREAD_EXPRESSION node inside schema body", 1, spreadExprs.size)
+    }
+
+    fun testMacroDeclarationHasObjectKeywordSeq() {
+        val file = parseFile("macro_kw_seq", "MACRO ts (x INT)")
+        val decls = PsiTreeUtil.getChildrenOfType(file, DpgObjectDeclaration::class.java)
+        assertNotNull(decls)
+        val macro = decls!!.first { it.node.elementType == MACRO_DECLARATION }
+        assertNotNull("MACRO_DECLARATION should have an OBJECT_KEYWORD_SEQ child",
+            macro.node.findChildByType(OBJECT_KEYWORD_SEQ))
+        assertEquals("MACRO", macro.getObjectKindText())
     }
 
     // ── Extension ─────────────────────────────────────────────────────────────

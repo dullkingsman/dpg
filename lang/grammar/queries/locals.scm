@@ -56,3 +56,7 @@
 
 (column_def
   type: (sql_type (_) @reference))
+
+; References to macros (spread expressions)
+(macro_spread
+  name: (identifier) @reference)
