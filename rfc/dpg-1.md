@@ -4303,7 +4303,6 @@ serial_sequence_declared      = "off"
    | `pg_namespace` | Schemas |
    | `pg_extension` | Installed extensions |
    | `pg_publication` | Publications |
-   | `pg_subscription` | Subscriptions |
    | `pg_foreign_table` | Foreign tables |
    | `pg_foreign_server` | Foreign servers |
    | `pg_user_mapping` | User mappings |
@@ -4629,7 +4628,7 @@ serial_sequence_declared      = "off"
    | Window functions | Declared, Passthrough body | |
    | Row Level Security | Declared, Diffed | |
    | Triggers | Declared, Diffed | |
-   | Event triggers | Declared, Diffed | |
+   | Event triggers | Declared, Passthrough | Reconstructed from catalog; hash-diffed |
    | Sequences | Declared, Diffed | |
    | Schemas | Declared, Diffed | |
    | Extensions | Declared, Diffed | |
@@ -4638,24 +4637,24 @@ serial_sequence_declared      = "off"
    | Column-level grants | Declared, Diffed | Additive model |
    | Explicit revocations | Declared, Diffed | |
    | Default Privileges | Declared, Diffed | |
-   | Tablespaces | Declared, Diffed | Cluster-level |
-   | Foreign Data Wrappers | Declared, Diffed | Cluster-level |
-   | Foreign Servers | Declared, Diffed | |
-   | User Mappings | Declared, Diffed | |
+   | Tablespaces | Declared, Passthrough | Cluster-level; reconstructed from catalog, hash-diffed |
+   | Foreign Data Wrappers | Declared, Passthrough | Cluster-level; reconstructed from catalog, hash-diffed |
+   | Foreign Servers | Declared, Passthrough | Reconstructed from catalog; hash-diffed |
+   | User Mappings | Declared, Passthrough | Reconstructed from catalog; hash-diffed |
    | Foreign Tables | Declared, Diffed | |
    | Partitioned Tables | Declared, Diffed | |
    | Sub-partitioning | Declared, Diffed | |
-   | Publications | Declared, Diffed | |
-   | Subscriptions | Declared, Diffed | |
-   | Collations | Declared, Diffed | Change = DESTRUCTIVE |
-   | Operators | Declared, Diffed | PROCEDURE change = DESTRUCTIVE |
-   | Operator Classes / Families | Declared, Passthrough | |
-   | Casts | Declared, Diffed | Any change = DESTRUCTIVE |
-   | Extended Statistics Objects | Declared, Diffed | |
-   | Text Search Configurations | Declared, Diffed | |
-   | Text Search Dictionaries | Declared, Diffed | |
-   | Text Search Parsers | Declared, Diffed | |
-   | Text Search Templates | Declared, Diffed | |
+   | Publications | Declared, Passthrough | Reconstructed from catalog; hash-diffed |
+   | Subscriptions | Declared, Deferred | Introspection blocked: `CONNECTION` secret is catalog-redacted, can't round-trip; not yet dumped/diffed |
+   | Collations | Declared, Passthrough | Reconstructed from catalog, hash-diffed; any change = DESTRUCTIVE |
+   | Operators | Declared, Passthrough | Reconstructed from catalog, hash-diffed; any change = DESTRUCTIVE |
+   | Operator Classes / Families | Declared, Passthrough | Reconstructed from catalog, hash-diffed |
+   | Casts | Declared, Passthrough | Reconstructed from catalog, hash-diffed; any change = DESTRUCTIVE |
+   | Extended Statistics Objects | Declared, Passthrough | Reconstructed from catalog; hash-diffed |
+   | Text Search Configurations | Declared, Passthrough | Reconstructed from catalog; hash-diffed |
+   | Text Search Dictionaries | Declared, Passthrough | Reconstructed from catalog; hash-diffed |
+   | Text Search Parsers | Declared, Passthrough | Reconstructed from catalog; hash-diffed |
+   | Text Search Templates | Declared, Passthrough | Reconstructed from catalog; hash-diffed |
    | Macro preprocessor | Declared, No SQL | Compile-time text expansion |
    | Cross-file macro sharing | Declared, No SQL | Macros defined in any file in the compilation scope are available to all others |
    | Rules (REWRITE) | Out of scope | Legacy |
@@ -5561,8 +5560,10 @@ type SecretResolver interface {
    -   `aws-sm:<secret-id>` — AWS Secrets Manager lookup.
    -   `gcp-sm:<resource-name>` — GCP Secret Manager lookup.
 
-   A `ChainResolver` implementation is provided that tries each resolver
-   in order and returns the first non-error result.
+   No other scheme is recognised today; `link` URIs with an unimplemented
+   scheme return an error at resolution time. A `ChainResolver` that tries
+   multiple resolvers in order is planned alongside these future schemes
+   but not yet implemented.
 
 ---
 
