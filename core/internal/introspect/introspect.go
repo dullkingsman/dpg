@@ -95,6 +95,13 @@ func (ci *CatalogIntrospector) Introspect(ctx context.Context, conn pipeline.Que
 		introspectUserMappings,
 		introspectPublications,
 		introspectTablespaces,
+		introspectOperators,
+		introspectTSParsers,
+		introspectTSTemplates,
+		introspectTSDicts,
+		introspectTSConfigs,
+		introspectOperatorFamilies,
+		introspectOperatorClasses,
 	} {
 		objs, err := step(ctx, conn)
 		if err != nil {

@@ -142,15 +142,15 @@ func toSnapObject(obj pipeline.IRObject) *SnapObject {
 		}}
 	case *ir.Operator:
 		return &SnapObject{Kind: "operator", Opaque: &SnapOpaque{
-			Kind: "operator", Schema: o.Schema, Name: o.Name, BodyHash: hashBodyStr(o.Body),
+			Kind: "operator", Schema: o.Schema, Name: o.Name, BodyHash: sourceBodyHash(o.Body, o.Reconstructed),
 		}}
 	case *ir.OperatorClass:
 		return &SnapObject{Kind: "operator_class", Opaque: &SnapOpaque{
-			Kind: "operator_class", Schema: o.Schema, Name: o.Name, Using: o.AccessMethod, BodyHash: hashBodyStr(o.Body),
+			Kind: "operator_class", Schema: o.Schema, Name: o.Name, Using: o.AccessMethod, BodyHash: sourceBodyHash(o.Body, o.Reconstructed),
 		}}
 	case *ir.OperatorFamily:
 		return &SnapObject{Kind: "operator_family", Opaque: &SnapOpaque{
-			Kind: "operator_family", Schema: o.Schema, Name: o.Name, Using: o.AccessMethod, BodyHash: hashBodyStr(o.Body),
+			Kind: "operator_family", Schema: o.Schema, Name: o.Name, Using: o.AccessMethod, BodyHash: sourceBodyHash(o.Body, o.Reconstructed),
 		}}
 	case *ir.Cast:
 		return &SnapObject{Kind: "cast", Opaque: &SnapOpaque{
@@ -164,19 +164,19 @@ func toSnapObject(obj pipeline.IRObject) *SnapObject {
 		}}
 	case *ir.TSConfig:
 		return &SnapObject{Kind: "ts_config", Opaque: &SnapOpaque{
-			Kind: "ts_config", Schema: o.Schema, Name: o.Name, Comment: o.Comment,
+			Kind: "ts_config", Schema: o.Schema, Name: o.Name, BodyHash: sourceBodyHash(o.Body, o.Reconstructed), Comment: o.Comment,
 		}}
 	case *ir.TSDict:
 		return &SnapObject{Kind: "ts_dict", Opaque: &SnapOpaque{
-			Kind: "ts_dict", Schema: o.Schema, Name: o.Name, BodyHash: hashBodyStr(o.Body), Comment: o.Comment,
+			Kind: "ts_dict", Schema: o.Schema, Name: o.Name, BodyHash: sourceBodyHash(o.Body, o.Reconstructed), Comment: o.Comment,
 		}}
 	case *ir.TSParser:
 		return &SnapObject{Kind: "ts_parser", Opaque: &SnapOpaque{
-			Kind: "ts_parser", Schema: o.Schema, Name: o.Name, BodyHash: hashBodyStr(o.Body),
+			Kind: "ts_parser", Schema: o.Schema, Name: o.Name, BodyHash: sourceBodyHash(o.Body, o.Reconstructed),
 		}}
 	case *ir.TSTemplate:
 		return &SnapObject{Kind: "ts_template", Opaque: &SnapOpaque{
-			Kind: "ts_template", Schema: o.Schema, Name: o.Name, BodyHash: hashBodyStr(o.Body),
+			Kind: "ts_template", Schema: o.Schema, Name: o.Name, BodyHash: sourceBodyHash(o.Body, o.Reconstructed),
 		}}
 	case *ir.DefaultPrivileges:
 		sdp := &SnapDefaultPrivileges{

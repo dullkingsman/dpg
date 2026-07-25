@@ -602,6 +602,488 @@ ORDER  BY n.nspname, s.stxname`
 	return out, rs.Err()
 }
 
+// ── operators ─────────────────────────────────────────────────────────────────
+
+func introspectOperators(ctx context.Context, conn pipeline.Querier) ([]pipeline.IRObject, error) {
+	// oprcom/oprnegate reference other pg_operator rows by OID; a forward
+	// reference (COMMUTATOR pointing at an operator created later) is legal —
+	// PostgreSQL creates a shell and links it — so ordering is not a concern.
+	q := `
+SELECT n.nspname, o.oprname,
+       NULLIF(o.oprleft, 0)::regtype::text  AS leftarg,
+       NULLIF(o.oprright, 0)::regtype::text AS rightarg,
+       o.oprcode::regproc::text             AS fn,
+       cn.nspname AS com_schema, co.oprname AS com_name,
+       nn.nspname AS neg_schema, no.oprname AS neg_name,
+       NULLIF(o.oprrest, 0)::regproc::text   AS restrict_fn,
+       NULLIF(o.oprjoin, 0)::regproc::text   AS join_fn,
+       o.oprcanmerge, o.oprcanhash
+FROM   pg_operator o
+JOIN   pg_namespace n  ON n.oid = o.oprnamespace
+LEFT   JOIN pg_operator co ON co.oid = o.oprcom
+LEFT   JOIN pg_namespace cn ON cn.oid = co.oprnamespace
+LEFT   JOIN pg_operator no ON no.oid = o.oprnegate
+LEFT   JOIN pg_namespace nn ON nn.oid = no.oprnamespace
+WHERE  o.oid >= $1
+AND    n.nspname NOT IN ('pg_catalog', 'information_schema', 'pg_toast')
+AND    ` + notExtensionOwned("pg_operator", "o.oid") + `
+ORDER  BY n.nspname, o.oprname`
+
+	rs, err := conn.QueryRows(ctx, q, firstNormalObjectID)
+	if err != nil {
+		return nil, fmt.Errorf("introspect operators: %w", err)
+	}
+	defer rs.Close()
+
+	var out []pipeline.IRObject
+	for rs.Next() {
+		var schema, name, fn string
+		var leftArg, rightArg, comSchema, comName, negSchema, negName, restrictFn, joinFn *string
+		var canMerge, canHash bool
+		if err := rs.Scan(&schema, &name, &leftArg, &rightArg, &fn,
+			&comSchema, &comName, &negSchema, &negName, &restrictFn, &joinFn,
+			&canMerge, &canHash); err != nil {
+			return nil, err
+		}
+		var parts []string
+		parts = append(parts, "FUNCTION = "+fn)
+		if leftArg != nil {
+			parts = append(parts, "LEFTARG = "+*leftArg)
+		}
+		if rightArg != nil {
+			parts = append(parts, "RIGHTARG = "+*rightArg)
+		}
+		if comName != nil {
+			parts = append(parts, "COMMUTATOR = OPERATOR("+operatorRef(deref(comSchema), *comName)+")")
+		}
+		if negName != nil {
+			parts = append(parts, "NEGATOR = OPERATOR("+operatorRef(deref(negSchema), *negName)+")")
+		}
+		if restrictFn != nil {
+			parts = append(parts, "RESTRICT = "+*restrictFn)
+		}
+		if joinFn != nil {
+			parts = append(parts, "JOIN = "+*joinFn)
+		}
+		if canHash {
+			parts = append(parts, "HASHES")
+		}
+		if canMerge {
+			parts = append(parts, "MERGES")
+		}
+		body := fmt.Sprintf("CREATE OPERATOR %s (%s)", operatorRef(schema, name), strings.Join(parts, ", "))
+		out = append(out, &ir.Operator{Schema: schema, Name: name, Body: canonicalDDL(body), Reconstructed: true})
+	}
+	return out, rs.Err()
+}
+
+// operatorRef renders an optionally schema-qualified operator name. The operator
+// symbol itself (e.g. "===", "@>") is never quoted — quoting is only applied to
+// the schema identifier.
+func operatorRef(schema, name string) string {
+	if schema == "" {
+		return name
+	}
+	return quoteIdent(schema) + "." + name
+}
+
+// ── text search: parsers ──────────────────────────────────────────────────────
+
+func introspectTSParsers(ctx context.Context, conn pipeline.Querier) ([]pipeline.IRObject, error) {
+	q := `
+SELECT n.nspname, p.prsname,
+       p.prsstart::regproc::text    AS start_fn,
+       p.prstoken::regproc::text    AS token_fn,
+       p.prsend::regproc::text      AS end_fn,
+       p.prslextype::regproc::text  AS lextype_fn,
+       NULLIF(p.prsheadline, 0)::regproc::text AS headline_fn
+FROM   pg_ts_parser p
+JOIN   pg_namespace n ON n.oid = p.prsnamespace
+WHERE  p.oid >= $1
+AND    n.nspname NOT IN ('pg_catalog', 'information_schema', 'pg_toast')
+AND    ` + notExtensionOwned("pg_ts_parser", "p.oid") + `
+ORDER  BY n.nspname, p.prsname`
+
+	rs, err := conn.QueryRows(ctx, q, firstNormalObjectID)
+	if err != nil {
+		return nil, fmt.Errorf("introspect text search parsers: %w", err)
+	}
+	defer rs.Close()
+
+	var out []pipeline.IRObject
+	for rs.Next() {
+		var schema, name, startFn, tokenFn, endFn, lextypeFn string
+		var headlineFn *string
+		if err := rs.Scan(&schema, &name, &startFn, &tokenFn, &endFn, &lextypeFn, &headlineFn); err != nil {
+			return nil, err
+		}
+		parts := []string{
+			"START = " + startFn,
+			"GETTOKEN = " + tokenFn,
+			"END = " + endFn,
+			"LEXTYPES = " + lextypeFn,
+		}
+		if headlineFn != nil {
+			parts = append(parts, "HEADLINE = "+*headlineFn)
+		}
+		body := fmt.Sprintf("CREATE TEXT SEARCH PARSER %s (%s)", qualIdentQ(schema, name), strings.Join(parts, ", "))
+		out = append(out, &ir.TSParser{Schema: schema, Name: name, Body: canonicalDDL(body), Reconstructed: true})
+	}
+	return out, rs.Err()
+}
+
+// ── text search: templates ────────────────────────────────────────────────────
+
+func introspectTSTemplates(ctx context.Context, conn pipeline.Querier) ([]pipeline.IRObject, error) {
+	q := `
+SELECT n.nspname, t.tmplname,
+       NULLIF(t.tmplinit, 0)::regproc::text AS init_fn,
+       t.tmpllexize::regproc::text          AS lexize_fn
+FROM   pg_ts_template t
+JOIN   pg_namespace n ON n.oid = t.tmplnamespace
+WHERE  t.oid >= $1
+AND    n.nspname NOT IN ('pg_catalog', 'information_schema', 'pg_toast')
+AND    ` + notExtensionOwned("pg_ts_template", "t.oid") + `
+ORDER  BY n.nspname, t.tmplname`
+
+	rs, err := conn.QueryRows(ctx, q, firstNormalObjectID)
+	if err != nil {
+		return nil, fmt.Errorf("introspect text search templates: %w", err)
+	}
+	defer rs.Close()
+
+	var out []pipeline.IRObject
+	for rs.Next() {
+		var schema, name, lexizeFn string
+		var initFn *string
+		if err := rs.Scan(&schema, &name, &initFn, &lexizeFn); err != nil {
+			return nil, err
+		}
+		var parts []string
+		if initFn != nil {
+			parts = append(parts, "INIT = "+*initFn)
+		}
+		parts = append(parts, "LEXIZE = "+lexizeFn)
+		body := fmt.Sprintf("CREATE TEXT SEARCH TEMPLATE %s (%s)", qualIdentQ(schema, name), strings.Join(parts, ", "))
+		out = append(out, &ir.TSTemplate{Schema: schema, Name: name, Body: canonicalDDL(body), Reconstructed: true})
+	}
+	return out, rs.Err()
+}
+
+// ── text search: dictionaries ─────────────────────────────────────────────────
+
+func introspectTSDicts(ctx context.Context, conn pipeline.Querier) ([]pipeline.IRObject, error) {
+	// dictinitoption is stored as the already-rendered option list, e.g.
+	// "stopwords = 'english', language = 'english'"; it is appended verbatim.
+	// The outer alias must not be "d": notExtensionOwned's subquery aliases
+	// pg_depend as "d", and a matching outer alias would be shadowed.
+	q := `
+SELECT n.nspname, dict.dictname,
+       tn.nspname AS tmpl_schema, t.tmplname AS tmpl_name,
+       dict.dictinitoption
+FROM   pg_ts_dict dict
+JOIN   pg_namespace n  ON n.oid = dict.dictnamespace
+JOIN   pg_ts_template t ON t.oid = dict.dicttemplate
+JOIN   pg_namespace tn ON tn.oid = t.tmplnamespace
+WHERE  dict.oid >= $1
+AND    n.nspname NOT IN ('pg_catalog', 'information_schema', 'pg_toast')
+AND    ` + notExtensionOwned("pg_ts_dict", "dict.oid") + `
+ORDER  BY n.nspname, dict.dictname`
+
+	rs, err := conn.QueryRows(ctx, q, firstNormalObjectID)
+	if err != nil {
+		return nil, fmt.Errorf("introspect text search dictionaries: %w", err)
+	}
+	defer rs.Close()
+
+	var out []pipeline.IRObject
+	for rs.Next() {
+		var schema, name, tmplSchema, tmplName string
+		var initOption *string
+		if err := rs.Scan(&schema, &name, &tmplSchema, &tmplName, &initOption); err != nil {
+			return nil, err
+		}
+		parts := []string{"TEMPLATE = " + qualIdentQ(tmplSchema, tmplName)}
+		if initOption != nil && strings.TrimSpace(*initOption) != "" {
+			parts = append(parts, strings.TrimSpace(*initOption))
+		}
+		body := fmt.Sprintf("CREATE TEXT SEARCH DICTIONARY %s (%s)", qualIdentQ(schema, name), strings.Join(parts, ", "))
+		out = append(out, &ir.TSDict{Schema: schema, Name: name, Body: canonicalDDL(body), Reconstructed: true})
+	}
+	return out, rs.Err()
+}
+
+// ── text search: configurations ───────────────────────────────────────────────
+
+func introspectTSConfigs(ctx context.Context, conn pipeline.Querier) ([]pipeline.IRObject, error) {
+	// The reconstructed body is the bare CREATE with its PARSER; token→dictionary
+	// mappings (pg_ts_config_map) are a separate IR concern (TSConfig.Mappings)
+	// and are not folded into the body.
+	q := `
+SELECT n.nspname, c.cfgname,
+       pn.nspname AS parser_schema, p.prsname AS parser_name
+FROM   pg_ts_config c
+JOIN   pg_namespace n  ON n.oid = c.cfgnamespace
+JOIN   pg_ts_parser p  ON p.oid = c.cfgparser
+JOIN   pg_namespace pn ON pn.oid = p.prsnamespace
+WHERE  c.oid >= $1
+AND    n.nspname NOT IN ('pg_catalog', 'information_schema', 'pg_toast')
+AND    ` + notExtensionOwned("pg_ts_config", "c.oid") + `
+ORDER  BY n.nspname, c.cfgname`
+
+	rs, err := conn.QueryRows(ctx, q, firstNormalObjectID)
+	if err != nil {
+		return nil, fmt.Errorf("introspect text search configurations: %w", err)
+	}
+	defer rs.Close()
+
+	var out []pipeline.IRObject
+	for rs.Next() {
+		var schema, name, parserSchema, parserName string
+		if err := rs.Scan(&schema, &name, &parserSchema, &parserName); err != nil {
+			return nil, err
+		}
+		body := fmt.Sprintf("CREATE TEXT SEARCH CONFIGURATION %s (PARSER = %s)",
+			qualIdentQ(schema, name), qualIdentQ(parserSchema, parserName))
+		out = append(out, &ir.TSConfig{Schema: schema, Name: name, Body: canonicalDDL(body), Reconstructed: true})
+	}
+	return out, rs.Err()
+}
+
+// ── operator families ─────────────────────────────────────────────────────────
+
+func introspectOperatorFamilies(ctx context.Context, conn pipeline.Querier) ([]pipeline.IRObject, error) {
+	// A CREATE OPERATOR CLASS without an explicit FAMILY auto-creates a family of
+	// the SAME name in the same schema and access method. (The opclass→opfamily
+	// pg_depend row is deptype 'a' whether the family was auto-created or
+	// explicitly attached, so it cannot discriminate the two — the name match is
+	// the reliable signal, mirroring PostgreSQL's own same-name reuse rule.) Such
+	// a family is not a standalone object: introspecting it would emit a spurious
+	// CREATE OPERATOR FAMILY that the class's own reconstruction already implies,
+	// and that would conflict with the auto-creation on re-apply.
+	//
+	// ASSUMPTION (mirrored in introspectOperatorClasses): a same-name+schema
+	// family is the auto-created one and is skipped. The rare, legal case of an
+	// EXPLICIT family that happens to share a class's name — especially one
+	// enriched via ALTER OPERATOR FAMILY ADD, or shared by several classes — is
+	// misclassified and dropped from the dump. See the longer note there for why
+	// no deptype signal separates the cases and what the general fix would be.
+	q := `
+SELECT n.nspname, f.opfname, am.amname
+FROM   pg_opfamily f
+JOIN   pg_namespace n ON n.oid = f.opfnamespace
+JOIN   pg_am am       ON am.oid = f.opfmethod
+WHERE  f.oid >= $1
+AND    n.nspname NOT IN ('pg_catalog', 'information_schema', 'pg_toast')
+AND    ` + notExtensionOwned("pg_opfamily", "f.oid") + `
+AND    NOT EXISTS (
+           SELECT 1 FROM pg_opclass c
+           WHERE  c.opcfamily = f.oid
+           AND    c.opcname = f.opfname
+           AND    c.opcnamespace = f.opfnamespace
+       )
+ORDER  BY n.nspname, f.opfname`
+
+	rs, err := conn.QueryRows(ctx, q, firstNormalObjectID)
+	if err != nil {
+		return nil, fmt.Errorf("introspect operator families: %w", err)
+	}
+	defer rs.Close()
+
+	var out []pipeline.IRObject
+	for rs.Next() {
+		var schema, name, am string
+		if err := rs.Scan(&schema, &name, &am); err != nil {
+			return nil, err
+		}
+		body := fmt.Sprintf("CREATE OPERATOR FAMILY %s USING %s", qualIdentQ(schema, name), quoteIdent(am))
+		out = append(out, &ir.OperatorFamily{
+			Schema: schema, Name: name, AccessMethod: am,
+			Body: canonicalDDL(body), Reconstructed: true,
+		})
+	}
+	return out, rs.Err()
+}
+
+// ── operator classes ──────────────────────────────────────────────────────────
+
+func introspectOperatorClasses(ctx context.Context, conn pipeline.Querier) ([]pipeline.IRObject, error) {
+	q := `
+SELECT c.oid, n.nspname, c.opcname, am.amname,
+       c.opcintype::regtype::text AS intype,
+       c.opcdefault,
+       NULLIF(c.opckeytype, 0)::regtype::text AS storagetype,
+       fn.nspname AS fam_schema, f.opfname AS fam_name
+FROM   pg_opclass c
+JOIN   pg_namespace n ON n.oid = c.opcnamespace
+JOIN   pg_am am       ON am.oid = c.opcmethod
+JOIN   pg_opfamily f  ON f.oid = c.opcfamily
+JOIN   pg_namespace fn ON fn.oid = f.opfnamespace
+WHERE  c.oid >= $1
+AND    n.nspname NOT IN ('pg_catalog', 'information_schema', 'pg_toast')
+AND    ` + notExtensionOwned("pg_opclass", "c.oid") + `
+ORDER  BY n.nspname, c.opcname`
+
+	rs, err := conn.QueryRows(ctx, q, firstNormalObjectID)
+	if err != nil {
+		return nil, fmt.Errorf("introspect operator classes: %w", err)
+	}
+
+	type opcRow struct {
+		oid                             uint32
+		schema, name, am, intype        string
+		isDefault                       bool
+		storageType, famSchema, famName *string
+	}
+	var rows []opcRow
+	for rs.Next() {
+		var r opcRow
+		if err := rs.Scan(&r.oid, &r.schema, &r.name, &r.am, &r.intype, &r.isDefault,
+			&r.storageType, &r.famSchema, &r.famName); err != nil {
+			rs.Close()
+			return nil, err
+		}
+		rows = append(rows, r)
+	}
+	if err := rs.Err(); err != nil {
+		rs.Close()
+		return nil, err
+	}
+	rs.Close()
+
+	var out []pipeline.IRObject
+	for _, r := range rows {
+		members, err := opClassMembers(ctx, conn, r.oid)
+		if err != nil {
+			return nil, err
+		}
+		if r.storageType != nil {
+			members = append(members, "STORAGE "+*r.storageType)
+		}
+		if len(members) == 0 {
+			// An operator class with no reconstructable members cannot be emitted
+			// as valid DDL; skip rather than produce an empty AS clause.
+			continue
+		}
+		var sb strings.Builder
+		fmt.Fprintf(&sb, "CREATE OPERATOR CLASS %s", qualIdentQ(r.schema, r.name))
+		if r.isDefault {
+			sb.WriteString(" DEFAULT")
+		}
+		fmt.Fprintf(&sb, " FOR TYPE %s USING %s", r.intype, quoteIdent(r.am))
+		// Only name the family when it is an explicit, separately-declared family.
+		// A family sharing the class's name and schema is the one PostgreSQL
+		// auto-creates (or reuses) for an unqualified CREATE OPERATOR CLASS, so the
+		// FAMILY clause is omitted — emitting it would reference a family that the
+		// introspector deliberately does not dump as a standalone object.
+		//
+		// ASSUMPTION (see introspectOperatorFamilies): "same name+schema as the
+		// class" is treated as implicit/auto-created. This is exact for the common
+		// case but wrong for the rare, legal shape where a user creates an explicit
+		// CREATE OPERATOR FAMILY that happens to share a name with a class attached
+		// to it — the standalone family (and any members added to it via ALTER,
+		// which DPG does not model regardless) is then omitted. There is no
+		// pg_depend-only signal that distinguishes the two (auto and explicit both
+		// use deptype 'a'). The fully general fix is pg_dump's model: introspect
+		// every family and give every class an explicit FAMILY clause, with a
+		// class→family dependency edge added to the resolver for ordering.
+		implicitFamily := r.famName != nil && *r.famName == r.name && deref(r.famSchema) == r.schema
+		if !implicitFamily && r.famName != nil {
+			fmt.Fprintf(&sb, " FAMILY %s", qualIdentQ(deref(r.famSchema), *r.famName))
+		}
+		fmt.Fprintf(&sb, " AS %s", strings.Join(members, ", "))
+		out = append(out, &ir.OperatorClass{
+			Schema: r.schema, Name: r.name, AccessMethod: r.am,
+			Body: canonicalDDL(sb.String()), Reconstructed: true,
+		})
+	}
+	return out, nil
+}
+
+// opClassMembers returns the rendered OPERATOR and FUNCTION member clauses that
+// belong to the operator class identified by opcOID. Membership is determined by
+// an internal pg_depend link from the pg_amop/pg_amproc row to the opclass, which
+// is exactly the set a CREATE OPERATOR CLASS ... AS clause established (members
+// later added at family scope via ALTER depend on the family, not the class).
+func opClassMembers(ctx context.Context, conn pipeline.Querier, opcOID uint32) ([]string, error) {
+	var members []string
+
+	const opQ = `
+SELECT ao.amopstrategy,
+       opn.nspname AS opr_schema, op.oprname AS opr_name,
+       ao.amoplefttype::regtype::text  AS lt,
+       ao.amoprighttype::regtype::text AS rt,
+       ao.amoppurpose::text,
+       (SELECT sfn.nspname || '.' || sf.opfname
+        FROM   pg_opfamily sf
+        JOIN   pg_namespace sfn ON sfn.oid = sf.opfnamespace
+        WHERE  sf.oid = ao.amopsortfamily) AS sort_family
+FROM   pg_amop ao
+JOIN   pg_depend d  ON d.classid = 'pg_amop'::regclass AND d.objid = ao.oid
+                   AND d.refclassid = 'pg_opclass'::regclass AND d.refobjid = $1
+                   AND d.deptype = 'i'
+JOIN   pg_operator op  ON op.oid = ao.amopopr
+JOIN   pg_namespace opn ON opn.oid = op.oprnamespace
+ORDER  BY ao.amopstrategy, ao.amoplefttype, ao.amoprighttype`
+
+	rs, err := conn.QueryRows(ctx, opQ, opcOID)
+	if err != nil {
+		return nil, fmt.Errorf("introspect operator class operators: %w", err)
+	}
+	for rs.Next() {
+		var strategy int
+		var oprSchema, oprName, lt, rt string
+		var purpose string
+		var sortFamily *string
+		if err := rs.Scan(&strategy, &oprSchema, &oprName, &lt, &rt, &purpose, &sortFamily); err != nil {
+			rs.Close()
+			return nil, err
+		}
+		clause := fmt.Sprintf("OPERATOR %d %s (%s, %s)", strategy, operatorRef(oprSchema, oprName), lt, rt)
+		if purpose == "o" && sortFamily != nil {
+			clause += " FOR ORDER BY " + *sortFamily
+		}
+		members = append(members, clause)
+	}
+	if err := rs.Err(); err != nil {
+		rs.Close()
+		return nil, err
+	}
+	rs.Close()
+
+	const fnQ = `
+SELECT ap.amprocnum,
+       ap.amproc::regprocedure::text  AS fn,
+       ap.amproclefttype::regtype::text  AS lt,
+       ap.amprocrighttype::regtype::text AS rt
+FROM   pg_amproc ap
+JOIN   pg_depend d ON d.classid = 'pg_amproc'::regclass AND d.objid = ap.oid
+                  AND d.refclassid = 'pg_opclass'::regclass AND d.refobjid = $1
+                  AND d.deptype = 'i'
+ORDER  BY ap.amprocnum, ap.amproclefttype, ap.amprocrighttype`
+
+	rs2, err := conn.QueryRows(ctx, fnQ, opcOID)
+	if err != nil {
+		return nil, fmt.Errorf("introspect operator class functions: %w", err)
+	}
+	for rs2.Next() {
+		var support int
+		var fn, lt, rt string
+		if err := rs2.Scan(&support, &fn, &lt, &rt); err != nil {
+			rs2.Close()
+			return nil, err
+		}
+		members = append(members, fmt.Sprintf("FUNCTION %d (%s, %s) %s", support, lt, rt, fn))
+	}
+	if err := rs2.Err(); err != nil {
+		rs2.Close()
+		return nil, err
+	}
+	rs2.Close()
+
+	return members, nil
+}
+
 // ── shared row helpers ────────────────────────────────────────────────────────
 
 // scanNames runs a single-column query and returns the values.

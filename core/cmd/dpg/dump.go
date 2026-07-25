@@ -292,6 +292,20 @@ func objectSchema(obj pipeline.IRObject) string {
 		return o.Schema
 	case *ir.StatisticsObject:
 		return o.Schema
+	case *ir.Operator:
+		return o.Schema
+	case *ir.OperatorClass:
+		return o.Schema
+	case *ir.OperatorFamily:
+		return o.Schema
+	case *ir.TSConfig:
+		return o.Schema
+	case *ir.TSDict:
+		return o.Schema
+	case *ir.TSParser:
+		return o.Schema
+	case *ir.TSTemplate:
+		return o.Schema
 	}
 	return ""
 }
@@ -506,6 +520,20 @@ func renderObjectDPG(b *strings.Builder, obj pipeline.IRObject, fmtOpts format.O
 	case *ir.Publication:
 		renderOpaqueBody(b, o.Body)
 	case *ir.Tablespace:
+		renderOpaqueBody(b, o.Body)
+	case *ir.Operator:
+		renderOpaqueBody(b, o.Body)
+	case *ir.OperatorClass:
+		renderOpaqueBody(b, o.Body)
+	case *ir.OperatorFamily:
+		renderOpaqueBody(b, o.Body)
+	case *ir.TSConfig:
+		renderOpaqueBody(b, o.Body)
+	case *ir.TSDict:
+		renderOpaqueBody(b, o.Body)
+	case *ir.TSParser:
+		renderOpaqueBody(b, o.Body)
+	case *ir.TSTemplate:
 		renderOpaqueBody(b, o.Body)
 	}
 }

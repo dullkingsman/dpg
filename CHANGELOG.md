@@ -14,6 +14,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   collations, casts, extended statistics), so `dump`/`verify`/`plan --live`
   cover them. Reconstructed DDL is canonicalised through pg_query to match the
   compiler's output. Extension-owned and system objects are filtered out.
+- Introspect seven further object types — operators, operator families, operator
+  classes (with their full `OPERATOR`/`FUNCTION` member list), text-search
+  parsers, templates, dictionaries, and configurations — completing catalog
+  coverage for the opaque tier. Previously `plan --live` proposed a spurious
+  `CREATE` for each of these because introspection returned nothing. Operator
+  class/family members are scoped by their internal `pg_depend` link to the
+  class, so family-level members added later by `ALTER` are not mis-attributed;
+  operator families auto-created for a class are skipped.
 - `dump` now writes database-scoped schemaless objects to `<db>/objects.dpg`
   (previously misfiled under the cluster roles file) and can emit these object
   types as DPG declarations.
@@ -40,6 +48,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   "type … does not exist".
 - `dump` now emits `SCHEMA` and `EXTENSION` declarations, so non-public schemas
   and installed extensions are no longer dropped by `plan --live`.
+- `dump` now renders the seven deferred-tier types it learned to introspect
+  (operators, operator classes/families, text-search parsers/templates/
+  dictionaries/configurations); previously it silently omitted them, so a `dump`
+  of a database using any of them was immediately followed by a destructive
+  `DROP` for each on the next `plan --live`.
+- An operator class and the operator family PostgreSQL auto-creates for it share
+  the same qualified name, which collided in the flat, name-keyed snapshot and
+  diff maps and silently dropped one of the two objects. Operator class/family
+  identity now includes the access method and a class/family discriminator, so
+  the two can never overwrite each other (this changes their snapshot keys — see
+  upgrade notes).
+- Operator-family introspection no longer emits the same-named family that a
+  `CREATE OPERATOR CLASS` auto-creates as a standalone object (which would emit a
+  redundant `CREATE OPERATOR FAMILY` that conflicts with the auto-creation on
+  re-apply), and a class's reconstructed body no longer names that implicit
+  family in a `FAMILY` clause. The previous discriminator relied on a `pg_depend`
+  deptype that is identical for auto-created and explicitly-attached families; the
+  reliable signal is the family's matching name, mirroring PostgreSQL's own rule.
+  Known limitation: an *explicit* operator family that happens to share a class's
+  name (rare, but legal) is treated as the implicit auto-created one and omitted
+  from the dump; operator-family members added via `ALTER OPERATOR FAMILY … ADD`
+  are not modeled in either case.
 - Introspection now excludes extension-owned functions, procedures, aggregates,
   types, tables, views, and sequences (e.g. `hstore`'s ~60 functions), so they
   are not dumped or proposed for dropping.
@@ -70,6 +100,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Body-change detection self-heals on next apply.** Snapshots written before
   this release have no stored body hash for these types, so offline detection of
   a body edit stays dormant until the next `apply` re-snapshots from source.
+- **Operator class/family snapshot keys changed.** Their snapshot keys now embed
+  the access method and a class/family marker (e.g. `public.x USING btree` vs
+  `public.x USING btree FAMILY`). Any operator class or family in a pre-existing
+  snapshot re-keys on the next run: the old key reads as a removed object and the
+  new key as a new one, so `plan` emits a **DESTRUCTIVE** `DROP` + `CREATE` pair
+  (requires `--allow-destructive` to apply). For a class or family with no
+  dependents this applies cleanly and the next `plan` is a genuine no-op. If
+  anything depends on the object — e.g. an index built with a custom operator
+  class, the usual reason to have one — the `DROP` **fails outright** with a
+  Postgres "other objects depend on it" error (loud failure, not silent
+  corruption); drop/rebuild the dependents around the apply, or avoid the churn
+  entirely by hand-editing the snapshot key to the new format before running.
 
 ## [idea-v0.5.2-alpha.13] — 2026-05-22
 

@@ -479,10 +479,11 @@ func (c *Collation) irObject()               {}
 
 // Operator is a CREATE OPERATOR declaration.
 type Operator struct {
-	Schema string
-	Name   string
-	Body   string
-	SrcPos pipeline.SourcePos
+	Schema        string
+	Name          string
+	Body          string
+	Reconstructed bool // Body rebuilt from the catalog; see Tablespace.Reconstructed
+	SrcPos        pipeline.SourcePos
 }
 
 func (o *Operator) QualifiedName() string   { return qualName(o.Schema, o.Name) }
@@ -491,27 +492,42 @@ func (o *Operator) irObject()               {}
 
 // OperatorClass is a CREATE OPERATOR CLASS declaration.
 type OperatorClass struct {
-	Schema       string
-	Name         string
-	AccessMethod string // the index access method (btree/gin/gist/...); needed for DROP
-	Body         string
-	SrcPos       pipeline.SourcePos
+	Schema        string
+	Name          string
+	AccessMethod  string // the index access method (btree/gin/gist/...); needed for DROP
+	Body          string
+	Reconstructed bool // Body rebuilt from the catalog; see Tablespace.Reconstructed
+	SrcPos        pipeline.SourcePos
 }
 
-func (o *OperatorClass) QualifiedName() string   { return qualName(o.Schema, o.Name) }
+// QualifiedName includes the access method because operator class names are
+// unique only within a method, so two same-named classes under different methods
+// must key distinctly in the flat, name-keyed snapshot and diff maps. See
+// OperatorFamily.QualifiedName for why classes and families must not collide.
+func (o *OperatorClass) QualifiedName() string {
+	return qualName(o.Schema, o.Name) + " USING " + o.AccessMethod
+}
 func (o *OperatorClass) Pos() pipeline.SourcePos { return o.SrcPos }
 func (o *OperatorClass) irObject()               {}
 
 // OperatorFamily is a CREATE OPERATOR FAMILY declaration.
 type OperatorFamily struct {
-	Schema       string
-	Name         string
-	AccessMethod string // the index access method (btree/gin/gist/...); needed for DROP
-	Body         string
-	SrcPos       pipeline.SourcePos
+	Schema        string
+	Name          string
+	AccessMethod  string // the index access method (btree/gin/gist/...); needed for DROP
+	Body          string
+	Reconstructed bool // Body rebuilt from the catalog; see Tablespace.Reconstructed
+	SrcPos        pipeline.SourcePos
 }
 
-func (o *OperatorFamily) QualifiedName() string   { return qualName(o.Schema, o.Name) }
+// QualifiedName carries a trailing " FAMILY" so an operator family never
+// collides with a same-named operator class in the flat, name-keyed snapshot and
+// diff maps — PostgreSQL auto-creates a same-named family for every class, so the
+// collision is the common case, not an edge one. The access method is included
+// for the same reason as OperatorClass: names are unique only per method.
+func (o *OperatorFamily) QualifiedName() string {
+	return qualName(o.Schema, o.Name) + " USING " + o.AccessMethod + " FAMILY"
+}
 func (o *OperatorFamily) Pos() pipeline.SourcePos { return o.SrcPos }
 func (o *OperatorFamily) irObject()               {}
 
@@ -543,12 +559,13 @@ func (s *StatisticsObject) irObject()               {}
 
 // TSConfig is a CREATE TEXT SEARCH CONFIGURATION declaration.
 type TSConfig struct {
-	Schema   string
-	Name     string
-	Body     string
-	Mappings []pipeline.TSMappingDef
-	Comment  *string
-	SrcPos   pipeline.SourcePos
+	Schema        string
+	Name          string
+	Body          string
+	Mappings      []pipeline.TSMappingDef
+	Comment       *string
+	Reconstructed bool // Body rebuilt from the catalog; see Tablespace.Reconstructed
+	SrcPos        pipeline.SourcePos
 }
 
 func (t *TSConfig) QualifiedName() string   { return qualName(t.Schema, t.Name) }
@@ -557,11 +574,12 @@ func (t *TSConfig) irObject()               {}
 
 // TSDict is a CREATE TEXT SEARCH DICTIONARY declaration.
 type TSDict struct {
-	Schema  string
-	Name    string
-	Body    string
-	Comment *string
-	SrcPos  pipeline.SourcePos
+	Schema        string
+	Name          string
+	Body          string
+	Comment       *string
+	Reconstructed bool // Body rebuilt from the catalog; see Tablespace.Reconstructed
+	SrcPos        pipeline.SourcePos
 }
 
 func (t *TSDict) QualifiedName() string   { return qualName(t.Schema, t.Name) }
@@ -570,10 +588,11 @@ func (t *TSDict) irObject()               {}
 
 // TSParser is a CREATE TEXT SEARCH PARSER declaration.
 type TSParser struct {
-	Schema string
-	Name   string
-	Body   string
-	SrcPos pipeline.SourcePos
+	Schema        string
+	Name          string
+	Body          string
+	Reconstructed bool // Body rebuilt from the catalog; see Tablespace.Reconstructed
+	SrcPos        pipeline.SourcePos
 }
 
 func (t *TSParser) QualifiedName() string   { return qualName(t.Schema, t.Name) }
@@ -582,10 +601,11 @@ func (t *TSParser) irObject()               {}
 
 // TSTemplate is a CREATE TEXT SEARCH TEMPLATE declaration.
 type TSTemplate struct {
-	Schema string
-	Name   string
-	Body   string
-	SrcPos pipeline.SourcePos
+	Schema        string
+	Name          string
+	Body          string
+	Reconstructed bool // Body rebuilt from the catalog; see Tablespace.Reconstructed
+	SrcPos        pipeline.SourcePos
 }
 
 func (t *TSTemplate) QualifiedName() string   { return qualName(t.Schema, t.Name) }

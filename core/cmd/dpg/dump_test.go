@@ -59,6 +59,20 @@ func TestRenderOpaqueObjectsCompile(t *testing.T) {
 		&ir.StatisticsObject{Schema: "public", Name: "st",
 			Body: "CREATE STATISTICS public.st (dependencies) ON a, b FROM public.t"},
 		&ir.Tablespace{Name: "ts", Body: "CREATE TABLESPACE ts LOCATION '/tmp/x'"},
+		&ir.Operator{Schema: "public", Name: "===",
+			Body: "CREATE OPERATOR public.=== (FUNCTION = int4eq, LEFTARG = integer, RIGHTARG = integer)"},
+		&ir.OperatorClass{Schema: "public", Name: "my_opc", AccessMethod: "btree",
+			Body: "CREATE OPERATOR CLASS public.my_opc FOR TYPE integer USING btree AS OPERATOR 3 =, FUNCTION 1 btint4cmp(integer, integer)"},
+		&ir.OperatorFamily{Schema: "public", Name: "my_fam", AccessMethod: "btree",
+			Body: "CREATE OPERATOR FAMILY public.my_fam USING btree"},
+		&ir.TSConfig{Schema: "public", Name: "my_cfg",
+			Body: `CREATE TEXT SEARCH CONFIGURATION public.my_cfg (PARSER = pg_catalog."default")`},
+		&ir.TSDict{Schema: "public", Name: "my_dict",
+			Body: "CREATE TEXT SEARCH DICTIONARY public.my_dict (TEMPLATE = pg_catalog.simple)"},
+		&ir.TSParser{Schema: "public", Name: "my_prs",
+			Body: "CREATE TEXT SEARCH PARSER public.my_prs (START = prsd_start, GETTOKEN = prsd_nexttoken, END = prsd_end, LEXTYPES = prsd_lextype)"},
+		&ir.TSTemplate{Schema: "public", Name: "my_tmpl",
+			Body: "CREATE TEXT SEARCH TEMPLATE public.my_tmpl (LEXIZE = dsimple_lexize)"},
 	}
 
 	var b strings.Builder
@@ -89,6 +103,8 @@ func TestRenderOpaqueObjectsCompile(t *testing.T) {
 		"*ir.ForeignDataWrapper": false, "*ir.ForeignServer": false, "*ir.UserMapping": false,
 		"*ir.Publication": false, "*ir.EventTrigger": false, "*ir.Collation": false,
 		"*ir.Cast": false, "*ir.StatisticsObject": false, "*ir.Tablespace": false,
+		"*ir.Operator": false, "*ir.OperatorClass": false, "*ir.OperatorFamily": false,
+		"*ir.TSConfig": false, "*ir.TSDict": false, "*ir.TSParser": false, "*ir.TSTemplate": false,
 	}
 	for _, o := range compiled {
 		k := reflect.TypeOf(o).String()

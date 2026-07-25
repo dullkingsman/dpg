@@ -1625,17 +1625,17 @@ func diffObject(desired pipeline.IRObject, snap *snapshot.SnapObject, fullSnap *
 		if snap.Opaque == nil {
 			return nil, nil
 		}
-		return diffOpaqueIR(o.QualifiedName(), o.Body, false, snap.Opaque, o.SrcPos)
+		return diffOpaqueIR(o.QualifiedName(), o.Body, o.Reconstructed, snap.Opaque, o.SrcPos)
 	case *ir.OperatorClass:
 		if snap.Opaque == nil {
 			return nil, nil
 		}
-		return diffOpaqueIR(o.QualifiedName(), o.Body, false, snap.Opaque, o.SrcPos)
+		return diffOpaqueIR(o.QualifiedName(), o.Body, o.Reconstructed, snap.Opaque, o.SrcPos)
 	case *ir.OperatorFamily:
 		if snap.Opaque == nil {
 			return nil, nil
 		}
-		return diffOpaqueIR(o.QualifiedName(), o.Body, false, snap.Opaque, o.SrcPos)
+		return diffOpaqueIR(o.QualifiedName(), o.Body, o.Reconstructed, snap.Opaque, o.SrcPos)
 	case *ir.Cast:
 		if snap.Opaque == nil {
 			return nil, nil
@@ -1650,22 +1650,22 @@ func diffObject(desired pipeline.IRObject, snap *snapshot.SnapObject, fullSnap *
 		if snap.Opaque == nil {
 			return nil, nil
 		}
-		return diffOpaqueIR(o.QualifiedName(), o.Body, false, snap.Opaque, o.SrcPos)
+		return diffOpaqueIR(o.QualifiedName(), o.Body, o.Reconstructed, snap.Opaque, o.SrcPos)
 	case *ir.TSDict:
 		if snap.Opaque == nil {
 			return nil, nil
 		}
-		return diffOpaqueIR(o.QualifiedName(), o.Body, false, snap.Opaque, o.SrcPos)
+		return diffOpaqueIR(o.QualifiedName(), o.Body, o.Reconstructed, snap.Opaque, o.SrcPos)
 	case *ir.TSParser:
 		if snap.Opaque == nil {
 			return nil, nil
 		}
-		return diffOpaqueIR(o.QualifiedName(), o.Body, false, snap.Opaque, o.SrcPos)
+		return diffOpaqueIR(o.QualifiedName(), o.Body, o.Reconstructed, snap.Opaque, o.SrcPos)
 	case *ir.TSTemplate:
 		if snap.Opaque == nil {
 			return nil, nil
 		}
-		return diffOpaqueIR(o.QualifiedName(), o.Body, false, snap.Opaque, o.SrcPos)
+		return diffOpaqueIR(o.QualifiedName(), o.Body, o.Reconstructed, snap.Opaque, o.SrcPos)
 	case *ir.DefaultPrivileges:
 		if snap.DefaultPrivileges == nil {
 			return nil, nil

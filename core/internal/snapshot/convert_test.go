@@ -303,9 +303,9 @@ func TestPopulateOperatorClassUsing(t *testing.T) {
 	if err := Populate(snap, objects); err != nil {
 		t.Fatal(err)
 	}
-	raw, ok := snap.Objects["public.my_ops"]
+	raw, ok := snap.Objects["public.my_ops USING gin"]
 	if !ok {
-		t.Fatal("expected public.my_ops in snapshot")
+		t.Fatal("expected public.my_ops USING gin in snapshot")
 	}
 	var so SnapObject
 	if err := json.Unmarshal(raw, &so); err != nil {
@@ -332,9 +332,9 @@ func TestPopulateOperatorFamilyUsing(t *testing.T) {
 	if err := Populate(snap, objects); err != nil {
 		t.Fatal(err)
 	}
-	raw, ok := snap.Objects["public.my_family"]
+	raw, ok := snap.Objects["public.my_family USING gist FAMILY"]
 	if !ok {
-		t.Fatal("expected public.my_family in snapshot")
+		t.Fatal("expected public.my_family USING gist FAMILY in snapshot")
 	}
 	var so SnapObject
 	if err := json.Unmarshal(raw, &so); err != nil {
@@ -342,5 +342,42 @@ func TestPopulateOperatorFamilyUsing(t *testing.T) {
 	}
 	if so.Opaque == nil || so.Opaque.Using != "gist" {
 		t.Errorf("Using: got %+v, want gist", so.Opaque)
+	}
+}
+
+// TestPopulateOperatorClassFamilyNoCollision guards the data-loss bug where an
+// operator class and the same-named operator family PostgreSQL auto-creates for
+// it both keyed to qualName(schema,name), so one silently overwrote the other in
+// the flat snapshot map. Both must survive Populate under distinct keys.
+func TestPopulateOperatorClassFamilyNoCollision(t *testing.T) {
+	snap := &pipeline.Snapshot{}
+	objects := []pipeline.IRObject{
+		&ir.OperatorClass{
+			Schema: "public", Name: "widget", AccessMethod: "btree",
+			Body: "CREATE OPERATOR CLASS public.widget FOR TYPE int4 USING btree AS STORAGE int4",
+		},
+		&ir.OperatorFamily{
+			Schema: "public", Name: "widget", AccessMethod: "btree",
+			Body: "CREATE OPERATOR FAMILY public.widget USING btree",
+		},
+	}
+	if err := Populate(snap, objects); err != nil {
+		t.Fatal(err)
+	}
+	var classKey, familyKey int
+	for key, raw := range snap.Objects {
+		var so SnapObject
+		if err := json.Unmarshal(raw, &so); err != nil {
+			t.Fatalf("unmarshal %q: %v", key, err)
+		}
+		switch so.Opaque.Kind {
+		case "operator_class":
+			classKey++
+		case "operator_family":
+			familyKey++
+		}
+	}
+	if classKey != 1 || familyKey != 1 {
+		t.Errorf("expected one class and one family to survive; got class=%d family=%d (collision dropped one)", classKey, familyKey)
 	}
 }
