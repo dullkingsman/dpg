@@ -210,3 +210,30 @@ func TestSort_ViewAfterAllTables(t *testing.T) {
 	assertBefore(t, sorted, "app.users", "app.user_view")
 	assertBefore(t, sorted, "app.orders", "app.user_view")
 }
+
+// A column whose custom type is written UNQUALIFIED (as introspected columns are
+// — e.g. "mood" rather than "public.mood") must still order the type before the
+// table, resolved against the table's own schema. Regression: dump emitted the
+// table before its enum, so apply-to-fresh-DB failed with "type does not exist".
+func TestSort_UnqualifiedTypeSameSchema(t *testing.T) {
+	tbl := table("app", "orders")
+	tbl.Columns = []*ir.Column{columnWithType("status", "", "order_status")}
+	objects := []pipeline.IRObject{
+		tbl,
+		schema("app"),
+		enumType("app", "order_status"),
+	}
+	sorted := sortObjects(t, objects)
+	assertBefore(t, sorted, "app.order_status", "app.orders")
+}
+
+// An unqualified type name with no matching custom type is a built-in and must
+// not error or create a dependency.
+func TestSort_UnqualifiedBuiltinTypeNoError(t *testing.T) {
+	tbl := table("app", "orders")
+	tbl.Columns = []*ir.Column{columnWithType("n", "", "integer")}
+	objects := []pipeline.IRObject{tbl, schema("app")}
+	if _, err := graph.New().Sort(objects); err != nil {
+		t.Fatalf("unqualified built-in type must not error: %v", err)
+	}
+}

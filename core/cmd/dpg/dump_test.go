@@ -135,3 +135,207 @@ func TestIsClusterScoped(t *testing.T) {
 		t.Errorf("excludeClusterScoped kept %d, want %d", len(kept), len(database))
 	}
 }
+
+func TestQuoteIdentIfNeeded(t *testing.T) {
+	cases := map[string]string{
+		"items":     "items",       // safe lowercase
+		"a1_$":      "a1_$",        // safe with digit/underscore/dollar
+		"name":      "name",        // unreserved/col-name keyword -> bare
+		"order":     `"order"`,     // reserved
+		"select":    `"select"`,    // reserved
+		"user":      `"user"`,      // reserved
+		"left":      `"left"`,      // type_func_name
+		"MyTable":   `"MyTable"`,   // uppercase folds -> must quote
+		"has space": `"has space"`, // special char
+		"1st":       `"1st"`,       // leading digit
+		"":          `""`,          // empty
+	}
+	for in, want := range cases {
+		if got := quoteIdentIfNeeded(in); got != want {
+			t.Errorf("quoteIdentIfNeeded(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+// Dumped source for reserved-word / schema / extension objects must quote where
+// needed and recompile cleanly (regression: renderObjectDPG emitted identifiers
+// raw, so a reserved-word table/column produced non-compiling source).
+func TestRenderReservedWordAndStructuralCompile(t *testing.T) {
+	fmtOpts := format.Options{IndentSize: 4, KeywordCase: "upper"}
+	comment := "reporting schema"
+	tblComment := "a table's comment"
+	where := `"select" > 0`
+	objs := []pipeline.IRObject{
+		&ir.Schema{Name: "reporting", Comment: &comment},
+		&ir.Extension{Name: "hstore"},
+		// ENUM must render "AS ENUM (...)" with single-quoted labels.
+		&ir.Type{Schema: "public", Name: "mood", Variant: "ENUM", EnumValues: []string{"happy", "it's ok"}},
+		// Reserved-word names + a COMMENT + an INDEX (INDICES block) must all recompile.
+		&ir.Table{Schema: "public", Name: "user", Comment: &tblComment,
+			Columns: []*ir.Column{
+				{Name: "select", Type: ir.TypeRef{Name: "integer"}},
+				{Name: "id", Type: ir.TypeRef{Name: "integer"}},
+			},
+			Indexes: []*ir.Index{
+				{Name: "idx_user_sel", Columns: []pipeline.IndexColumn{{Name: "select"}}, Where: &where},
+			}},
+	}
+	var b strings.Builder
+	for _, o := range objs {
+		renderObjectDPG(&b, o, fmtOpts)
+	}
+	rendered := b.String()
+	// Reserved-word table/column names must be quoted (these support quoting via
+	// the PG parser). Schema names cannot be quoted (scanner limitation) so are
+	// emitted bare — a reserved-word schema name is out of scope.
+	for _, q := range []string{`"user"`, `"select"`} {
+		if !strings.Contains(rendered, q) {
+			t.Errorf("expected %s quoted in output:\n%s", q, rendered)
+		}
+	}
+	if !strings.Contains(rendered, "EXTENSION hstore;") {
+		t.Errorf("expected bare EXTENSION hstore, got:\n%s", rendered)
+	}
+	if !strings.Contains(rendered, "SCHEMA reporting {") {
+		t.Errorf("expected SCHEMA reporting block, got:\n%s", rendered)
+	}
+
+	dir := t.TempDir()
+	f := filepath.Join(dir, "schema.dpg")
+	if err := os.WriteFile(f, []byte(rendered), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	compiled, err := compiler.Compile([]string{f}, dir, pipeline.Default)
+	if err != nil {
+		t.Fatalf("reserved-word/structural dump did not recompile: %v\n---\n%s", err, rendered)
+	}
+	var sawSchema, sawExt, sawTable bool
+	for _, o := range compiled {
+		switch v := o.(type) {
+		case *ir.Schema:
+			if v.Name == "reporting" {
+				sawSchema = true
+			}
+		case *ir.Extension:
+			if v.Name == "hstore" {
+				sawExt = true
+			}
+		case *ir.Table:
+			if v.Name == "user" {
+				sawTable = true
+			}
+		}
+	}
+	if !sawSchema || !sawExt || !sawTable {
+		t.Errorf("recompile missing objects: schema=%v ext=%v table=%v", sawSchema, sawExt, sawTable)
+	}
+
+	// Index columns must render bare in source (the differ's createIndex quotes
+	// them when generating SQL). Emitting """select""" would create an index on a
+	// literal 8-char column name. The dumped INDICES entry must contain (select),
+	// not ("select").
+	if strings.Contains(rendered, `("select")`) {
+		t.Errorf("index column must be bare in dumped source, got quoted:\n%s", rendered)
+	}
+
+	// End-to-end: diffing the recompiled objects against an empty snapshot must
+	// produce a CREATE INDEX with the column quoted exactly once, and with the
+	// partial-index WHERE preserved.
+	ops, err := diff.New().Diff(compiled, &pipeline.Snapshot{})
+	if err != nil {
+		t.Fatalf("diff of recompiled objects failed: %v", err)
+	}
+	var idxSQL string
+	for _, o := range ops {
+		if strings.Contains(o.SQL(), "CREATE") && strings.Contains(o.SQL(), "INDEX") {
+			idxSQL = o.SQL()
+			break
+		}
+	}
+	if idxSQL == "" {
+		t.Fatal("no CREATE INDEX op from recompiled table")
+	}
+	if strings.Contains(idxSQL, `"""select"""`) || !strings.Contains(idxSQL, `("select")`) {
+		t.Errorf("index column not single-quoted correctly: %s", idxSQL)
+	}
+	if !strings.Contains(idxSQL, `WHERE "select" > 0`) {
+		t.Errorf("partial-index WHERE lost through round-trip: %s", idxSQL)
+	}
+}
+
+// TestRenderIndexVariantsRoundtrip guards the full render → recompile → createIndex
+// chain for every index variant. Apply runs createIndex's SQL, so asserting it
+// here (fast) is equivalent to dump → apply for the index class. Regressions in
+// this chain (sort-order lost on parse, INCLUDE dropped, columns double-quoted)
+// are invisible to plan and only surface on apply.
+func TestRenderIndexVariantsRoundtrip(t *testing.T) {
+	fmtOpts := format.Options{IndentSize: 4, KeywordCase: "upper"}
+	where := "b > 0"
+	tbl := &ir.Table{
+		Schema: "public", Name: "t",
+		Columns: []*ir.Column{
+			{Name: "a", Type: ir.TypeRef{Name: "int4"}},
+			{Name: "b", Type: ir.TypeRef{Name: "int4"}},
+			{Name: "MixedCol", Type: ir.TypeRef{Name: "text"}},
+		},
+		Indexes: []*ir.Index{
+			{Name: "i_uniq", Unique: true, Columns: []pipeline.IndexColumn{{Name: "a"}}},
+			{Name: "i_sort", Columns: []pipeline.IndexColumn{{Name: "MixedCol", SortOrder: "DESC", Nulls: "LAST"}, {Name: "b", SortOrder: "ASC"}}},
+			{Name: "i_partial", Columns: []pipeline.IndexColumn{{Name: "b"}}, Where: &where},
+			{Name: "i_cover", Columns: []pipeline.IndexColumn{{Name: "a"}}, Include: []string{"MixedCol", "b"}},
+			{Name: "i_expr", Columns: []pipeline.IndexColumn{{Expr: &pipeline.RawExpr{Text: "lower(\"MixedCol\")"}}}},
+			{Name: "i_gin", Method: "gin", Columns: []pipeline.IndexColumn{{Expr: &pipeline.RawExpr{Text: "to_tsvector('english', \"MixedCol\")"}}}},
+		},
+	}
+	var b strings.Builder
+	renderObjectDPG(&b, tbl, fmtOpts)
+	rendered := b.String()
+
+	dir := t.TempDir()
+	f := filepath.Join(dir, "schema.dpg")
+	if err := os.WriteFile(f, []byte(rendered), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	compiled, err := compiler.Compile([]string{f}, dir, pipeline.Default)
+	if err != nil {
+		t.Fatalf("index variants did not recompile: %v\n---\n%s", err, rendered)
+	}
+	ops, err := diff.New().Diff(compiled, &pipeline.Snapshot{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	byName := map[string]string{}
+	for _, o := range ops {
+		sql := o.SQL()
+		for _, n := range []string{"i_uniq", "i_sort", "i_partial", "i_cover", "i_expr", "i_gin"} {
+			if strings.Contains(sql, `"`+n+`"`) {
+				byName[n] = sql
+			}
+		}
+	}
+	// Each variant's generated SQL must be correct — no double-quoting, sort-order
+	// preserved, INCLUDE present, WHERE present, method carried.
+	checks := map[string][]string{
+		"i_uniq":    {`CREATE UNIQUE INDEX "i_uniq"`, `("a")`},
+		"i_sort":    {`"MixedCol" DESC NULLS LAST`, `"b" ASC`},
+		"i_partial": {`("b")`, `WHERE b > 0`},
+		"i_cover":   {`("a")`, `INCLUDE ("MixedCol", "b")`},
+		"i_expr":    {`(lower("MixedCol"))`},
+		"i_gin":     {`USING gin`, `to_tsvector('english', "MixedCol")`},
+	}
+	for name, wants := range checks {
+		sql, ok := byName[name]
+		if !ok {
+			t.Errorf("%s: no CREATE INDEX op emitted", name)
+			continue
+		}
+		if strings.Contains(sql, `"""`) {
+			t.Errorf("%s: double-quoted identifier: %s", name, sql)
+		}
+		for _, w := range wants {
+			if !strings.Contains(sql, w) {
+				t.Errorf("%s: missing %q in: %s", name, w, sql)
+			}
+		}
+	}
+}

@@ -325,7 +325,7 @@ func renderObjectDPG(b *strings.Builder, obj pipeline.IRObject, fmtOpts format.O
 
 		renderColText := func(col *ir.Column) string {
 			var sb strings.Builder
-			fmt.Fprintf(&sb, "%s%s %s", ind, col.Name, col.Type.String())
+			fmt.Fprintf(&sb, "%s%s %s", ind, quoteIdentIfNeeded(col.Name), col.Type.String())
 			if col.NotNull && col.Identity == nil {
 				fmt.Fprintf(&sb, " %s %s", kw("NOT"), kw("NULL"))
 			}
@@ -352,7 +352,7 @@ func renderObjectDPG(b *strings.Builder, obj pipeline.IRObject, fmtOpts format.O
 		}
 		renderCSTText := func(cst *ir.Constraint) string {
 			if cst.Name != "" {
-				return fmt.Sprintf("%s%s %s %s", ind, kw("CONSTRAINT"), cst.Name, cst.Expr)
+				return fmt.Sprintf("%s%s %s %s", ind, kw("CONSTRAINT"), quoteIdentIfNeeded(cst.Name), cst.Expr)
 			}
 			return ind + cst.Expr
 		}
@@ -368,7 +368,7 @@ func renderObjectDPG(b *strings.Builder, obj pipeline.IRObject, fmtOpts format.O
 			return sectionOrder[items[i].section] < sectionOrder[items[j].section]
 		})
 
-		fmt.Fprintf(b, "\n%s %s (\n", kw("TABLE"), o.Name)
+		fmt.Fprintf(b, "\n%s %s (\n", kw("TABLE"), quoteIdentIfNeeded(o.Name))
 		hasContent := false
 		prevSection := "__none__"
 		for i, item := range items {
@@ -393,7 +393,7 @@ func renderObjectDPG(b *strings.Builder, obj pipeline.IRObject, fmtOpts format.O
 			b.WriteString(" {\n")
 			blockHasContent := false
 			if o.Comment != nil {
-				fmt.Fprintf(b, "%s%s %q;\n", ind, kw("COMMENT"), *o.Comment)
+				fmt.Fprintf(b, "%s%s %s;\n", ind, kw("COMMENT"), sqlStringLit(*o.Comment))
 				blockHasContent = true
 			}
 			if o.RLSEnabled {
@@ -404,17 +404,20 @@ func renderObjectDPG(b *strings.Builder, obj pipeline.IRObject, fmtOpts format.O
 				if blockHasContent {
 					b.WriteString("\n")
 				}
-				fmt.Fprintf(b, "%s-- indices\n", ind)
+				// Mode A (INDICES { … }) — the form the scanner accepts. Each entry
+				// omits the INDEX verb: "name [UNIQUE] (cols) [USING m] [WHERE …];".
+				fmt.Fprintf(b, "%s%s {\n", ind, kw("INDICES"))
 				for _, idx := range o.Indexes {
 					renderIndex(b, idx, fmtOpts)
 				}
+				fmt.Fprintf(b, "%s}\n", ind)
 			}
 			b.WriteString("}")
 		}
 		b.WriteString(";\n")
 
 	case *ir.View:
-		fmt.Fprintf(b, "\n%s %s %s %s;\n", kw("VIEW"), o.Name, kw("AS"), o.Query)
+		fmt.Fprintf(b, "\n%s %s %s %s;\n", kw("VIEW"), quoteIdentIfNeeded(o.Name), kw("AS"), o.Query)
 
 	case *ir.Function:
 		fmt.Fprintf(b, "\n-- function %s (body omitted; use source files for full definition)\n", o.QualifiedName())
@@ -422,16 +425,17 @@ func renderObjectDPG(b *strings.Builder, obj pipeline.IRObject, fmtOpts format.O
 	case *ir.Type:
 		switch o.Variant {
 		case "ENUM":
-			fmt.Fprintf(b, "\n%s %s (", kw("ENUM"), o.Name)
+			// DPG enum form: ENUM <name> AS ENUM ('a', 'b', …);
+			fmt.Fprintf(b, "\n%s %s %s %s (", kw("ENUM"), quoteIdentIfNeeded(o.Name), kw("AS"), kw("ENUM"))
 			for i, v := range o.EnumValues {
 				if i > 0 {
 					b.WriteString(", ")
 				}
-				fmt.Fprintf(b, "'%s'", v)
+				b.WriteString(sqlStringLit(v))
 			}
 			b.WriteString(");\n")
 		case "DOMAIN":
-			fmt.Fprintf(b, "\n%s %s %s %s;\n", kw("DOMAIN"), o.Name, kw("AS"), o.Body)
+			fmt.Fprintf(b, "\n%s %s %s %s;\n", kw("DOMAIN"), quoteIdentIfNeeded(o.Name), kw("AS"), o.Body)
 		default:
 			fmt.Fprintf(b, "\n-- type %s (%s) omitted\n", o.Name, o.Variant)
 		}
@@ -440,7 +444,7 @@ func renderObjectDPG(b *strings.Builder, obj pipeline.IRObject, fmtOpts format.O
 		b.WriteString("\n")
 		b.WriteString(kw("SEQUENCE"))
 		b.WriteString(" ")
-		b.WriteString(o.Name)
+		b.WriteString(quoteIdentIfNeeded(o.Name))
 		if o.IncrementBy != nil {
 			fmt.Fprintf(b, " %s %d", kw("INCREMENT BY"), *o.IncrementBy)
 		}
@@ -463,7 +467,25 @@ func renderObjectDPG(b *strings.Builder, obj pipeline.IRObject, fmtOpts format.O
 		b.WriteString(";\n")
 
 	case *ir.Role:
-		fmt.Fprintf(b, "\n%s %s;\n", kw("ROLE"), o.Name)
+		fmt.Fprintf(b, "\n%s %s;\n", kw("ROLE"), quoteIdentIfNeeded(o.Name))
+
+	case *ir.Schema:
+		// The scanner requires a { } block after SCHEMA and reads the name as a
+		// bare word (no quoted-identifier support), so the name is emitted bare —
+		// a reserved-word schema name is a pre-existing DPG language limitation,
+		// not a dump concern. A comment is rendered when present so plan --live
+		// doesn't emit a spurious COMMENT ... IS NULL; owner is left to the
+		// pre-existing owner-drift path.
+		if o.Comment != nil {
+			fmt.Fprintf(b, "\n%s %s {\n%s%s %s;\n}\n", kw("SCHEMA"), o.Name, ind, kw("COMMENT"), sqlStringLit(*o.Comment))
+		} else {
+			fmt.Fprintf(b, "\n%s %s {\n}\n", kw("SCHEMA"), o.Name)
+		}
+
+	case *ir.Extension:
+		// Bare form (no VERSION) so plan --live never pins/updates a version:
+		// diffExtension only acts when the desired side declares a version.
+		fmt.Fprintf(b, "\n%s %s;\n", kw("EXTENSION"), quoteIdentIfNeeded(o.Name))
 
 	// Reliable-tier opaque objects carry a canonicalised CREATE statement in
 	// Body; renderOpaqueBody strips the CREATE verb to satisfy the no-verb mandate.
@@ -504,6 +526,67 @@ func renderOpaqueBody(b *strings.Builder, body string) {
 	}
 	fmt.Fprintf(b, "\n%s;\n", body)
 }
+
+// sqlStringLit renders s as a single-quoted SQL string literal, doubling any
+// embedded single quotes. DPG string values (COMMENT text, ENUM labels) use SQL
+// single-quote literals, not Go %q double quotes.
+func sqlStringLit(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", "''") + "'"
+}
+
+// isSafeBareIdent reports whether s can appear as an unquoted PostgreSQL
+// identifier: non-empty, starting with a lowercase letter or underscore, and
+// containing only lowercase letters, digits, underscores, or dollar signs. Any
+// uppercase forces quoting, since an unquoted identifier folds to lowercase.
+func isSafeBareIdent(s string) bool {
+	if s == "" {
+		return false
+	}
+	for i, r := range s {
+		switch {
+		case r >= 'a' && r <= 'z', r == '_':
+		case i > 0 && (r >= '0' && r <= '9' || r == '$'):
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+// quoteIdentIfNeeded double-quotes an identifier when it is not a safe bare
+// identifier or is a PostgreSQL reserved / type-or-function-name keyword, so that
+// dumped DPG source recompiles. Safe lowercase non-keyword names are left bare to
+// keep the output idiomatic. Mirrors PostgreSQL's quote_identifier().
+func quoteIdentIfNeeded(s string) string {
+	if isSafeBareIdent(s) && !dumpReservedKeywords[s] {
+		return s
+	}
+	return `"` + strings.ReplaceAll(s, `"`, `""`) + `"`
+}
+
+// dumpReservedKeywords is the set of PostgreSQL RESERVED and TYPE_FUNC_NAME
+// keywords — the categories that cannot be a bare identifier in the positions
+// dump emits (table/column/schema/role/etc. names). Unreserved and col-name
+// keywords are valid bare and are omitted. Stable across PG 14–17; a missing
+// future keyword degrades only to the pre-existing unquoted behaviour.
+var dumpReservedKeywords = func() map[string]bool {
+	const words = `all analyse analyze and any array as asc asymmetric both case cast check
+collate column constraint create current_catalog current_date current_role
+current_time current_timestamp current_user default deferrable desc distinct do
+else end except false fetch for foreign from grant group having in initially
+intersect into lateral leading limit localtime localtimestamp not null offset on
+only or order placing primary references returning select session_user some
+symmetric system_user table then to trailing true union unique user using
+variadic when where window with
+authorization binary collation concurrently cross current_schema freeze full
+ilike inner is isnull join left like natural notnull outer overlaps right similar
+tablesample verbose`
+	m := make(map[string]bool)
+	for _, w := range strings.Fields(words) {
+		m[w] = true
+	}
+	return m
+}()
 
 // classifyColumn returns the presentation section for a column.
 // Priority: generated > lifecycle > timestamps > "" (regular).
@@ -554,12 +637,13 @@ func inlineConstraintClause(cst *ir.Constraint) string {
 	return cst.Expr
 }
 
-// renderIndex writes one INDEX entry for a table's {} block.
-// Format: INDEX name [UNIQUE] (cols) [USING method] [WHERE pred];
+// renderIndex writes one entry inside a table's INDICES { } block.
+// Format: name [UNIQUE] (cols) [USING method] [WHERE pred]; (two-level indent,
+// no INDEX verb — that is the grammar parseOneIndex accepts).
 func renderIndex(b *strings.Builder, idx *ir.Index, fmtOpts format.Options) {
 	ind := fmtOpts.Indent()
 	kw := fmtOpts.Keyword
-	fmt.Fprintf(b, "%s%s %s", ind, kw("INDEX"), idx.Name)
+	fmt.Fprintf(b, "%s%s%s", ind, ind, quoteIdentIfNeeded(idx.Name))
 	if idx.Unique {
 		fmt.Fprintf(b, " %s", kw("UNIQUE"))
 	}
@@ -571,6 +655,9 @@ func renderIndex(b *strings.Builder, idx *ir.Index, fmtOpts format.Options) {
 		if col.Expr != nil {
 			b.WriteString(col.Expr.Text)
 		} else {
+			// Index column names are emitted bare: the blockparser stores the
+			// column text verbatim and the differ's createIndex quotes it when
+			// generating SQL, so quoting here would double-quote it.
 			b.WriteString(col.Name)
 		}
 		if col.SortOrder != "" {
@@ -584,6 +671,10 @@ func renderIndex(b *strings.Builder, idx *ir.Index, fmtOpts format.Options) {
 	b.WriteString(")")
 	if idx.Method != "" && idx.Method != "btree" {
 		fmt.Fprintf(b, " %s %s", kw("USING"), idx.Method)
+	}
+	if len(idx.Include) > 0 {
+		// Bare column names; createIndex quotes them when generating SQL.
+		fmt.Fprintf(b, " %s (%s)", kw("INCLUDE"), strings.Join(idx.Include, ", "))
 	}
 	if idx.Where != nil {
 		fmt.Fprintf(b, " %s %s", kw("WHERE"), *idx.Where)

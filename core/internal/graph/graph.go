@@ -93,7 +93,20 @@ func (r *Resolver) Sort(objects []pipeline.IRObject) ([]pipeline.IRObject, error
 			// in source but the type isn't defined, that's a real bug — surface it
 			// rather than silently dropping the dependency.
 			for _, col := range o.Columns {
-				if col.Type.Schema == "" || col.Type.Schema == "pg_catalog" {
+				if col.Type.Schema == "pg_catalog" {
+					continue
+				}
+				if col.Type.Schema == "" {
+					// Unqualified type: could be a built-in or a custom type in the
+					// table's own schema (this is how introspected columns look —
+					// e.g. an enum column reads as "mood", not "public.mood"). Add a
+					// dependency only when a matching custom type is defined; never
+					// error, since built-ins legitimately aren't in the index.
+					if o.Schema != "" {
+						if j, ok := idx[o.Schema+"."+col.Type.Name]; ok {
+							dependsOn(i, j)
+						}
+					}
 					continue
 				}
 				typeKey := col.Type.Schema + "." + col.Type.Name

@@ -710,7 +710,10 @@ func (b *blockParser) parseOneIndex() (pipeline.IndexDef, error) {
 			}
 			b.advance()
 			for _, s := range strings.Split(raw, ",") {
-				s = strings.TrimSpace(s)
+				// Strip quotes like parseIndexColumnEntry does for key columns, so
+				// the differ (which quotes on output) doesn't double-quote a
+				// hand-written INCLUDE ("col").
+				s = strings.Trim(strings.TrimSpace(s), `"`)
 				if s != "" {
 					idx.Include = append(idx.Include, pipeline.Identifier{Name: s})
 				}
@@ -757,14 +760,71 @@ doneIndexClauses:
 
 func parseIndexColumns(raw string) []pipeline.IndexColumn {
 	var cols []pipeline.IndexColumn
-	for _, part := range strings.Split(raw, ",") {
+	for _, part := range splitTopLevel(raw, ',') {
 		part = strings.TrimSpace(part)
 		if part == "" {
 			continue
 		}
-		cols = append(cols, pipeline.IndexColumn{Name: part})
+		cols = append(cols, parseIndexColumnEntry(part))
 	}
 	return cols
+}
+
+// splitTopLevel splits s on sep, ignoring separators nested inside parentheses
+// (so an expression column like "coalesce(a, b)" is not split at its comma).
+func splitTopLevel(s string, sep rune) []string {
+	var parts []string
+	var cur strings.Builder
+	depth := 0
+	for _, ch := range s {
+		switch {
+		case ch == '(':
+			depth++
+			cur.WriteRune(ch)
+		case ch == ')':
+			depth--
+			cur.WriteRune(ch)
+		case ch == sep && depth == 0:
+			parts = append(parts, cur.String())
+			cur.Reset()
+		default:
+			cur.WriteRune(ch)
+		}
+	}
+	parts = append(parts, cur.String())
+	return parts
+}
+
+// parseIndexColumnEntry parses one index-column entry: an expression "(…)" or a
+// (possibly quoted) column name, followed by optional ASC/DESC and NULLS
+// FIRST/LAST. It mirrors the introspector's parseIndexColumn so a dumped index
+// column ("col DESC NULLS LAST") round-trips to the same IndexColumn rather than
+// being stored — and then quoted — as one literal identifier.
+func parseIndexColumnEntry(s string) pipeline.IndexColumn {
+	col := pipeline.IndexColumn{}
+	upper := strings.ToUpper(s)
+	if strings.HasSuffix(upper, " NULLS LAST") {
+		col.Nulls = "LAST"
+		s = strings.TrimSpace(s[:len(s)-len(" NULLS LAST")])
+		upper = strings.ToUpper(s)
+	} else if strings.HasSuffix(upper, " NULLS FIRST") {
+		col.Nulls = "FIRST"
+		s = strings.TrimSpace(s[:len(s)-len(" NULLS FIRST")])
+		upper = strings.ToUpper(s)
+	}
+	if strings.HasSuffix(upper, " DESC") {
+		col.SortOrder = "DESC"
+		s = strings.TrimSpace(s[:len(s)-len(" DESC")])
+	} else if strings.HasSuffix(upper, " ASC") {
+		col.SortOrder = "ASC"
+		s = strings.TrimSpace(s[:len(s)-len(" ASC")])
+	}
+	if strings.ContainsRune(s, '(') {
+		col.Expr = &pipeline.RawExpr{Text: s}
+	} else {
+		col.Name = strings.Trim(s, `"`)
+	}
+	return col
 }
 
 func parseStorageParams(raw string) []pipeline.StorageParam {

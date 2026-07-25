@@ -88,3 +88,22 @@ func TestRoundtripForeignInfra(t *testing.T) {
 SERVER dummy_srv FOREIGN DATA WRAPPER dummy_fdw;
 USER MAPPING FOR PUBLIC SERVER dummy_srv;`)
 }
+
+// TestRoundtripIndexVariants applies a table carrying every index variant —
+// unique, multi-column sort order (DESC/ASC + NULLS), partial (WHERE), covering
+// (INCLUDE), expression, and a non-btree method — and asserts zero drift. This
+// exercises the parse → createIndex → introspect round-trip for the index class
+// that repeatedly hid apply-only defects (sort-order corrupting the column,
+// INCLUDE silently dropped).
+func TestRoundtripIndexVariants(t *testing.T) {
+	assertOpaqueRoundtrip(t, `TABLE t (a INTEGER, b INTEGER, c TEXT, e TEXT) {
+    INDICES {
+        i_uniq UNIQUE (a);
+        i_sort (c DESC NULLS LAST, b);
+        i_partial (b) WHERE (b > 0);
+        i_cover (a) INCLUDE (c, b);
+        i_expr (lower(e));
+        i_gin (to_tsvector('english', e)) USING gin;
+    }
+}`)
+}

@@ -118,6 +118,7 @@ FROM   pg_proc p
 JOIN   pg_namespace n ON n.oid = p.pronamespace
 WHERE  p.prokind = 'a'
 AND    n.nspname NOT IN ('pg_catalog','information_schema','pg_toast')
+AND    NOT EXISTS (SELECT 1 FROM pg_depend d WHERE d.classid = 'pg_proc'::regclass AND d.objid = p.oid AND d.deptype = 'e')
 ORDER  BY n.nspname, p.proname, args`
 
 	rs, err := conn.QueryRows(ctx, q)
@@ -300,6 +301,7 @@ JOIN   pg_roles r     ON r.oid = c.relowner
 WHERE  c.relkind IN ('r', 'p')
 AND    NOT c.relispartition
 AND    n.nspname NOT IN ('pg_catalog','information_schema','pg_toast')
+AND    NOT EXISTS (SELECT 1 FROM pg_depend d WHERE d.classid = 'pg_class'::regclass AND d.objid = c.oid AND d.deptype = 'e')
 ORDER  BY n.nspname, c.relname`
 
 	rs, err := conn.QueryRows(ctx, q)
@@ -547,6 +549,7 @@ ORDER  BY n.nspname, c.relname, i.relname`
 			Unique:  unique,
 			Method:  method,
 			Columns: parseIndexDef(def),
+			Include: parseIndexInclude(def),
 			Where:   where,
 		})
 	}
@@ -587,6 +590,29 @@ func parseIndexDef(def string) []pipeline.IndexColumn {
 	return nil
 found:
 	return splitIndexColumns(rest[:end])
+}
+
+// parseIndexInclude extracts the covering (INCLUDE) column names from a
+// pg_get_indexdef string, e.g. "… (a) INCLUDE (b, c) WHERE …" → ["b", "c"].
+func parseIndexInclude(def string) []string {
+	upper := strings.ToUpper(def)
+	i := strings.Index(upper, " INCLUDE (")
+	if i < 0 {
+		return nil
+	}
+	rest := def[i+len(" INCLUDE ("):]
+	end := strings.IndexByte(rest, ')')
+	if end < 0 {
+		return nil
+	}
+	var cols []string
+	for _, c := range strings.Split(rest[:end], ",") {
+		c = strings.Trim(strings.TrimSpace(c), `"`)
+		if c != "" {
+			cols = append(cols, c)
+		}
+	}
+	return cols
 }
 
 func splitIndexColumns(s string) []pipeline.IndexColumn {
@@ -767,6 +793,7 @@ JOIN   pg_namespace n ON n.oid = c.relnamespace
 JOIN   pg_roles r     ON r.oid = c.relowner
 WHERE  c.relkind IN ('v', 'm')
 AND    n.nspname NOT IN ('pg_catalog','information_schema','pg_toast')
+AND    NOT EXISTS (SELECT 1 FROM pg_depend d WHERE d.classid = 'pg_class'::regclass AND d.objid = c.oid AND d.deptype = 'e')
 ORDER  BY n.nspname, c.relname`
 
 	rs, err := conn.QueryRows(ctx, q)
@@ -833,6 +860,7 @@ JOIN   pg_namespace n ON n.oid = p.pronamespace
 JOIN   pg_language  l ON l.oid = p.prolang
 WHERE  p.prokind IN ('f', 'p')
 AND    n.nspname NOT IN ('pg_catalog','information_schema','pg_toast')
+AND    NOT EXISTS (SELECT 1 FROM pg_depend d WHERE d.classid = 'pg_proc'::regclass AND d.objid = p.oid AND d.deptype = 'e')
 ORDER  BY n.nspname, p.proname, args`
 
 	rs, err := conn.QueryRows(ctx, q)
@@ -930,6 +958,7 @@ AND    n.nspname NOT IN ('pg_catalog','information_schema','pg_toast')
 AND    (t.typtype != 'c' OR NOT EXISTS (
     SELECT 1 FROM pg_class c WHERE c.oid = t.typrelid AND c.relkind != 'c'
 ))
+AND    NOT EXISTS (SELECT 1 FROM pg_depend d WHERE d.classid = 'pg_type'::regclass AND d.objid = t.oid AND d.deptype = 'e')
 ORDER  BY n.nspname, t.typname`
 
 	rs, err := conn.QueryRows(ctx, q)
@@ -1118,7 +1147,7 @@ AND    NOT EXISTS (
            SELECT 1 FROM pg_depend d
            WHERE  d.classid = 'pg_class'::regclass
            AND    d.objid = c.oid
-           AND    d.deptype IN ('a', 'i')
+           AND    d.deptype IN ('a', 'i', 'e')
        )
 ORDER  BY n.nspname, c.relname`
 

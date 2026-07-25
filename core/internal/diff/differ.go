@@ -1132,7 +1132,24 @@ func createIndex(schema, table string, idx *ir.Index) []pipeline.DiffOp {
 			b.WriteString(col.Nulls)
 		}
 	}
-	b.WriteString(");")
+	b.WriteString(")")
+	// Covering (INCLUDE) columns and the partial-index predicate must be emitted
+	// or the created index silently differs from the declared one.
+	if len(idx.Include) > 0 {
+		b.WriteString(" INCLUDE (")
+		for i, c := range idx.Include {
+			if i > 0 {
+				b.WriteString(", ")
+			}
+			b.WriteString(quoteIdent(c))
+		}
+		b.WriteString(")")
+	}
+	if idx.Where != nil && *idx.Where != "" {
+		b.WriteString(" WHERE ")
+		b.WriteString(*idx.Where)
+	}
+	b.WriteString(";")
 
 	if idx.Concurrently {
 		return []pipeline.DiffOp{manualOp(b.String(), idx.Pos)}

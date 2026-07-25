@@ -2983,3 +2983,40 @@ func TestDiffCollationPlanLiveNoSpuriousDrift(t *testing.T) {
 		t.Fatalf("plan --live: spurious drift vs reconstructed baseline: %d ops: %v", len(ops), ops)
 	}
 }
+
+// createIndex must emit the partial-index WHERE predicate and INCLUDE columns;
+// omitting them silently creates an index that differs from the declared one.
+func TestDiffCreateIndexWhereAndInclude(t *testing.T) {
+	d := New()
+	where := "active"
+	desired := []pipeline.IRObject{
+		&ir.Table{
+			Schema:  "public",
+			Name:    "t",
+			Columns: []*ir.Column{{Name: "a", Type: ir.TypeRef{Name: "int4"}}, {Name: "active", Type: ir.TypeRef{Name: "bool"}}},
+			Indexes: []*ir.Index{
+				{Name: "t_a_idx", Columns: []pipeline.IndexColumn{{Name: "a"}}, Include: []string{"active"}, Where: &where},
+			},
+		},
+	}
+	ops, err := d.Diff(desired, &pipeline.Snapshot{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var sql string
+	for _, o := range ops {
+		if strings.Contains(o.SQL(), "CREATE") && strings.Contains(o.SQL(), "INDEX") {
+			sql = o.SQL()
+			break
+		}
+	}
+	if sql == "" {
+		t.Fatalf("no CREATE INDEX op: %v", sqlList(ops))
+	}
+	if !strings.Contains(sql, "INCLUDE (") || !strings.Contains(sql, `"active"`) {
+		t.Errorf("missing INCLUDE clause: %s", sql)
+	}
+	if !strings.Contains(sql, "WHERE active") {
+		t.Errorf("missing WHERE predicate: %s", sql)
+	}
+}

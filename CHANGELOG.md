@@ -20,6 +20,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `dump` output now recompiles **and re-applies** for real-world tables:
+  identifiers that are reserved keywords or otherwise non-bare (table/column/view/
+  sequence/role/index/constraint names) are quoted; indexes render as the accepted
+  `INDICES { … }` block (was the unparseable `INDEX name (…)` form) with bare
+  column names (the differ quotes them); `COMMENT` values render as SQL string
+  literals (was Go `%q` double-quotes); and enums render as `ENUM <name> AS ENUM
+  (…)` (was a missing `AS ENUM`).
+- `CREATE INDEX` now emits the partial-index `WHERE` predicate and `INCLUDE`
+  columns, which were silently dropped — a declared partial/covering index was
+  created as a plain index.
+- Index column sort order (`ASC`/`DESC`) and `NULLS FIRST`/`LAST` now round-trip:
+  the block parser previously stored `col DESC NULLS LAST` as one literal column
+  name, so a dumped sorted index failed to apply. Covering (`INCLUDE`) columns are
+  now introspected and dumped, so a dumped covering index stays covering.
+- The dependency resolver now orders a custom type before a table that uses it
+  even when the column type is written unqualified (as introspected columns are),
+  so a dumped project whose table precedes its enum applies without
+  "type … does not exist".
+- `dump` now emits `SCHEMA` and `EXTENSION` declarations, so non-public schemas
+  and installed extensions are no longer dropped by `plan --live`.
+- Introspection now excludes extension-owned functions, procedures, aggregates,
+  types, tables, views, and sequences (e.g. `hstore`'s ~60 functions), so they
+  are not dumped or proposed for dropping.
 - `DROP OPERATOR CLASS`/`DROP OPERATOR FAMILY` now use the object's real index
   access method instead of a hardcoded `USING btree` (legacy snapshots without
   the recorded method fall back to `btree`).

@@ -659,3 +659,23 @@ func TestRegistration(t *testing.T) {
 		t.Fatal("registered BlockParser is nil")
 	}
 }
+
+// Index column sort order/NULLS must parse into structured fields (not be stored
+// as part of the column name), and INCLUDE columns must be unquoted — matching
+// key columns — so the differ doesn't double-quote them.
+func TestIndexSortOrderAndInclude(t *testing.T) {
+	ast := parse(t, `INDICES { i (a DESC NULLS LAST, b) INCLUDE ("c", d); }`)
+	idx := ast.Indices[0]
+	if len(idx.Columns) != 2 {
+		t.Fatalf("expected 2 key columns, got %d: %+v", len(idx.Columns), idx.Columns)
+	}
+	if idx.Columns[0].Name != "a" || idx.Columns[0].SortOrder != "DESC" || idx.Columns[0].Nulls != "LAST" {
+		t.Errorf("column 0: got %+v, want a/DESC/LAST", idx.Columns[0])
+	}
+	if idx.Columns[1].Name != "b" || idx.Columns[1].SortOrder != "" {
+		t.Errorf("column 1: got %+v, want b with no sort", idx.Columns[1])
+	}
+	if len(idx.Include) != 2 || idx.Include[0].Name != "c" || idx.Include[1].Name != "d" {
+		t.Errorf("INCLUDE: got %+v, want unquoted [c d]", idx.Include)
+	}
+}
