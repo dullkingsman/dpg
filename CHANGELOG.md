@@ -80,6 +80,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   identifier.
 - `dump` no longer emits `COLLATION`/`STATISTICS` declarations with an empty
   body (which aborted `plan`/`apply` with "body not captured").
+- A source-side body edit to an opaque object (tablespace, FDW, foreign server,
+  user mapping, publication, subscription, event trigger, collation, operator
+  class/family, cast, extended statistics, or any text-search object) now emits
+  a real `DROP ... IF EXISTS` followed by the new `CREATE`, reusing the exact
+  statement `dropObject` already emits when the object is removed outright.
+  Previously `plan`/`apply` only emitted a `-- WARNING: ... manual DROP +
+  recreate required` SQL comment — a body edit was silently a no-op unless
+  someone read migration output and ran the DROP/CREATE by hand. Operators are
+  excluded from this fix and keep the old warning. Known limitation: `DROP
+  OPERATOR` requires a mandatory `(lefttype, righttype)` clause that
+  `ir.Operator` does not capture (a pre-existing gap, not introduced by this
+  fix — it also affects an operator's removal from source, not just its body
+  edits); operator names can also be overloaded across operand types, which the
+  flat `schema.name` snapshot key cannot disambiguate. Emitting invalid or
+  misdirected DDL would be worse than the manual warning, so operator body
+  edits keep the placeholder until operand types are modelled end-to-end.
 - Reconstructed opaque-object bodies no longer report spurious destructive
   "body changed" drift on `verify`/`plan --live` when hand-written source uses an
   equivalent-but-differently-spelled form; offline `plan`/`apply` still detect

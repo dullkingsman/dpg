@@ -1688,8 +1688,10 @@ func accessMethodOrDefault(am string) string {
 	return am
 }
 
-// diffOpaqueIR checks whether an opaque object's body hash has changed and emits
-// a warning op if so. The body comparison is only meaningful when BOTH sides are
+// diffOpaqueIR checks whether an opaque object's body hash has changed and, if
+// so, emits a structured DROP (via dropObject, reusing the exact statement
+// already used when the object is removed outright) followed by a CREATE from
+// the new body. The body comparison is only meaningful when BOTH sides are
 // source-derived deparses: it is skipped when the desired object's body is a
 // catalog reconstruction (reconstructed == true, e.g. verify introspects the
 // desired side) or when the snapshot side carries no hash (a reconstructed
@@ -1701,13 +1703,30 @@ func diffOpaqueIR(name, body string, reconstructed bool, snap *snapshot.SnapOpaq
 	}
 	sum := sha256.Sum256([]byte(strings.TrimSpace(body)))
 	newHash := fmt.Sprintf("%x", sum)
-	if snap.BodyHash != "" && newHash != snap.BodyHash {
+	if snap.BodyHash == "" || newHash == snap.BodyHash {
+		return nil, nil
+	}
+	if snap.Kind == "operator" {
+		// Unlike the other 16 opaque kinds, dropObject's "operator" case cannot
+		// be reused safely here: DROP OPERATOR requires a mandatory
+		// (lefttype, righttype) clause that ir.Operator does not capture (a
+		// pre-existing gap - see dropObject), so a bare "DROP OPERATOR IF
+		// EXISTS name" is a PG syntax error. Operator names can also be
+		// overloaded across operand types, which the flat schema.name identity
+		// used here cannot disambiguate anyway. Emitting invalid or
+		// misdirected DDL is worse than a manual warning, so fall back until
+		// operand types are modelled end-to-end (known limitation).
 		return []pipeline.DiffOp{destructiveOp(
 			fmt.Sprintf("-- WARNING: %s body changed; manual DROP + recreate required", name),
 			pos,
 		)}, nil
 	}
-	return nil, nil
+	ops := dropObject(&snapshot.SnapObject{Kind: snap.Kind, Opaque: snap})
+	createOps, err := createOpaque(name, body, snap.Kind, pos)
+	if err != nil {
+		return nil, err
+	}
+	return append(ops, createOps...), nil
 }
 
 func diffProcedure(o *ir.Procedure, snap *snapshot.SnapOpaque) ([]pipeline.DiffOp, error) {

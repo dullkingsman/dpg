@@ -2936,6 +2936,205 @@ func TestDiffPublicationOfflineDetectsEdit(t *testing.T) {
 	}
 }
 
+// TestDiffOpaqueOfflineEditEmitsStructuredDropRecreate is the regression guard
+// for #3 (real update path for opaque objects): a genuine offline body edit
+// must emit a structured DROP (matching what dropObject emits when the object
+// is removed outright) followed by a CREATE from the new body — not the old
+// "-- WARNING: ... manual DROP + recreate required" comment placeholder. Every
+// opaque kind except "operator" is covered; see
+// TestDiffOperatorOfflineEditStillWarnsManual for why operator is excluded.
+func TestDiffOpaqueOfflineEditEmitsStructuredDropRecreate(t *testing.T) {
+	cases := []struct {
+		name           string
+		oldObj, newObj pipeline.IRObject
+		wantDropSubstr string
+		wantNewInBody  string
+	}{
+		{
+			name:           "tablespace",
+			oldObj:         &ir.Tablespace{Name: "ts", Body: "CREATE TABLESPACE ts LOCATION '/data/ts1'"},
+			newObj:         &ir.Tablespace{Name: "ts", Body: "CREATE TABLESPACE ts LOCATION '/data/ts2'"},
+			wantDropSubstr: `DROP TABLESPACE IF EXISTS "ts";`,
+			wantNewInBody:  "/data/ts2",
+		},
+		{
+			name:           "fdw",
+			oldObj:         &ir.ForeignDataWrapper{Name: "myfdw", Body: "CREATE FOREIGN DATA WRAPPER myfdw HANDLER h1"},
+			newObj:         &ir.ForeignDataWrapper{Name: "myfdw", Body: "CREATE FOREIGN DATA WRAPPER myfdw HANDLER h2"},
+			wantDropSubstr: `DROP FOREIGN DATA WRAPPER IF EXISTS "myfdw";`,
+			wantNewInBody:  "h2",
+		},
+		{
+			name:           "server",
+			oldObj:         &ir.ForeignServer{Name: "srv", Body: "CREATE SERVER srv FOREIGN DATA WRAPPER myfdw OPTIONS (host 'a')"},
+			newObj:         &ir.ForeignServer{Name: "srv", Body: "CREATE SERVER srv FOREIGN DATA WRAPPER myfdw OPTIONS (host 'b')"},
+			wantDropSubstr: `DROP SERVER IF EXISTS "srv";`,
+			wantNewInBody:  "'b'",
+		},
+		{
+			name:           "user_mapping",
+			oldObj:         &ir.UserMapping{User: "alice", Server: "srv", Body: "CREATE USER MAPPING FOR alice SERVER srv OPTIONS (password 'p1')"},
+			newObj:         &ir.UserMapping{User: "alice", Server: "srv", Body: "CREATE USER MAPPING FOR alice SERVER srv OPTIONS (password 'p2')"},
+			wantDropSubstr: `DROP USER MAPPING IF EXISTS FOR "alice" SERVER "srv";`,
+			wantNewInBody:  "'p2'",
+		},
+		{
+			name:           "publication",
+			oldObj:         &ir.Publication{Name: "p", Body: "CREATE PUBLICATION p FOR ALL TABLES"},
+			newObj:         &ir.Publication{Name: "p", Body: "CREATE PUBLICATION p FOR TABLE public.t"},
+			wantDropSubstr: `DROP PUBLICATION IF EXISTS "p";`,
+			wantNewInBody:  "public.t",
+		},
+		{
+			name:           "subscription",
+			oldObj:         &ir.Subscription{Name: "sub", Body: "CREATE SUBSCRIPTION sub CONNECTION 'x' PUBLICATION p1"},
+			newObj:         &ir.Subscription{Name: "sub", Body: "CREATE SUBSCRIPTION sub CONNECTION 'x' PUBLICATION p2"},
+			wantDropSubstr: `DROP SUBSCRIPTION IF EXISTS "sub";`,
+			wantNewInBody:  "p2",
+		},
+		{
+			name:           "event_trigger",
+			oldObj:         &ir.EventTrigger{Name: "et", Body: "CREATE EVENT TRIGGER et ON ddl_command_start EXECUTE FUNCTION f1()"},
+			newObj:         &ir.EventTrigger{Name: "et", Body: "CREATE EVENT TRIGGER et ON ddl_command_start EXECUTE FUNCTION f2()"},
+			wantDropSubstr: `DROP EVENT TRIGGER IF EXISTS "et";`,
+			wantNewInBody:  "f2()",
+		},
+		{
+			name:           "collation",
+			oldObj:         &ir.Collation{Schema: "public", Name: "c", Body: "CREATE COLLATION public.c (LOCALE = 'C')"},
+			newObj:         &ir.Collation{Schema: "public", Name: "c", Body: "CREATE COLLATION public.c (LOCALE = 'POSIX')"},
+			wantDropSubstr: `DROP COLLATION IF EXISTS "public"."c";`,
+			wantNewInBody:  "POSIX",
+		},
+		{
+			name:           "operator_class",
+			oldObj:         &ir.OperatorClass{Schema: "public", Name: "oc", AccessMethod: "gin", Body: "CREATE OPERATOR CLASS public.oc FOR TYPE int4 USING gin AS OPERATOR 1 = FUNCTION 1 f1()"},
+			newObj:         &ir.OperatorClass{Schema: "public", Name: "oc", AccessMethod: "gin", Body: "CREATE OPERATOR CLASS public.oc FOR TYPE int4 USING gin AS OPERATOR 1 = FUNCTION 1 f2()"},
+			wantDropSubstr: `DROP OPERATOR CLASS IF EXISTS "public"."oc" USING gin;`,
+			wantNewInBody:  "f2()",
+		},
+		{
+			name:           "operator_family",
+			oldObj:         &ir.OperatorFamily{Schema: "public", Name: "of", AccessMethod: "gin", Body: "CREATE OPERATOR FAMILY public.of USING gin"},
+			newObj:         &ir.OperatorFamily{Schema: "public", Name: "of", AccessMethod: "gin", Body: "CREATE OPERATOR FAMILY public.of USING gin AS OPERATOR 1 = (int4, int4)"},
+			wantDropSubstr: `DROP OPERATOR FAMILY IF EXISTS "public"."of" USING gin;`,
+			wantNewInBody:  "OPERATOR 1",
+		},
+		{
+			name:           "cast",
+			oldObj:         &ir.Cast{SourceType: ir.TypeRef{Name: "int4"}, TargetType: ir.TypeRef{Name: "text"}, Body: "CREATE CAST (int4 AS text) WITH FUNCTION f1(int4)"},
+			newObj:         &ir.Cast{SourceType: ir.TypeRef{Name: "int4"}, TargetType: ir.TypeRef{Name: "text"}, Body: "CREATE CAST (int4 AS text) WITH FUNCTION f2(int4)"},
+			wantDropSubstr: `DROP CAST IF EXISTS (int4 AS text);`,
+			wantNewInBody:  "f2(int4)",
+		},
+		{
+			name:           "statistics",
+			oldObj:         &ir.StatisticsObject{Schema: "public", Name: "st", Body: "CREATE STATISTICS public.st (ndistinct) ON a, b FROM t"},
+			newObj:         &ir.StatisticsObject{Schema: "public", Name: "st", Body: "CREATE STATISTICS public.st (dependencies) ON a, b FROM t"},
+			wantDropSubstr: `DROP STATISTICS IF EXISTS "public"."st";`,
+			wantNewInBody:  "dependencies",
+		},
+		{
+			name:           "ts_config",
+			oldObj:         &ir.TSConfig{Schema: "public", Name: "tc", Body: "CREATE TEXT SEARCH CONFIGURATION public.tc (COPY = simple1)"},
+			newObj:         &ir.TSConfig{Schema: "public", Name: "tc", Body: "CREATE TEXT SEARCH CONFIGURATION public.tc (COPY = simple2)"},
+			wantDropSubstr: `DROP TEXT SEARCH CONFIGURATION IF EXISTS "public"."tc";`,
+			wantNewInBody:  "simple2",
+		},
+		{
+			name:           "ts_dict",
+			oldObj:         &ir.TSDict{Schema: "public", Name: "td", Body: "CREATE TEXT SEARCH DICTIONARY public.td (TEMPLATE = simple, stopwords = e1)"},
+			newObj:         &ir.TSDict{Schema: "public", Name: "td", Body: "CREATE TEXT SEARCH DICTIONARY public.td (TEMPLATE = simple, stopwords = e2)"},
+			wantDropSubstr: `DROP TEXT SEARCH DICTIONARY IF EXISTS "public"."td";`,
+			wantNewInBody:  "e2",
+		},
+		{
+			name:           "ts_parser",
+			oldObj:         &ir.TSParser{Schema: "public", Name: "tp", Body: "CREATE TEXT SEARCH PARSER public.tp (START = f1, GETTOKEN = g, END = e, LEXTYPES = l)"},
+			newObj:         &ir.TSParser{Schema: "public", Name: "tp", Body: "CREATE TEXT SEARCH PARSER public.tp (START = f2, GETTOKEN = g, END = e, LEXTYPES = l)"},
+			wantDropSubstr: `DROP TEXT SEARCH PARSER IF EXISTS "public"."tp";`,
+			wantNewInBody:  "f2",
+		},
+		{
+			name:           "ts_template",
+			oldObj:         &ir.TSTemplate{Schema: "public", Name: "tt", Body: "CREATE TEXT SEARCH TEMPLATE public.tt (LEXIZE = f1)"},
+			newObj:         &ir.TSTemplate{Schema: "public", Name: "tt", Body: "CREATE TEXT SEARCH TEMPLATE public.tt (LEXIZE = f2)"},
+			wantDropSubstr: `DROP TEXT SEARCH TEMPLATE IF EXISTS "public"."tt";`,
+			wantNewInBody:  "f2",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			d := New()
+			snap := &pipeline.Snapshot{}
+			if err := snapshot.Populate(snap, []pipeline.IRObject{tc.oldObj}); err != nil {
+				t.Fatal(err)
+			}
+			ops, err := d.Diff([]pipeline.IRObject{tc.newObj}, snap)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if len(ops) != 2 {
+				t.Fatalf("want 2 ops (structured DROP + CREATE), got %d: %v", len(ops), ops)
+			}
+			dropSQL := ops[0].SQL()
+			createSQL := ops[1].SQL()
+			if !strings.Contains(dropSQL, tc.wantDropSubstr) {
+				t.Errorf("op[0] = %q, want substring %q", dropSQL, tc.wantDropSubstr)
+			}
+			if !strings.Contains(createSQL, tc.wantNewInBody) {
+				t.Errorf("op[1] = %q, want substring %q (new body)", createSQL, tc.wantNewInBody)
+			}
+			if ops[0].Safety() != pipeline.Destructive {
+				t.Errorf("DROP op safety = %v, want Destructive", ops[0].Safety())
+			}
+			if ops[1].Safety() != pipeline.Safe {
+				t.Errorf("CREATE op safety = %v, want Safe", ops[1].Safety())
+			}
+			for _, op := range ops {
+				if strings.Contains(op.SQL(), "manual DROP + recreate required") {
+					t.Errorf("structured path must not fall back to the manual warning, got: %s", op.SQL())
+				}
+			}
+		})
+	}
+}
+
+// TestDiffOperatorOfflineEditStillWarnsManual guards the intentional exclusion
+// of "operator" from the structured drop+recreate path: dropObject's operator
+// case cannot safely construct "DROP OPERATOR" (PG requires a mandatory
+// (lefttype, righttype) clause that ir.Operator does not capture), so wiring it
+// in would emit invalid SQL. Until operand types are modelled, operator keeps
+// the old manual-warning behavior — this must not regress to either the broken
+// DROP or silence.
+func TestDiffOperatorOfflineEditStillWarnsManual(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	if err := snapshot.Populate(snap, []pipeline.IRObject{
+		&ir.Operator{Schema: "public", Name: "=>", Body: "CREATE OPERATOR public.=> (PROCEDURE = f1, LEFTARG = int4, RIGHTARG = int4)"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	desired := []pipeline.IRObject{
+		&ir.Operator{Schema: "public", Name: "=>", Body: "CREATE OPERATOR public.=> (PROCEDURE = f2, LEFTARG = int4, RIGHTARG = int4)"},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ops) != 1 {
+		t.Fatalf("want 1 op (manual warning), got %d: %v", len(ops), ops)
+	}
+	sql := ops[0].SQL()
+	if !strings.Contains(sql, "manual DROP + recreate required") {
+		t.Errorf("expected manual-warning fallback for operator, got: %s", sql)
+	}
+	if strings.Contains(sql, "DROP OPERATOR") {
+		t.Errorf("operator must not emit a bare (invalid) DROP OPERATOR statement, got: %s", sql)
+	}
+}
+
 // VERIFY: desired side is the introspected reconstruction (Reconstructed=true),
 // snap side is the stored source hash. Must NOT report spurious drift despite
 // different-but-equivalent spelling.
