@@ -7,6 +7,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Introspect nine previously-unsupported object types (tablespaces, foreign data
+  wrappers, foreign servers, user mappings, publications, event triggers,
+  collations, casts, extended statistics), so `dump`/`verify`/`plan --live`
+  cover them. Reconstructed DDL is canonicalised through pg_query to match the
+  compiler's output. Extension-owned and system objects are filtered out.
+- `dump` now writes database-scoped schemaless objects to `<db>/objects.dpg`
+  (previously misfiled under the cluster roles file) and can emit these object
+  types as DPG declarations.
+
+### Fixed
+
+- `DROP OPERATOR CLASS`/`DROP OPERATOR FAMILY` now use the object's real index
+  access method instead of a hardcoded `USING btree` (legacy snapshots without
+  the recorded method fall back to `btree`).
+- `DROP USER MAPPING` for a `FOR PUBLIC` mapping no longer emits a zero-length
+  identifier.
+- `dump` no longer emits `COLLATION`/`STATISTICS` declarations with an empty
+  body (which aborted `plan`/`apply` with "body not captured").
+- Reconstructed opaque-object bodies no longer report spurious destructive
+  "body changed" drift on `verify`/`plan --live` when hand-written source uses an
+  equivalent-but-differently-spelled form; offline `plan`/`apply` still detect
+  genuine body edits.
+
+### Changed
+
+- Cluster/database object routing is unified across `dump`, `plan`, and `verify`:
+  only roles and tablespaces are cluster-scoped.
+
+### Upgrade notes
+
+- **Drift on first run against an existing database.** Because these object types
+  are now introspected, a live-but-undeclared publication, FDW, event trigger,
+  collation, etc. becomes a drop candidate on `plan --live` (standard declarative
+  semantics — declare the object in source to keep it). This is a behavior change
+  only for upgrade-in-place; freshly dumped projects are unaffected.
+- **Body-change detection self-heals on next apply.** Snapshots written before
+  this release have no stored body hash for these types, so offline detection of
+  a body edit stays dormant until the next `apply` re-snapshots from source.
+
 ## [idea-v0.5.2-alpha.13] — 2026-05-22
 
 ### Added

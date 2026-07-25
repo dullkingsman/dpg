@@ -81,7 +81,7 @@ func (b *Builder) Build(pg pipeline.PGParseResult, block pipeline.BlockAST) (pip
 	case *pg_query.Node_CreateOpFamilyStmt:
 		obj, err = b.buildOpaque(node, block, pos, "OPERATOR FAMILY")
 	case *pg_query.Node_CreateStatsStmt:
-		obj, err = b.buildStatistics(n.CreateStatsStmt, block, pos)
+		obj, err = b.buildStatistics(n.CreateStatsStmt, block, pos, rawSQL(node))
 	case *pg_query.Node_AlterDefaultPrivilegesStmt:
 		obj, err = b.buildDefaultPrivileges(n.AlterDefaultPrivilegesStmt, block, pos)
 	case *pg_query.Node_CreateOpClassItem:
@@ -1143,8 +1143,8 @@ func (b *Builder) buildDomain(cs *pg_query.CreateDomainStmt, block pipeline.Bloc
 
 // ── Statistics ────────────────────────────────────────────────────────────────
 
-func (b *Builder) buildStatistics(cs *pg_query.CreateStatsStmt, block pipeline.BlockAST, pos pipeline.SourcePos) (pipeline.IRObject, error) {
-	s := &StatisticsObject{SrcPos: pos}
+func (b *Builder) buildStatistics(cs *pg_query.CreateStatsStmt, block pipeline.BlockAST, pos pipeline.SourcePos, body string) (pipeline.IRObject, error) {
+	s := &StatisticsObject{Body: body, SrcPos: pos}
 	if len(cs.Defnames) > 0 {
 		s.Schema, s.Name = extractTypeName(cs.Defnames)
 	}
@@ -1220,13 +1220,13 @@ func (b *Builder) buildDefineStmt(ds *pg_query.DefineStmt, block pipeline.BlockA
 		return agg, nil
 
 	case pg_query.ObjectType_OBJECT_OPERATOR:
-		return &Operator{Schema: schema, Name: name, SrcPos: pos}, nil
+		return &Operator{Schema: schema, Name: name, Body: rawBody, SrcPos: pos}, nil
 
 	case pg_query.ObjectType_OBJECT_COLLATION:
-		return &Collation{Schema: schema, Name: name, SrcPos: pos}, nil
+		return &Collation{Schema: schema, Name: name, Body: rawBody, SrcPos: pos}, nil
 
 	case pg_query.ObjectType_OBJECT_TSCONFIGURATION:
-		tc := &TSConfig{Schema: schema, Name: name, SrcPos: pos}
+		tc := &TSConfig{Schema: schema, Name: name, Body: rawBody, SrcPos: pos}
 		tc.Mappings = append(tc.Mappings, block.Mappings...)
 		if block.Comment != nil {
 			tc.Comment = &block.Comment.Value
@@ -1234,13 +1234,13 @@ func (b *Builder) buildDefineStmt(ds *pg_query.DefineStmt, block pipeline.BlockA
 		return tc, nil
 
 	case pg_query.ObjectType_OBJECT_TSDICTIONARY:
-		return &TSDict{Schema: schema, Name: name, SrcPos: pos}, nil
+		return &TSDict{Schema: schema, Name: name, Body: rawBody, SrcPos: pos}, nil
 
 	case pg_query.ObjectType_OBJECT_TSPARSER:
-		return &TSParser{Schema: schema, Name: name, SrcPos: pos}, nil
+		return &TSParser{Schema: schema, Name: name, Body: rawBody, SrcPos: pos}, nil
 
 	case pg_query.ObjectType_OBJECT_TSTEMPLATE:
-		return &TSTemplate{Schema: schema, Name: name, SrcPos: pos}, nil
+		return &TSTemplate{Schema: schema, Name: name, Body: rawBody, SrcPos: pos}, nil
 	}
 
 	return &OpaqueObject{kind: ds.Kind.String(), body: name, SrcPos: pos}, nil
@@ -1309,10 +1309,10 @@ func (b *Builder) buildOpaque(node *pg_query.Node, _ pipeline.BlockAST, pos pipe
 		return &EventTrigger{Name: n.CreateEventTrigStmt.Trigname, Body: sql, SrcPos: pos}, nil
 	case *pg_query.Node_CreateOpClassStmt:
 		schema, name := extractTypeName(n.CreateOpClassStmt.Opclassname)
-		return &OperatorClass{Schema: schema, Name: name, Body: sql, SrcPos: pos}, nil
+		return &OperatorClass{Schema: schema, Name: name, AccessMethod: n.CreateOpClassStmt.Amname, Body: sql, SrcPos: pos}, nil
 	case *pg_query.Node_CreateOpFamilyStmt:
 		schema, name := extractTypeName(n.CreateOpFamilyStmt.Opfamilyname)
-		return &OperatorFamily{Schema: schema, Name: name, Body: sql, SrcPos: pos}, nil
+		return &OperatorFamily{Schema: schema, Name: name, AccessMethod: n.CreateOpFamilyStmt.Amname, Body: sql, SrcPos: pos}, nil
 	}
 	return &OpaqueObject{kind: kind, body: kind, SrcPos: pos}, nil
 }

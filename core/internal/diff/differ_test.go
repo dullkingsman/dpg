@@ -2731,3 +2731,255 @@ func TestDiffDefaultPrivilegesForRole(t *testing.T) {
 		t.Errorf("expected FOR ROLE in DEFAULT PRIVILEGES, got: %v", sqlList(ops))
 	}
 }
+
+// ── Operator class/family DROP access method (regression: hardcoded btree) ─────
+
+func TestDiffDropOperatorClassUsesRecordedAccessMethod(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.my_ops", &snapshot.SnapObject{
+		Kind: "operator_class",
+		Opaque: &snapshot.SnapOpaque{
+			Kind: "operator_class", Schema: "public", Name: "my_ops", Using: "gin",
+		},
+	})
+	ops, err := d.Diff(nil, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ops) == 0 {
+		t.Fatal("expected drop op")
+	}
+	sql := ops[0].SQL()
+	if !strings.Contains(sql, "DROP OPERATOR CLASS") || !strings.Contains(sql, "USING gin") {
+		t.Errorf("expected DROP … USING gin, got: %s", sql)
+	}
+	if strings.Contains(sql, "USING btree") {
+		t.Errorf("must not hardcode btree, got: %s", sql)
+	}
+}
+
+func TestDiffDropOperatorFamilyUsesRecordedAccessMethod(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.my_family", &snapshot.SnapObject{
+		Kind: "operator_family",
+		Opaque: &snapshot.SnapOpaque{
+			Kind: "operator_family", Schema: "public", Name: "my_family", Using: "gist",
+		},
+	})
+	ops, err := d.Diff(nil, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ops) == 0 || !strings.Contains(ops[0].SQL(), "USING gist") {
+		t.Fatalf("expected DROP … USING gist, got: %v", ops)
+	}
+}
+
+// Legacy snapshots predate the access-method field; DROP falls back to btree.
+func TestDiffDropOperatorClassLegacyFallsBackToBtree(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.my_ops", &snapshot.SnapObject{
+		Kind: "operator_class",
+		Opaque: &snapshot.SnapOpaque{
+			Kind: "operator_class", Schema: "public", Name: "my_ops", // no Using
+		},
+	})
+	ops, err := d.Diff(nil, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ops) == 0 || !strings.Contains(ops[0].SQL(), "USING btree") {
+		t.Fatalf("expected fallback USING btree, got: %v", ops)
+	}
+}
+
+// An introspected opaque object (used as the baseline by `plan --live`) may have
+// no body hash; comparing a real body against an empty snapshot hash must NOT
+// report spurious drift.
+func TestDiffOpaqueNoSpuriousDriftWhenSnapHashEmpty(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.my_coll", &snapshot.SnapObject{
+		Kind: "collation",
+		Opaque: &snapshot.SnapOpaque{
+			Kind: "collation", Schema: "public", Name: "my_coll", // BodyHash == ""
+		},
+	})
+	desired := []pipeline.IRObject{
+		&ir.Collation{Schema: "public", Name: "my_coll", Body: "CREATE COLLATION public.my_coll (LOCALE = 'C')"},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ops) != 0 {
+		t.Fatalf("want 0 ops (no spurious drift), got %d: %v", len(ops), ops)
+	}
+}
+
+// A FOR PUBLIC user mapping has an empty user; the DROP must emit FOR PUBLIC,
+// not FOR "" (a zero-length identifier that aborts the migration).
+func TestDiffDropUserMappingForPublic(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("@dummy_srv", &snapshot.SnapObject{
+		Kind: "user_mapping",
+		Opaque: &snapshot.SnapOpaque{
+			Kind: "user_mapping", Name: "@dummy_srv",
+		},
+	})
+	ops, err := d.Diff(nil, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ops) == 0 {
+		t.Fatal("expected drop op")
+	}
+	sql := ops[0].SQL()
+	if !strings.Contains(sql, "FOR PUBLIC") {
+		t.Errorf("expected FOR PUBLIC, got: %s", sql)
+	}
+	if strings.Contains(sql, `FOR ""`) {
+		t.Errorf("must not emit zero-length identifier, got: %s", sql)
+	}
+}
+
+// Collation/statistics bodies are catalog reconstructions on the live side and
+// won't byte-match equivalent hand-written source; against a reconstructed
+// baseline (plan --live) the differ must not report spurious "body changed"
+// drift (regression: capturing Body activated this).
+func TestDiffCollationNoSpuriousBodyDrift(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	// Baseline as introspection produces it (qualified, LOCALE form; Reconstructed).
+	if err := snapshot.Populate(snap, []pipeline.IRObject{
+		&ir.Collation{Schema: "public", Name: "c", Body: "CREATE COLLATION public.c (LOCALE = 'C')", Reconstructed: true},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// Desired from hand-written source (unqualified, LC_* form) — semantically equal.
+	desired := []pipeline.IRObject{
+		&ir.Collation{Schema: "public", Name: "c", Body: "CREATE COLLATION c (LC_COLLATE = 'C', LC_CTYPE = 'C')"},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ops) != 0 {
+		t.Fatalf("spurious drift for equivalent collation spelling: %d ops: %v", len(ops), ops)
+	}
+}
+
+func TestDiffStatisticsNoSpuriousBodyDrift(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	if err := snapshot.Populate(snap, []pipeline.IRObject{
+		&ir.StatisticsObject{Schema: "public", Name: "st", Body: "CREATE STATISTICS public.st ON a, b FROM st", Reconstructed: true},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	desired := []pipeline.IRObject{
+		&ir.StatisticsObject{Schema: "public", Name: "st", Body: "CREATE STATISTICS public.st ON a, b FROM public.st"},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ops) != 0 {
+		t.Fatalf("spurious drift for equivalent statistics spelling: %d ops: %v", len(ops), ops)
+	}
+}
+
+// OFFLINE plan/apply: both sides source-derived (Reconstructed=false). A genuine
+// edit to a collation/publication body MUST be detected (regression guard: the
+// over-broad fix silently dropped this).
+func TestDiffCollationOfflineDetectsEdit(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	if err := snapshot.Populate(snap, []pipeline.IRObject{
+		&ir.Collation{Schema: "public", Name: "c", Body: "CREATE COLLATION public.c (LOCALE = 'C')"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	desired := []pipeline.IRObject{
+		&ir.Collation{Schema: "public", Name: "c", Body: "CREATE COLLATION public.c (LOCALE = 'POSIX')"},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ops) == 0 {
+		t.Fatal("offline: genuine collation body edit must be detected, got 0 ops")
+	}
+}
+
+func TestDiffPublicationOfflineDetectsEdit(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	if err := snapshot.Populate(snap, []pipeline.IRObject{
+		&ir.Publication{Name: "p", Body: "CREATE PUBLICATION p FOR ALL TABLES"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	desired := []pipeline.IRObject{
+		&ir.Publication{Name: "p", Body: "CREATE PUBLICATION p FOR TABLE public.t"},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ops) == 0 {
+		t.Fatal("offline: genuine publication body edit must be detected, got 0 ops")
+	}
+}
+
+// VERIFY: desired side is the introspected reconstruction (Reconstructed=true),
+// snap side is the stored source hash. Must NOT report spurious drift despite
+// different-but-equivalent spelling.
+func TestDiffCollationVerifyNoSpuriousDrift(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	// Stored snapshot from source apply (has a hash).
+	if err := snapshot.Populate(snap, []pipeline.IRObject{
+		&ir.Collation{Schema: "public", Name: "c", Body: "CREATE COLLATION c (LC_COLLATE = 'C', LC_CTYPE = 'C')"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// Introspected desired side: canonical reconstruction, marked Reconstructed.
+	desired := []pipeline.IRObject{
+		&ir.Collation{Schema: "public", Name: "c", Body: "CREATE COLLATION public.c (LOCALE = 'C')", Reconstructed: true},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ops) != 0 {
+		t.Fatalf("verify: spurious drift for reconstructed collation: %d ops: %v", len(ops), ops)
+	}
+}
+
+// PLAN --LIVE: desired side is source, snap side is the introspected baseline
+// (Reconstructed=true → no hash). Must NOT report spurious drift.
+func TestDiffCollationPlanLiveNoSpuriousDrift(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	// Live baseline built from introspection (Reconstructed → BodyHash omitted).
+	if err := snapshot.Populate(snap, []pipeline.IRObject{
+		&ir.Collation{Schema: "public", Name: "c", Body: "CREATE COLLATION public.c (LOCALE = 'C')", Reconstructed: true},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	desired := []pipeline.IRObject{
+		&ir.Collation{Schema: "public", Name: "c", Body: "CREATE COLLATION c (LC_COLLATE = 'C', LC_CTYPE = 'C')"},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ops) != 0 {
+		t.Fatalf("plan --live: spurious drift vs reconstructed baseline: %d ops: %v", len(ops), ops)
+	}
+}

@@ -378,7 +378,12 @@ type Tablespace struct {
 	Name    string
 	Body    string // raw Part1 text
 	Comment *string
-	SrcPos  pipeline.SourcePos
+	// Reconstructed marks a Body rebuilt from the live catalog by the
+	// introspector (as opposed to parsed from source). Reconstructed bodies are
+	// canonical but not byte-identical to hand-written source, so the snapshot
+	// omits their body hash to avoid spurious text-diff drift. See sourceBodyHash.
+	Reconstructed bool
+	SrcPos        pipeline.SourcePos
 }
 
 func (ts *Tablespace) QualifiedName() string   { return ts.Name }
@@ -387,10 +392,11 @@ func (ts *Tablespace) irObject()               {}
 
 // ForeignDataWrapper is a CREATE FOREIGN DATA WRAPPER declaration.
 type ForeignDataWrapper struct {
-	Name    string
-	Body    string
-	Comment *string
-	SrcPos  pipeline.SourcePos
+	Name          string
+	Body          string
+	Comment       *string
+	Reconstructed bool // Body rebuilt from the catalog; see Tablespace.Reconstructed
+	SrcPos        pipeline.SourcePos
 }
 
 func (f *ForeignDataWrapper) QualifiedName() string   { return f.Name }
@@ -399,10 +405,11 @@ func (f *ForeignDataWrapper) irObject()               {}
 
 // ForeignServer is a CREATE SERVER declaration.
 type ForeignServer struct {
-	Name    string
-	Body    string
-	Comment *string
-	SrcPos  pipeline.SourcePos
+	Name          string
+	Body          string
+	Comment       *string
+	Reconstructed bool // Body rebuilt from the catalog; see Tablespace.Reconstructed
+	SrcPos        pipeline.SourcePos
 }
 
 func (f *ForeignServer) QualifiedName() string   { return f.Name }
@@ -411,10 +418,11 @@ func (f *ForeignServer) irObject()               {}
 
 // UserMapping is a CREATE USER MAPPING declaration.
 type UserMapping struct {
-	User   string
-	Server string
-	Body   string
-	SrcPos pipeline.SourcePos
+	User          string
+	Server        string
+	Body          string
+	Reconstructed bool // Body rebuilt from the catalog; see Tablespace.Reconstructed
+	SrcPos        pipeline.SourcePos
 }
 
 func (u *UserMapping) QualifiedName() string   { return u.User + "@" + u.Server }
@@ -423,9 +431,10 @@ func (u *UserMapping) irObject()               {}
 
 // Publication is a CREATE PUBLICATION declaration.
 type Publication struct {
-	Name   string
-	Body   string
-	SrcPos pipeline.SourcePos
+	Name          string
+	Body          string
+	Reconstructed bool // Body rebuilt from the catalog; see Tablespace.Reconstructed
+	SrcPos        pipeline.SourcePos
 }
 
 func (p *Publication) QualifiedName() string   { return p.Name }
@@ -445,9 +454,10 @@ func (s *Subscription) irObject()               {}
 
 // EventTrigger is a CREATE EVENT TRIGGER declaration.
 type EventTrigger struct {
-	Name   string
-	Body   string
-	SrcPos pipeline.SourcePos
+	Name          string
+	Body          string
+	Reconstructed bool // Body rebuilt from the catalog; see Tablespace.Reconstructed
+	SrcPos        pipeline.SourcePos
 }
 
 func (e *EventTrigger) QualifiedName() string   { return e.Name }
@@ -456,10 +466,11 @@ func (e *EventTrigger) irObject()               {}
 
 // Collation is a CREATE COLLATION declaration.
 type Collation struct {
-	Schema string
-	Name   string
-	Body   string
-	SrcPos pipeline.SourcePos
+	Schema        string
+	Name          string
+	Body          string
+	Reconstructed bool // Body rebuilt from the catalog; see Tablespace.Reconstructed
+	SrcPos        pipeline.SourcePos
 }
 
 func (c *Collation) QualifiedName() string   { return qualName(c.Schema, c.Name) }
@@ -480,10 +491,11 @@ func (o *Operator) irObject()               {}
 
 // OperatorClass is a CREATE OPERATOR CLASS declaration.
 type OperatorClass struct {
-	Schema string
-	Name   string
-	Body   string
-	SrcPos pipeline.SourcePos
+	Schema       string
+	Name         string
+	AccessMethod string // the index access method (btree/gin/gist/...); needed for DROP
+	Body         string
+	SrcPos       pipeline.SourcePos
 }
 
 func (o *OperatorClass) QualifiedName() string   { return qualName(o.Schema, o.Name) }
@@ -492,10 +504,11 @@ func (o *OperatorClass) irObject()               {}
 
 // OperatorFamily is a CREATE OPERATOR FAMILY declaration.
 type OperatorFamily struct {
-	Schema string
-	Name   string
-	Body   string
-	SrcPos pipeline.SourcePos
+	Schema       string
+	Name         string
+	AccessMethod string // the index access method (btree/gin/gist/...); needed for DROP
+	Body         string
+	SrcPos       pipeline.SourcePos
 }
 
 func (o *OperatorFamily) QualifiedName() string   { return qualName(o.Schema, o.Name) }
@@ -504,10 +517,11 @@ func (o *OperatorFamily) irObject()               {}
 
 // Cast is a CREATE CAST declaration.
 type Cast struct {
-	SourceType TypeRef
-	TargetType TypeRef
-	Body       string
-	SrcPos     pipeline.SourcePos
+	SourceType    TypeRef
+	TargetType    TypeRef
+	Body          string
+	Reconstructed bool // Body rebuilt from the catalog; see Tablespace.Reconstructed
+	SrcPos        pipeline.SourcePos
 }
 
 func (c *Cast) QualifiedName() string   { return c.SourceType.String() + "->" + c.TargetType.String() }
@@ -516,10 +530,11 @@ func (c *Cast) irObject()               {}
 
 // StatisticsObject is a CREATE STATISTICS declaration.
 type StatisticsObject struct {
-	Schema string
-	Name   string
-	Body   string
-	SrcPos pipeline.SourcePos
+	Schema        string
+	Name          string
+	Body          string
+	Reconstructed bool // Body rebuilt from the catalog; see Tablespace.Reconstructed
+	SrcPos        pipeline.SourcePos
 }
 
 func (s *StatisticsObject) QualifiedName() string   { return qualName(s.Schema, s.Name) }

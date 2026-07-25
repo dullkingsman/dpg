@@ -35,7 +35,8 @@ type SnapOpaque struct {
 	Kind     string             `json:"kind"` // e.g. "procedure", "tablespace"
 	Schema   string             `json:"schema,omitempty"`
 	Name     string             `json:"name"`
-	Args     string             `json:"args,omitempty"` // type-only arg list (proc/agg identity)
+	Args     string             `json:"args,omitempty"`  // type-only arg list (proc/agg identity)
+	Using    string             `json:"using,omitempty"` // index access method (operator_class/operator_family)
 	BodyHash string             `json:"body_hash,omitempty"`
 	Comment  *string            `json:"comment,omitempty"`
 	Grants   []SnapGrant        `json:"grants,omitempty"` // aggregate and procedure

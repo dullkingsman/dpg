@@ -134,15 +134,23 @@ func runDump(
 		return fmt.Errorf("create output directory: %w", err)
 	}
 
-	// Separate schema-scoped (DB-level) from cluster-level objects (roles).
+	// Route objects into three buckets: cluster-scoped (roles, tablespaces —
+	// shared across databases), database-scoped but schemaless (FDWs, servers,
+	// user mappings, publications, event triggers, casts), and schema-scoped
+	// (everything owned by a schema).
 	schemaFiles := map[string]*strings.Builder{}
-	var clusterFile strings.Builder
+	var clusterFile, dbLevelFile strings.Builder
 	var dbObjects, clusterObjects []pipeline.IRObject
 	for _, obj := range objects {
-		schema := objectSchema(obj)
-		if schema == "" {
+		if isClusterScoped(obj) {
 			renderObjectDPG(&clusterFile, obj, fmtOpts)
 			clusterObjects = append(clusterObjects, obj)
+			continue
+		}
+		schema := objectSchema(obj)
+		if schema == "" {
+			renderObjectDPG(&dbLevelFile, obj, fmtOpts)
+			dbObjects = append(dbObjects, obj)
 			continue
 		}
 		if _, ok := schemaFiles[schema]; !ok {
@@ -167,7 +175,17 @@ func runDump(
 		ui.PrintInfo(os.Stdout, "wrote", path, color)
 	}
 
-	// Write cluster-level roles file to the cluster objects directory.
+	// Write database-scoped schemaless objects to a database-level file.
+	if dbLevelFile.Len() > 0 {
+		path := filepath.Join(outDir, "objects.dpg")
+		if err := os.WriteFile(path, []byte(dbLevelFile.String()), 0o644); err != nil {
+			return err
+		}
+		dpgFiles = append(dpgFiles, path)
+		ui.PrintInfo(os.Stdout, "wrote", path, color)
+	}
+
+	// Write cluster-level objects (roles, tablespaces) to the cluster objects dir.
 	var clusterDPGFiles []string
 	if clusterFile.Len() > 0 {
 		if err := os.MkdirAll(cl.ObjectsDir, 0o755); err != nil {
@@ -182,10 +200,17 @@ func runDump(
 	}
 
 	// Build DB snapshot from compiled source (ensures plan produces no diff).
+	// If the freshly written .dpg files fail to recompile, fall back to the raw
+	// introspected objects but surface the error — a silent fallback would hide a
+	// dump that emits non-compiling source (the snapshot would then diverge from
+	// what `plan` reads back).
 	dbSnapObjects := dbObjects
 	if len(dpgFiles) > 0 {
 		if compiled, compileErr := compiler.Compile(dpgFiles, outDir, pipeline.Default); compileErr == nil {
 			dbSnapObjects = compiled
+		} else {
+			fmt.Fprintf(os.Stderr, "%s  dumped source did not recompile for %s/%s; snapshot built from live catalog instead: %v\n",
+				ui.Yellow("warning", color), cl.Name(), db.Name(), compileErr)
 		}
 	}
 	dbSnap := &pipeline.Snapshot{}
@@ -197,12 +222,16 @@ func runDump(
 	}
 	ui.PrintSuccess(os.Stdout, "DB snapshot written", cl.Name()+"/"+db.Name(), color)
 
-	// Build cluster snapshot (roles). Written once per cluster; safe to repeat.
+	// Build cluster snapshot (roles, tablespaces). These are cluster-global, so
+	// every database dumps identical content — written once per cluster, safe to repeat.
 	if len(clusterObjects) > 0 {
 		clusterSnapObjects := clusterObjects
 		if len(clusterDPGFiles) > 0 {
 			if compiled, compileErr := compiler.Compile(clusterDPGFiles, cl.ObjectsDir, pipeline.Default); compileErr == nil {
 				clusterSnapObjects = compiled
+			} else {
+				fmt.Fprintf(os.Stderr, "%s  dumped cluster source did not recompile for %s; snapshot built from live catalog instead: %v\n",
+					ui.Yellow("warning", color), cl.Name(), compileErr)
 			}
 		}
 		clusterSnap := &pipeline.Snapshot{}
@@ -215,6 +244,31 @@ func runDump(
 		ui.PrintSuccess(os.Stdout, "Cluster snapshot written", cl.Name(), color)
 	}
 	return nil
+}
+
+// isClusterScoped reports whether obj lives at the cluster level (shared across
+// every database) rather than inside one database. Only roles and tablespaces
+// qualify; all other schemaless objects (FDWs, servers, user mappings,
+// publications, event triggers, casts) are database-scoped.
+func isClusterScoped(obj pipeline.IRObject) bool {
+	switch obj.(type) {
+	case *ir.Role, *ir.Tablespace:
+		return true
+	}
+	return false
+}
+
+// excludeClusterScoped returns the objects that belong to a database (i.e. not
+// cluster-scoped), preserving order. Used to build database-level baselines for
+// verify and plan --live so roles/tablespaces are handled only at cluster level.
+func excludeClusterScoped(objs []pipeline.IRObject) []pipeline.IRObject {
+	out := make([]pipeline.IRObject, 0, len(objs))
+	for _, obj := range objs {
+		if !isClusterScoped(obj) {
+			out = append(out, obj)
+		}
+	}
+	return out
 }
 
 // objectSchema returns the schema name for schema-scoped objects.
@@ -233,6 +287,10 @@ func objectSchema(obj pipeline.IRObject) string {
 	case *ir.Type:
 		return o.Schema
 	case *ir.Sequence:
+		return o.Schema
+	case *ir.Collation:
+		return o.Schema
+	case *ir.StatisticsObject:
 		return o.Schema
 	}
 	return ""
@@ -406,7 +464,45 @@ func renderObjectDPG(b *strings.Builder, obj pipeline.IRObject, fmtOpts format.O
 
 	case *ir.Role:
 		fmt.Fprintf(b, "\n%s %s;\n", kw("ROLE"), o.Name)
+
+	// Reliable-tier opaque objects carry a canonicalised CREATE statement in
+	// Body; renderOpaqueBody strips the CREATE verb to satisfy the no-verb mandate.
+	case *ir.Collation:
+		renderOpaqueBody(b, o.Body)
+	case *ir.StatisticsObject:
+		renderOpaqueBody(b, o.Body)
+	case *ir.Cast:
+		renderOpaqueBody(b, o.Body)
+	case *ir.EventTrigger:
+		renderOpaqueBody(b, o.Body)
+	case *ir.ForeignDataWrapper:
+		renderOpaqueBody(b, o.Body)
+	case *ir.ForeignServer:
+		renderOpaqueBody(b, o.Body)
+	case *ir.UserMapping:
+		renderOpaqueBody(b, o.Body)
+	case *ir.Publication:
+		renderOpaqueBody(b, o.Body)
+	case *ir.Tablespace:
+		renderOpaqueBody(b, o.Body)
 	}
+}
+
+// renderOpaqueBody writes a reconstructed CREATE statement (already
+// canonicalised by the introspector) as a DPG declaration. DPG source obeys the
+// no-verb mandate — declarations must not begin with CREATE — so the leading
+// CREATE verb is stripped. Empty bodies are skipped so a body-less object never
+// emits a bare, invalid ";".
+func renderOpaqueBody(b *strings.Builder, body string) {
+	body = strings.TrimSpace(body)
+	const createPrefix = "CREATE "
+	if len(body) >= len(createPrefix) && strings.EqualFold(body[:len(createPrefix)], createPrefix) {
+		body = strings.TrimSpace(body[len(createPrefix):])
+	}
+	if body == "" {
+		return
+	}
+	fmt.Fprintf(b, "\n%s;\n", body)
 }
 
 // classifyColumn returns the presentation section for a column.

@@ -659,3 +659,28 @@ func findCol(cols []*ir.Column, name string) *ir.Column {
 	}
 	return nil
 }
+
+// ── Operator class / family access method ─────────────────────────────────────
+
+func TestBuildOperatorClassAccessMethod(t *testing.T) {
+	obj := buildObject(t, pipeline.KindOperatorClass,
+		`my_ops FOR TYPE int4 USING gin AS STORAGE int4`, ``)
+	oc, ok := obj.(*ir.OperatorClass)
+	if !ok {
+		t.Fatalf("expected *ir.OperatorClass, got %T", obj)
+	}
+	if oc.AccessMethod != "gin" {
+		t.Errorf("AccessMethod: got %q, want %q", oc.AccessMethod, "gin")
+	}
+}
+
+func TestBuildOperatorFamilyAccessMethod(t *testing.T) {
+	obj := buildObject(t, pipeline.KindOperatorFamily, `my_family USING gist`, ``)
+	of, ok := obj.(*ir.OperatorFamily)
+	if !ok {
+		t.Fatalf("expected *ir.OperatorFamily, got %T", obj)
+	}
+	if of.AccessMethod != "gist" {
+		t.Errorf("AccessMethod: got %q, want %q", of.AccessMethod, "gist")
+	}
+}

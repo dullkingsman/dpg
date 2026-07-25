@@ -287,3 +287,60 @@ func TestPopulateVirtualTypeWithComment(t *testing.T) {
 		t.Errorf("Comment: got %v, want %q", so.VirtualType.Comment, comment)
 	}
 }
+
+// ── Operator class access method round-trip ───────────────────────────────────
+
+func TestPopulateOperatorClassUsing(t *testing.T) {
+	snap := &pipeline.Snapshot{}
+	objects := []pipeline.IRObject{
+		&ir.OperatorClass{
+			Schema:       "public",
+			Name:         "my_ops",
+			AccessMethod: "gin",
+			Body:         "CREATE OPERATOR CLASS public.my_ops FOR TYPE int4 USING gin AS STORAGE int4",
+		},
+	}
+	if err := Populate(snap, objects); err != nil {
+		t.Fatal(err)
+	}
+	raw, ok := snap.Objects["public.my_ops"]
+	if !ok {
+		t.Fatal("expected public.my_ops in snapshot")
+	}
+	var so SnapObject
+	if err := json.Unmarshal(raw, &so); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if so.Opaque == nil {
+		t.Fatal("expected opaque payload")
+	}
+	if so.Opaque.Using != "gin" {
+		t.Errorf("Using: got %q, want %q", so.Opaque.Using, "gin")
+	}
+}
+
+func TestPopulateOperatorFamilyUsing(t *testing.T) {
+	snap := &pipeline.Snapshot{}
+	objects := []pipeline.IRObject{
+		&ir.OperatorFamily{
+			Schema:       "public",
+			Name:         "my_family",
+			AccessMethod: "gist",
+			Body:         "CREATE OPERATOR FAMILY public.my_family USING gist",
+		},
+	}
+	if err := Populate(snap, objects); err != nil {
+		t.Fatal(err)
+	}
+	raw, ok := snap.Objects["public.my_family"]
+	if !ok {
+		t.Fatal("expected public.my_family in snapshot")
+	}
+	var so SnapObject
+	if err := json.Unmarshal(raw, &so); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if so.Opaque == nil || so.Opaque.Using != "gist" {
+		t.Errorf("Using: got %+v, want gist", so.Opaque)
+	}
+}

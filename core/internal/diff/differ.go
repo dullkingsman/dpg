@@ -468,7 +468,13 @@ func dropObject(so *snapshot.SnapObject) []pipeline.DiffOp {
 		if so.Opaque != nil {
 			parts := strings.SplitN(so.Opaque.Name, "@", 2)
 			if len(parts) == 2 {
-				return []pipeline.DiffOp{destructiveOp(fmt.Sprintf("DROP USER MAPPING IF EXISTS FOR %s SERVER %s;", quoteIdent(parts[0]), quoteIdent(parts[1])), zero)}
+				// An empty user is a FOR PUBLIC mapping; quoting "" would emit a
+				// zero-length identifier and abort the migration.
+				forClause := "PUBLIC"
+				if parts[0] != "" {
+					forClause = quoteIdent(parts[0])
+				}
+				return []pipeline.DiffOp{destructiveOp(fmt.Sprintf("DROP USER MAPPING IF EXISTS FOR %s SERVER %s;", forClause, quoteIdent(parts[1])), zero)}
 			}
 		}
 	case "publication":
@@ -493,11 +499,11 @@ func dropObject(so *snapshot.SnapObject) []pipeline.DiffOp {
 		}
 	case "operator_class":
 		if so.Opaque != nil {
-			return []pipeline.DiffOp{destructiveOp(fmt.Sprintf("DROP OPERATOR CLASS IF EXISTS %s USING btree;", qualIdent(so.Opaque.Schema, so.Opaque.Name)), zero)}
+			return []pipeline.DiffOp{destructiveOp(fmt.Sprintf("DROP OPERATOR CLASS IF EXISTS %s USING %s;", qualIdent(so.Opaque.Schema, so.Opaque.Name), accessMethodOrDefault(so.Opaque.Using)), zero)}
 		}
 	case "operator_family":
 		if so.Opaque != nil {
-			return []pipeline.DiffOp{destructiveOp(fmt.Sprintf("DROP OPERATOR FAMILY IF EXISTS %s USING btree;", qualIdent(so.Opaque.Schema, so.Opaque.Name)), zero)}
+			return []pipeline.DiffOp{destructiveOp(fmt.Sprintf("DROP OPERATOR FAMILY IF EXISTS %s USING %s;", qualIdent(so.Opaque.Schema, so.Opaque.Name), accessMethodOrDefault(so.Opaque.Using)), zero)}
 		}
 	case "cast":
 		if so.Opaque != nil {
@@ -1562,87 +1568,87 @@ func diffObject(desired pipeline.IRObject, snap *snapshot.SnapObject, fullSnap *
 		if snap.Opaque == nil {
 			return nil, nil
 		}
-		return diffOpaqueIR(o.Name, o.Body, o.Comment, snap.Opaque, o.SrcPos)
+		return diffOpaqueIR(o.Name, o.Body, o.Reconstructed, snap.Opaque, o.SrcPos)
 	case *ir.ForeignDataWrapper:
 		if snap.Opaque == nil {
 			return nil, nil
 		}
-		return diffOpaqueIR(o.Name, o.Body, o.Comment, snap.Opaque, o.SrcPos)
+		return diffOpaqueIR(o.Name, o.Body, o.Reconstructed, snap.Opaque, o.SrcPos)
 	case *ir.ForeignServer:
 		if snap.Opaque == nil {
 			return nil, nil
 		}
-		return diffOpaqueIR(o.Name, o.Body, o.Comment, snap.Opaque, o.SrcPos)
+		return diffOpaqueIR(o.Name, o.Body, o.Reconstructed, snap.Opaque, o.SrcPos)
 	case *ir.UserMapping:
 		if snap.Opaque == nil {
 			return nil, nil
 		}
-		return diffOpaqueIR(o.QualifiedName(), o.Body, nil, snap.Opaque, o.SrcPos)
+		return diffOpaqueIR(o.QualifiedName(), o.Body, o.Reconstructed, snap.Opaque, o.SrcPos)
 	case *ir.Publication:
 		if snap.Opaque == nil {
 			return nil, nil
 		}
-		return diffOpaqueIR(o.Name, o.Body, nil, snap.Opaque, o.SrcPos)
+		return diffOpaqueIR(o.Name, o.Body, o.Reconstructed, snap.Opaque, o.SrcPos)
 	case *ir.Subscription:
 		if snap.Opaque == nil {
 			return nil, nil
 		}
-		return diffOpaqueIR(o.Name, o.Body, nil, snap.Opaque, o.SrcPos)
+		return diffOpaqueIR(o.Name, o.Body, false, snap.Opaque, o.SrcPos)
 	case *ir.EventTrigger:
 		if snap.Opaque == nil {
 			return nil, nil
 		}
-		return diffOpaqueIR(o.Name, o.Body, nil, snap.Opaque, o.SrcPos)
+		return diffOpaqueIR(o.Name, o.Body, o.Reconstructed, snap.Opaque, o.SrcPos)
 	case *ir.Collation:
 		if snap.Opaque == nil {
 			return nil, nil
 		}
-		return diffOpaqueIR(o.QualifiedName(), o.Body, nil, snap.Opaque, o.SrcPos)
+		return diffOpaqueIR(o.QualifiedName(), o.Body, o.Reconstructed, snap.Opaque, o.SrcPos)
 	case *ir.Operator:
 		if snap.Opaque == nil {
 			return nil, nil
 		}
-		return diffOpaqueIR(o.QualifiedName(), o.Body, nil, snap.Opaque, o.SrcPos)
+		return diffOpaqueIR(o.QualifiedName(), o.Body, false, snap.Opaque, o.SrcPos)
 	case *ir.OperatorClass:
 		if snap.Opaque == nil {
 			return nil, nil
 		}
-		return diffOpaqueIR(o.QualifiedName(), o.Body, nil, snap.Opaque, o.SrcPos)
+		return diffOpaqueIR(o.QualifiedName(), o.Body, false, snap.Opaque, o.SrcPos)
 	case *ir.OperatorFamily:
 		if snap.Opaque == nil {
 			return nil, nil
 		}
-		return diffOpaqueIR(o.QualifiedName(), o.Body, nil, snap.Opaque, o.SrcPos)
+		return diffOpaqueIR(o.QualifiedName(), o.Body, false, snap.Opaque, o.SrcPos)
 	case *ir.Cast:
 		if snap.Opaque == nil {
 			return nil, nil
 		}
-		return diffOpaqueIR(o.QualifiedName(), o.Body, nil, snap.Opaque, o.SrcPos)
+		return diffOpaqueIR(o.QualifiedName(), o.Body, o.Reconstructed, snap.Opaque, o.SrcPos)
 	case *ir.StatisticsObject:
 		if snap.Opaque == nil {
 			return nil, nil
 		}
-		return diffOpaqueIR(o.QualifiedName(), o.Body, nil, snap.Opaque, o.SrcPos)
+		return diffOpaqueIR(o.QualifiedName(), o.Body, o.Reconstructed, snap.Opaque, o.SrcPos)
 	case *ir.TSConfig:
 		if snap.Opaque == nil {
 			return nil, nil
 		}
-		return diffOpaqueIR(o.QualifiedName(), o.Body, o.Comment, snap.Opaque, o.SrcPos)
+		return diffOpaqueIR(o.QualifiedName(), o.Body, false, snap.Opaque, o.SrcPos)
 	case *ir.TSDict:
 		if snap.Opaque == nil {
 			return nil, nil
 		}
-		return diffOpaqueIR(o.QualifiedName(), o.Body, o.Comment, snap.Opaque, o.SrcPos)
+		return diffOpaqueIR(o.QualifiedName(), o.Body, false, snap.Opaque, o.SrcPos)
 	case *ir.TSParser:
 		if snap.Opaque == nil {
 			return nil, nil
 		}
-		return diffOpaqueIR(o.QualifiedName(), o.Body, nil, snap.Opaque, o.SrcPos)
+		return diffOpaqueIR(o.QualifiedName(), o.Body, false, snap.Opaque, o.SrcPos)
 	case *ir.TSTemplate:
 		if snap.Opaque == nil {
 			return nil, nil
 		}
-		return diffOpaqueIR(o.QualifiedName(), o.Body, nil, snap.Opaque, o.SrcPos)
+		return diffOpaqueIR(o.QualifiedName(), o.Body, false, snap.Opaque, o.SrcPos)
 	case *ir.DefaultPrivileges:
 		if snap.DefaultPrivileges == nil {
 			return nil, nil
@@ -1655,14 +1661,30 @@ func diffObject(desired pipeline.IRObject, snap *snapshot.SnapObject, fullSnap *
 	return nil, nil
 }
 
-// diffOpaqueIR checks if the body hash has changed and emits a warning op if so.
-func diffOpaqueIR(name, body string, _ *string, snap *snapshot.SnapOpaque, pos pipeline.SourcePos) ([]pipeline.DiffOp, error) {
-	if body == "" {
+// accessMethodOrDefault returns the recorded index access method for an
+// operator class/family, falling back to "btree" for snapshots written before
+// the access method was tracked (the field is absent in legacy snapshot JSON).
+func accessMethodOrDefault(am string) string {
+	if am == "" {
+		return "btree"
+	}
+	return am
+}
+
+// diffOpaqueIR checks whether an opaque object's body hash has changed and emits
+// a warning op if so. The body comparison is only meaningful when BOTH sides are
+// source-derived deparses: it is skipped when the desired object's body is a
+// catalog reconstruction (reconstructed == true, e.g. verify introspects the
+// desired side) or when the snapshot side carries no hash (a reconstructed
+// baseline, e.g. plan --live). Offline plan/apply (source vs source) compare
+// normally and detect genuine edits.
+func diffOpaqueIR(name, body string, reconstructed bool, snap *snapshot.SnapOpaque, pos pipeline.SourcePos) ([]pipeline.DiffOp, error) {
+	if body == "" || reconstructed {
 		return nil, nil
 	}
 	sum := sha256.Sum256([]byte(strings.TrimSpace(body)))
 	newHash := fmt.Sprintf("%x", sum)
-	if newHash != snap.BodyHash {
+	if snap.BodyHash != "" && newHash != snap.BodyHash {
 		return []pipeline.DiffOp{destructiveOp(
 			fmt.Sprintf("-- WARNING: %s body changed; manual DROP + recreate required", name),
 			pos,

@@ -141,12 +141,16 @@ func runVerify(
 		return false, ui.WrapDB(fmt.Errorf("introspect: %w", err))
 	}
 
+	// Exclude cluster-level objects (roles, tablespaces); they are verified
+	// against the cluster snapshot, not the database snapshot.
+	databaseObjects := excludeClusterScoped(liveObjects)
+
 	liveSnap := &pipeline.Snapshot{}
-	if err := snapshot.Populate(liveSnap, liveObjects); err != nil {
+	if err := snapshot.Populate(liveSnap, databaseObjects); err != nil {
 		return false, fmt.Errorf("build live snapshot: %w", err)
 	}
 
-	ops, err := differ.Diff(liveObjects, snap)
+	ops, err := differ.Diff(databaseObjects, snap)
 	if err != nil {
 		return false, fmt.Errorf("diff: %w", err)
 	}
@@ -211,10 +215,12 @@ func runVerifyCluster(
 		return false, ui.WrapDB(fmt.Errorf("introspect: %w", err))
 	}
 
-	// Retain only cluster-level (schema-less) objects.
+	// Retain only cluster-level objects (roles, tablespaces). This must match
+	// dump's routing (isClusterScoped): database-scoped schemaless objects like
+	// FDWs and publications belong to the database, not the cluster.
 	var clusterObjects []pipeline.IRObject
 	for _, obj := range allObjects {
-		if objectSchema(obj) == "" {
+		if isClusterScoped(obj) {
 			clusterObjects = append(clusterObjects, obj)
 		}
 	}

@@ -218,8 +218,10 @@ func introspectSnapshot(ctx context.Context, cl *project.Cluster, secretResolver
 		return nil, ui.WrapDB(fmt.Errorf("introspect: %w", err))
 	}
 
+	// Exclude cluster-level objects (roles, tablespaces); the database plan
+	// compares against database-scoped source only.
 	snap := &pipeline.Snapshot{}
-	if err := snapshotpkg.Populate(snap, liveObjects); err != nil {
+	if err := snapshotpkg.Populate(snap, excludeClusterScoped(liveObjects)); err != nil {
 		return nil, fmt.Errorf("build live snapshot: %w", err)
 	}
 	return snap, nil
@@ -364,10 +366,11 @@ func introspectClusterSnapshot(ctx context.Context, cl *project.Cluster, secretR
 		return nil, ui.WrapDB(fmt.Errorf("introspect: %w", err))
 	}
 
-	// Keep only cluster-level (schema-less) objects.
+	// Keep only cluster-level objects (roles, tablespaces), matching dump's
+	// isClusterScoped routing.
 	var clusterObjects []pipeline.IRObject
 	for _, obj := range allObjects {
-		if objectSchema(obj) == "" {
+		if isClusterScoped(obj) {
 			clusterObjects = append(clusterObjects, obj)
 		}
 	}

@@ -35,6 +35,22 @@ func hashBodyStr(s string) string {
 	return fmt.Sprintf("%x", sum)
 }
 
+// sourceBodyHash hashes a body for change detection, but only when the body was
+// derived from source (parsed and deparsed by the compiler). A reconstructed
+// body — rebuilt from the live catalog by the introspector — is canonical but
+// not byte-identical to arbitrary hand-written source (schema qualification,
+// LC_COLLATE/LC_CTYPE vs LOCALE, option ordering), so hashing it would report
+// spurious "body changed" drift when it lands on either side of a diff. For
+// reconstructed bodies we store "", which the differ's guard treats as "no
+// comparison". Offline plan/apply (source vs source) keep a real hash and so
+// still detect genuine edits.
+func sourceBodyHash(body string, reconstructed bool) string {
+	if reconstructed {
+		return ""
+	}
+	return hashBodyStr(body)
+}
+
 // Populate converts objects into SnapObjects and stores them in snap.
 func Populate(snap *pipeline.Snapshot, objects []pipeline.IRObject) error {
 	for _, obj := range objects {
@@ -87,25 +103,30 @@ func toSnapObject(obj pipeline.IRObject) *SnapObject {
 			so.Grants = append(so.Grants, toSnapGrant(g))
 		}
 		return &SnapObject{Kind: "aggregate", Opaque: so}
+	// The reliable-tier opaque types below can be introspected, in which case
+	// their Body is a catalog reconstruction (Reconstructed == true) whose text
+	// won't byte-match hand-written source. sourceBodyHash stores a hash only for
+	// source-derived bodies, so offline plan/apply still detect edits while
+	// verify/plan --live (which involve a reconstruction) skip the comparison.
 	case *ir.Tablespace:
 		return &SnapObject{Kind: "tablespace", Opaque: &SnapOpaque{
-			Kind: "tablespace", Name: o.Name, BodyHash: hashBodyStr(o.Body), Comment: o.Comment,
+			Kind: "tablespace", Name: o.Name, BodyHash: sourceBodyHash(o.Body, o.Reconstructed), Comment: o.Comment,
 		}}
 	case *ir.ForeignDataWrapper:
 		return &SnapObject{Kind: "fdw", Opaque: &SnapOpaque{
-			Kind: "fdw", Name: o.Name, BodyHash: hashBodyStr(o.Body), Comment: o.Comment,
+			Kind: "fdw", Name: o.Name, BodyHash: sourceBodyHash(o.Body, o.Reconstructed), Comment: o.Comment,
 		}}
 	case *ir.ForeignServer:
 		return &SnapObject{Kind: "server", Opaque: &SnapOpaque{
-			Kind: "server", Name: o.Name, BodyHash: hashBodyStr(o.Body), Comment: o.Comment,
+			Kind: "server", Name: o.Name, BodyHash: sourceBodyHash(o.Body, o.Reconstructed), Comment: o.Comment,
 		}}
 	case *ir.UserMapping:
 		return &SnapObject{Kind: "user_mapping", Opaque: &SnapOpaque{
-			Kind: "user_mapping", Name: o.User + "@" + o.Server, BodyHash: hashBodyStr(o.Body),
+			Kind: "user_mapping", Name: o.User + "@" + o.Server, BodyHash: sourceBodyHash(o.Body, o.Reconstructed),
 		}}
 	case *ir.Publication:
 		return &SnapObject{Kind: "publication", Opaque: &SnapOpaque{
-			Kind: "publication", Name: o.Name, BodyHash: hashBodyStr(o.Body),
+			Kind: "publication", Name: o.Name, BodyHash: sourceBodyHash(o.Body, o.Reconstructed),
 		}}
 	case *ir.Subscription:
 		return &SnapObject{Kind: "subscription", Opaque: &SnapOpaque{
@@ -113,11 +134,11 @@ func toSnapObject(obj pipeline.IRObject) *SnapObject {
 		}}
 	case *ir.EventTrigger:
 		return &SnapObject{Kind: "event_trigger", Opaque: &SnapOpaque{
-			Kind: "event_trigger", Name: o.Name, BodyHash: hashBodyStr(o.Body),
+			Kind: "event_trigger", Name: o.Name, BodyHash: sourceBodyHash(o.Body, o.Reconstructed),
 		}}
 	case *ir.Collation:
 		return &SnapObject{Kind: "collation", Opaque: &SnapOpaque{
-			Kind: "collation", Schema: o.Schema, Name: o.Name, BodyHash: hashBodyStr(o.Body),
+			Kind: "collation", Schema: o.Schema, Name: o.Name, BodyHash: sourceBodyHash(o.Body, o.Reconstructed),
 		}}
 	case *ir.Operator:
 		return &SnapObject{Kind: "operator", Opaque: &SnapOpaque{
@@ -125,21 +146,21 @@ func toSnapObject(obj pipeline.IRObject) *SnapObject {
 		}}
 	case *ir.OperatorClass:
 		return &SnapObject{Kind: "operator_class", Opaque: &SnapOpaque{
-			Kind: "operator_class", Schema: o.Schema, Name: o.Name, BodyHash: hashBodyStr(o.Body),
+			Kind: "operator_class", Schema: o.Schema, Name: o.Name, Using: o.AccessMethod, BodyHash: hashBodyStr(o.Body),
 		}}
 	case *ir.OperatorFamily:
 		return &SnapObject{Kind: "operator_family", Opaque: &SnapOpaque{
-			Kind: "operator_family", Schema: o.Schema, Name: o.Name, BodyHash: hashBodyStr(o.Body),
+			Kind: "operator_family", Schema: o.Schema, Name: o.Name, Using: o.AccessMethod, BodyHash: hashBodyStr(o.Body),
 		}}
 	case *ir.Cast:
 		return &SnapObject{Kind: "cast", Opaque: &SnapOpaque{
 			Kind:     "cast",
 			Name:     o.SourceType.String() + "->" + o.TargetType.String(),
-			BodyHash: hashBodyStr(o.Body),
+			BodyHash: sourceBodyHash(o.Body, o.Reconstructed),
 		}}
 	case *ir.StatisticsObject:
 		return &SnapObject{Kind: "statistics", Opaque: &SnapOpaque{
-			Kind: "statistics", Schema: o.Schema, Name: o.Name, BodyHash: hashBodyStr(o.Body),
+			Kind: "statistics", Schema: o.Schema, Name: o.Name, BodyHash: sourceBodyHash(o.Body, o.Reconstructed),
 		}}
 	case *ir.TSConfig:
 		return &SnapObject{Kind: "ts_config", Opaque: &SnapOpaque{

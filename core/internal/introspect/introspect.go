@@ -83,6 +83,26 @@ func (ci *CatalogIntrospector) Introspect(ctx context.Context, conn pipeline.Que
 	}
 	all = append(all, aggregates...)
 
+	// Reliable-tier opaque objects: reconstructed CREATE DDL, canonicalised
+	// through pg_query so the body hash matches the compiler's. See opaque.go.
+	for _, step := range []func(context.Context, pipeline.Querier) ([]pipeline.IRObject, error){
+		introspectCollations,
+		introspectCasts,
+		introspectStatistics,
+		introspectEventTriggers,
+		introspectForeignDataWrappers,
+		introspectForeignServers,
+		introspectUserMappings,
+		introspectPublications,
+		introspectTablespaces,
+	} {
+		objs, err := step(ctx, conn)
+		if err != nil {
+			return nil, err
+		}
+		all = append(all, objs...)
+	}
+
 	return all, nil
 }
 
