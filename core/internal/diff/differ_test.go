@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/dullkingsman/dpg/internal/ir"
 	"github.com/dullkingsman/dpg/internal/pipeline"
@@ -793,6 +794,340 @@ func TestDiffColumnDropSuppressesCascadedConstraint(t *testing.T) {
 	}
 	if !sawDropCol {
 		t.Fatalf("expected DROP COLUMN locality_id, got: %v", sqlList(ops))
+	}
+}
+
+// ── Unnamed-constraint / live-generated-name matching ─────────────────────────
+//
+// Regression guard for a bug found reviewing the diff-coverage-push session:
+// PostgreSQL's pg_constraint.conname is NEVER empty (it auto-generates a name
+// like "t_pkey" even when the user wrote none), so a live-introspected
+// unnamed inline PK/UNIQUE/FK always keyed as "n:<real name>", while the
+// desired IR (still unnamed in source) keyed as "s:<type>|<expr>" — the two
+// never matched, so verify/plan --live produced a self-inconsistent
+// DROP+ADD pair on every single run for any inline unnamed PK/UNIQUE/FK.
+// pgAutoConstraintName reconstructs PostgreSQL's actual auto-naming
+// algorithm (ChooseConstraintName/makeObjectName, ported from PG's own C
+// source) so an unnamed desired constraint can be matched against the real
+// generated name directly.
+
+func TestMakeObjectNamePrimaryKey(t *testing.T) {
+	if got := makeObjectName("orders", "", "pkey"); got != "orders_pkey" {
+		t.Errorf("makeObjectName(orders, \"\", pkey) = %q, want orders_pkey", got)
+	}
+}
+
+func TestMakeObjectNameUnique(t *testing.T) {
+	if got := makeObjectName("orders", "user_id", "key"); got != "orders_user_id_key" {
+		t.Errorf("makeObjectName(orders, user_id, key) = %q, want orders_user_id_key", got)
+	}
+}
+
+// TestMakeObjectNameTruncation guards PG's actual truncation rule: when
+// name1_name2_label would exceed NAMEDATALEN-1 (63) bytes, the longer of
+// name1/name2 is shortened first, one byte at a time, alternating — the
+// label is never touched. Verified against PostgreSQL's own C source
+// (src/backend/commands/indexcmds.c makeObjectName), not from memory.
+func TestMakeObjectNameTruncation(t *testing.T) {
+	name1 := strings.Repeat("a", 40)
+	name2 := strings.Repeat("b", 40)
+	got := makeObjectName(name1, name2, "key")
+	if len(got) > 63 {
+		t.Fatalf("generated name exceeds NAMEDATALEN-1 (63 bytes): %d bytes: %q", len(got), got)
+	}
+	if !strings.HasSuffix(got, "_key") {
+		t.Errorf("label must never be truncated, got: %q", got)
+	}
+	// availchars = 63 - 1(sep) - 3(key) - 1(sep) = 58; split evenly since
+	// both names start equal length: 29 + 29.
+	wantName1 := strings.Repeat("a", 29)
+	wantName2 := strings.Repeat("b", 29)
+	want := wantName1 + "_" + wantName2 + "_key"
+	if got != want {
+		t.Errorf("makeObjectName truncation = %q, want %q", got, want)
+	}
+}
+
+func TestMakeObjectNameMultiByteSafeTruncation(t *testing.T) {
+	// A multi-byte (3-byte UTF-8) rune landing exactly on the truncation
+	// boundary must not be split — mbClipLen must round the cut down to the
+	// nearest complete rune, mirroring PG's pg_mbcliplen.
+	name1 := strings.Repeat("a", 55) + "日本語" // 55 ASCII + 3 three-byte runes = 64 bytes
+	got := makeObjectName(name1, "", "pkey")
+	if !utf8.ValidString(got) {
+		t.Fatalf("truncation produced invalid UTF-8: %q", got)
+	}
+}
+
+func TestPgAutoConstraintNameCollisionSuffix(t *testing.T) {
+	existing := map[string]bool{"orders_pkey": true}
+	got := pgAutoConstraintName("orders", nil, "pkey", existing)
+	if got != "orders_pkey1" {
+		t.Errorf("expected collision suffix orders_pkey1, got: %q", got)
+	}
+	if !existing["orders_pkey1"] {
+		t.Error("expected pgAutoConstraintName to record the chosen name in existingNames")
+	}
+}
+
+// TestDiffUnnamedPrimaryKeyMatchesLiveGeneratedName is the core regression
+// guard: an inline `id BIGINT PRIMARY KEY` (unnamed in source) must produce
+// zero ops against a snapshot shaped like live introspection — real
+// generated name "orders_pkey", never empty.
+func TestDiffUnnamedPrimaryKeyMatchesLiveGeneratedName(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.orders", &snapshot.SnapObject{
+		Kind: "table",
+		Table: &snapshot.SnapTable{
+			Schema:  "public",
+			Name:    "orders",
+			Columns: []snapshot.SnapColumn{{Name: "id", Type: "bigint", NotNull: true}},
+			Constraints: []snapshot.SnapConstraint{
+				{Name: "orders_pkey", Type: "PRIMARY KEY", Expr: `PRIMARY KEY ("id")`},
+			},
+		},
+	})
+	desired := []pipeline.IRObject{
+		&ir.Table{
+			Schema: "public", Name: "orders",
+			Columns: []*ir.Column{{Name: "id", Type: ir.TypeRef{Name: "bigint"}, NotNull: true}},
+			Constraints: []*ir.Constraint{
+				{Type: "PRIMARY KEY", Columns: []string{"id"}, Expr: `PRIMARY KEY ("id")`},
+			},
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ops) != 0 {
+		t.Errorf("expected zero ops (unnamed PK must match live-generated orders_pkey), got: %v", sqlList(ops))
+	}
+}
+
+func TestDiffUnnamedUniqueMatchesLiveGeneratedName(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.orders", &snapshot.SnapObject{
+		Kind: "table",
+		Table: &snapshot.SnapTable{
+			Schema:  "public",
+			Name:    "orders",
+			Columns: []snapshot.SnapColumn{{Name: "external_id", Type: "text"}},
+			Constraints: []snapshot.SnapConstraint{
+				{Name: "orders_external_id_key", Type: "UNIQUE", Expr: `UNIQUE ("external_id")`},
+			},
+		},
+	})
+	desired := []pipeline.IRObject{
+		&ir.Table{
+			Schema: "public", Name: "orders",
+			Columns: []*ir.Column{{Name: "external_id", Type: ir.TypeRef{Name: "text"}}},
+			Constraints: []*ir.Constraint{
+				{Type: "UNIQUE", Columns: []string{"external_id"}, Expr: `UNIQUE ("external_id")`},
+			},
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ops) != 0 {
+		t.Errorf("expected zero ops (unnamed UNIQUE must match live-generated orders_external_id_key), got: %v", sqlList(ops))
+	}
+}
+
+func TestDiffUnnamedForeignKeyMatchesLiveGeneratedName(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.orders", &snapshot.SnapObject{
+		Kind: "table",
+		Table: &snapshot.SnapTable{
+			Schema:  "public",
+			Name:    "orders",
+			Columns: []snapshot.SnapColumn{{Name: "user_id", Type: "bigint"}},
+			Constraints: []snapshot.SnapConstraint{
+				{Name: "orders_user_id_fkey", Type: "FOREIGN KEY",
+					Expr: `FOREIGN KEY ("user_id") REFERENCES "public"."users" ("id")`},
+			},
+		},
+	})
+	desired := []pipeline.IRObject{
+		&ir.Table{
+			Schema: "public", Name: "orders",
+			Columns: []*ir.Column{{Name: "user_id", Type: ir.TypeRef{Name: "bigint"}}},
+			Constraints: []*ir.Constraint{
+				{Type: "FOREIGN KEY", Columns: []string{"user_id"},
+					Expr: `FOREIGN KEY ("user_id") REFERENCES "public"."users" ("id")`},
+			},
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ops) != 0 {
+		t.Errorf("expected zero ops (unnamed FK must match live-generated orders_user_id_fkey), got: %v", sqlList(ops))
+	}
+}
+
+// TestDiffUnnamedPrimaryKeyRemovalStillDetected proves the fix doesn't paper
+// over a genuinely removed PK: when desired drops the PRIMARY KEY
+// constraint entirely, a live-style "orders_pkey" in the snapshot must still
+// surface as a real DROP CONSTRAINT.
+//
+// Note a known, pre-existing limitation this fix inherits rather than
+// introduces: matching here is identity-only (by name, or — for an unnamed
+// constraint — by predicted name), never full-definition equality. This
+// already applied to any hand-named constraint before this fix (redefining
+// a CHECK's expression while keeping its explicit name goes undetected the
+// same way); it now also applies to an unnamed PK specifically, since a
+// PRIMARY KEY's PG-generated name never encodes its columns at all (a table
+// has only one PK), so an unnamed PK moved to a different column on both
+// sides is not something the tool can distinguish from unchanged. Genuine
+// removal (this test) or a change of TYPE (a different test could add
+// UNIQUE where a PK used to be) are still caught correctly, since those
+// change which map entry — if any — the snap constraint matches.
+func TestDiffUnnamedPrimaryKeyRemovalStillDetected(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.orders", &snapshot.SnapObject{
+		Kind: "table",
+		Table: &snapshot.SnapTable{
+			Schema:  "public",
+			Name:    "orders",
+			Columns: []snapshot.SnapColumn{{Name: "id", Type: "bigint"}},
+			Constraints: []snapshot.SnapConstraint{
+				{Name: "orders_pkey", Type: "PRIMARY KEY", Expr: `PRIMARY KEY ("id")`},
+			},
+		},
+	})
+	desired := []pipeline.IRObject{
+		&ir.Table{
+			Schema: "public", Name: "orders",
+			Columns: []*ir.Column{{Name: "id", Type: ir.TypeRef{Name: "bigint"}}},
+			// No PRIMARY KEY constraint at all — genuinely removed.
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsSQL(ops, "DROP CONSTRAINT") || !containsSQL(ops, `orders_pkey`) {
+		t.Errorf("expected DROP CONSTRAINT orders_pkey for the removed PK, got: %v", sqlList(ops))
+	}
+}
+
+// TestDiffUnnamedConstraintSchemaWideCollision proves the collision universe
+// is genuinely schema-wide, not just same-table: a second table in the same
+// schema already using the name "widgets_pkey" would force PostgreSQL's own
+// algorithm to fall back to "orders_pkey1" ONLY if the two tables' own
+// generated names actually collided — this test instead checks the more
+// realistic case (two DIFFERENT unnamed PKs on two different tables produce
+// two DIFFERENT names, since name1 embeds the table name) to confirm
+// schemaConstraintNames doesn't cause false cross-table collisions.
+func TestDiffUnnamedConstraintNoFalseCrossTableCollision(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.widgets", &snapshot.SnapObject{
+		Kind: "table",
+		Table: &snapshot.SnapTable{
+			Schema:  "public",
+			Name:    "widgets",
+			Columns: []snapshot.SnapColumn{{Name: "id", Type: "bigint"}},
+			Constraints: []snapshot.SnapConstraint{
+				{Name: "widgets_pkey", Type: "PRIMARY KEY", Expr: `PRIMARY KEY ("id")`},
+			},
+		},
+	})
+	_ = snap.SetObject("public.orders", &snapshot.SnapObject{
+		Kind: "table",
+		Table: &snapshot.SnapTable{
+			Schema:  "public",
+			Name:    "orders",
+			Columns: []snapshot.SnapColumn{{Name: "id", Type: "bigint"}},
+			Constraints: []snapshot.SnapConstraint{
+				{Name: "orders_pkey", Type: "PRIMARY KEY", Expr: `PRIMARY KEY ("id")`},
+			},
+		},
+	})
+	desired := []pipeline.IRObject{
+		&ir.Table{
+			Schema: "public", Name: "widgets",
+			Columns:     []*ir.Column{{Name: "id", Type: ir.TypeRef{Name: "bigint"}, NotNull: true}},
+			Constraints: []*ir.Constraint{{Type: "PRIMARY KEY", Columns: []string{"id"}, Expr: `PRIMARY KEY ("id")`}},
+		},
+		&ir.Table{
+			Schema: "public", Name: "orders",
+			Columns:     []*ir.Column{{Name: "id", Type: ir.TypeRef{Name: "bigint"}, NotNull: true}},
+			Constraints: []*ir.Constraint{{Type: "PRIMARY KEY", Columns: []string{"id"}, Expr: `PRIMARY KEY ("id")`}},
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ops) != 0 {
+		t.Errorf("expected zero ops for both tables' unnamed PKs matching their own distinct generated names, got: %v", sqlList(ops))
+	}
+}
+
+// TestDiffUnnamedPrimaryKeyRelationNameCollision is the regression guard for
+// a gap an independent verification pass found live: PostgreSQL's
+// ChooseRelationName (used for PRIMARY KEY/UNIQUE, since both are
+// index-backed) checks for a naming collision against ANY relation in the
+// schema via pg_class — not just other constraint names. A plain table
+// literally named "bar_pkey" forces PG to fall back to "bar_pkey1" for an
+// unnamed PK on table "bar", even though no OTHER CONSTRAINT is named
+// "bar_pkey". schemaConstraintNames alone (constraint names only) would
+// miss this and predict "bar_pkey", silently reintroducing the exact
+// self-inconsistent DROP+ADD bug this feature exists to eliminate.
+// schemaRelationNames closes this by also collecting table/view/sequence/
+// index names in the schema.
+func TestDiffUnnamedPrimaryKeyRelationNameCollision(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	// A plain, unrelated table that happens to be named exactly what
+	// table "bar"'s auto-generated PK name would otherwise be.
+	_ = snap.SetObject("public.bar_pkey", &snapshot.SnapObject{
+		Kind: "table",
+		Table: &snapshot.SnapTable{
+			Schema:  "public",
+			Name:    "bar_pkey",
+			Columns: []snapshot.SnapColumn{{Name: "x", Type: "bigint"}},
+		},
+	})
+	_ = snap.SetObject("public.bar", &snapshot.SnapObject{
+		Kind: "table",
+		Table: &snapshot.SnapTable{
+			Schema:  "public",
+			Name:    "bar",
+			Columns: []snapshot.SnapColumn{{Name: "id", Type: "bigint"}},
+			Constraints: []snapshot.SnapConstraint{
+				// The name PG actually assigns once "bar_pkey" the relation
+				// is taken: it falls back to the next available suffix.
+				{Name: "bar_pkey1", Type: "PRIMARY KEY", Expr: `PRIMARY KEY ("id")`},
+			},
+		},
+	})
+	desired := []pipeline.IRObject{
+		&ir.Table{
+			Schema: "public", Name: "bar_pkey",
+			Columns: []*ir.Column{{Name: "x", Type: ir.TypeRef{Name: "bigint"}}},
+		},
+		&ir.Table{
+			Schema: "public", Name: "bar",
+			Columns:     []*ir.Column{{Name: "id", Type: ir.TypeRef{Name: "bigint"}, NotNull: true}},
+			Constraints: []*ir.Constraint{{Type: "PRIMARY KEY", Columns: []string{"id"}, Expr: `PRIMARY KEY ("id")`}},
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ops) != 0 {
+		t.Errorf("expected zero ops: unnamed PK on \"bar\" must predict \"bar_pkey1\" (relation-name collision with table \"bar_pkey\"), got: %v", sqlList(ops))
 	}
 }
 

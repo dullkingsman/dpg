@@ -973,3 +973,79 @@ func TestRoundtripSequenceOwner(t *testing.T) {
 		}
 	}
 }
+
+// TestRoundtripUnnamedConstraintsNoLiveDrift is the live regression guard
+// for the unnamed-PK/UNIQUE/FK matching fix: PostgreSQL's
+// pg_constraint.conname is NEVER empty (it auto-generates a name like
+// "widgets_pkey" even when the source declares no CONSTRAINT name at all),
+// so before this fix, verify/plan --live against a table with an inline
+// unnamed PK/UNIQUE/FK produced a self-inconsistent DROP+ADD pair on every
+// single run — never converging. Confirms all three constraint kinds
+// (declared with no CONSTRAINT name anywhere in source) show zero drift
+// against a real PostgreSQL 17 catalog after apply.
+func TestRoundtripUnnamedConstraintsNoLiveDrift(t *testing.T) {
+	connStr := testpg.Start(t)
+	ctx := context.Background()
+
+	differ := diff.New()
+	emitter := emit.New()
+	applyExec := executor.New()
+	ci := introspect.New()
+	store := newMemStore()
+
+	conn, err := executor.Connect(ctx, connStr)
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	defer conn.Close(ctx)
+
+	dir := t.TempDir()
+	f := filepath.Join(dir, "schema.dpg")
+	v1 := `TABLE widgets (
+    id BIGINT PRIMARY KEY,
+    external_id TEXT UNIQUE
+);
+
+TABLE orders (
+    id BIGINT PRIMARY KEY,
+    widget_id BIGINT REFERENCES widgets (id)
+);`
+	if err := os.WriteFile(f, []byte(v1), 0o644); err != nil {
+		t.Fatalf("write v1: %v", err)
+	}
+	desired, err := compiler.Compile([]string{f}, dir, pipeline.Default)
+	if err != nil {
+		t.Fatalf("compile: %v", err)
+	}
+	applyFixture(t, ctx, conn, []string{f}, dir, differ, emitter, applyExec, store)
+
+	liveObjects, err := ci.Introspect(ctx, conn)
+	if err != nil {
+		t.Fatalf("introspect: %v", err)
+	}
+	appliedSnap := &pipeline.Snapshot{}
+	if err := snapshot.Populate(appliedSnap, desired); err != nil {
+		t.Fatalf("populate snapshot: %v", err)
+	}
+	var managedLive []pipeline.IRObject
+	for _, obj := range liveObjects {
+		if _, ok := appliedSnap.Objects[obj.QualifiedName()]; ok {
+			managedLive = append(managedLive, obj)
+		}
+	}
+	liveSnap := &pipeline.Snapshot{}
+	if err := snapshot.Populate(liveSnap, managedLive); err != nil {
+		t.Fatalf("populate live snapshot: %v", err)
+	}
+
+	driftOps, err := differ.Diff(desired, liveSnap)
+	if err != nil {
+		t.Fatalf("drift diff: %v", err)
+	}
+	if len(driftOps) != 0 {
+		t.Errorf("expected zero drift for inline unnamed PK/UNIQUE/FK against a live catalog, got %d ops:", len(driftOps))
+		for _, op := range driftOps {
+			t.Errorf("  [%s] %s", op.Safety(), op.SQL())
+		}
+	}
+}

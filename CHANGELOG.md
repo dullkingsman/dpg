@@ -41,6 +41,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **An inline, unnamed `PRIMARY KEY`/`UNIQUE`/`FOREIGN KEY` (e.g.
+  `id BIGINT PRIMARY KEY`, with no explicit `CONSTRAINT` name) produced a
+  self-inconsistent `DROP CONSTRAINT` + `ADD` pair on every single
+  `verify`/`plan --live` run, never converging.** PostgreSQL's
+  `pg_constraint.conname` is never empty — it auto-generates a name (e.g.
+  `orders_pkey`) even when the user writes none — so live introspection
+  always sees a real name, while the desired source (still unnamed) has
+  none; the differ's constraint-matching key treated these as unrelated,
+  reading the live one as removed and the desired one as new. Fixed by
+  reconstructing PostgreSQL's own auto-naming algorithm
+  (`ChooseConstraintName`/`ChooseRelationName`/`makeObjectName`, ported from
+  PostgreSQL's own C source rather than from memory, including its exact
+  truncation-on-collision behavior for names exceeding 63 bytes and its
+  schema-wide collision-avoidance rule) and matching an unnamed desired
+  constraint against the reconstructed name in addition to the existing
+  structural-signature fallback (which already correctly handled the
+  offline `plan`/`apply` path, where a persisted snapshot preserves the
+  original unnamed declaration verbatim). Covers `PRIMARY KEY`, `UNIQUE`,
+  and `FOREIGN KEY`; `CHECK` naming is not covered by this fix, since
+  PostgreSQL's rule for it depends on whether the expression references
+  exactly one distinct column, information neither the IR builder nor the
+  introspector currently extract; `EXCLUDE` constraints aren't
+  round-tripped at all yet (a pre-existing, separate gap). The
+  collision-avoidance check is schema-wide in the same way PostgreSQL's own
+  is: for `PRIMARY KEY`/`UNIQUE` (both index-backed) it considers every
+  relation name in the schema — tables, views, sequences, indexes — not
+  just other constraint names, matching `ChooseRelationName`'s real
+  `pg_class` scan (a plain table happening to be named e.g. `orders_pkey`
+  forces PostgreSQL to fall back to `orders_pkey1` for an unnamed `PRIMARY
+  KEY` on table `orders`, even with no colliding constraint name);
+  `FOREIGN KEY` only needs the narrower constraint-name check, since it
+  isn't backed by an index.
 - **`diffIndexes` now compares a same-named index's actual definition instead
   of only checking whether the name exists.** Previously an index present in
   both desired and snapshot was never compared at all — editing its method,

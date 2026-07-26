@@ -7,8 +7,10 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"sort"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/dullkingsman/dpg/internal/ir"
 	"github.com/dullkingsman/dpg/internal/pipeline"
@@ -1717,7 +1719,7 @@ func diffObject(desired pipeline.IRObject, snap *snapshot.SnapObject, fullSnap *
 		if snap.Table == nil {
 			return nil, nil
 		}
-		return diffTable(o, snap.Table, vtypes)
+		return diffTable(o, snap.Table, fullSnap, vtypes)
 	case *ir.View:
 		if snap.View == nil {
 			return nil, nil
@@ -2265,7 +2267,7 @@ func enumTypeMatch(colType, schema, name string) bool {
 		colType == qn+"[]" || colType == name+"[]"
 }
 
-func diffTable(o *ir.Table, snap *snapshot.SnapTable, vtypes map[string]string) ([]pipeline.DiffOp, error) {
+func diffTable(o *ir.Table, snap *snapshot.SnapTable, fullSnap *pipeline.Snapshot, vtypes map[string]string) ([]pipeline.DiffOp, error) {
 	var ops []pipeline.DiffOp
 	pos := o.SrcPos
 	tbl := qualIdent(o.Schema, o.Name)
@@ -2305,7 +2307,7 @@ func diffTable(o *ir.Table, snap *snapshot.SnapTable, vtypes map[string]string) 
 		return nil, err
 	}
 	ops = append(ops, colOps...)
-	ops = append(ops, diffConstraints(tbl, o, snap, pos, renamedCols, droppedCols)...)
+	ops = append(ops, diffConstraints(tbl, o, snap, fullSnap, pos, renamedCols, droppedCols)...)
 	ops = append(ops, diffIndexes(o.Schema, o.Name, o, snap, renamedCols, droppedCols)...)
 	ops = append(ops, diffPolicies(o.Schema, o.Name, o, snap)...)
 	ops = append(ops, diffTriggers(o.Schema, o.Name, o, snap)...)
@@ -2634,15 +2636,45 @@ func diffColumns(tbl string, o *ir.Table, snap *snapshot.SnapTable, vtypes map[s
 	return ops, renamedFrom, droppedCols, nil
 }
 
-func diffConstraints(tbl string, o *ir.Table, snap *snapshot.SnapTable, pos pipeline.SourcePos, renamedCols map[string]string, droppedCols map[string]bool) []pipeline.DiffOp {
+func diffConstraints(tbl string, o *ir.Table, snap *snapshot.SnapTable, fullSnap *pipeline.Snapshot, pos pipeline.SourcePos, renamedCols map[string]string, droppedCols map[string]bool) []pipeline.DiffOp {
 	var ops []pipeline.DiffOp
 
 	// Inline constraints (e.g. `id BIGINT PRIMARY KEY`) have no user-supplied
 	// name, so matching by name alone would treat them as new on every run.
-	// Fall back to a signature derived from type + normalized expression. The
-	// snapshot expression still references pre-rename column names, so apply
-	// the rename map first — otherwise a plain RENAMED FROM would surface as a
-	// spurious drop+recreate of every constraint touching the renamed column.
+	// An unnamed desired constraint is matched against the snapshot side two
+	// ways:
+	//   1. A structural signature (type + normalized expression) — matches
+	//      an unnamed snapshot-side constraint. This is the offline
+	//      plan/apply path: the persisted snapshot.json preserves an
+	//      original unnamed declaration's empty name verbatim, so both sides
+	//      key identically.
+	//   2. PostgreSQL's own auto-naming algorithm, reconstructed (see
+	//      pgAutoConstraintName) — matches a REAL generated name. This is
+	//      the verify/plan --live path: live introspection's
+	//      pg_constraint.conname is NEVER empty, since PG always assigns a
+	//      name (e.g. "t_pkey") even when the user wrote none, so without
+	//      this an unnamed inline PK/UNIQUE/FK produced a self-inconsistent
+	//      DROP+ADD pair on every single run. Limited to PRIMARY KEY/UNIQUE/
+	//      FOREIGN KEY: CHECK's naming rule needs to know whether the
+	//      expression references exactly one distinct column (which neither
+	//      the IR builder nor the introspector currently extract), and
+	//      EXCLUDE bodies aren't round-tripped at all yet (buildConstraint
+	//      stores only a placeholder "EXCLUDE" Expr, no columns) — both
+	//      pre-existing gaps, not addressed here.
+	// Note both matching strategies are identity-only, never full-definition
+	// equality — this is a pre-existing property of this function (a named
+	// constraint whose definition changes while keeping the same name was
+	// already invisible to it before this fix) that now also applies to an
+	// unnamed PRIMARY KEY specifically: PG's generated PK name never encodes
+	// columns (a table has only one PK), so an unnamed PK moved to a
+	// different column on both sides can't be distinguished from unchanged.
+	// Genuine removal, or a change of constraint TYPE, are still caught
+	// correctly either way, since those change which map entry (if any) a
+	// snapshot constraint matches.
+	// The snapshot expression still references pre-rename column names, so
+	// apply the rename map first — otherwise a plain RENAMED FROM would
+	// surface as a spurious drop+recreate of every constraint touching the
+	// renamed column.
 	key := func(name, typ, expr string) string {
 		if name != "" {
 			return "n:" + name
@@ -2655,9 +2687,39 @@ func diffConstraints(tbl string, o *ir.Table, snap *snapshot.SnapTable, pos pipe
 		sc := &snap.Constraints[i]
 		snapByKey[key(sc.Name, sc.Type, translateConstraintExpr(sc.Expr, renamedCols))] = sc
 	}
+
+	// The collision universe pgAutoConstraintName needs: every constraint
+	// name already used by another table in this schema (schemaConstraintNames),
+	// PLUS — for PRIMARY KEY/UNIQUE specifically, since those are index-backed —
+	// every other RELATION name in the schema (schemaRelationNames), matching
+	// PostgreSQL's own ChooseRelationName, which checks pg_class, not just
+	// pg_constraint. FOREIGN KEY isn't index-backed, so it only gets the
+	// narrower constraint-name set (see schemaRelationNames' doc comment).
+	// The current table's own names are excluded from both — those are
+	// exactly the pre-existing assignments a recomputed name is trying to
+	// reproduce, not competitors to avoid. Each unnamed constraint gets an
+	// independent copy so that multiple unnamed constraints on the same
+	// table don't influence one another's predicted name (PG's actual
+	// within-batch collision order for that pathological case can't be
+	// reconstructed after the fact).
+	otherTableNames := schemaConstraintNames(fullSnap, o.Schema, o.Name)
+	otherRelationNames := schemaRelationNames(fullSnap, o.Schema, o.Name)
+	predictName := func(c *ir.Constraint, label string) string {
+		existing := maps.Clone(otherTableNames)
+		if label != "fkey" {
+			maps.Copy(existing, otherRelationNames)
+		}
+		return pgAutoConstraintName(o.Name, c.Columns, label, existing)
+	}
+
 	desiredByKey := make(map[string]*ir.Constraint, len(o.Constraints))
 	for _, c := range o.Constraints {
 		desiredByKey[key(c.Name, c.Type, c.Expr)] = c
+		if c.Name == "" {
+			if label, ok := pgConstraintNameLabel(c.Type); ok {
+				desiredByKey["n:"+predictName(c, label)] = c
+			}
+		}
 	}
 
 	for i := range snap.Constraints {
@@ -2689,6 +2751,13 @@ func diffConstraints(tbl string, o *ir.Table, snap *snapshot.SnapTable, pos pipe
 		if _, exists := snapByKey[key(c.Name, c.Type, c.Expr)]; exists {
 			continue
 		}
+		if c.Name == "" {
+			if label, ok := pgConstraintNameLabel(c.Type); ok {
+				if _, exists := snapByKey["n:"+predictName(c, label)]; exists {
+					continue
+				}
+			}
+		}
 		notValid := ""
 		if c.NotValid {
 			notValid = " NOT VALID"
@@ -2703,6 +2772,181 @@ func diffConstraints(tbl string, o *ir.Table, snap *snapshot.SnapTable, pos pipe
 		ops = append(ops, cautionOp(sql, c.Pos))
 	}
 	return ops
+}
+
+// pgConstraintNameLabel returns the label PostgreSQL's auto-naming
+// algorithm uses for a constraint type, and whether pgAutoConstraintName
+// can reconstruct a name for it. CHECK and EXCLUDE are deliberately
+// excluded — see the comment in diffConstraints for why.
+func pgConstraintNameLabel(typ string) (label string, ok bool) {
+	switch typ {
+	case "PRIMARY KEY":
+		return "pkey", true
+	case "UNIQUE":
+		return "key", true
+	case "FOREIGN KEY":
+		return "fkey", true
+	default:
+		return "", false
+	}
+}
+
+// pgAutoConstraintName replicates PostgreSQL's algorithm for generating a
+// constraint name when the user supplies none (ChooseConstraintName /
+// ChooseRelationName / makeObjectName, in src/backend/catalog/
+// pg_constraint.c and src/backend/commands/indexcmds.c /tablecmds.c), so
+// that verify/plan --live can recognize a live catalog's auto-generated
+// name as the SAME constraint an inline unnamed declaration refers to.
+//
+// label is "pkey"/"key"/"fkey" (see pgConstraintNameLabel); cols is ignored
+// for "pkey" (PG's primary key name never depends on columns — a table can
+// only have one), and is the constraint's own column list for the others
+// (for "fkey" this must be the LOCAL/referencing columns, matching
+// ChooseForeignKeyConstraintNameAddition, not the referenced table's).
+// existingNames is mutated: each name this function returns is added to it,
+// so a second call sharing the same map correctly avoids colliding with the
+// first — callers that want independent (non-batch) predictions, as
+// diffConstraints does, must pass a fresh copy per call.
+func pgAutoConstraintName(table string, cols []string, label string, existingNames map[string]bool) string {
+	var name2 string
+	if label != "pkey" {
+		name2 = strings.Join(cols, "_")
+	}
+	for pass := 0; ; pass++ {
+		modlabel := label
+		if pass > 0 {
+			modlabel = fmt.Sprintf("%s%d", label, pass)
+		}
+		name := makeObjectName(table, name2, modlabel)
+		if !existingNames[name] {
+			existingNames[name] = true
+			return name
+		}
+	}
+}
+
+// makeObjectName ports PostgreSQL's makeObjectName (src/backend/commands/
+// indexcmds.c): build "name1_name2_label" (name2 omitted when empty),
+// truncating name1/name2 — never label, which the caller retries with
+// instead on collision — to fit within NAMEDATALEN-1 (63) bytes. Truncation
+// shortens whichever of name1/name2 is currently longer, one byte at a
+// time, then rounds each cut down to the nearest complete UTF-8 rune
+// boundary (PG's pg_mbcliplen), so a multi-byte identifier is never split
+// mid-character.
+func makeObjectName(name1, name2, label string) string {
+	const nameDataLen = 64 // PostgreSQL's NAMEDATALEN
+	overhead := len(label) + 1
+	if name2 != "" {
+		overhead++
+	}
+	avail := nameDataLen - 1 - overhead
+
+	n1, n2 := len(name1), len(name2)
+	for n1+n2 > avail {
+		if n1 > n2 {
+			n1--
+		} else {
+			n2--
+		}
+	}
+	n1 = mbClipLen(name1, n1)
+	if name2 != "" {
+		n2 = mbClipLen(name2, n2)
+	}
+
+	var b strings.Builder
+	b.WriteString(name1[:n1])
+	if name2 != "" {
+		b.WriteByte('_')
+		b.WriteString(name2[:n2])
+	}
+	b.WriteByte('_')
+	b.WriteString(label)
+	return b.String()
+}
+
+// mbClipLen returns the largest n <= limit such that s[:n] does not split a
+// UTF-8 rune, mirroring PostgreSQL's pg_mbcliplen.
+func mbClipLen(s string, limit int) int {
+	if limit >= len(s) {
+		return len(s)
+	}
+	for limit > 0 && !utf8.RuneStart(s[limit]) {
+		limit--
+	}
+	return limit
+}
+
+// schemaConstraintNames collects every constraint name already in use by
+// any OTHER table in the given schema, per fullSnap — the collision
+// universe pgAutoConstraintName needs, since PostgreSQL's auto-naming
+// avoids clashing with any constraint name in the same namespace (schema),
+// not just the same table. excludeTable is left out deliberately: see the
+// comment at diffConstraints's call site.
+func schemaConstraintNames(fullSnap *pipeline.Snapshot, schema, excludeTable string) map[string]bool {
+	names := make(map[string]bool)
+	if fullSnap == nil {
+		return names
+	}
+	for _, raw := range fullSnap.Objects {
+		var so snapshot.SnapObject
+		if err := json.Unmarshal(raw, &so); err != nil || so.Table == nil {
+			continue
+		}
+		if so.Table.Schema != schema || so.Table.Name == excludeTable {
+			continue
+		}
+		for _, c := range so.Table.Constraints {
+			if c.Name != "" {
+				names[c.Name] = true
+			}
+		}
+	}
+	return names
+}
+
+// schemaRelationNames collects every relation name (table, view, sequence,
+// and index) already in use in the given schema, per fullSnap. This is the
+// BROADER collision universe PostgreSQL's ChooseRelationName actually
+// checks — a pg_class scan, not just a pg_constraint one — for PRIMARY
+// KEY/UNIQUE specifically: those constraint types are backed by an index,
+// so the auto-generated name must be unique among ALL relations in the
+// namespace (a plain table happening to be named "orders_pkey" would force
+// PG to fall back to "orders_pkey1" for an unnamed PK on "orders", even
+// though no OTHER constraint is named "orders_pkey"). FOREIGN KEY is not
+// index-backed (ChooseConstraintName only ever checks pg_constraint, never
+// pg_class — see ChooseConstraintName in pg_constraint.c), so callers must
+// not add this set for "fkey".
+// excludeTable's own index names are left out — those are exactly the
+// pre-existing backing-index assignment a recomputed name is trying to
+// reproduce, not a competitor to avoid.
+func schemaRelationNames(fullSnap *pipeline.Snapshot, schema, excludeTable string) map[string]bool {
+	names := make(map[string]bool)
+	if fullSnap == nil {
+		return names
+	}
+	for _, raw := range fullSnap.Objects {
+		var so snapshot.SnapObject
+		if err := json.Unmarshal(raw, &so); err != nil {
+			continue
+		}
+		switch {
+		case so.Table != nil && so.Table.Schema == schema:
+			if so.Table.Name != excludeTable {
+				names[so.Table.Name] = true
+			}
+			if so.Table.Name != excludeTable {
+				for _, idx := range so.Table.Indexes {
+					names[idx.Name] = true
+				}
+			}
+		case so.View != nil && so.View.Schema == schema:
+			names[so.View.Name] = true
+		case so.Sequence != nil && so.Sequence.Schema == schema:
+			names[so.Sequence.Name] = true
+		}
+	}
+	return names
 }
 
 func diffIndexes(schema, table string, o *ir.Table, snap *snapshot.SnapTable, renamedCols map[string]string, droppedCols map[string]bool) []pipeline.DiffOp {
