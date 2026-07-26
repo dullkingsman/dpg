@@ -80,6 +80,7 @@ type SnapTable struct {
 	Policies    []SnapPolicy       `json:"policies,omitempty"`
 	Triggers    []SnapTrigger      `json:"triggers,omitempty"`
 	Grants      []SnapGrant        `json:"grants,omitempty"`
+	Revocations []SnapGrant        `json:"revocations,omitempty"`
 	NameMaps    []SnapNameMapEntry `json:"name_maps,omitempty"`
 }
 
@@ -104,6 +105,7 @@ type SnapColumn struct {
 	Deprecated  *string            `json:"deprecated,omitempty"`
 	RenamedFrom *string            `json:"renamed_from,omitempty"`
 	Grants      []SnapGrant        `json:"grants,omitempty"`
+	Revocations []SnapGrant        `json:"revocations,omitempty"`
 	NameMaps    []SnapNameMapEntry `json:"name_maps,omitempty"`
 }
 
@@ -153,15 +155,16 @@ type SnapGrant struct {
 }
 
 type SnapView struct {
-	Schema     string             `json:"schema"`
-	Name       string             `json:"name"`
-	Query      string             `json:"query"`
-	Owner      *string            `json:"owner,omitempty"`
-	Comment    *string            `json:"comment,omitempty"`
-	Recursive  bool               `json:"recursive,omitempty"`
-	WithNoData bool               `json:"with_no_data,omitempty"`
-	Grants     []SnapGrant        `json:"grants,omitempty"`
-	NameMaps   []SnapNameMapEntry `json:"name_maps,omitempty"`
+	Schema      string             `json:"schema"`
+	Name        string             `json:"name"`
+	Query       string             `json:"query"`
+	Owner       *string            `json:"owner,omitempty"`
+	Comment     *string            `json:"comment,omitempty"`
+	Recursive   bool               `json:"recursive,omitempty"`
+	WithNoData  bool               `json:"with_no_data,omitempty"`
+	Grants      []SnapGrant        `json:"grants,omitempty"`
+	Revocations []SnapGrant        `json:"revocations,omitempty"`
+	NameMaps    []SnapNameMapEntry `json:"name_maps,omitempty"`
 }
 
 type SnapFunction struct {

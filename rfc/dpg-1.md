@@ -2818,16 +2818,22 @@ ROLE app_admin {
    Explicit revocations are declared in `REVOCATIONS { }` blocks and
    cause the compiler to emit `REVOKE` statements.
 
-   Unlike grants, revocations are NOT idempotent by default: running
-   `REVOKE` when the privilege is already absent is an error in
-   PostgreSQL.  The compiler MUST emit `REVOKE ... FROM role` without
-   any `IF EXISTS` guard, relying on the operator to verify the privilege
-   existed before running the migration (or relying on the transaction
-   to roll back on failure).
+   `REVOKE` on an already-absent privilege is a no-op in PostgreSQL —
+   it succeeds without error, unlike a grant declaration's removal
+   (§11.2), which is the additive model's deliberate no-op.  PostgreSQL's
+   `REVOKE` grammar has no `IF EXISTS` clause at all, so the compiler
+   emits plain `REVOKE ... FROM role`; there is no guard to add or omit.
+
+   The one revocation failure mode that does error is a target role
+   that does not exist — the compiler does not create roles referenced
+   only in a `REVOCATIONS { }` block, so a typo'd or since-dropped role
+   name surfaces as a normal PostgreSQL error at apply time.
 
    **However**, the compiler SHOULD check the snapshot: if the
    revocation targets a role that was never granted the privilege by
-   DPG, it MAY emit a warning (lint rule: `unnecessary_revocation`).
+   DPG, it MAY emit a warning (lint rule: `unnecessary_revocation`) —
+   useful as a "did you mean to declare this" signal, independent of
+   whether re-running it would error.
 
 ### 11.4. Default Privileges
 

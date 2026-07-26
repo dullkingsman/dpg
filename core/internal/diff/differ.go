@@ -376,6 +376,58 @@ func diffGrantSet(
 	return ops
 }
 
+// diffRevocationSet diffs an explicit REVOCATIONS list (RFC §11.3) against its
+// snapshot. Unlike grants (the additive model in diffGrantSet — removing a
+// GRANT declaration emits nothing), a revocation is itself tracked as a
+// persistent declaration: once applied it's remembered in the snapshot so a
+// later unchanged run doesn't re-issue REVOKE — not because re-running it
+// would error (REVOKE on an already-absent privilege is a harmless no-op in
+// PG), but to keep migration output free of redundant statements, matching
+// the same idempotency style already used for grants. Removing a REVOCATION
+// entry re-GRANTs the privilege to restore it. Mirrors diffDefaultPrivileges's
+// existing revocation-diffing logic, generalized so table/view/column
+// REVOCATION can share it.
+func diffRevocationSet(
+	snapRevs []snapshot.SnapGrant,
+	desiredRevs []ir.Revocation,
+	onClause string,
+	pos pipeline.SourcePos,
+) []pipeline.DiffOp {
+	var ops []pipeline.DiffOp
+
+	snapByKey := make(map[string]snapshot.SnapGrant, len(snapRevs))
+	for _, r := range snapRevs {
+		snapByKey[grantKey(r.Privileges, r.Roles, false)] = r
+	}
+	desiredByKey := make(map[string]ir.Revocation, len(desiredRevs))
+	for _, r := range desiredRevs {
+		desiredByKey[grantKey(r.Privileges, r.Roles, false)] = r
+	}
+
+	for k, sr := range snapByKey {
+		if _, ok := desiredByKey[k]; !ok {
+			// Revocation removed from desired: re-grant to restore.
+			ops = append(ops, safeOp(
+				fmt.Sprintf("GRANT %s ON %s TO %s;", privStr(sr.Privileges), onClause, roleList(sr.Roles)),
+				pos,
+			))
+		}
+	}
+	for k, r := range desiredByKey {
+		if _, ok := snapByKey[k]; !ok {
+			cascade := ""
+			if r.Cascade {
+				cascade = " CASCADE"
+			}
+			ops = append(ops, cautionOp(
+				fmt.Sprintf("REVOKE %s ON %s FROM %s%s;", privStr(r.Privileges), onClause, roleList(r.Roles), cascade),
+				pos,
+			))
+		}
+	}
+	return ops
+}
+
 // ── DROP operations ───────────────────────────────────────────────────────────
 
 func dropObject(so *snapshot.SnapObject) []pipeline.DiffOp {
@@ -1086,9 +1138,15 @@ func createTable(o *ir.Table, vtypes map[string]string) []pipeline.DiffOp {
 	for _, g := range o.Grants {
 		ops = append(ops, tableGrantOp(g, tblIdent, o.SrcPos))
 	}
+	for _, r := range o.Revocations {
+		ops = append(ops, tableExplicitRevokeOp(r, tblIdent, o.SrcPos))
+	}
 	for _, col := range o.Columns {
 		for _, g := range col.Grants {
 			ops = append(ops, colGrantOp(g, tblIdent, col.Name, col.SrcPos))
+		}
+		for _, r := range col.Revocations {
+			ops = append(ops, colExplicitRevokeOp(r, tblIdent, col.Name, col.SrcPos))
 		}
 	}
 	return ops
@@ -1274,6 +1332,54 @@ func colGrantOp(g ir.Grant, tbl, col string, pos pipeline.SourcePos) pipeline.Di
 	return safeOp(sql+";", pos)
 }
 
+// tableExplicitRevokeOp emits the REVOKE for an explicit REVOCATION directive
+// (RFC §11.3) — distinct from the additive-model's implicit revoke (see
+// colRevokeOp) that fires when a GRANT declaration is simply removed. Explicit
+// revocations are CAUTION (not SAFE): they can break access that something
+// else depends on. PG's REVOKE grammar has no IF EXISTS clause, so there's
+// no guard to add regardless.
+func tableExplicitRevokeOp(r ir.Revocation, tblIdent string, pos pipeline.SourcePos) *op {
+	var privs string
+	if len(r.Privileges) == 0 {
+		privs = "ALL"
+	} else {
+		privs = strings.Join(r.Privileges, ", ")
+	}
+	roles := make([]string, len(r.Roles))
+	for i, role := range r.Roles {
+		roles[i] = quoteIdent(role)
+	}
+	sql := fmt.Sprintf("REVOKE %s ON TABLE %s FROM %s", privs, tblIdent, strings.Join(roles, ", "))
+	if r.Cascade {
+		sql += " CASCADE"
+	}
+	sql += ";"
+	return cautionOp(sql, pos)
+}
+
+// colExplicitRevokeOp is tableExplicitRevokeOp's column-level counterpart,
+// mirroring colGrantOp's column-parenthesized privilege syntax.
+func colExplicitRevokeOp(r ir.Revocation, tbl, col string, pos pipeline.SourcePos) pipeline.DiffOp {
+	colIdent := quoteIdent(col)
+	var privParts []string
+	if len(r.Privileges) == 0 {
+		privParts = []string{"ALL (" + colIdent + ")"}
+	} else {
+		for _, p := range r.Privileges {
+			privParts = append(privParts, p+" ("+colIdent+")")
+		}
+	}
+	roles := make([]string, len(r.Roles))
+	for i, role := range r.Roles {
+		roles[i] = quoteIdent(role)
+	}
+	sql := "REVOKE " + strings.Join(privParts, ", ") + " ON TABLE " + tbl + " FROM " + strings.Join(roles, ", ")
+	if r.Cascade {
+		sql += " CASCADE"
+	}
+	return cautionOp(sql+";", pos)
+}
+
 func colRevokeOp(sg snapshot.SnapGrant, tbl, col string, pos pipeline.SourcePos) pipeline.DiffOp {
 	colIdent := quoteIdent(col)
 	var privParts []string
@@ -1317,6 +1423,32 @@ func diffColGrantSet(tbl, col string, snapGrants []snapshot.SnapGrant, desiredGr
 	return ops
 }
 
+// diffColRevocationSet is diffRevocationSet's column-level counterpart,
+// mirroring diffColGrantSet's structure for explicit REVOCATIONS on a column.
+func diffColRevocationSet(tbl, col string, snapRevs []snapshot.SnapGrant, desiredRevs []ir.Revocation, pos pipeline.SourcePos) []pipeline.DiffOp {
+	snapKeys := make(map[string]snapshot.SnapGrant, len(snapRevs))
+	for _, r := range snapRevs {
+		snapKeys[grantKey(r.Privileges, r.Roles, false)] = r
+	}
+	desiredKeys := make(map[string]ir.Revocation, len(desiredRevs))
+	for _, r := range desiredRevs {
+		desiredKeys[grantKey(r.Privileges, r.Roles, false)] = r
+	}
+	var ops []pipeline.DiffOp
+	for k, sr := range snapKeys {
+		if _, ok := desiredKeys[k]; !ok {
+			// Revocation removed from desired: re-grant to restore.
+			ops = append(ops, colGrantOp(ir.Grant{Privileges: sr.Privileges, Roles: sr.Roles}, tbl, col, pos))
+		}
+	}
+	for k, r := range desiredKeys {
+		if _, ok := snapKeys[k]; !ok {
+			ops = append(ops, colExplicitRevokeOp(r, tbl, col, pos))
+		}
+	}
+	return ops
+}
+
 func createView(o *ir.View) []pipeline.DiffOp {
 	var b strings.Builder
 	b.WriteString("CREATE ")
@@ -1352,6 +1484,9 @@ func createView(o *ir.View) []pipeline.DiffOp {
 			sql += " WITH GRANT OPTION"
 		}
 		ops = append(ops, safeOp(sql+";", o.SrcPos))
+	}
+	for _, r := range o.Revocations {
+		ops = append(ops, tableExplicitRevokeOp(r, viewIdent, o.SrcPos))
 	}
 	return ops
 }
@@ -1911,6 +2046,7 @@ func diffView(o *ir.View, snap *snapshot.SnapView) []pipeline.DiffOp {
 	}
 
 	ops = append(ops, diffGrantSet(snap.Grants, o.Grants, "TABLE "+tbl, pos)...)
+	ops = append(ops, diffRevocationSet(snap.Revocations, o.Revocations, "TABLE "+tbl, pos)...)
 	return ops
 }
 
@@ -2159,6 +2295,7 @@ func diffTable(o *ir.Table, snap *snapshot.SnapTable, vtypes map[string]string) 
 	ops = append(ops, diffTriggers(o.Schema, o.Name, o, snap)...)
 	ops = append(ops, diffTableInherits(tbl, o, snap, pos)...)
 	ops = append(ops, diffGrantSet(snap.Grants, o.Grants, "TABLE "+tbl, pos)...)
+	ops = append(ops, diffRevocationSet(snap.Revocations, o.Revocations, "TABLE "+tbl, pos)...)
 	ops = append(ops, diffPartitions(tbl, o, snap, pos)...)
 	return ops, nil
 }
@@ -2387,6 +2524,9 @@ func diffColumns(tbl string, o *ir.Table, snap *snapshot.SnapTable, vtypes map[s
 			for _, g := range col.Grants {
 				ops = append(ops, colGrantOp(g, tbl, col.Name, col.SrcPos))
 			}
+			for _, r := range col.Revocations {
+				ops = append(ops, colExplicitRevokeOp(r, tbl, col.Name, col.SrcPos))
+			}
 			continue
 		}
 
@@ -2470,6 +2610,7 @@ func diffColumns(tbl string, o *ir.Table, snap *snapshot.SnapTable, vtypes map[s
 			))
 		}
 		ops = append(ops, diffColGrantSet(tbl, col.Name, sc.Grants, col.Grants, col.SrcPos)...)
+		ops = append(ops, diffColRevocationSet(tbl, col.Name, sc.Revocations, col.Revocations, col.SrcPos)...)
 	}
 
 	return ops, renamedFrom, droppedCols, nil

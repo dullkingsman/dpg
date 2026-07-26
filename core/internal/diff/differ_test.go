@@ -1152,6 +1152,169 @@ func TestDiffTableGrantUnchangedIsNoop(t *testing.T) {
 	}
 }
 
+// ── Explicit REVOCATIONS (RFC §11.3) ──────────────────────────────────────────
+//
+// Regression guard for the discovery that ir.Table/Column/View.Revocations was
+// parsed into the IR but never read anywhere in diff/create/emit — an explicit
+// REVOCATION was a total silent no-op regardless of Mode A/B syntax. These
+// tests cover: emission on a brand-new object, emission when a REVOCATION is
+// newly added to an already-applied object, restoration (re-GRANT) when a
+// REVOCATION is removed, and idempotency (unchanged REVOCATION => zero ops,
+// so a stored revocation isn't re-issued — PG errors on REVOKE of an
+// already-absent privilege per the RFC).
+
+func TestDiffCreateTableEmitsRevocation(t *testing.T) {
+	d := New()
+	desired := []pipeline.IRObject{
+		&ir.Table{
+			Schema:      "public",
+			Name:        "orders",
+			Columns:     []*ir.Column{{Name: "id", Type: ir.TypeRef{Name: "bigint"}}},
+			Revocations: []ir.Revocation{{Privileges: []string{"UPDATE"}, Roles: []string{"readonly"}}},
+		},
+	}
+	ops, err := d.Diff(desired, &pipeline.Snapshot{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsSQL(ops, "REVOKE UPDATE ON TABLE") {
+		t.Errorf("expected REVOKE UPDATE ON TABLE at create time, got: %v", sqlList(ops))
+	}
+	if !containsSQL(ops, `"readonly"`) {
+		t.Errorf("expected quoted role name, got: %v", sqlList(ops))
+	}
+}
+
+func TestDiffTableRevocationAdded(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.orders", &snapshot.SnapObject{
+		Kind: "table",
+		Table: &snapshot.SnapTable{
+			Schema:  "public",
+			Name:    "orders",
+			Columns: []snapshot.SnapColumn{{Name: "id", Type: "bigint"}},
+		},
+	})
+	desired := []pipeline.IRObject{
+		&ir.Table{
+			Schema:      "public",
+			Name:        "orders",
+			Columns:     []*ir.Column{{Name: "id", Type: ir.TypeRef{Name: "bigint"}}},
+			Revocations: []ir.Revocation{{Privileges: []string{"UPDATE"}, Roles: []string{"readonly"}}},
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var found bool
+	for _, o := range ops {
+		if strings.Contains(o.SQL(), "REVOKE UPDATE ON TABLE") {
+			found = true
+			if o.Safety() != pipeline.Caution {
+				t.Errorf("explicit revocation safety = %v, want Caution: %s", o.Safety(), o.SQL())
+			}
+		}
+	}
+	if !found {
+		t.Errorf("expected REVOKE UPDATE ON TABLE, got: %v", sqlList(ops))
+	}
+}
+
+func TestDiffTableRevocationRemoved(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.orders", &snapshot.SnapObject{
+		Kind: "table",
+		Table: &snapshot.SnapTable{
+			Schema:      "public",
+			Name:        "orders",
+			Columns:     []snapshot.SnapColumn{{Name: "id", Type: "bigint"}},
+			Revocations: []snapshot.SnapGrant{{Privileges: []string{"UPDATE"}, Roles: []string{"readonly"}}},
+		},
+	})
+	desired := []pipeline.IRObject{
+		&ir.Table{
+			Schema:  "public",
+			Name:    "orders",
+			Columns: []*ir.Column{{Name: "id", Type: ir.TypeRef{Name: "bigint"}}},
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsSQL(ops, "GRANT UPDATE ON TABLE") {
+		t.Errorf("expected GRANT UPDATE ON TABLE to restore the revoked privilege, got: %v", sqlList(ops))
+	}
+	if containsSQL(ops, "REVOKE") {
+		t.Errorf("must not also emit REVOKE when the revocation itself was removed: %v", sqlList(ops))
+	}
+}
+
+// The idempotency guard: PG errors on REVOKE of an already-absent privilege
+// (RFC §11.3), so an unchanged REVOCATION must produce zero ops once it's
+// been applied and recorded in the snapshot — not re-issued on every apply.
+func TestDiffTableRevocationUnchangedIsNoop(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.orders", &snapshot.SnapObject{
+		Kind: "table",
+		Table: &snapshot.SnapTable{
+			Schema:      "public",
+			Name:        "orders",
+			Columns:     []snapshot.SnapColumn{{Name: "id", Type: "bigint"}},
+			Revocations: []snapshot.SnapGrant{{Privileges: []string{"UPDATE"}, Roles: []string{"readonly"}}},
+		},
+	})
+	desired := []pipeline.IRObject{
+		&ir.Table{
+			Schema:      "public",
+			Name:        "orders",
+			Columns:     []*ir.Column{{Name: "id", Type: ir.TypeRef{Name: "bigint"}}},
+			Revocations: []ir.Revocation{{Privileges: []string{"UPDATE"}, Roles: []string{"readonly"}}},
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if containsSQL(ops, "GRANT") || containsSQL(ops, "REVOKE") {
+		t.Errorf("expected no GRANT/REVOKE for unchanged revocation, got: %v", sqlList(ops))
+	}
+}
+
+func TestDiffTableRevocationCascade(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.orders", &snapshot.SnapObject{
+		Kind: "table",
+		Table: &snapshot.SnapTable{
+			Schema:  "public",
+			Name:    "orders",
+			Columns: []snapshot.SnapColumn{{Name: "id", Type: "bigint"}},
+		},
+	})
+	desired := []pipeline.IRObject{
+		&ir.Table{
+			Schema:  "public",
+			Name:    "orders",
+			Columns: []*ir.Column{{Name: "id", Type: ir.TypeRef{Name: "bigint"}}},
+			Revocations: []ir.Revocation{
+				{Privileges: []string{"UPDATE"}, Roles: []string{"readonly"}, Cascade: true},
+			},
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsSQL(ops, "REVOKE UPDATE ON TABLE") || !containsSQL(ops, "CASCADE") {
+		t.Errorf("expected REVOKE ... CASCADE, got: %v", sqlList(ops))
+	}
+}
+
 func TestDiffViewGrantAdded(t *testing.T) {
 	d := New()
 	snap := &pipeline.Snapshot{}
@@ -1205,6 +1368,75 @@ func TestDiffViewGrantRemoved(t *testing.T) {
 	}
 	if !containsSQL(ops, "REVOKE SELECT ON TABLE") {
 		t.Errorf("expected REVOKE SELECT ON TABLE for view, got: %v", sqlList(ops))
+	}
+}
+
+func TestDiffCreateViewEmitsRevocation(t *testing.T) {
+	d := New()
+	desired := []pipeline.IRObject{
+		&ir.View{
+			Schema:      "public",
+			Name:        "v_active",
+			Query:       "SELECT id FROM users WHERE active",
+			Revocations: []ir.Revocation{{Privileges: []string{"SELECT"}, Roles: []string{"guest"}}},
+		},
+	}
+	ops, err := d.Diff(desired, &pipeline.Snapshot{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsSQL(ops, "REVOKE SELECT ON TABLE") {
+		t.Errorf("expected REVOKE SELECT ON TABLE for a new view, got: %v", sqlList(ops))
+	}
+}
+
+func TestDiffViewRevocationAddedAndRemoved(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.v_active", &snapshot.SnapObject{
+		Kind: "view",
+		View: &snapshot.SnapView{
+			Schema: "public",
+			Name:   "v_active",
+			Query:  "SELECT id FROM users WHERE active",
+		},
+	})
+	desired := []pipeline.IRObject{
+		&ir.View{
+			Schema:      "public",
+			Name:        "v_active",
+			Query:       "SELECT id FROM users WHERE active",
+			Revocations: []ir.Revocation{{Privileges: []string{"SELECT"}, Roles: []string{"guest"}}},
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsSQL(ops, "REVOKE SELECT ON TABLE") {
+		t.Errorf("expected REVOKE SELECT ON TABLE when adding a view revocation, got: %v", sqlList(ops))
+	}
+
+	// Now remove it: the snapshot side has the revocation, desired doesn't.
+	snap2 := &pipeline.Snapshot{}
+	_ = snap2.SetObject("public.v_active", &snapshot.SnapObject{
+		Kind: "view",
+		View: &snapshot.SnapView{
+			Schema:      "public",
+			Name:        "v_active",
+			Query:       "SELECT id FROM users WHERE active",
+			Revocations: []snapshot.SnapGrant{{Privileges: []string{"SELECT"}, Roles: []string{"guest"}}},
+		},
+	})
+	desired2 := []pipeline.IRObject{
+		&ir.View{Schema: "public", Name: "v_active", Query: "SELECT id FROM users WHERE active"},
+	}
+	ops2, err := d.Diff(desired2, snap2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsSQL(ops2, "GRANT SELECT ON TABLE") {
+		t.Errorf("expected GRANT SELECT ON TABLE to restore, got: %v", sqlList(ops2))
 	}
 }
 
@@ -1882,6 +2114,170 @@ func TestDiffColumnGrantRemoved(t *testing.T) {
 	}
 	if !containsSQL(ops, `REVOKE SELECT ("body")`) {
 		t.Errorf("expected column REVOKE SELECT, got: %v", sqlList(ops))
+	}
+}
+
+func TestDiffCreateTableEmitsColumnRevocation(t *testing.T) {
+	d := New()
+	desired := []pipeline.IRObject{
+		&ir.Table{
+			Schema: "public",
+			Name:   "docs",
+			Columns: []*ir.Column{
+				{
+					Name:        "body",
+					Type:        ir.TypeRef{Name: "text"},
+					Revocations: []ir.Revocation{{Privileges: []string{"SELECT"}, Roles: []string{"guest"}}},
+				},
+			},
+		},
+	}
+	ops, err := d.Diff(desired, &pipeline.Snapshot{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsSQL(ops, `REVOKE SELECT ("body")`) {
+		t.Errorf("expected column-level REVOKE SELECT (body) at create time, got: %v", sqlList(ops))
+	}
+}
+
+func TestDiffColumnRevocationAddedAndRemoved(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.docs", &snapshot.SnapObject{
+		Kind: "table",
+		Table: &snapshot.SnapTable{
+			Schema:  "public",
+			Name:    "docs",
+			Columns: []snapshot.SnapColumn{{Name: "body", Type: "text"}},
+		},
+	})
+	desired := []pipeline.IRObject{
+		&ir.Table{
+			Schema: "public",
+			Name:   "docs",
+			Columns: []*ir.Column{
+				{
+					Name:        "body",
+					Type:        ir.TypeRef{Name: "text"},
+					Revocations: []ir.Revocation{{Privileges: []string{"SELECT"}, Roles: []string{"guest"}}},
+				},
+			},
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsSQL(ops, `REVOKE SELECT ("body")`) {
+		t.Errorf("expected column REVOKE SELECT when adding a revocation, got: %v", sqlList(ops))
+	}
+
+	// Now remove it: the snapshot side has the revocation, desired doesn't.
+	snap2 := &pipeline.Snapshot{}
+	_ = snap2.SetObject("public.docs", &snapshot.SnapObject{
+		Kind: "table",
+		Table: &snapshot.SnapTable{
+			Schema: "public",
+			Name:   "docs",
+			Columns: []snapshot.SnapColumn{
+				{
+					Name:        "body",
+					Type:        "text",
+					Revocations: []snapshot.SnapGrant{{Privileges: []string{"SELECT"}, Roles: []string{"guest"}}},
+				},
+			},
+		},
+	})
+	desired2 := []pipeline.IRObject{
+		&ir.Table{
+			Schema:  "public",
+			Name:    "docs",
+			Columns: []*ir.Column{{Name: "body", Type: ir.TypeRef{Name: "text"}}},
+		},
+	}
+	ops2, err := d.Diff(desired2, snap2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsSQL(ops2, `GRANT SELECT ("body")`) {
+		t.Errorf("expected column GRANT SELECT (body) to restore, got: %v", sqlList(ops2))
+	}
+}
+
+func TestDiffColumnRevocationUnchangedIsNoop(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.docs", &snapshot.SnapObject{
+		Kind: "table",
+		Table: &snapshot.SnapTable{
+			Schema: "public",
+			Name:   "docs",
+			Columns: []snapshot.SnapColumn{
+				{
+					Name:        "body",
+					Type:        "text",
+					Revocations: []snapshot.SnapGrant{{Privileges: []string{"SELECT"}, Roles: []string{"guest"}}},
+				},
+			},
+		},
+	})
+	desired := []pipeline.IRObject{
+		&ir.Table{
+			Schema: "public",
+			Name:   "docs",
+			Columns: []*ir.Column{
+				{
+					Name:        "body",
+					Type:        ir.TypeRef{Name: "text"},
+					Revocations: []ir.Revocation{{Privileges: []string{"SELECT"}, Roles: []string{"guest"}}},
+				},
+			},
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if containsSQL(ops, "GRANT") || containsSQL(ops, "REVOKE") {
+		t.Errorf("expected no GRANT/REVOKE for unchanged column revocation, got: %v", sqlList(ops))
+	}
+}
+
+// New column added via ALTER TABLE ADD COLUMN, carrying its own REVOCATION —
+// exercises the other diffColumns call site (new-column path vs
+// existing-column path already covered above).
+func TestDiffAddColumnEmitsRevocation(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.docs", &snapshot.SnapObject{
+		Kind: "table",
+		Table: &snapshot.SnapTable{
+			Schema:  "public",
+			Name:    "docs",
+			Columns: []snapshot.SnapColumn{{Name: "id", Type: "bigint"}},
+		},
+	})
+	desired := []pipeline.IRObject{
+		&ir.Table{
+			Schema: "public",
+			Name:   "docs",
+			Columns: []*ir.Column{
+				{Name: "id", Type: ir.TypeRef{Name: "bigint"}},
+				{
+					Name:        "body",
+					Type:        ir.TypeRef{Name: "text"},
+					Revocations: []ir.Revocation{{Privileges: []string{"SELECT"}, Roles: []string{"guest"}}},
+				},
+			},
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsSQL(ops, `REVOKE SELECT ("body")`) {
+		t.Errorf("expected column REVOKE SELECT for a newly added column, got: %v", sqlList(ops))
 	}
 }
 

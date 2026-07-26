@@ -74,14 +74,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   form was a hard parse error, identical to the `INDEX`/`INDICES` conflation
   fixed earlier in this release. Mode A (`GRANTS { ... }`/`REVOCATIONS { ... }`)
   is unchanged and the two may be freely mixed, as the RFC requires.
-  Known limitation found while live-testing this fix, **not fixed here**: an
-  explicit `REVOCATION`/`REVOCATIONS` on a table, column, or view parses into
-  the AST/IR correctly (in either syntax mode) but is never turned into SQL —
-  `internal/diff/differ.go` never reads `ir.Table.Revocations`,
-  `ir.Column.Revocations`, or `ir.View.Revocations` anywhere; only
-  `DEFAULT PRIVILEGES` revocations are diffed/emitted. This is a pre-existing
-  gap unrelated to Mode A vs B — declaring a table/column/view `REVOCATION`
-  today is a silent no-op regardless of which syntax you use.
+- Explicit `REVOCATION`/`REVOCATIONS` (RFC §11.3) on a table, column, or view
+  now actually emits `REVOKE`, in either syntax mode. Found while live-testing
+  the fix above: it was parsed into the AST/IR correctly but
+  `internal/diff/differ.go` never read `ir.Table.Revocations`,
+  `ir.Column.Revocations`, or `ir.View.Revocations` anywhere — only
+  `DEFAULT PRIVILEGES` revocations were diffed/emitted, so declaring one on a
+  table/column/view was a complete silent no-op. Mirrors the existing
+  `DEFAULT PRIVILEGES` revocation semantics: a revocation is tracked in the
+  snapshot once applied, so a later unchanged run doesn't re-issue `REVOKE`
+  (kept for tidy migration output, not because re-running it would error —
+  `REVOKE` on an already-absent privilege is a harmless no-op in PostgreSQL),
+  and removing a `REVOCATION` declaration re-`GRANT`s the privilege to
+  restore it. `CASCADE` is supported at the table/view level and column
+  level.
 - `dump` output now recompiles **and re-applies** for real-world tables:
   identifiers that are reserved keywords or otherwise non-bare (table/column/view/
   sequence/role/index/constraint names) are quoted; indexes render as the accepted
@@ -191,6 +197,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `CAUTION`-level `DROP INDEX` + `CREATE INDEX`, not `DESTRUCTIVE` — same as a
   plain index change) to bring the snapshot up to date; every run after that
   is a genuine no-op.
+- **Table/column/view `REVOCATION` now actually runs.** Previously a silent
+  no-op, so an existing `REVOCATION`/`REVOCATIONS` declaration may not
+  reflect current reality — the target role might already lack the privilege,
+  or might still have it because DPG never revoked it. On the first
+  `plan`/`apply` after upgrading, `REVOKE` runs for every declared revocation
+  not yet recorded in the snapshot. This is safe to run even if the privilege
+  was never actually granted — `REVOKE` on an already-absent privilege
+  succeeds as a no-op in PostgreSQL, it does not error. The one thing that
+  does error is revoking from a role that no longer exists; if you have a
+  stale `REVOCATION` naming a dropped role, fix or remove it before applying.
 
 ## [idea-v0.5.2-alpha.13] — 2026-05-22
 

@@ -188,10 +188,7 @@ func toSnapObject(obj pipeline.IRObject) *SnapObject {
 			sdp.Grants = append(sdp.Grants, toSnapGrant(g))
 		}
 		for _, r := range o.Revocations {
-			sdp.Revocations = append(sdp.Revocations, SnapGrant{
-				Privileges: r.Privileges,
-				Roles:      r.Roles,
-			})
+			sdp.Revocations = append(sdp.Revocations, toSnapRevocation(r))
 		}
 		return &SnapObject{Kind: "default_privileges", DefaultPrivileges: sdp}
 	case *ir.VirtualType:
@@ -296,6 +293,9 @@ func toSnapTable(o *ir.Table) *SnapTable {
 	for _, g := range o.Grants {
 		t.Grants = append(t.Grants, toSnapGrant(g))
 	}
+	for _, r := range o.Revocations {
+		t.Revocations = append(t.Revocations, toSnapRevocation(r))
+	}
 	t.NameMaps = toSnapNameMaps(o.NameMaps)
 	return t
 }
@@ -327,6 +327,9 @@ func toSnapColumn(col *ir.Column) SnapColumn {
 	}
 	for _, g := range col.Grants {
 		sc.Grants = append(sc.Grants, toSnapGrant(g))
+	}
+	for _, r := range col.Revocations {
+		sc.Revocations = append(sc.Revocations, toSnapRevocation(r))
 	}
 	sc.NameMaps = toSnapNameMaps(col.NameMaps)
 	return sc
@@ -424,6 +427,18 @@ func toSnapGrant(g ir.Grant) SnapGrant {
 	}
 }
 
+// toSnapRevocation converts an explicit ir.Revocation into a SnapGrant for
+// storage/comparison purposes. Reuses SnapGrant (rather than a dedicated type)
+// to match the existing DefaultPrivileges precedent; Cascade is intentionally
+// not stored, same as that precedent — a revocation is matched for diffing
+// purposes by privileges+roles only.
+func toSnapRevocation(r ir.Revocation) SnapGrant {
+	return SnapGrant{
+		Privileges: r.Privileges,
+		Roles:      r.Roles,
+	}
+}
+
 func toSnapView(o *ir.View) *SnapView {
 	sv := &SnapView{
 		Schema:     o.Schema,
@@ -436,6 +451,9 @@ func toSnapView(o *ir.View) *SnapView {
 	}
 	for _, g := range o.Grants {
 		sv.Grants = append(sv.Grants, toSnapGrant(g))
+	}
+	for _, r := range o.Revocations {
+		sv.Revocations = append(sv.Revocations, toSnapRevocation(r))
 	}
 	sv.NameMaps = toSnapNameMaps(o.NameMaps)
 	return sv
