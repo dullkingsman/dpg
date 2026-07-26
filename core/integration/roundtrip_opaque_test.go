@@ -312,6 +312,80 @@ func TestRoundtripIndexModeB(t *testing.T) {
 }`)
 }
 
+// TestRoundtripGrantRevocationModeBAppliesLive is the live-catalog guard for
+// the GRANT/GRANTS Mode-B fix (RFC §4.8 singular keyword): previously
+// "GRANT ...;" outside a GRANTS{} block was a hard parse error — the identical
+// conflation bug fixed for INDEX/INDICES, both keywords routed to the same
+// brace-requiring block parser. This proves Mode-B grants parse, apply, and
+// take effect against a real PostgreSQL instance, mixed freely with Mode A on
+// the same table.
+//
+// REVOCATION is deliberately NOT exercised for its live effect here: while
+// writing this test, `has_table_privilege` after a Mode-B REVOCATION showed
+// the revoked privilege was still present — not a Mode-B bug, but a separate,
+// pre-existing gap: internal/diff/differ.go never reads ir.Table.Revocations
+// (or ir.Column.Revocations/ir.View.Revocations) at all — grep confirms
+// `Revocation` only appears in the DefaultPrivileges create/diff functions.
+// An explicit REVOCATION on a table, column, or view is parsed into the AST/IR
+// correctly (see TestRevocationModeBSingularKeyword et al. in
+// internal/blockparser/parser_test.go, which still validates the Mode-B parse
+// fix this test is named for) but never turns into SQL. Documented as a new
+// finding rather than fixed here — well outside "fix the Mode-B dispatch bug."
+func TestRoundtripGrantRevocationModeBAppliesLive(t *testing.T) {
+	connStr := testpg.Start(t)
+	ctx := context.Background()
+
+	differ := diff.New()
+	emitter := emit.New()
+	applyExec := executor.New()
+	store := newMemStore()
+
+	conn, err := executor.Connect(ctx, connStr)
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	defer conn.Close(ctx)
+
+	if _, err := conn.Exec(ctx, `CREATE ROLE rt_reader`); err != nil {
+		t.Fatalf("create role rt_reader: %v", err)
+	}
+	if _, err := conn.Exec(ctx, `CREATE ROLE rt_writer`); err != nil {
+		t.Fatalf("create role rt_writer: %v", err)
+	}
+
+	dir := t.TempDir()
+	f := filepath.Join(dir, "schema.dpg")
+	schema := `TABLE t (a INTEGER) {
+    GRANT SELECT TO rt_reader;
+    GRANTS { INSERT TO rt_writer; }
+}`
+	if err := os.WriteFile(f, []byte(schema), 0o644); err != nil {
+		t.Fatalf("write schema: %v", err)
+	}
+	applyFixture(t, ctx, conn, []string{f}, dir, differ, emitter, applyExec, store)
+
+	rs, err := conn.QueryRows(ctx, `SELECT
+		has_table_privilege('rt_reader', 'public.t', 'SELECT'),
+		has_table_privilege('rt_writer', 'public.t', 'INSERT')`)
+	if err != nil {
+		t.Fatalf("query privileges: %v", err)
+	}
+	defer rs.Close()
+	if !rs.Next() {
+		t.Fatal("no privilege row returned")
+	}
+	var readerSelect, writerInsert bool
+	if err := rs.Scan(&readerSelect, &writerInsert); err != nil {
+		t.Fatalf("scan privileges: %v", err)
+	}
+	if !readerSelect {
+		t.Error("rt_reader should have SELECT (Mode B GRANT, table-level)")
+	}
+	if !writerInsert {
+		t.Error("rt_writer should have INSERT (Mode A GRANTS block)")
+	}
+}
+
 // TestRoundtripIndexDefinitionChangeAppliesLive is the live-catalog guard for
 // the diffIndexes name-only-matching fix (internal/diff/differ.go): previously
 // a same-named index was matched by name only, with zero comparison of its

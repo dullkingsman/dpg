@@ -447,14 +447,24 @@ func (b *blockParser) parseBlock(pos pipeline.SourcePos) (pipeline.BlockAST, err
 			var triggers []pipeline.TriggerDef
 			triggers, err = b.parseTriggers(dirPos)
 			ast.Triggers = append(ast.Triggers, triggers...)
-		case "GRANTS", "GRANT":
+		case "GRANTS":
 			var grants []pipeline.GrantEntry
 			grants, err = b.parseGrantsBlock(dirPos)
 			ast.Grants = append(ast.Grants, grants...)
-		case "REVOCATIONS", "REVOCATION":
+		case "GRANT":
+			// Mode B (§4.8 Dual Definition Modes): singular entry, no wrapping '{ }'.
+			var g pipeline.GrantEntry
+			g, err = b.parseOneGrant(dirPos)
+			ast.Grants = append(ast.Grants, g)
+		case "REVOCATIONS":
 			var revs []pipeline.RevocationEntry
 			revs, err = b.parseRevocationsBlock(dirPos)
 			ast.Revocations = append(ast.Revocations, revs...)
+		case "REVOCATION":
+			// Mode B: singular entry, no wrapping '{ }'.
+			var r pipeline.RevocationEntry
+			r, err = b.parseOneRevocation(dirPos)
+			ast.Revocations = append(ast.Revocations, r)
 		case "PARTITIONS":
 			ast.Partitions, err = b.parsePartitionsBlock(dirPos)
 		case "MIGRATE":
@@ -955,19 +965,35 @@ func (b *blockParser) fillColumnBlock(col *pipeline.ColumnBlock) error {
 				col.Using = &pipeline.RawExpr{Text: strings.TrimSpace(raw), Pos: dirPos}
 				b.advance() // consume ;
 			}
-		case "GRANTS", "GRANT":
+		case "GRANTS":
 			grants, e2 := b.parseGrantsBlock(dirPos)
 			if e2 != nil {
 				err = e2
 			} else {
 				col.Grants = append(col.Grants, grants...)
 			}
-		case "REVOCATIONS", "REVOCATION":
+		case "GRANT":
+			// Mode B (§4.8 Dual Definition Modes): singular entry, no wrapping '{ }'.
+			g, e2 := b.parseOneGrant(dirPos)
+			if e2 != nil {
+				err = e2
+			} else {
+				col.Grants = append(col.Grants, g)
+			}
+		case "REVOCATIONS":
 			revs, e2 := b.parseRevocationsBlock(dirPos)
 			if e2 != nil {
 				err = e2
 			} else {
 				col.Revocations = append(col.Revocations, revs...)
+			}
+		case "REVOCATION":
+			// Mode B: singular entry, no wrapping '{ }'.
+			r, e2 := b.parseOneRevocation(dirPos)
+			if e2 != nil {
+				err = e2
+			} else {
+				col.Revocations = append(col.Revocations, r)
 			}
 		case "NAME":
 			b.skipWS()
@@ -1667,18 +1693,32 @@ func (b *blockParser) parseDefaultPrivileges(pos pipeline.SourcePos) (pipeline.D
 		dirPos := b.srcPos()
 		word := strings.ToUpper(b.readWord())
 		switch word {
-		case "GRANTS", "GRANT":
+		case "GRANTS":
 			grants, err := b.parseGrantsBlock(dirPos)
 			if err != nil {
 				return dp, err
 			}
 			dp.Grants = append(dp.Grants, grants...)
-		case "REVOCATIONS", "REVOCATION":
+		case "GRANT":
+			// Mode B (§4.8 Dual Definition Modes): singular entry, no wrapping '{ }'.
+			g, err := b.parseOneGrant(dirPos)
+			if err != nil {
+				return dp, err
+			}
+			dp.Grants = append(dp.Grants, g)
+		case "REVOCATIONS":
 			revs, err := b.parseRevocationsBlock(dirPos)
 			if err != nil {
 				return dp, err
 			}
 			dp.Revocations = append(dp.Revocations, revs...)
+		case "REVOCATION":
+			// Mode B: singular entry, no wrapping '{ }'.
+			r, err := b.parseOneRevocation(dirPos)
+			if err != nil {
+				return dp, err
+			}
+			dp.Revocations = append(dp.Revocations, r)
 		default:
 			return dp, fmt.Errorf("%s: unexpected directive %q in DEFAULT PRIVILEGES block", dirPos, word)
 		}

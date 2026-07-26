@@ -333,6 +333,76 @@ func TestRevocations(t *testing.T) {
 	}
 }
 
+// Mode B (§4.8 Dual Definition Modes): the singular GRANT/REVOCATION keyword
+// precedes a single entry outside a plural block and must parse without a
+// wrapping '{ }' — previously this went through the same brace-requiring
+// parser as GRANTS/REVOCATIONS and was a hard parse error, exactly the same
+// conflation bug fixed for INDEX/INDICES.
+func TestGrantModeBSingularKeyword(t *testing.T) {
+	ast := parse(t, `GRANT SELECT, INSERT TO app_service;`)
+	if len(ast.Grants) != 1 {
+		t.Fatalf("expected 1 grant, got %d", len(ast.Grants))
+	}
+	g := ast.Grants[0]
+	if len(g.Privileges) != 2 || len(g.Roles) != 1 || g.Roles[0].Name != "app_service" {
+		t.Errorf("grant: got %+v", g)
+	}
+}
+
+func TestRevocationModeBSingularKeyword(t *testing.T) {
+	ast := parse(t, `REVOCATION ALL PRIVILEGES FROM PUBLIC;`)
+	if len(ast.Revocations) != 1 {
+		t.Fatalf("expected 1 revocation, got %d", len(ast.Revocations))
+	}
+	r := ast.Revocations[0]
+	if r.Privileges != nil || len(r.Roles) != 1 || r.Roles[0].Name != "PUBLIC" {
+		t.Errorf("revocation: got %+v", r)
+	}
+}
+
+func TestGrantRevocationModeAAndBCanMix(t *testing.T) {
+	src := `
+		GRANTS { SELECT TO reader; }
+		GRANT INSERT TO writer;
+		REVOCATIONS { ALL PRIVILEGES FROM PUBLIC; }
+		REVOCATION UPDATE FROM guest;
+	`
+	ast := parse(t, src)
+	if len(ast.Grants) != 2 {
+		t.Fatalf("expected 2 grants (one per mode), got %d", len(ast.Grants))
+	}
+	if len(ast.Revocations) != 2 {
+		t.Fatalf("expected 2 revocations (one per mode), got %d", len(ast.Revocations))
+	}
+}
+
+// GRANT/REVOCATION Mode B inside a COLUMN block exercises the second of the
+// three dispatch sites that had this conflation (table-level, column-level,
+// DEFAULT PRIVILEGES-level).
+func TestGrantModeBInColumnBlock(t *testing.T) {
+	ast := parse(t, `COLUMN email { GRANT SELECT TO reader; REVOCATION UPDATE FROM guest; }`)
+	if len(ast.Columns) != 1 {
+		t.Fatalf("expected 1 column, got %d", len(ast.Columns))
+	}
+	col := ast.Columns[0]
+	if len(col.Grants) != 1 || len(col.Revocations) != 1 {
+		t.Errorf("column grants/revocations: got %d/%d", len(col.Grants), len(col.Revocations))
+	}
+}
+
+// GRANT/REVOCATION Mode B inside a DEFAULT PRIVILEGES block exercises the
+// third of the three dispatch sites that had this conflation.
+func TestGrantModeBInDefaultPrivilegesBlock(t *testing.T) {
+	ast := parse(t, `DEFAULT PRIVILEGES { GRANT SELECT TO reader; REVOCATION UPDATE FROM guest; }`)
+	if len(ast.DefaultPrivileges) != 1 {
+		t.Fatalf("expected 1 default privileges block, got %d", len(ast.DefaultPrivileges))
+	}
+	dp := ast.DefaultPrivileges[0]
+	if len(dp.Grants) != 1 || len(dp.Revocations) != 1 {
+		t.Errorf("dp grants/revocations: got %d/%d", len(dp.Grants), len(dp.Revocations))
+	}
+}
+
 // ── POLICIES ─────────────────────────────────────────────────────────────────
 
 func TestSimplePolicy(t *testing.T) {

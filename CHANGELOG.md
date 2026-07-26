@@ -66,6 +66,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   used for column defaults — applied to `WHERE` and expression columns during
   introspection), so an unchanged index no longer shows drift against a real
   database.
+- `GRANT name (...)`/`REVOCATION name (...)` (Mode B, RFC §4.8's singular-
+  keyword form) now parse in all three places they're accepted — table level,
+  column level, and inside a `DEFAULT PRIVILEGES { }` block. Previously the
+  parser routed `GRANT`/`GRANTS` (and `REVOCATION`/`REVOCATIONS`) to the same
+  brace-requiring block parser at each of those three sites, so the singular
+  form was a hard parse error, identical to the `INDEX`/`INDICES` conflation
+  fixed earlier in this release. Mode A (`GRANTS { ... }`/`REVOCATIONS { ... }`)
+  is unchanged and the two may be freely mixed, as the RFC requires.
+  Known limitation found while live-testing this fix, **not fixed here**: an
+  explicit `REVOCATION`/`REVOCATIONS` on a table, column, or view parses into
+  the AST/IR correctly (in either syntax mode) but is never turned into SQL —
+  `internal/diff/differ.go` never reads `ir.Table.Revocations`,
+  `ir.Column.Revocations`, or `ir.View.Revocations` anywhere; only
+  `DEFAULT PRIVILEGES` revocations are diffed/emitted. This is a pre-existing
+  gap unrelated to Mode A vs B — declaring a table/column/view `REVOCATION`
+  today is a silent no-op regardless of which syntax you use.
 - `dump` output now recompiles **and re-applies** for real-world tables:
   identifiers that are reserved keywords or otherwise non-bare (table/column/view/
   sequence/role/index/constraint names) are quoted; indexes render as the accepted
