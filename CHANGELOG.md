@@ -25,6 +25,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `dump` now writes database-scoped schemaless objects to `<db>/objects.dpg`
   (previously misfiled under the cluster roles file) and can emit these object
   types as DPG declarations.
+- Indexes now support `WITH (...)` storage parameters and `NULLS NOT DISTINCT`
+  end to end: parsed in hand-written source, introspected from the live
+  catalog (via `pg_get_indexdef`, so it works on any supported PG version
+  without a version-gated catalog column), emitted in `CREATE INDEX` SQL, and
+  rendered back by `dump`. `WITH` was previously parsed into the IR (`idx.With`)
+  but silently dropped everywhere downstream; `NULLS NOT DISTINCT` wasn't
+  represented at all. Known limitation (pre-existing, not introduced by this
+  fix): `diffIndexes` matches indexes by name only — it drops a snapshot index
+  absent from desired and creates a desired index absent from the snapshot,
+  but never compares the two when a name is present on both sides. So editing
+  *any* property of an index that keeps its name (method, uniqueness, columns,
+  `WHERE`, `INCLUDE`, and now `WITH`/`NULLS NOT DISTINCT` too) is a silent
+  no-op on `plan`/`apply`, not just these two new fields. Fixing that is a
+  larger, separate change (move `diffIndexes` to full content comparison,
+  which also means capturing `Include`/`With`/`NullsNotDistinct` in
+  `SnapIndex`, which today only stores `Name`/`Unique`/`Method`/`Columns`/
+  `Where`) and is out of scope here.
+- `INDEX name (...)` (Mode B, RFC §4.8's singular-keyword form) now parses for
+  hand-written indexes. Previously the parser routed both `INDEX` and
+  `INDICES` to the same brace-requiring block parser, so the singular form was
+  a hard parse error (`expected '{', got '('`), not just silently unsupported.
+  Mode A (`INDICES { ... }`) is unchanged and the two may be freely mixed, as
+  the RFC requires.
 
 ### Fixed
 

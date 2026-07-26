@@ -91,6 +91,122 @@ SERVER dummy_srv FOREIGN DATA WRAPPER dummy_fdw;
 USER MAPPING FOR PUBLIC SERVER dummy_srv;`)
 }
 
+// TestRoundtripOpaqueBodyEditAppliesLive is the live-catalog guard for #3
+// (real update path for opaque objects, internal/diff/differ.go diffOpaqueIR):
+// previously an offline body edit to an opaque object (here, a COLLATION's
+// LOCALE) only ever produced a "-- WARNING: ... manual DROP + recreate
+// required" SQL comment — applying it was a silent no-op against a real
+// database. This proves the structured DROP + CREATE it emits now is valid
+// SQL that a real PostgreSQL instance accepts, and that after applying it the
+// live catalog actually reflects the new body (zero drift against the edited
+// desired state, not the original one).
+func TestRoundtripOpaqueBodyEditAppliesLive(t *testing.T) {
+	connStr := testpg.Start(t)
+	ctx := context.Background()
+
+	differ := diff.New()
+	emitter := emit.New()
+	applyExec := executor.New()
+	ci := introspect.New()
+	store := newMemStore()
+
+	conn, err := executor.Connect(ctx, connStr)
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	defer conn.Close(ctx)
+
+	dir := t.TempDir()
+	f := filepath.Join(dir, "schema.dpg")
+	v1 := `COLLATION my_coll (LOCALE = 'C');`
+	if err := os.WriteFile(f, []byte(v1), 0o644); err != nil {
+		t.Fatalf("write v1: %v", err)
+	}
+	applyFixture(t, ctx, conn, []string{f}, dir, differ, emitter, applyExec, store)
+
+	// Edit the body (same identity, different LOCALE) and diff against the
+	// snapshot from the v1 apply — this must route through diffOpaqueIR's
+	// offline body-hash-changed branch.
+	v2 := `COLLATION my_coll (LOCALE = 'POSIX');`
+	if err := os.WriteFile(f, []byte(v2), 0o644); err != nil {
+		t.Fatalf("write v2: %v", err)
+	}
+	desired2, err := compiler.Compile([]string{f}, dir, pipeline.Default)
+	if err != nil {
+		t.Fatalf("compile v2: %v", err)
+	}
+	snap, _ := store.Load("test", "dpgtest")
+	ops, err := differ.Diff(desired2, snap)
+	if err != nil {
+		t.Fatalf("diff (body edit): %v", err)
+	}
+	if len(ops) == 0 {
+		t.Fatal("expected structured DROP+CREATE ops for the body edit, got none")
+	}
+	for _, op := range ops {
+		if strings.Contains(op.SQL(), "manual DROP + recreate required") {
+			t.Fatalf("must not fall back to the manual warning for collation: %s", op.SQL())
+		}
+	}
+
+	migration, err := emitter.Emit(ops, pipeline.MigrationMeta{Cluster: "test", Database: "dpgtest"})
+	if err != nil {
+		t.Fatalf("emit: %v", err)
+	}
+	if err := applyExec.Apply(ctx, migration, conn); err != nil {
+		t.Fatalf("apply (body edit) against live PostgreSQL: %v", err)
+	}
+
+	appliedSnap := &pipeline.Snapshot{}
+	if err := snapshot.Populate(appliedSnap, desired2); err != nil {
+		t.Fatalf("populate snapshot: %v", err)
+	}
+	if err := store.Save("test", "dpgtest", appliedSnap); err != nil {
+		t.Fatalf("save snapshot: %v", err)
+	}
+
+	liveObjects, err := ci.Introspect(ctx, conn)
+	if err != nil {
+		t.Fatalf("introspect: %v", err)
+	}
+	var managedLive []pipeline.IRObject
+	for _, obj := range liveObjects {
+		if _, ok := appliedSnap.Objects[obj.QualifiedName()]; ok {
+			managedLive = append(managedLive, obj)
+		}
+	}
+	liveSnap := &pipeline.Snapshot{}
+	if err := snapshot.Populate(liveSnap, managedLive); err != nil {
+		t.Fatalf("populate live snapshot: %v", err)
+	}
+	driftOps, err := differ.Diff(desired2, liveSnap)
+	if err != nil {
+		t.Fatalf("drift diff: %v", err)
+	}
+	if len(driftOps) != 0 {
+		t.Errorf("drift after body-edit apply (%d ops) — live catalog doesn't reflect the new body:", len(driftOps))
+		for _, op := range driftOps {
+			t.Errorf("  [%s] %s", op.Safety(), op.SQL())
+		}
+	}
+
+	rs, err := conn.QueryRows(ctx, `SELECT collcollate FROM pg_collation WHERE collname = 'my_coll'`)
+	if err != nil {
+		t.Fatalf("query pg_collation: %v", err)
+	}
+	defer rs.Close()
+	if !rs.Next() {
+		t.Fatal("my_coll not found in pg_collation after body-edit apply")
+	}
+	var collate string
+	if err := rs.Scan(&collate); err != nil {
+		t.Fatalf("scan collcollate: %v", err)
+	}
+	if !strings.Contains(strings.ToUpper(collate), "POSIX") {
+		t.Errorf("live collcollate = %q, want it to reflect the POSIX edit (was 'C')", collate)
+	}
+}
+
 // TestRoundtripIndexVariants applies a table carrying every index variant —
 // unique, multi-column sort order (DESC/ASC + NULLS), partial (WHERE), covering
 // (INCLUDE), expression, and a non-btree method — and asserts zero drift. This
@@ -175,6 +291,23 @@ func TestRoundtripIndexVariants(t *testing.T) {
         i_cover (a) INCLUDE (c, b);
         i_expr (lower(e));
         i_gin (to_tsvector('english', e)) USING gin;
+        i_nulls_nd UNIQUE (b) NULLS NOT DISTINCT;
+        i_with (a) WITH (fillfactor = 70);
     }
+}`)
+}
+
+// TestRoundtripIndexModeB is the live-catalog guard for the Mode-B (RFC §4.8
+// singular keyword) fix: previously "INDEX name (...)" outside an INDICES{}
+// block was a hard parse error, so it could never reach a live database at
+// all. This proves the whole pipeline — parse Mode-B, build IR, emit CREATE
+// INDEX, introspect back — round-trips against real PostgreSQL with zero
+// drift, and that it can be freely mixed with a Mode-A INDICES{} block on the
+// same table.
+func TestRoundtripIndexModeB(t *testing.T) {
+	assertOpaqueRoundtrip(t, `TABLE t (a INTEGER, b INTEGER) {
+    INDEX i_modeb_a (a);
+    INDEX i_modeb_uniq UNIQUE (b) NULLS NOT DISTINCT;
+    INDICES { i_modea_ab (a, b); }
 }`)
 }

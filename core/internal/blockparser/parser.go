@@ -416,10 +416,17 @@ func (b *blockParser) parseBlock(pos pipeline.SourcePos) (pipeline.BlockAST, err
 			err = b.parseEnable(&ast, dirPos)
 		case "FORCE":
 			err = b.parseForce(&ast, dirPos)
-		case "INDICES", "INDEX":
+		case "INDICES":
 			var indices []pipeline.IndexDef
 			indices, err = b.parseIndices(dirPos)
 			ast.Indices = append(ast.Indices, indices...)
+		case "INDEX":
+			// Mode B (§4.8 Dual Definition Modes): the singular keyword precedes
+			// a single entry outside a plural block, so unlike INDICES this must
+			// not consume a wrapping '{ }'.
+			var idx pipeline.IndexDef
+			idx, err = b.parseOneIndex()
+			ast.Indices = append(ast.Indices, idx)
 		case "COLUMN":
 			var col pipeline.ColumnBlock
 			col, err = b.parseColumnBlock(dirPos)
@@ -717,6 +724,23 @@ func (b *blockParser) parseOneIndex() (pipeline.IndexDef, error) {
 				if s != "" {
 					idx.Include = append(idx.Include, pipeline.Identifier{Name: s})
 				}
+			}
+		case "NULLS":
+			b.readWord()
+			b.skipWS()
+			w2 := strings.ToUpper(b.readWord())
+			switch w2 {
+			case "NOT":
+				b.skipWS()
+				w3 := strings.ToUpper(b.readWord())
+				if w3 != "DISTINCT" {
+					return idx, b.errorf("expected DISTINCT after NULLS NOT, got %q", w3)
+				}
+				idx.NullsNotDistinct = true
+			case "DISTINCT":
+				// Explicit spelling of the default; nothing to record.
+			default:
+				return idx, b.errorf("expected NOT or DISTINCT after NULLS, got %q", w2)
 			}
 		case "WITH":
 			b.readWord()

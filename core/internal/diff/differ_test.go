@@ -3219,3 +3219,53 @@ func TestDiffCreateIndexWhereAndInclude(t *testing.T) {
 		t.Errorf("missing WHERE predicate: %s", sql)
 	}
 }
+
+// TestDiffCreateIndexNullsNotDistinctAndWith is the regression guard for the
+// S-tier index gap: WITH storage params and NULLS NOT DISTINCT were parsed
+// into ir.Index (idx.With already existed, unused downstream) but createIndex
+// silently dropped them from the emitted CREATE INDEX SQL — lossless-by-
+// omission, same class of gap INCLUDE/WHERE used to have before they were
+// wired up.
+func TestDiffCreateIndexNullsNotDistinctAndWith(t *testing.T) {
+	d := New()
+	desired := []pipeline.IRObject{
+		&ir.Table{
+			Schema:  "public",
+			Name:    "t",
+			Columns: []*ir.Column{{Name: "a", Type: ir.TypeRef{Name: "int4"}}},
+			Indexes: []*ir.Index{
+				{
+					Name:             "t_a_idx",
+					Unique:           true,
+					Columns:          []pipeline.IndexColumn{{Name: "a"}},
+					NullsNotDistinct: true,
+					With:             []pipeline.StorageParam{{Key: "fillfactor", Value: "70"}},
+				},
+			},
+		},
+	}
+	ops, err := d.Diff(desired, &pipeline.Snapshot{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var sql string
+	for _, o := range ops {
+		if strings.Contains(o.SQL(), "CREATE") && strings.Contains(o.SQL(), "INDEX") {
+			sql = o.SQL()
+			break
+		}
+	}
+	if sql == "" {
+		t.Fatalf("no CREATE INDEX op: %v", sqlList(ops))
+	}
+	if !strings.Contains(sql, "NULLS NOT DISTINCT") {
+		t.Errorf("missing NULLS NOT DISTINCT: %s", sql)
+	}
+	if !strings.Contains(sql, "WITH (fillfactor=70)") {
+		t.Errorf("missing WITH clause: %s", sql)
+	}
+	// Grammar order: ... columns ... NULLS NOT DISTINCT ... WITH ( ... ) ...
+	if strings.Index(sql, "NULLS NOT DISTINCT") > strings.Index(sql, "WITH (") {
+		t.Errorf("NULLS NOT DISTINCT must precede WITH per PG grammar: %s", sql)
+	}
+}

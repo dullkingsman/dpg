@@ -704,6 +704,16 @@ func renderIndex(b *strings.Builder, idx *ir.Index, fmtOpts format.Options) {
 		// Bare column names; createIndex quotes them when generating SQL.
 		fmt.Fprintf(b, " %s (%s)", kw("INCLUDE"), strings.Join(idx.Include, ", "))
 	}
+	if idx.NullsNotDistinct {
+		fmt.Fprintf(b, " %s %s %s", kw("NULLS"), kw("NOT"), kw("DISTINCT"))
+	}
+	if len(idx.With) > 0 {
+		parts := make([]string, len(idx.With))
+		for i, p := range idx.With {
+			parts[i] = p.Key + "=" + p.Value
+		}
+		fmt.Fprintf(b, " %s (%s)", kw("WITH"), strings.Join(parts, ", "))
+	}
 	if idx.Where != nil {
 		fmt.Fprintf(b, " %s %s", kw("WHERE"), *idx.Where)
 	}

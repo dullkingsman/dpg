@@ -166,6 +166,87 @@ func TestMultipleIndices(t *testing.T) {
 	}
 }
 
+// Mode B (§4.8 Dual Definition Modes): the singular INDEX keyword precedes a
+// single entry outside a plural block and must parse without a wrapping '{ }'
+// (previously this went through the same brace-requiring parser as INDICES
+// and was a hard parse error, not just "unsupported").
+func TestIndexModeBSingularKeyword(t *testing.T) {
+	ast := parse(t, `INDEX idx_email (email);`)
+	if len(ast.Indices) != 1 {
+		t.Fatalf("expected 1 index, got %d", len(ast.Indices))
+	}
+	idx := ast.Indices[0]
+	if idx.Name.Name != "idx_email" {
+		t.Errorf("index name: got %q", idx.Name.Name)
+	}
+	if len(idx.Columns) != 1 || idx.Columns[0].Name != "email" {
+		t.Errorf("index columns: got %v", idx.Columns)
+	}
+}
+
+func TestIndexModeBWithWhereAndUsing(t *testing.T) {
+	ast := parse(t, `INDEX idx_status (status) USING gin WHERE (status != 'deleted');`)
+	if len(ast.Indices) != 1 {
+		t.Fatalf("expected 1 index, got %d", len(ast.Indices))
+	}
+	idx := ast.Indices[0]
+	if idx.Method == nil || idx.Method.Name != "gin" {
+		t.Errorf("Method: got %v", idx.Method)
+	}
+	if idx.Where == nil {
+		t.Fatal("expected WHERE clause")
+	}
+}
+
+func TestIndexModeAAndBCanMix(t *testing.T) {
+	src := `
+		INDICES { idx_a (a); }
+		INDEX idx_b (b);
+	`
+	ast := parse(t, src)
+	if len(ast.Indices) != 2 {
+		t.Fatalf("expected 2 indices (one per mode), got %d", len(ast.Indices))
+	}
+}
+
+func TestIndexNullsNotDistinct(t *testing.T) {
+	ast := parse(t, `INDICES { idx_uq UNIQUE (email) NULLS NOT DISTINCT; }`)
+	idx := ast.Indices[0]
+	if !idx.NullsNotDistinct {
+		t.Error("expected NullsNotDistinct = true")
+	}
+}
+
+// The explicit-default spelling ("NULLS DISTINCT") must parse (not error) but
+// records no special state — it's PG's default made explicit.
+func TestIndexNullsDistinctExplicitDefault(t *testing.T) {
+	ast := parse(t, `INDICES { idx_uq UNIQUE (email) NULLS DISTINCT; }`)
+	idx := ast.Indices[0]
+	if idx.NullsNotDistinct {
+		t.Error("expected NullsNotDistinct = false for explicit NULLS DISTINCT")
+	}
+}
+
+func TestIndexNullsInvalidSuffix(t *testing.T) {
+	if err := parseErr(t, `INDICES { idx_uq UNIQUE (email) NULLS MAYBE; }`); err == nil {
+		t.Error("expected parse error for NULLS MAYBE")
+	}
+}
+
+func TestIndexWithStorageParams(t *testing.T) {
+	ast := parse(t, `INDICES { idx_a (a) WITH (fillfactor = 70, deduplicate_items = off); }`)
+	idx := ast.Indices[0]
+	if len(idx.With) != 2 {
+		t.Fatalf("expected 2 storage params, got %d: %v", len(idx.With), idx.With)
+	}
+	if idx.With[0].Key != "fillfactor" || idx.With[0].Value != "70" {
+		t.Errorf("param[0]: got %+v", idx.With[0])
+	}
+	if idx.With[1].Key != "deduplicate_items" || idx.With[1].Value != "off" {
+		t.Errorf("param[1]: got %+v", idx.With[1])
+	}
+}
+
 // ── COLUMN ────────────────────────────────────────────────────────────────────
 
 func TestColumnComment(t *testing.T) {

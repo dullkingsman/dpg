@@ -1431,6 +1431,7 @@ func blockIndexToIR(idx pipeline.IndexDef) *Index {
 	for _, inc := range idx.Include {
 		ir.Include = append(ir.Include, inc.Name)
 	}
+	ir.NullsNotDistinct = idx.NullsNotDistinct
 	ir.With = idx.With
 	if idx.Tablespace != nil {
 		ir.Tablespace = &idx.Tablespace.Name

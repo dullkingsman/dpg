@@ -43,16 +43,17 @@ type IndexColumn struct {
 
 // IndexDef is a DPG INDICES { } entry.
 type IndexDef struct {
-	Name         Identifier
-	Unique       bool
-	Method       *Identifier
-	Columns      []IndexColumn
-	Where        *RawExpr
-	Include      []Identifier
-	With         []StorageParam
-	Tablespace   *Identifier
-	Concurrently bool
-	Pos          SourcePos
+	Name             Identifier
+	Unique           bool
+	Method           *Identifier
+	Columns          []IndexColumn
+	Where            *RawExpr
+	Include          []Identifier
+	NullsNotDistinct bool
+	With             []StorageParam
+	Tablespace       *Identifier
+	Concurrently     bool
+	Pos              SourcePos
 }
 
 // GrantEntry is a single GRANTS directive.

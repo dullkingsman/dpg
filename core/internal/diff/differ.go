@@ -1145,6 +1145,21 @@ func createIndex(schema, table string, idx *ir.Index) []pipeline.DiffOp {
 		}
 		b.WriteString(")")
 	}
+	if idx.NullsNotDistinct {
+		b.WriteString(" NULLS NOT DISTINCT")
+	}
+	if len(idx.With) > 0 {
+		b.WriteString(" WITH (")
+		for i, p := range idx.With {
+			if i > 0 {
+				b.WriteString(", ")
+			}
+			b.WriteString(p.Key)
+			b.WriteString("=")
+			b.WriteString(p.Value)
+		}
+		b.WriteString(")")
+	}
 	if idx.Where != nil && *idx.Where != "" {
 		b.WriteString(" WHERE ")
 		b.WriteString(*idx.Where)

@@ -1,6 +1,7 @@
 package introspect
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/dullkingsman/dpg/internal/pipeline"
@@ -86,6 +87,54 @@ func TestParseIndexDefInvalid(t *testing.T) {
 	// Empty string → nil.
 	if got := parseIndexDef(""); got != nil {
 		t.Errorf("expected nil for empty def, got %v", got)
+	}
+}
+
+// ── parseIndexWith ────────────────────────────────────────────────────────────
+
+func TestParseIndexWith(t *testing.T) {
+	got := parseIndexWith("CREATE INDEX idx ON public.t USING btree (a) WITH (fillfactor='70') WHERE (a > 0)")
+	want := []pipeline.StorageParam{{Key: "fillfactor", Value: "'70'"}}
+	if len(got) != len(want) {
+		t.Fatalf("got %d params, want %d: %v", len(got), len(want), got)
+	}
+	if got[0] != want[0] {
+		t.Errorf("param[0]: got %+v, want %+v", got[0], want[0])
+	}
+}
+
+func TestParseIndexWithMultipleParams(t *testing.T) {
+	got := parseIndexWith("CREATE INDEX idx ON public.t USING btree (a) WITH (fillfactor='70', deduplicate_items='off')")
+	if len(got) != 2 {
+		t.Fatalf("expected 2 params, got %d: %v", len(got), got)
+	}
+	if got[1].Key != "deduplicate_items" || got[1].Value != "'off'" {
+		t.Errorf("param[1]: got %+v", got[1])
+	}
+}
+
+func TestParseIndexWithAbsent(t *testing.T) {
+	if got := parseIndexWith("CREATE INDEX idx ON public.t USING btree (a)"); got != nil {
+		t.Errorf("expected nil when no WITH clause, got %v", got)
+	}
+}
+
+// ── NULLS NOT DISTINCT extraction ─────────────────────────────────────────────
+
+func TestNullsNotDistinctDetection(t *testing.T) {
+	cases := []struct {
+		def  string
+		want bool
+	}{
+		{"CREATE UNIQUE INDEX idx ON public.t USING btree (a) NULLS NOT DISTINCT", true},
+		{"CREATE UNIQUE INDEX idx ON public.t USING btree (a)", false},
+		{"CREATE INDEX idx ON public.t USING btree (a)", false},
+	}
+	for _, tc := range cases {
+		got := strings.Contains(strings.ToUpper(tc.def), "NULLS NOT DISTINCT")
+		if got != tc.want {
+			t.Errorf("NULLS NOT DISTINCT detection for %q: got %v, want %v", tc.def, got, tc.want)
+		}
 	}
 }
 

@@ -77,16 +77,17 @@ type Identity struct {
 
 // Index is a CREATE INDEX / INDICES entry.
 type Index struct {
-	Name         string
-	Unique       bool
-	Method       string // "btree" (default), "hash", "gin", "gist", etc.
-	Columns      []pipeline.IndexColumn
-	Where        *string // partial index predicate
-	Include      []string
-	With         []pipeline.StorageParam
-	Tablespace   *string
-	Concurrently bool
-	Pos          pipeline.SourcePos
+	Name             string
+	Unique           bool
+	Method           string // "btree" (default), "hash", "gin", "gist", etc.
+	Columns          []pipeline.IndexColumn
+	Where            *string // partial index predicate
+	Include          []string
+	NullsNotDistinct bool // UNIQUE ... NULLS NOT DISTINCT
+	With             []pipeline.StorageParam
+	Tablespace       *string
+	Concurrently     bool
+	Pos              pipeline.SourcePos
 }
 
 // Constraint is a table or column constraint.

@@ -552,12 +552,14 @@ ORDER  BY n.nspname, c.relname, i.relname`
 			where = &w
 		}
 		t.Indexes = append(t.Indexes, &ir.Index{
-			Name:    name,
-			Unique:  unique,
-			Method:  method,
-			Columns: parseIndexDef(def),
-			Include: parseIndexInclude(def),
-			Where:   where,
+			Name:             name,
+			Unique:           unique,
+			Method:           method,
+			Columns:          parseIndexDef(def),
+			Include:          parseIndexInclude(def),
+			NullsNotDistinct: strings.Contains(strings.ToUpper(def), "NULLS NOT DISTINCT"),
+			With:             parseIndexWith(def),
+			Where:            where,
 		})
 	}
 	return rs.Err()
@@ -620,6 +622,32 @@ func parseIndexInclude(def string) []string {
 		}
 	}
 	return cols
+}
+
+// parseIndexWith extracts WITH (...) storage parameters from a
+// pg_get_indexdef string, e.g. "… (a) WITH (fillfactor='70') WHERE …".
+func parseIndexWith(def string) []pipeline.StorageParam {
+	upper := strings.ToUpper(def)
+	i := strings.Index(upper, " WITH (")
+	if i < 0 {
+		return nil
+	}
+	rest := def[i+len(" WITH ("):]
+	end := strings.IndexByte(rest, ')')
+	if end < 0 {
+		return nil
+	}
+	var params []pipeline.StorageParam
+	for _, part := range strings.Split(rest[:end], ",") {
+		part = strings.TrimSpace(part)
+		if kv := strings.SplitN(part, "=", 2); len(kv) == 2 {
+			params = append(params, pipeline.StorageParam{
+				Key:   strings.TrimSpace(kv[0]),
+				Value: strings.TrimSpace(kv[1]),
+			})
+		}
+	}
+	return params
 }
 
 func splitIndexColumns(s string) []pipeline.IndexColumn {

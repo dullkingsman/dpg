@@ -301,6 +301,8 @@ func TestRenderIndexVariantsRoundtrip(t *testing.T) {
 			{Name: "i_cover", Columns: []pipeline.IndexColumn{{Name: "a"}}, Include: []string{"MixedCol", "b"}},
 			{Name: "i_expr", Columns: []pipeline.IndexColumn{{Expr: &pipeline.RawExpr{Text: "lower(\"MixedCol\")"}}}},
 			{Name: "i_gin", Method: "gin", Columns: []pipeline.IndexColumn{{Expr: &pipeline.RawExpr{Text: "to_tsvector('english', \"MixedCol\")"}}}},
+			{Name: "i_nulls_nd", Unique: true, Columns: []pipeline.IndexColumn{{Name: "a"}}, NullsNotDistinct: true},
+			{Name: "i_with", Columns: []pipeline.IndexColumn{{Name: "a"}}, With: []pipeline.StorageParam{{Key: "fillfactor", Value: "70"}}},
 		},
 	}
 	var b strings.Builder
@@ -323,7 +325,7 @@ func TestRenderIndexVariantsRoundtrip(t *testing.T) {
 	byName := map[string]string{}
 	for _, o := range ops {
 		sql := o.SQL()
-		for _, n := range []string{"i_uniq", "i_sort", "i_partial", "i_cover", "i_expr", "i_gin"} {
+		for _, n := range []string{"i_uniq", "i_sort", "i_partial", "i_cover", "i_expr", "i_gin", "i_nulls_nd", "i_with"} {
 			if strings.Contains(sql, `"`+n+`"`) {
 				byName[n] = sql
 			}
@@ -332,12 +334,14 @@ func TestRenderIndexVariantsRoundtrip(t *testing.T) {
 	// Each variant's generated SQL must be correct — no double-quoting, sort-order
 	// preserved, INCLUDE present, WHERE present, method carried.
 	checks := map[string][]string{
-		"i_uniq":    {`CREATE UNIQUE INDEX "i_uniq"`, `("a")`},
-		"i_sort":    {`"MixedCol" DESC NULLS LAST`, `"b" ASC`},
-		"i_partial": {`("b")`, `WHERE b > 0`},
-		"i_cover":   {`("a")`, `INCLUDE ("MixedCol", "b")`},
-		"i_expr":    {`(lower("MixedCol"))`},
-		"i_gin":     {`USING gin`, `to_tsvector('english', "MixedCol")`},
+		"i_uniq":     {`CREATE UNIQUE INDEX "i_uniq"`, `("a")`},
+		"i_sort":     {`"MixedCol" DESC NULLS LAST`, `"b" ASC`},
+		"i_partial":  {`("b")`, `WHERE b > 0`},
+		"i_cover":    {`("a")`, `INCLUDE ("MixedCol", "b")`},
+		"i_expr":     {`(lower("MixedCol"))`},
+		"i_gin":      {`USING gin`, `to_tsvector('english', "MixedCol")`},
+		"i_nulls_nd": {`CREATE UNIQUE INDEX "i_nulls_nd"`, `NULLS NOT DISTINCT`},
+		"i_with":     {`("a")`, `WITH (fillfactor=70)`},
 	}
 	for name, wants := range checks {
 		sql, ok := byName[name]
