@@ -4,6 +4,7 @@ package introspect_test
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"github.com/dullkingsman/dpg/internal/executor"
@@ -127,6 +128,73 @@ func TestIntrospectColumnStorageIsTypeDefault(t *testing.T) {
 	}
 	if col := byName["overridden"]; col == nil || col.Storage == nil || *col.Storage != "EXTERNAL" || col.StorageIsTypeDefault {
 		t.Errorf("overridden: got Storage=%v StorageIsTypeDefault=%v, want EXTERNAL/false", col.Storage, col != nil && col.StorageIsTypeDefault)
+	}
+}
+
+// TestIntrospectFunctionAndProcedureBody is the live regression guard for
+// the dump function/procedure fix: pg_proc.prosrc was previously selected
+// only to compute BodyHash, then discarded — dump had no raw body text to
+// work with, so it could only emit a placeholder comment for a function
+// (and had no case at all for procedures). Confirms the raw body now lands
+// on Attrs.Body against a real PostgreSQL 17 catalog for both.
+func TestIntrospectFunctionAndProcedureBody(t *testing.T) {
+	connStr := testpg.Start(t)
+	ctx := context.Background()
+
+	conn, err := executor.Connect(ctx, connStr)
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	defer conn.Close(ctx)
+
+	_, err = conn.Exec(ctx, `
+CREATE FUNCTION public.add_ints(a integer, b integer) RETURNS integer
+LANGUAGE plpgsql IMMUTABLE AS $$
+BEGIN
+    RETURN a + b;
+END;
+$$;
+
+CREATE PROCEDURE public.recalc() LANGUAGE plpgsql AS $$
+BEGIN
+    NULL;
+END;
+$$;`)
+	if err != nil {
+		t.Fatalf("create function/procedure: %v", err)
+	}
+
+	ci := introspect.New()
+	objects, err := ci.Introspect(ctx, conn)
+	if err != nil {
+		t.Fatalf("introspect: %v", err)
+	}
+
+	var fn *ir.Function
+	var proc *ir.Procedure
+	for _, obj := range objects {
+		switch o := obj.(type) {
+		case *ir.Function:
+			if o.Name == "add_ints" {
+				fn = o
+			}
+		case *ir.Procedure:
+			if o.Name == "recalc" {
+				proc = o
+			}
+		}
+	}
+	if fn == nil {
+		t.Fatal("introspect: function public.add_ints not found")
+	}
+	if !strings.Contains(fn.Attrs.Body, "RETURN a + b") {
+		t.Errorf("function Attrs.Body = %q, want it to contain the real function body", fn.Attrs.Body)
+	}
+	if proc == nil {
+		t.Fatal("introspect: procedure public.recalc not found")
+	}
+	if !strings.Contains(proc.Attrs.Body, "NULL") {
+		t.Errorf("procedure Attrs.Body = %q, want it to contain the real procedure body", proc.Attrs.Body)
 	}
 }
 

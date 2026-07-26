@@ -952,6 +952,7 @@ ORDER  BY n.nspname, p.proname, args`
 				BodyHash: ir.HashBody(prosrc),
 				Attrs: ir.FuncAttrs{
 					Language: lang,
+					Body:     prosrc,
 				},
 			}
 			// Use argTypes (type-only, from oidvectortypes) to build Args so that
@@ -977,6 +978,7 @@ ORDER  BY n.nspname, p.proname, args`
 					Volatility:  volatility,
 					SecurityDef: secDef,
 					Strict:      strict,
+					Body:        prosrc,
 				},
 			}
 			// Use argTypes (type-only) so QualifiedName matches argsKey() in IR builder.

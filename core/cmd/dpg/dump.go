@@ -481,7 +481,46 @@ func renderObjectDPG(b *strings.Builder, obj pipeline.IRObject, fmtOpts format.O
 		fmt.Fprintf(b, "\n%s %s %s %s;\n", kw("VIEW"), quoteIdentIfNeeded(o.Name), kw("AS"), o.Query)
 
 	case *ir.Function:
-		fmt.Fprintf(b, "\n-- function %s (body omitted; use source files for full definition)\n", o.QualifiedName())
+		b.WriteString("\n")
+		b.WriteString(kw("FUNCTION"))
+		b.WriteString(" ")
+		b.WriteString(quoteIdentIfNeeded(o.Name))
+		b.WriteString("(")
+		writeFuncArgs(b, o.Args)
+		b.WriteString(") ")
+		b.WriteString(kw("RETURNS"))
+		b.WriteString(" ")
+		b.WriteString(o.ReturnType.String())
+		b.WriteString(" ")
+		b.WriteString(kw("LANGUAGE"))
+		b.WriteString(" ")
+		b.WriteString(o.Attrs.Language)
+		if o.Attrs.Volatility != "" && o.Attrs.Volatility != "VOLATILE" {
+			b.WriteString(" ")
+			b.WriteString(kw(o.Attrs.Volatility))
+		}
+		if o.Attrs.Strict {
+			fmt.Fprintf(b, " %s", kw("STRICT"))
+		}
+		if o.Attrs.SecurityDef {
+			fmt.Fprintf(b, " %s %s", kw("SECURITY"), kw("DEFINER"))
+		}
+		fmt.Fprintf(b, " %s $$%s$$", kw("AS"), o.Attrs.Body)
+		writeFuncBlock(b, ind, fmtOpts, o.Comment, o.Grants)
+
+	case *ir.Procedure:
+		b.WriteString("\n")
+		b.WriteString(kw("PROCEDURE"))
+		b.WriteString(" ")
+		b.WriteString(quoteIdentIfNeeded(o.Name))
+		b.WriteString("(")
+		writeFuncArgs(b, o.Args)
+		b.WriteString(") ")
+		b.WriteString(kw("LANGUAGE"))
+		b.WriteString(" ")
+		b.WriteString(o.Attrs.Language)
+		fmt.Fprintf(b, " %s $$%s$$", kw("AS"), o.Attrs.Body)
+		writeFuncBlock(b, ind, fmtOpts, o.Comment, o.Grants)
 
 	case *ir.Type:
 		switch o.Variant {
@@ -594,6 +633,62 @@ func renderObjectDPG(b *strings.Builder, obj pipeline.IRObject, fmtOpts format.O
 	case *ir.TSTemplate:
 		renderOpaqueBody(b, o.Body)
 	}
+}
+
+// writeFuncArgs renders a FUNCTION/PROCEDURE argument list's interior
+// ("mode name type [DEFAULT expr]", comma-joined) — shared between the two,
+// since their parameter syntax is identical.
+func writeFuncArgs(b *strings.Builder, args []ir.FuncArg) {
+	for i, a := range args {
+		if i > 0 {
+			b.WriteString(", ")
+		}
+		if a.Mode != "" && a.Mode != "IN" {
+			b.WriteString(a.Mode)
+			b.WriteString(" ")
+		}
+		if a.Name != "" {
+			b.WriteString(a.Name)
+			b.WriteString(" ")
+		}
+		b.WriteString(a.Type.String())
+		if a.Default != nil {
+			b.WriteString(" DEFAULT ")
+			b.WriteString(*a.Default)
+		}
+	}
+}
+
+// writeFuncBlock terminates a FUNCTION/PROCEDURE declaration: a bare ";" when
+// there's no COMMENT/GRANT to declare, or a "{ }" block carrying them when
+// there is. Comment/Grants are genuinely compared by diffFunction/
+// diffProcedure but were previously never rendered by dump at all (the
+// object type had no case in this switch whatsoever for PROCEDURE, and
+// FUNCTION rendered only a placeholder comment) — a dumped project could
+// never detect drift on either, or even reconstruct a function's/procedure's
+// body to begin with.
+func writeFuncBlock(b *strings.Builder, ind string, fmtOpts format.Options, comment *string, grants []ir.Grant) {
+	kw := fmtOpts.Keyword
+	if comment == nil && len(grants) == 0 {
+		b.WriteString(";\n")
+		return
+	}
+	b.WriteString(" {\n")
+	if comment != nil {
+		fmt.Fprintf(b, "%s%s %s;\n", ind, kw("COMMENT"), sqlStringLit(*comment))
+	}
+	for _, g := range grants {
+		priv := "ALL"
+		if len(g.Privileges) > 0 {
+			priv = strings.Join(g.Privileges, ", ")
+		}
+		fmt.Fprintf(b, "%s%s %s %s %s", ind, kw("GRANT"), priv, kw("TO"), strings.Join(g.Roles, ", "))
+		if g.WithGrant {
+			fmt.Fprintf(b, " %s %s %s", kw("WITH"), kw("GRANT"), kw("OPTION"))
+		}
+		b.WriteString(";\n")
+	}
+	b.WriteString("}\n")
 }
 
 // renderOpaqueBody writes a reconstructed CREATE statement (already

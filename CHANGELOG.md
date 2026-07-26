@@ -41,6 +41,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`dump` could not reconstruct a `FUNCTION`'s body at all, and dropped
+  every `PROCEDURE` from generated source entirely.** A dumped function
+  rendered only `-- function ... (body omitted; use source files for full
+  definition)` — a comment, not a working declaration — and `PROCEDURE` had
+  no case at all in `dump`'s object-rendering switch, so a database
+  containing procedures produced source silently missing them, with no
+  error or warning. Root cause: introspection selected `pg_proc.prosrc`
+  only to compute a change-detection hash (`BodyHash`), then discarded the
+  raw text; it was never stored anywhere `dump` could read it from, even
+  though `ir.Function`/`ir.Procedure` already carry an `Attrs.Body` field
+  (already populated correctly when compiling from `.dpg` source — this was
+  purely an introspection-side gap). Fixed by also storing `prosrc` into
+  `Attrs.Body`, and giving `dump` real rendering logic for both object
+  types: full signature, `RETURNS`/`LANGUAGE`/volatility/`STRICT`/`SECURITY
+  DEFINER` (as applicable), the actual `AS $$...$$` body, and a trailing
+  block for `COMMENT`/`GRANT` (also previously never rendered for either
+  type, despite being genuinely compared by `diffFunction`/`diffProcedure`).
+  `PARALLEL`/`COST`/`ROWS` remain unrendered, since introspection doesn't
+  capture them either — a narrower, separate residual gap, not addressed
+  here. `AGGREGATE` is unaffected by this fix and remains a deliberate,
+  separate limitation: reconstructing a real `CREATE AGGREGATE` from
+  catalog fields (`sfunc`/`stype`/`finalfunc`/etc.) isn't attempted at all,
+  and `apply`/`plan` already error explicitly if an aggregate's body was
+  never captured, rather than silently applying an incomplete definition.
 - **An inline, unnamed `PRIMARY KEY`/`UNIQUE`/`FOREIGN KEY` (e.g.
   `id BIGINT PRIMARY KEY`, with no explicit `CONSTRAINT` name) produced a
   self-inconsistent `DROP CONSTRAINT` + `ADD` pair on every single

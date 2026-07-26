@@ -377,6 +377,101 @@ func TestRenderOwnerAndColumnStorage(t *testing.T) {
 	}
 }
 
+// TestRenderFunctionAndProcedureBody guards the fix for a much deeper dump
+// gap than a rendering tweak: FUNCTION previously rendered only a
+// placeholder comment ("body omitted"), and PROCEDURE had no case in
+// renderObjectDPG's switch at all — dump silently dropped every procedure
+// from generated source. dump can now actually reconstruct both, using
+// Attrs.Body (already populated by the IR builder from source, and now also
+// by introspection from pg_proc.prosrc). Also guards the "no CREATE verb"
+// rule (RFC §3.4-adjacent convention already enforced elsewhere in this
+// file, e.g. renderOpaqueBody) — a naive port of differ.go's
+// buildFunctionSQL/createProcedure (which DO emit CREATE, since that's real
+// SQL, not DPG source) would have produced unparseable DPG source.
+func TestRenderFunctionAndProcedureBody(t *testing.T) {
+	fmtOpts := format.Options{IndentSize: 4, KeywordCase: "upper"}
+	fnComment := "adds two integers"
+	fnBody := "BEGIN\n    RETURN a + b;\nEND;"
+	procBody := "BEGIN\n    NULL;\nEND;"
+	objs := []pipeline.IRObject{
+		&ir.Function{
+			Schema: "public", Name: "add_ints",
+			Args: []ir.FuncArg{
+				{Name: "a", Type: ir.TypeRef{Name: "integer"}},
+				{Name: "b", Type: ir.TypeRef{Name: "integer"}},
+			},
+			ReturnType: ir.TypeRef{Name: "integer"},
+			Attrs:      ir.FuncAttrs{Language: "plpgsql", Volatility: "IMMUTABLE", Strict: true, Body: fnBody},
+			Comment:    &fnComment,
+			Grants:     []ir.Grant{{Privileges: []string{"EXECUTE"}, Roles: []string{"app_user"}}},
+		},
+		&ir.Procedure{
+			Schema: "public", Name: "recalc",
+			Attrs: ir.FuncAttrs{Language: "plpgsql", Body: procBody},
+		},
+	}
+	var b strings.Builder
+	for _, o := range objs {
+		renderObjectDPG(&b, o, fmtOpts)
+	}
+	rendered := b.String()
+
+	if strings.Contains(rendered, "CREATE FUNCTION") || strings.Contains(rendered, "CREATE PROCEDURE") {
+		t.Errorf("DPG source must not begin a declaration with CREATE, got:\n%s", rendered)
+	}
+	if !strings.Contains(rendered, "FUNCTION add_ints(") {
+		t.Errorf("expected bare FUNCTION declaration, got:\n%s", rendered)
+	}
+	if !strings.Contains(rendered, "RETURN a + b;") {
+		t.Errorf("expected the real function body rendered, not a placeholder, got:\n%s", rendered)
+	}
+	if !strings.Contains(rendered, "IMMUTABLE") || !strings.Contains(rendered, "STRICT") {
+		t.Errorf("expected IMMUTABLE/STRICT rendered, got:\n%s", rendered)
+	}
+	if !strings.Contains(rendered, "COMMENT 'adds two integers';") {
+		t.Errorf("expected function COMMENT, got:\n%s", rendered)
+	}
+	if !strings.Contains(rendered, "GRANT EXECUTE TO app_user;") {
+		t.Errorf("expected function GRANT, got:\n%s", rendered)
+	}
+	if !strings.Contains(rendered, "PROCEDURE recalc(") {
+		t.Errorf("expected a PROCEDURE declaration (previously dropped entirely), got:\n%s", rendered)
+	}
+	if !strings.Contains(rendered, "NULL;") {
+		t.Errorf("expected the real procedure body rendered, got:\n%s", rendered)
+	}
+
+	dir := t.TempDir()
+	f := filepath.Join(dir, "schema.dpg")
+	if err := os.WriteFile(f, []byte(rendered), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	compiled, err := compiler.Compile([]string{f}, dir, pipeline.Default)
+	if err != nil {
+		t.Fatalf("function/procedure dump did not recompile: %v\n---\n%s", err, rendered)
+	}
+	var sawFunc, sawProc bool
+	for _, o := range compiled {
+		switch v := o.(type) {
+		case *ir.Function:
+			if v.Name == "add_ints" {
+				sawFunc = v.BodyHash == ir.HashBody(fnBody) && v.Comment != nil && *v.Comment == fnComment &&
+					len(v.Grants) == 1 && v.Attrs.Volatility == "IMMUTABLE" && v.Attrs.Strict
+			}
+		case *ir.Procedure:
+			if v.Name == "recalc" {
+				sawProc = v.BodyHash == ir.HashBody(procBody)
+			}
+		}
+	}
+	if !sawFunc {
+		t.Error("recompile missing function body/comment/grant/attrs fidelity")
+	}
+	if !sawProc {
+		t.Error("recompile missing procedure body fidelity")
+	}
+}
+
 // TestRenderIndexVariantsRoundtrip guards the full render → recompile → createIndex
 // chain for every index variant. Apply runs createIndex's SQL, so asserting it
 // here (fast) is equivalent to dump → apply for the index class. Regressions in
