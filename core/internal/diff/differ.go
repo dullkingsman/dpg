@@ -2944,7 +2944,7 @@ func diffTriggers(schema, table string, o *ir.Table, snap *snapshot.SnapTable) [
 		} else if trg.When != existing.When ||
 			strings.Join(trg.Events, ", ") != existing.Events ||
 			trg.ForEach != existing.ForEach ||
-			trg.Function != existing.Function {
+			qualifyFuncForCompare(trg.Function) != qualifyFuncForCompare(existing.Function) {
 			ops = append(ops, safeOp(
 				fmt.Sprintf("DROP TRIGGER IF EXISTS %s ON %s;", quoteIdent(trg.Name), tblIdent),
 				trg.Pos,
@@ -2953,6 +2953,21 @@ func diffTriggers(schema, table string, o *ir.Table, snap *snapshot.SnapTable) [
 		}
 	}
 	return ops
+}
+
+// qualifyFuncForCompare normalizes a trigger's EXECUTE FUNCTION reference for
+// comparison purposes only (never for rendering — createTrigger still emits
+// whatever the user wrote). Introspection always returns a fully schema-
+// qualified name (funcSchema + "." + funcName, from a live pg_proc join),
+// while hand-written source commonly references a function unqualified,
+// relying on the default "public" schema — the same convention DPG's own
+// objects get via applySchemaContext. Comparing raw strings treated every
+// unqualified trigger function as changed on every verify/plan --live.
+func qualifyFuncForCompare(f string) string {
+	if strings.Contains(f, ".") {
+		return f
+	}
+	return "public." + f
 }
 
 var _ pipeline.Differ = (*Differ)(nil)

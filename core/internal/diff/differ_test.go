@@ -1827,6 +1827,153 @@ func TestDiffMaterViewWithNoDataChangedIsManual(t *testing.T) {
 
 // ── Partitioning ─────────────────────────────────────────────────────────────
 
+// ── TRIGGERS diffing ─────────────────────────────────────────────────────────
+//
+// No unit test exercised diffTriggers at all before now — the function-
+// qualification mismatch below (introspection always returns "schema.func",
+// hand-written source commonly writes an unqualified "func") was invisible at
+// both the unit and (until a live partition test happened to exercise the
+// full introspect+diff round trip) integration level.
+
+func TestDiffTriggerUnchangedIsNoop(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.t", &snapshot.SnapObject{
+		Kind: "table",
+		Table: &snapshot.SnapTable{
+			Schema:  "public",
+			Name:    "t",
+			Columns: []snapshot.SnapColumn{{Name: "id", Type: "bigint"}},
+			Triggers: []snapshot.SnapTrigger{
+				{Name: "trg_a", When: "AFTER", Events: "INSERT", ForEach: "ROW", Function: "public.trg_touch"},
+			},
+		},
+	})
+	desired := []pipeline.IRObject{
+		&ir.Table{
+			Schema:  "public",
+			Name:    "t",
+			Columns: []*ir.Column{{Name: "id", Type: ir.TypeRef{Name: "bigint"}}},
+			Triggers: []*ir.Trigger{
+				{Name: "trg_a", When: "AFTER", Events: []string{"INSERT"}, ForEach: "ROW", Function: "trg_touch"},
+			},
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if containsSQL(ops, "TRIGGER") {
+		t.Errorf("expected no trigger ops: an unqualified source function name ('trg_touch') must compare equal to introspection's qualified form ('public.trg_touch'), got: %v", sqlList(ops))
+	}
+}
+
+func TestDiffTriggerFunctionGenuinelyChanged(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.t", &snapshot.SnapObject{
+		Kind: "table",
+		Table: &snapshot.SnapTable{
+			Schema:  "public",
+			Name:    "t",
+			Columns: []snapshot.SnapColumn{{Name: "id", Type: "bigint"}},
+			Triggers: []snapshot.SnapTrigger{
+				{Name: "trg_a", When: "AFTER", Events: "INSERT", ForEach: "ROW", Function: "public.old_func"},
+			},
+		},
+	})
+	desired := []pipeline.IRObject{
+		&ir.Table{
+			Schema:  "public",
+			Name:    "t",
+			Columns: []*ir.Column{{Name: "id", Type: ir.TypeRef{Name: "bigint"}}},
+			Triggers: []*ir.Trigger{
+				{Name: "trg_a", When: "AFTER", Events: []string{"INSERT"}, ForEach: "ROW", Function: "new_func"},
+			},
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsSQL(ops, `DROP TRIGGER IF EXISTS "trg_a"`) || !containsSQL(ops, "new_func") {
+		t.Errorf("expected DROP+CREATE for a genuinely changed function, got: %v", sqlList(ops))
+	}
+}
+
+func TestDiffTriggerAdded(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.t", &snapshot.SnapObject{
+		Kind: "table",
+		Table: &snapshot.SnapTable{
+			Schema:  "public",
+			Name:    "t",
+			Columns: []snapshot.SnapColumn{{Name: "id", Type: "bigint"}},
+		},
+	})
+	desired := []pipeline.IRObject{
+		&ir.Table{
+			Schema:  "public",
+			Name:    "t",
+			Columns: []*ir.Column{{Name: "id", Type: ir.TypeRef{Name: "bigint"}}},
+			Triggers: []*ir.Trigger{
+				{Name: "trg_a", When: "AFTER", Events: []string{"INSERT"}, ForEach: "ROW", Function: "trg_touch"},
+			},
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsSQL(ops, `CREATE TRIGGER "trg_a"`) {
+		t.Errorf("expected CREATE TRIGGER for new trigger, got: %v", sqlList(ops))
+	}
+}
+
+func TestDiffTriggerRemoved(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.t", &snapshot.SnapObject{
+		Kind: "table",
+		Table: &snapshot.SnapTable{
+			Schema:  "public",
+			Name:    "t",
+			Columns: []snapshot.SnapColumn{{Name: "id", Type: "bigint"}},
+			Triggers: []snapshot.SnapTrigger{
+				{Name: "trg_a", When: "AFTER", Events: "INSERT", ForEach: "ROW", Function: "public.trg_touch"},
+			},
+		},
+	})
+	desired := []pipeline.IRObject{
+		&ir.Table{
+			Schema:  "public",
+			Name:    "t",
+			Columns: []*ir.Column{{Name: "id", Type: ir.TypeRef{Name: "bigint"}}},
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsSQL(ops, `DROP TRIGGER IF EXISTS "trg_a"`) {
+		t.Errorf("expected DROP TRIGGER for removed trigger, got: %v", sqlList(ops))
+	}
+}
+
+func TestQualifyFuncForCompare(t *testing.T) {
+	cases := []struct{ in, want string }{
+		{"trg_touch", "public.trg_touch"},
+		{"public.trg_touch", "public.trg_touch"},
+		{"other_schema.trg_touch", "other_schema.trg_touch"},
+	}
+	for _, tc := range cases {
+		if got := qualifyFuncForCompare(tc.in); got != tc.want {
+			t.Errorf("qualifyFuncForCompare(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}
+
 func TestDiffCreateTableWithPartitionBy(t *testing.T) {
 	d := New()
 	desired := []pipeline.IRObject{

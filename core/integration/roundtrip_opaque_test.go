@@ -329,66 +329,34 @@ func TestRoundtripIndexModeB(t *testing.T) {
 // catalog checks isolate what this test is actually verifying: that Mode-B
 // POLICY/TRIGGER/PARTITION parse into valid SQL that a real PostgreSQL
 // instance accepts.
+// Originally used direct pg_catalog counts instead of assertOpaqueRoundtrip's
+// introspect-and-diff round trip, because introspecting a partitioned parent
+// table was badly broken at the time: introspectColumns/Constraints/Indexes
+// all filtered on relkind = 'r' only (excluding relkind = 'p', a partitioned
+// parent), so a partitioned table's own columns/constraints/indexes were
+// silently dropped on introspection, and diffTriggers compared a trigger's
+// EXECUTE FUNCTION reference as a raw string (introspection always returns it
+// schema-qualified; hand-written source commonly doesn't). Both are now fixed
+// (see introspect.go doc comments on introspectColumns et al., and
+// qualifyFuncForCompare in differ.go) — this now uses the full round trip,
+// which is a strictly stronger check.
 func TestRoundtripPolicyTriggerPartitionModeB(t *testing.T) {
-	connStr := testpg.Start(t)
-	ctx := context.Background()
-
-	differ := diff.New()
-	emitter := emit.New()
-	applyExec := executor.New()
-	store := newMemStore()
-
-	conn, err := executor.Connect(ctx, connStr)
-	if err != nil {
-		t.Fatalf("connect: %v", err)
-	}
-	defer conn.Close(ctx)
-
-	dir := t.TempDir()
-	f := filepath.Join(dir, "schema.dpg")
-	schema := `FUNCTION trg_touch() RETURNS trigger LANGUAGE plpgsql AS $$
+	assertOpaqueRoundtrip(t, `FUNCTION trg_touch() RETURNS trigger LANGUAGE plpgsql AS $$
 BEGIN
     RETURN NEW;
 END;
 $$ {}
 
 TABLE t (a INTEGER, created_at DATE NOT NULL) PARTITION BY RANGE (created_at) {
+    CONSTRAINT ck_a CHECK (a > 0);
+    INDICES { i_a (a); }
     POLICY p_modeb FOR SELECT USING (true);
     POLICIES { p_modea FOR INSERT WITH CHECK (true); }
     TRIGGER trg_modeb AFTER INSERT FOR EACH ROW EXECUTE FUNCTION trg_touch();
     TRIGGERS { trg_modea AFTER UPDATE FOR EACH ROW EXECUTE FUNCTION trg_touch(); }
     PARTITION t_modeb FOR VALUES FROM ('2024-01-01') TO ('2025-01-01');
     PARTITIONS { t_modea FOR VALUES FROM ('2025-01-01') TO ('2026-01-01'); }
-}`
-	if err := os.WriteFile(f, []byte(schema), 0o644); err != nil {
-		t.Fatalf("write schema: %v", err)
-	}
-	applyFixture(t, ctx, conn, []string{f}, dir, differ, emitter, applyExec, store)
-
-	rs, err := conn.QueryRows(ctx, `SELECT
-		(SELECT count(*) FROM pg_policies WHERE tablename = 't' AND policyname IN ('p_modeb', 'p_modea')),
-		(SELECT count(*) FROM pg_trigger WHERE tgrelid = 't'::regclass AND NOT tgisinternal AND tgname IN ('trg_modeb', 'trg_modea')),
-		(SELECT count(*) FROM pg_inherits WHERE inhparent = 't'::regclass)`)
-	if err != nil {
-		t.Fatalf("query catalog: %v", err)
-	}
-	defer rs.Close()
-	if !rs.Next() {
-		t.Fatal("no catalog row returned")
-	}
-	var policyCount, triggerCount, partitionCount int
-	if err := rs.Scan(&policyCount, &triggerCount, &partitionCount); err != nil {
-		t.Fatalf("scan catalog counts: %v", err)
-	}
-	if policyCount != 2 {
-		t.Errorf("expected 2 policies (Mode A + Mode B), got %d", policyCount)
-	}
-	if triggerCount != 2 {
-		t.Errorf("expected 2 triggers (Mode A + Mode B), got %d", triggerCount)
-	}
-	if partitionCount != 2 {
-		t.Errorf("expected 2 partitions (Mode A + Mode B), got %d", partitionCount)
-	}
+}`)
 }
 
 // TestRoundtripConstraintsBlockModeA is the live-catalog guard for the new

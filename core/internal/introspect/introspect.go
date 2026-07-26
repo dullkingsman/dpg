@@ -379,6 +379,10 @@ ORDER  BY n.nspname, c.relname`
 	return out, nil
 }
 
+// introspectColumns populates Table.Columns. relkind matches both 'r'
+// (ordinary table) and 'p' (partitioned parent) — a partitioned table's own
+// columns live in pg_attribute the same as an ordinary table's, but omitting
+// 'p' here silently left every partitioned table's Columns empty.
 func introspectColumns(ctx context.Context, conn pipeline.Querier, idx map[string]*ir.Table) error {
 	const q = `
 SELECT n.nspname, c.relname,
@@ -402,7 +406,7 @@ JOIN   pg_namespace n ON n.oid = c.relnamespace
 LEFT   JOIN pg_attrdef d ON d.adrelid = a.attrelid AND d.adnum = a.attnum
 WHERE  a.attnum > 0
 AND    NOT a.attisdropped
-AND    c.relkind = 'r'
+AND    c.relkind IN ('r', 'p')
 AND    n.nspname NOT IN ('pg_catalog','information_schema','pg_toast')
 ORDER  BY n.nspname, c.relname, a.attnum`
 
@@ -453,6 +457,8 @@ ORDER  BY n.nspname, c.relname, a.attnum`
 	return rs.Err()
 }
 
+// introspectConstraints populates Table.Constraints. See introspectColumns
+// for why relkind must include 'p' (partitioned parent) alongside 'r'.
 func introspectConstraints(ctx context.Context, conn pipeline.Querier, idx map[string]*ir.Table) error {
 	const q = `
 SELECT n.nspname, c.relname,
@@ -473,7 +479,7 @@ SELECT n.nspname, c.relname,
 FROM   pg_constraint con
 JOIN   pg_class c     ON c.oid = con.conrelid
 JOIN   pg_namespace n ON n.oid = c.relnamespace
-WHERE  c.relkind = 'r'
+WHERE  c.relkind IN ('r', 'p')
 AND    con.contype != 'n'
 AND    n.nspname NOT IN ('pg_catalog','information_schema','pg_toast')
 ORDER  BY n.nspname, c.relname, con.conname`
@@ -510,6 +516,10 @@ ORDER  BY n.nspname, c.relname, con.conname`
 	return rs.Err()
 }
 
+// introspectIndexes populates Table.Indexes. See introspectColumns for why
+// relkind must include 'p' (partitioned parent) alongside 'r' — an index
+// created directly on a partitioned table is itself a real pg_index entry
+// with indrelid pointing at the relkind='p' parent, not just at its children.
 func introspectIndexes(ctx context.Context, conn pipeline.Querier, idx map[string]*ir.Table) error {
 	const q = `
 SELECT n.nspname, c.relname,
@@ -522,7 +532,7 @@ JOIN   pg_class c  ON c.oid = ix.indrelid
 JOIN   pg_class i  ON i.oid = ix.indexrelid
 JOIN   pg_namespace n ON n.oid = c.relnamespace
 JOIN   pg_am am    ON am.oid = i.relam
-WHERE  c.relkind = 'r'
+WHERE  c.relkind IN ('r', 'p')
 AND    n.nspname NOT IN ('pg_catalog','information_schema','pg_toast')
 AND    NOT EXISTS (
            SELECT 1 FROM pg_constraint con
@@ -763,16 +773,25 @@ ORDER  BY n.nspname, c.relname, p.polname`
 	return rs.Err()
 }
 
+// introspectTriggers populates Table.Triggers. The events column uses
+// array_to_string (which skips NULL elements) rather than string
+// concatenation with a hardcoded " OR " prefix on every event after the
+// first bit position — that unconditional prefix left a dangling "OR " on
+// any trigger whose ONLY event isn't INSERT (e.g. an UPDATE-only trigger
+// introspected as "OR UPDATE" instead of "UPDATE"), which never round-
+// tripped back to the same event list.
 func introspectTriggers(ctx context.Context, conn pipeline.Querier, idx map[string]*ir.Table) error {
 	const q = `
 SELECT n.nspname, c.relname,
        t.tgname,
        CASE WHEN (t.tgtype & 2) != 0 THEN 'BEFORE' ELSE 'AFTER' END AS when,
        CASE WHEN (t.tgtype & 1) != 0 THEN 'ROW' ELSE 'STATEMENT' END AS for_each,
-       CASE WHEN (t.tgtype & 4)  != 0 THEN 'INSERT' ELSE '' END ||
-       CASE WHEN (t.tgtype & 8)  != 0 THEN ' OR DELETE' ELSE '' END ||
-       CASE WHEN (t.tgtype & 16) != 0 THEN ' OR UPDATE' ELSE '' END ||
-       CASE WHEN (t.tgtype & 32) != 0 THEN ' OR TRUNCATE' ELSE '' END AS events,
+       array_to_string(ARRAY[
+           CASE WHEN (t.tgtype & 4)  != 0 THEN 'INSERT' END,
+           CASE WHEN (t.tgtype & 8)  != 0 THEN 'DELETE' END,
+           CASE WHEN (t.tgtype & 16) != 0 THEN 'UPDATE' END,
+           CASE WHEN (t.tgtype & 32) != 0 THEN 'TRUNCATE' END
+       ], ' OR ') AS events,
        p.proname AS func_name,
        pn.nspname AS func_schema
 FROM   pg_trigger t
@@ -1692,6 +1711,11 @@ JOIN   pg_inherits i    ON i.inhrelid = cc.oid
 JOIN   pg_class pc      ON pc.oid = i.inhparent
 JOIN   pg_namespace pn  ON pn.oid = pc.relnamespace
 WHERE  cc.relispartition
+-- relispartition is also true for a child INDEX partition auto-created when
+-- an index exists directly on the partitioned parent (relkind 'i'), which
+-- has no partition bound (pg_get_expr returns NULL there, crashing the scan
+-- into a non-nullable string below) — restrict to actual table partitions.
+AND    cc.relkind IN ('r', 'p')
 AND    pn.nspname NOT IN ('pg_catalog','information_schema','pg_toast')
 ORDER  BY pn.nspname, pc.relname, cc.relname`
 

@@ -111,17 +111,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     (`ast.Partitions = ...`) instead of merging into an existing value. Only
     manifests when `PARTITION` precedes `PARTITIONS` on the same table; the
     reverse order happened to work by accident.
-  Known limitation found live-testing this fix, **not fixed here**:
-  introspecting a partitioned parent table and re-diffing against source
-  reports spurious drift — columns show as missing (`ADD COLUMN` proposed for
-  columns that already exist) and triggers show as changed (`DROP`/`CREATE`
-  proposed for unchanged triggers). Pre-existing, unrelated to Mode A vs B —
-  no integration test exercised a partitioned table with columns or triggers
-  before now. Root cause not investigated; likely in how partitioned tables'
-  columns/triggers are matched during introspection or live-snapshot
-  filtering. `dpg apply` itself is unaffected (the generated SQL is correct
-  and applies cleanly); only `verify`/`plan --live` on an already-applied
-  partitioned table would show this.
+  A known limitation found live-testing this fix — introspecting a
+  partitioned parent table reported spurious column/trigger drift — is now
+  fixed; see below.
+- **Partitioned-table introspection drift, fully fixed** (four separate
+  bugs, all found live-testing a partitioned table with columns, constraints,
+  indexes, and triggers together — the combination no prior test exercised):
+  - `introspectColumns`/`introspectConstraints`/`introspectIndexes` all
+    filtered `relkind = 'r'` (ordinary table only), silently excluding
+    `relkind = 'p'` (a partitioned parent). A partitioned table's own
+    columns, constraints, and indexes were never introspected at all, so
+    `verify`/`plan --live` proposed re-adding all of them on every run.
+  - `introspectPartitions`'s child-partition query matched on
+    `relispartition` alone, which is **also true for an auto-created child
+    INDEX partition** (when an index exists directly on the partitioned
+    parent) — those have no partition bound, so `pg_get_expr` returns `NULL`
+    and scanning it into a non-nullable string crashed introspection
+    outright for any partitioned table that also had an index on it. Fixed
+    by additionally requiring `relkind IN ('r', 'p')` (an actual table
+    partition), excluding index partitions (`relkind 'i'`/`'I'`).
+  - `diffTriggers` compared a trigger's `EXECUTE FUNCTION` reference as a
+    raw string. Introspection always returns it schema-qualified
+    (`public.func`); hand-written source commonly leaves it unqualified
+    (`func`), relying on the default schema the same way DPG's own objects
+    do. Every unqualified trigger function showed as changed on every
+    `verify`/`plan --live` — **not specific to partitioned tables**, this
+    affects any table with a trigger.
+  - The introspected trigger `events` column concatenated a hardcoded
+    `" OR "` before `DELETE`/`UPDATE`/`TRUNCATE` regardless of whether an
+    earlier event was actually present, leaving a dangling `"OR "` fragment
+    for any trigger whose only event isn't `INSERT` (e.g. an UPDATE-only
+    trigger introspected as `"OR UPDATE"` instead of `"UPDATE"`, which never
+    matched the declared event and always showed as changed). Also
+    **not specific to partitioned tables.** Rebuilt using `array_to_string`
+    (which skips absent events cleanly) instead of string concatenation.
+  `dpg apply` was never affected by any of these — only `verify`/
+  `plan --live` on an already-applied table.
 - `CONSTRAINTS { }` (Mode A, RFC §4.8's plural-block form) now parses.
   Previously only the singular `CONSTRAINT name ...;` form worked at all —
   unlike the other 7 collection types in RFC §4.8's Dual Definition Modes
