@@ -73,6 +73,67 @@ func TestDiffDropSchema(t *testing.T) {
 	}
 }
 
+func TestDiffSchemaCommentAdded(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("myschema", &snapshot.SnapObject{
+		Kind:   "schema",
+		Schema: &snapshot.SnapSchema{Name: "myschema"},
+	})
+	comment := "reporting tables"
+	desired := []pipeline.IRObject{
+		&ir.Schema{Name: "myschema", Comment: &comment},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsSQL(ops, "COMMENT ON SCHEMA") || !containsSQL(ops, "'reporting tables'") {
+		t.Errorf("expected COMMENT ON SCHEMA, got: %v", sqlList(ops))
+	}
+}
+
+func TestDiffSchemaOwnerChanged(t *testing.T) {
+	d := New()
+	oldOwner := "alice"
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("myschema", &snapshot.SnapObject{
+		Kind:   "schema",
+		Schema: &snapshot.SnapSchema{Name: "myschema", Owner: &oldOwner},
+	})
+	newOwner := "bob"
+	desired := []pipeline.IRObject{
+		&ir.Schema{Name: "myschema", Owner: &newOwner},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsSQL(ops, "ALTER SCHEMA") || !containsSQL(ops, "OWNER TO") || !containsSQL(ops, `"bob"`) {
+		t.Errorf("expected ALTER SCHEMA ... OWNER TO, got: %v", sqlList(ops))
+	}
+}
+
+func TestDiffSchemaUnchangedIsNoop(t *testing.T) {
+	d := New()
+	comment := "reporting tables"
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("myschema", &snapshot.SnapObject{
+		Kind:   "schema",
+		Schema: &snapshot.SnapSchema{Name: "myschema", Comment: &comment},
+	})
+	desired := []pipeline.IRObject{
+		&ir.Schema{Name: "myschema", Comment: &comment},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ops) != 0 {
+		t.Errorf("expected no ops for unchanged schema, got: %v", sqlList(ops))
+	}
+}
+
 func TestDiffCreateTable(t *testing.T) {
 	d := New()
 	desired := []pipeline.IRObject{
@@ -2988,6 +3049,26 @@ func TestDiffMaterViewCommentUsesCorrectKind(t *testing.T) {
 
 // ── Extension diff ────────────────────────────────────────────────────────────
 
+func TestDiffCreateExtension(t *testing.T) {
+	d := New()
+	schema := "public"
+	ver := "1.3"
+	desired := []pipeline.IRObject{
+		&ir.Extension{Name: "pgcrypto", Schema: &schema, Version: &ver},
+	}
+	ops, err := d.Diff(desired, &pipeline.Snapshot{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsSQL(ops, "CREATE EXTENSION IF NOT EXISTS") || !containsSQL(ops, `"pgcrypto"`) ||
+		!containsSQL(ops, `SCHEMA "public"`) || !containsSQL(ops, "VERSION '1.3'") {
+		t.Errorf("expected CREATE EXTENSION with schema+version, got: %v", sqlList(ops))
+	}
+	if ops[0].Safety() != pipeline.Safe {
+		t.Errorf("expected Safe, got %s", ops[0].Safety())
+	}
+}
+
 func TestDiffExtensionUnchangedIsNoop(t *testing.T) {
 	d := New()
 	ver := "1.0"
@@ -3032,6 +3113,73 @@ func TestDiffExtensionVersionUpdated(t *testing.T) {
 }
 
 // ── Sequence diff ─────────────────────────────────────────────────────────────
+
+func TestDiffCreateSequence(t *testing.T) {
+	d := New()
+	inc, start, cache := int64(2), int64(100), int64(10)
+	cyc := true
+	desired := []pipeline.IRObject{
+		&ir.Sequence{Schema: "public", Name: "seq_id", IncrementBy: &inc, StartValue: &start, Cache: &cache, Cycle: &cyc},
+	}
+	ops, err := d.Diff(desired, &pipeline.Snapshot{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsSQL(ops, "CREATE SEQUENCE IF NOT EXISTS") || !containsSQL(ops, "INCREMENT BY 2") ||
+		!containsSQL(ops, "START WITH 100") || !containsSQL(ops, "CACHE 10") || !containsSQL(ops, "CYCLE") {
+		t.Errorf("expected CREATE SEQUENCE with all params + CYCLE, got: %v", sqlList(ops))
+	}
+}
+
+// TestDiffSequenceCycleChangedWithoutOtherParams is the regression guard for a
+// bug found while pushing diff-package unit test coverage: paramsChanged in
+// diffSequence originally gated the Cycle comparison on `o.IncrementBy !=
+// nil`, so an explicit CYCLE with no other sequence option set (the common
+// case — CYCLE is usually the only thing anyone changes on an existing
+// sequence) was silently ignored by verify/plan --live. Cycle must be
+// compared whenever it was itself explicitly set, independent of any other
+// option.
+func TestDiffSequenceCycleChangedWithoutOtherParams(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.seq_id", &snapshot.SnapObject{
+		Kind:     "sequence",
+		Sequence: &snapshot.SnapSequence{Schema: "public", Name: "seq_id", Cycle: false},
+	})
+	cyc := true
+	desired := []pipeline.IRObject{
+		&ir.Sequence{Schema: "public", Name: "seq_id", Cycle: &cyc},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsSQL(ops, "ALTER SEQUENCE") || !containsSQL(ops, "CYCLE") {
+		t.Errorf("expected ALTER SEQUENCE ... CYCLE, got: %v", sqlList(ops))
+	}
+}
+
+// TestDiffSequenceCycleUnspecifiedIsNoop proves the nil-means-unspecified
+// semantics: a sequence source that never mentions CYCLE/NO CYCLE must not
+// touch an existing sequence's cycle setting either way.
+func TestDiffSequenceCycleUnspecifiedIsNoop(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.seq_id", &snapshot.SnapObject{
+		Kind:     "sequence",
+		Sequence: &snapshot.SnapSequence{Schema: "public", Name: "seq_id", Cycle: true},
+	})
+	desired := []pipeline.IRObject{
+		&ir.Sequence{Schema: "public", Name: "seq_id"},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ops) != 0 {
+		t.Errorf("expected no ops when CYCLE unspecified in source, got: %v", sqlList(ops))
+	}
+}
 
 func TestDiffSequenceUnchangedIsNoop(t *testing.T) {
 	d := New()
@@ -3093,6 +3241,24 @@ func TestDiffSequenceCommentRemoved(t *testing.T) {
 }
 
 // ── Role diff ─────────────────────────────────────────────────────────────────
+
+func TestDiffCreateRole(t *testing.T) {
+	d := New()
+	comment := "application role"
+	desired := []pipeline.IRObject{
+		&ir.Role{Name: "app_role", Comment: &comment},
+	}
+	ops, err := d.Diff(desired, &pipeline.Snapshot{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsSQL(ops, "CREATE ROLE") || !containsSQL(ops, `"app_role"`) {
+		t.Errorf("expected CREATE ROLE, got: %v", sqlList(ops))
+	}
+	if !containsSQL(ops, "COMMENT ON ROLE") || !containsSQL(ops, "'application role'") {
+		t.Errorf("expected COMMENT ON ROLE, got: %v", sqlList(ops))
+	}
+}
 
 func TestDiffRoleUnchangedIsNoop(t *testing.T) {
 	d := New()
@@ -3966,5 +4132,167 @@ func TestDiffIndexCascadeSuppressedWithSortSuffix(t *testing.T) {
 		if strings.Contains(o.SQL(), "DROP INDEX") {
 			t.Errorf("expected no standalone DROP INDEX for a column-dropped index (DESC suffix must not break cascade detection), got: %s", o.SQL())
 		}
+	}
+}
+
+// ── Procedure diff ────────────────────────────────────────────────────────────
+// PROCEDURE had zero diff-level test coverage anywhere in the repo (unit or
+// live integration) before this — found via a coverage pass on internal/diff.
+
+func TestDiffCreateProcedure(t *testing.T) {
+	d := New()
+	comment := "recalculates totals"
+	desired := []pipeline.IRObject{
+		&ir.Procedure{
+			Schema:   "public",
+			Name:     "recalc_totals",
+			Args:     []ir.FuncArg{{Type: ir.TypeRef{Name: "integer"}}},
+			Attrs:    ir.FuncAttrs{Language: "plpgsql", Body: "BEGIN NULL; END;"},
+			BodyHash: ir.HashBody("BEGIN NULL; END;"),
+			Comment:  &comment,
+			Grants:   []ir.Grant{{Privileges: []string{"EXECUTE"}, Roles: []string{"app"}}},
+		},
+	}
+	ops, err := d.Diff(desired, &pipeline.Snapshot{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsSQL(ops, "CREATE OR REPLACE PROCEDURE") || !containsSQL(ops, `"public"."recalc_totals"`) ||
+		!containsSQL(ops, "LANGUAGE plpgsql") {
+		t.Errorf("expected CREATE OR REPLACE PROCEDURE, got: %v", sqlList(ops))
+	}
+	if !containsSQL(ops, "COMMENT ON PROCEDURE") || !containsSQL(ops, "'recalculates totals'") {
+		t.Errorf("expected COMMENT ON PROCEDURE, got: %v", sqlList(ops))
+	}
+	if !containsSQL(ops, "GRANT EXECUTE ON PROCEDURE") {
+		t.Errorf("expected GRANT EXECUTE ON PROCEDURE, got: %v", sqlList(ops))
+	}
+}
+
+func TestDiffProcedureUnchangedIsNoop(t *testing.T) {
+	d := New()
+	body := "BEGIN NULL; END;"
+	hash := ir.HashBody(body)
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.recalc_totals(integer)", &snapshot.SnapObject{
+		Kind: "procedure",
+		Opaque: &snapshot.SnapOpaque{
+			Kind: "procedure", Schema: "public", Name: "recalc_totals", Args: "integer", BodyHash: hash,
+		},
+	})
+	desired := []pipeline.IRObject{
+		&ir.Procedure{
+			Schema:   "public",
+			Name:     "recalc_totals",
+			Args:     []ir.FuncArg{{Type: ir.TypeRef{Name: "integer"}}},
+			Attrs:    ir.FuncAttrs{Language: "plpgsql", Body: body},
+			BodyHash: hash,
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ops) != 0 {
+		t.Errorf("expected no ops for unchanged procedure, got: %v", sqlList(ops))
+	}
+}
+
+// TestDiffProcedureBodyChangedUsesCreateOrReplace proves a changed procedure
+// body is re-emitted via CREATE OR REPLACE (unlike aggregates/other opaque
+// kinds, which need a DROP first) — PostgreSQL supports CREATE OR REPLACE
+// PROCEDURE directly, so no DROP is needed or expected.
+func TestDiffProcedureBodyChangedUsesCreateOrReplace(t *testing.T) {
+	d := New()
+	oldHash := ir.HashBody("BEGIN NULL; END;")
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.recalc_totals(integer)", &snapshot.SnapObject{
+		Kind: "procedure",
+		Opaque: &snapshot.SnapOpaque{
+			Kind: "procedure", Schema: "public", Name: "recalc_totals", Args: "integer", BodyHash: oldHash,
+		},
+	})
+	newBody := "BEGIN UPDATE totals SET amount = amount + 1; END;"
+	desired := []pipeline.IRObject{
+		&ir.Procedure{
+			Schema:   "public",
+			Name:     "recalc_totals",
+			Args:     []ir.FuncArg{{Type: ir.TypeRef{Name: "integer"}}},
+			Attrs:    ir.FuncAttrs{Language: "plpgsql", Body: newBody},
+			BodyHash: ir.HashBody(newBody),
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if containsSQL(ops, "DROP PROCEDURE") {
+		t.Errorf("unexpected DROP PROCEDURE for a body change, got: %v", sqlList(ops))
+	}
+	if !containsSQL(ops, "CREATE OR REPLACE PROCEDURE") || !containsSQL(ops, "amount + 1") {
+		t.Errorf("expected CREATE OR REPLACE PROCEDURE with new body, got: %v", sqlList(ops))
+	}
+}
+
+func TestDiffProcedureCommentAdded(t *testing.T) {
+	d := New()
+	body := "BEGIN NULL; END;"
+	hash := ir.HashBody(body)
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.recalc_totals(integer)", &snapshot.SnapObject{
+		Kind: "procedure",
+		Opaque: &snapshot.SnapOpaque{
+			Kind: "procedure", Schema: "public", Name: "recalc_totals", Args: "integer", BodyHash: hash,
+		},
+	})
+	comment := "recalculates totals"
+	desired := []pipeline.IRObject{
+		&ir.Procedure{
+			Schema:   "public",
+			Name:     "recalc_totals",
+			Args:     []ir.FuncArg{{Type: ir.TypeRef{Name: "integer"}}},
+			Attrs:    ir.FuncAttrs{Language: "plpgsql", Body: body},
+			BodyHash: hash,
+			Comment:  &comment,
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsSQL(ops, "COMMENT ON PROCEDURE") || !containsSQL(ops, "'recalculates totals'") {
+		t.Errorf("expected COMMENT ON PROCEDURE, got: %v", sqlList(ops))
+	}
+}
+
+// ── Table-level policy + grant emission at CREATE time ───────────────────────
+// createPolicy and tableGrantOp (used for a GRANT declared inline on a new
+// table) had zero unit coverage — only proven live via integration tests.
+
+func TestDiffCreateTableWithPolicyAndGrant(t *testing.T) {
+	d := New()
+	desired := []pipeline.IRObject{
+		&ir.Table{
+			Schema: "public",
+			Name:   "t",
+			Columns: []*ir.Column{
+				{Name: "id", Type: ir.TypeRef{Name: "integer"}},
+			},
+			Policies: []*ir.Policy{
+				{Name: "p_owner", Permissive: true, Command: "SELECT", Using: strPtr("owner_id = current_user_id()")},
+			},
+			Grants: []ir.Grant{{Privileges: []string{"SELECT"}, Roles: []string{"app_readonly"}}},
+		},
+	}
+	ops, err := d.Diff(desired, &pipeline.Snapshot{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsSQL(ops, "CREATE POLICY") || !containsSQL(ops, `"p_owner"`) ||
+		!containsSQL(ops, "FOR SELECT") || !containsSQL(ops, "USING (owner_id = current_user_id())") {
+		t.Errorf("expected CREATE POLICY on new table, got: %v", sqlList(ops))
+	}
+	if !containsSQL(ops, "GRANT SELECT") || !containsSQL(ops, "app_readonly") {
+		t.Errorf("expected inline GRANT on new table, got: %v", sqlList(ops))
 	}
 }

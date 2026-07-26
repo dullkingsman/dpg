@@ -353,8 +353,11 @@ type Sequence struct {
 	MaxValue    *int64
 	StartValue  *int64
 	Cache       *int64
-	Cycle       bool
-	SrcPos      pipeline.SourcePos
+	// Cycle is nil when the source didn't write CYCLE or NO CYCLE at all
+	// (unlike the other options above, false is a real, explicit value:
+	// NO CYCLE), so it needs the same nil-means-unspecified treatment.
+	Cycle  *bool
+	SrcPos pipeline.SourcePos
 }
 
 func (s *Sequence) QualifiedName() string   { return qualName(s.Schema, s.Name) }

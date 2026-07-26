@@ -1043,8 +1043,15 @@ func (b *Builder) buildSequence(cs *pg_query.CreateSeqStmt, block pipeline.Block
 		case "cache":
 			s.Cache = v
 		case "cycle":
-			if v != nil {
-				s.Cycle = *v != 0
+			// Unlike the numeric options above, CYCLE/NO CYCLE parses as a
+			// DefElem{arg: Boolean}, not an Integer/A_Const — seqOptionInt
+			// (which only handles those two) always returns nil here, so this
+			// must read the Boolean node directly or CYCLE is silently dropped.
+			if de.Arg != nil {
+				if b := de.Arg.GetBoolean(); b != nil {
+					cyc := b.GetBoolval()
+					s.Cycle = &cyc
+				}
 			}
 		}
 	}

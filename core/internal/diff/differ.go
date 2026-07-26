@@ -1665,7 +1665,7 @@ func writeSeqParams(b *strings.Builder, o *ir.Sequence) {
 	if o.Cache != nil {
 		fmt.Fprintf(b, " CACHE %d", *o.Cache)
 	}
-	if o.Cycle {
+	if o.Cycle != nil && *o.Cycle {
 		b.WriteString(" CYCLE")
 	}
 }
@@ -1929,7 +1929,7 @@ func diffSequence(o *ir.Sequence, snap *snapshot.SnapSequence) []pipeline.DiffOp
 		(o.MaxValue != nil && !int64PtrEq(o.MaxValue, snap.MaxValue)) ||
 		(o.StartValue != nil && !int64PtrEq(o.StartValue, snap.StartValue)) ||
 		(o.Cache != nil && !int64PtrEq(o.Cache, snap.Cache)) ||
-		(o.IncrementBy != nil && o.Cycle != snap.Cycle)
+		(o.Cycle != nil && *o.Cycle != snap.Cycle)
 	if paramsChanged {
 		var b strings.Builder
 		b.WriteString("ALTER SEQUENCE ")

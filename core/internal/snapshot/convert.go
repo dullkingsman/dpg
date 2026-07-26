@@ -502,7 +502,7 @@ func toSnapSequence(o *ir.Sequence) *SnapSequence {
 		MaxValue:    o.MaxValue,
 		StartValue:  o.StartValue,
 		Cache:       o.Cache,
-		Cycle:       o.Cycle,
+		Cycle:       o.Cycle != nil && *o.Cycle,
 		NameMaps:    toSnapNameMaps(o.NameMaps),
 	}
 }

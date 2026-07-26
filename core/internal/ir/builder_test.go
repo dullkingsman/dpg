@@ -277,6 +277,76 @@ func TestBuildExtension(t *testing.T) {
 	}
 }
 
+// ── Sequence ──────────────────────────────────────────────────────────────────
+
+// TestBuildSequenceCycle is the regression guard for a bug found during a
+// diff-package coverage push: pg_query represents CYCLE/NO CYCLE as a
+// DefElem whose Arg is a Boolean node, not an Integer/A_Const like every
+// other sequence option — buildSequence routed all options through
+// seqOptionInt (which only handles Integer/A_Const), so CYCLE always
+// silently evaluated to nil/unset regardless of what was written, no matter
+// how the differ compared it.
+func TestBuildSequenceCycle(t *testing.T) {
+	obj := buildObject(t, pipeline.KindSequence, `seq_id CYCLE`, ``)
+	s, ok := obj.(*ir.Sequence)
+	if !ok {
+		t.Fatalf("expected *ir.Sequence, got %T", obj)
+	}
+	if s.Cycle == nil {
+		t.Fatal("Cycle: got nil, want non-nil (true)")
+	}
+	if !*s.Cycle {
+		t.Error("Cycle: got false, want true")
+	}
+}
+
+func TestBuildSequenceNoCycle(t *testing.T) {
+	obj := buildObject(t, pipeline.KindSequence, `seq_id NO CYCLE`, ``)
+	s := obj.(*ir.Sequence)
+	if s.Cycle == nil {
+		t.Fatal("Cycle: got nil, want non-nil (false)")
+	}
+	if *s.Cycle {
+		t.Error("Cycle: got true, want false")
+	}
+}
+
+// TestBuildSequenceCycleUnspecified proves Cycle stays nil (not false) when
+// the source doesn't mention CYCLE/NO CYCLE at all — the nil/false
+// distinction is what lets the differ tell "don't touch cycling" apart from
+// "explicitly set to no cycle".
+func TestBuildSequenceCycleUnspecified(t *testing.T) {
+	obj := buildObject(t, pipeline.KindSequence, `seq_id INCREMENT BY 1`, ``)
+	s := obj.(*ir.Sequence)
+	if s.Cycle != nil {
+		t.Errorf("Cycle: got %v, want nil", *s.Cycle)
+	}
+}
+
+func TestBuildSequenceAllOptions(t *testing.T) {
+	obj := buildObject(t, pipeline.KindSequence,
+		`seq_id INCREMENT BY 2 MINVALUE 1 MAXVALUE 100 START WITH 5 CACHE 10 CYCLE`, ``)
+	s := obj.(*ir.Sequence)
+	if s.IncrementBy == nil || *s.IncrementBy != 2 {
+		t.Errorf("IncrementBy: got %v, want 2", s.IncrementBy)
+	}
+	if s.MinValue == nil || *s.MinValue != 1 {
+		t.Errorf("MinValue: got %v, want 1", s.MinValue)
+	}
+	if s.MaxValue == nil || *s.MaxValue != 100 {
+		t.Errorf("MaxValue: got %v, want 100", s.MaxValue)
+	}
+	if s.StartValue == nil || *s.StartValue != 5 {
+		t.Errorf("StartValue: got %v, want 5", s.StartValue)
+	}
+	if s.Cache == nil || *s.Cache != 10 {
+		t.Errorf("Cache: got %v, want 10", s.Cache)
+	}
+	if s.Cycle == nil || !*s.Cycle {
+		t.Errorf("Cycle: got %v, want true", s.Cycle)
+	}
+}
+
 // ── TypeRef ───────────────────────────────────────────────────────────────────
 
 func TestTypeRefBuiltIn(t *testing.T) {

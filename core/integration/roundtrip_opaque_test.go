@@ -709,3 +709,138 @@ func TestRoundtripIndexDefinitionChangeAppliesLive(t *testing.T) {
 		t.Errorf("live indexdef = %q, want it to reflect the gin+WHERE edit", indexdef)
 	}
 }
+
+// TestRoundtripSequenceCycleChangeAndProcedure is the live-catalog guard for
+// two gaps found during a diff-package coverage push: (1) PROCEDURE had zero
+// diff-level test coverage anywhere, unit or live; (2) diffSequence's CYCLE
+// comparison was gated on IncrementBy also being explicitly set, so adding
+// CYCLE alone to an already-applied sequence was silently ignored by
+// verify/plan --live. Mirrors TestRoundtripIndexDefinitionChangeAppliesLive's
+// pattern: diff a real change against the v1 snapshot (the offline `plan`
+// path), then apply and reconfirm zero drift against the live catalog.
+func TestRoundtripSequenceCycleChangeAndProcedure(t *testing.T) {
+	connStr := testpg.Start(t)
+	ctx := context.Background()
+
+	differ := diff.New()
+	emitter := emit.New()
+	applyExec := executor.New()
+	ci := introspect.New()
+	store := newMemStore()
+
+	conn, err := executor.Connect(ctx, connStr)
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	defer conn.Close(ctx)
+
+	dir := t.TempDir()
+	f := filepath.Join(dir, "schema.dpg")
+	v1 := `SEQUENCE seq_id INCREMENT BY 1;
+
+PROCEDURE recalc_totals() LANGUAGE plpgsql AS $$
+BEGIN
+    NULL;
+END;
+$$ {}`
+	if err := os.WriteFile(f, []byte(v1), 0o644); err != nil {
+		t.Fatalf("write v1: %v", err)
+	}
+	applyFixture(t, ctx, conn, []string{f}, dir, differ, emitter, applyExec, store)
+
+	// v2 adds CYCLE to the sequence (no other sequence param touched — the
+	// exact shape the bug missed) and changes the procedure body.
+	v2 := `SEQUENCE seq_id INCREMENT BY 1 CYCLE;
+
+PROCEDURE recalc_totals() LANGUAGE plpgsql AS $$
+BEGIN
+    UPDATE pg_temp.nonexistent_marker SET x = 1 WHERE false;
+EXCEPTION WHEN OTHERS THEN NULL;
+END;
+$$ {}`
+	if err := os.WriteFile(f, []byte(v2), 0o644); err != nil {
+		t.Fatalf("write v2: %v", err)
+	}
+	desired2, err := compiler.Compile([]string{f}, dir, pipeline.Default)
+	if err != nil {
+		t.Fatalf("compile v2: %v", err)
+	}
+	snap, _ := store.Load("test", "dpgtest")
+	ops, err := differ.Diff(desired2, snap)
+	if err != nil {
+		t.Fatalf("diff (cycle + procedure body change): %v", err)
+	}
+	var sawCycle, sawProcReplace bool
+	for _, o := range ops {
+		sql := o.SQL()
+		if strings.Contains(sql, "ALTER SEQUENCE") && strings.Contains(sql, "CYCLE") {
+			sawCycle = true
+		}
+		if strings.Contains(sql, "CREATE OR REPLACE PROCEDURE") && strings.Contains(sql, "recalc_totals") {
+			sawProcReplace = true
+		}
+	}
+	if !sawCycle {
+		t.Fatalf("expected ALTER SEQUENCE ... CYCLE for the cycle-only change, got: %v", ops)
+	}
+	if !sawProcReplace {
+		t.Fatalf("expected CREATE OR REPLACE PROCEDURE for the body change, got: %v", ops)
+	}
+
+	migration, err := emitter.Emit(ops, pipeline.MigrationMeta{Cluster: "test", Database: "dpgtest"})
+	if err != nil {
+		t.Fatalf("emit: %v", err)
+	}
+	if err := applyExec.Apply(ctx, migration, conn); err != nil {
+		t.Fatalf("apply (cycle + procedure body change) against live PostgreSQL: %v", err)
+	}
+
+	appliedSnap := &pipeline.Snapshot{}
+	if err := snapshot.Populate(appliedSnap, desired2); err != nil {
+		t.Fatalf("populate snapshot: %v", err)
+	}
+	if err := store.Save("test", "dpgtest", appliedSnap); err != nil {
+		t.Fatalf("save snapshot: %v", err)
+	}
+
+	liveObjects, err := ci.Introspect(ctx, conn)
+	if err != nil {
+		t.Fatalf("introspect: %v", err)
+	}
+	var managedLive []pipeline.IRObject
+	for _, obj := range liveObjects {
+		if _, ok := appliedSnap.Objects[obj.QualifiedName()]; ok {
+			managedLive = append(managedLive, obj)
+		}
+	}
+	liveSnap := &pipeline.Snapshot{}
+	if err := snapshot.Populate(liveSnap, managedLive); err != nil {
+		t.Fatalf("populate live snapshot: %v", err)
+	}
+	driftOps, err := differ.Diff(desired2, liveSnap)
+	if err != nil {
+		t.Fatalf("drift diff: %v", err)
+	}
+	if len(driftOps) != 0 {
+		t.Errorf("drift after cycle+procedure apply (%d ops) — live catalog doesn't reflect the change:", len(driftOps))
+		for _, op := range driftOps {
+			t.Errorf("  [%s] %s", op.Safety(), op.SQL())
+		}
+	}
+
+	rs, err := conn.QueryRows(ctx, `SELECT seqcycle FROM pg_sequence s JOIN pg_class c ON c.oid = s.seqrelid WHERE c.relname = 'seq_id'`)
+	if err != nil {
+		t.Fatalf("query pg_sequence: %v", err)
+	}
+	defer rs.Close()
+	if !rs.Next() {
+		t.Fatal("seq_id not found in pg_sequence after cycle-change apply")
+	}
+	var cycle bool
+	if err := rs.Scan(&cycle); err != nil {
+		t.Fatalf("scan seqcycle: %v", err)
+	}
+	if !cycle {
+		t.Error("live seqcycle = false, want true after applying CYCLE")
+	}
+}

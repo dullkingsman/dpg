@@ -474,7 +474,7 @@ func renderObjectDPG(b *strings.Builder, obj pipeline.IRObject, fmtOpts format.O
 		if o.Cache != nil {
 			fmt.Fprintf(b, " %s %d", kw("CACHE"), *o.Cache)
 		}
-		if o.Cycle {
+		if o.Cycle != nil && *o.Cycle {
 			b.WriteString(" ")
 			b.WriteString(kw("CYCLE"))
 		}

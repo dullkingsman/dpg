@@ -1237,7 +1237,7 @@ ORDER  BY n.nspname, c.relname`
 			MaxValue:    &max,
 			StartValue:  &start,
 			Cache:       &cache,
-			Cycle:       cycle,
+			Cycle:       &cycle,
 		}
 		out = append(out, seq)
 	}

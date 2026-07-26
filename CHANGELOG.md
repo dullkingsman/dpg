@@ -166,6 +166,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   fed to the PG parser. `dump` now quotes a schema name via the same
   `quoteIdentIfNeeded` helper already used for roles/extensions, instead of
   always emitting it bare.
+- A sequence's `CYCLE`/`NO CYCLE` clause was silently unparseable: PostgreSQL's
+  grammar represents it as a `DefElem` whose argument is a `Boolean` node,
+  unlike every other sequence option (`INCREMENT BY`, `MINVALUE`, etc.), which
+  use an `Integer`/`A_Const` node — the builder routed all sequence options
+  through a helper that only handles the latter two, so `CYCLE`/`NO CYCLE`
+  always evaluated to "unset" regardless of what was written. A second,
+  related bug in `diffSequence` then gated the `CYCLE` comparison on
+  `INCREMENT BY` also being explicitly set, so even a correctly-parsed
+  `CYCLE` change was missed by `verify`/`plan --live` unless another sequence
+  option changed in the same diff — the common case (changing only `CYCLE`)
+  was silently ignored. Both are fixed: the builder now reads the `Boolean`
+  node directly, and the comparison is gated on `CYCLE` itself being set.
+  `ir.Sequence.Cycle` changed from `bool` to `*bool` (nil = unspecified,
+  matching every other sequence option) to make the "not set" state
+  representable at all.
+- Added unit test coverage for several `internal/diff` code paths that had
+  none at all (found via a coverage pass: package coverage was 67.1%): fresh
+  `CREATE ROLE`/`CREATE EXTENSION`/`CREATE SEQUENCE`, schema `ALTER
+  SCHEMA ... OWNER TO`/comment changes, and a table-level `POLICY`/inline
+  `GRANT` declared alongside a `CREATE TABLE`. `PROCEDURE` had zero diff-level
+  coverage of any kind, unit or live — added create/comment/grant/body-change
+  unit tests plus a live round-trip test.
 - `dump` output now recompiles **and re-applies** for real-world tables:
   identifiers that are reserved keywords or otherwise non-bare (table/column/view/
   sequence/role/index/constraint names) are quoted; indexes render as the accepted
