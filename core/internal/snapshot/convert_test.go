@@ -381,3 +381,44 @@ func TestPopulateOperatorClassFamilyNoCollision(t *testing.T) {
 		t.Errorf("expected one class and one family to survive; got class=%d family=%d (collision dropped one)", classKey, familyKey)
 	}
 }
+
+// TestToSnapIndexWithQuoteNormalization guards against a spurious-drift
+// regression found while live-testing the diffIndexes content-comparison fix:
+// pg_get_indexdef always quotes reloption values (e.g. fillfactor='70'), while
+// hand-written DPG source may not (fillfactor = 70). Without normalization, an
+// unchanged WITH-bearing index would show drift on every verify/plan --live
+// against a real catalog. Both spellings must produce the same SnapIndex.With.
+func TestToSnapIndexWithQuoteNormalization(t *testing.T) {
+	unquoted := ToSnapIndex(&ir.Index{
+		Name: "i", Columns: []pipeline.IndexColumn{{Name: "a"}},
+		With: []pipeline.StorageParam{{Key: "fillfactor", Value: "70"}},
+	})
+	quoted := ToSnapIndex(&ir.Index{
+		Name: "i", Columns: []pipeline.IndexColumn{{Name: "a"}},
+		With: []pipeline.StorageParam{{Key: "fillfactor", Value: "'70'"}},
+	})
+	if unquoted.With != "fillfactor=70" {
+		t.Errorf("unquoted With = %q, want %q", unquoted.With, "fillfactor=70")
+	}
+	if unquoted != quoted {
+		t.Errorf("quoted vs unquoted WITH value must compare equal: %+v != %+v", unquoted, quoted)
+	}
+}
+
+// TestToSnapIndexSortOrderAndNulls guards the fuller content-comparison fix:
+// Columns must now carry ASC/DESC and NULLS FIRST/LAST so a sort-order-only
+// edit on an otherwise-identical index is detected (previously the joined
+// Columns string dropped this information entirely).
+func TestToSnapIndexSortOrderAndNulls(t *testing.T) {
+	si := ToSnapIndex(&ir.Index{
+		Name: "i",
+		Columns: []pipeline.IndexColumn{
+			{Name: "a", SortOrder: "DESC", Nulls: "LAST"},
+			{Name: "b"},
+		},
+	})
+	want := `a DESC NULLS LAST, b`
+	if si.Columns != want {
+		t.Errorf("Columns = %q, want %q", si.Columns, want)
+	}
+}

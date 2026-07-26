@@ -3269,3 +3269,155 @@ func TestDiffCreateIndexNullsNotDistinctAndWith(t *testing.T) {
 		t.Errorf("NULLS NOT DISTINCT must precede WITH per PG grammar: %s", sql)
 	}
 }
+
+// baseFullIndex returns a fully-populated index exercising every property
+// diffIndexes must now compare, used as the common starting point for the
+// content-comparison regression guards below.
+func baseFullIndex() *ir.Index {
+	where := "a > 0"
+	return &ir.Index{
+		Name:    "t_idx",
+		Unique:  true,
+		Method:  "btree",
+		Columns: []pipeline.IndexColumn{{Name: "a", SortOrder: "ASC"}, {Name: "b"}},
+		Where:   &where,
+		Include: []string{"c"},
+		With:    []pipeline.StorageParam{{Key: "fillfactor", Value: "70"}},
+	}
+}
+
+func baseFullIndexTable(idx *ir.Index) *ir.Table {
+	return &ir.Table{
+		Schema: "public",
+		Name:   "t",
+		Columns: []*ir.Column{
+			{Name: "a", Type: ir.TypeRef{Name: "int4"}},
+			{Name: "b", Type: ir.TypeRef{Name: "int4"}},
+			{Name: "c", Type: ir.TypeRef{Name: "int4"}},
+		},
+		Indexes: []*ir.Index{idx},
+	}
+}
+
+// TestDiffIndexUnchangedNoOps is the baseline for the diffIndexes content-
+// comparison fix: a same-named index whose definition is byte-for-byte
+// identical (every property diffIndexes now compares) must still produce zero
+// ops, not a spurious recreate.
+func TestDiffIndexUnchangedNoOps(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	if err := snapshot.Populate(snap, []pipeline.IRObject{baseFullIndexTable(baseFullIndex())}); err != nil {
+		t.Fatal(err)
+	}
+	ops, err := d.Diff([]pipeline.IRObject{baseFullIndexTable(baseFullIndex())}, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ops) != 0 {
+		t.Fatalf("want 0 ops for an unchanged index, got %d: %v", len(ops), sqlList(ops))
+	}
+}
+
+// TestDiffIndexContentChangeRecreates is the regression guard for the
+// diffIndexes name-only-matching bug: previously a same-named index was
+// matched purely by name, with zero comparison of its actual definition, so
+// editing ANY property (method, uniqueness, columns, sort order/NULLS
+// placement, WHERE, INCLUDE, WITH, or NULLS NOT DISTINCT) while keeping the
+// name was a silent no-op on plan/apply. Each case here mutates exactly one
+// property off the common baseFullIndex baseline and must now produce a
+// structured DROP INDEX + CREATE INDEX pair reflecting the new definition.
+func TestDiffIndexContentChangeRecreates(t *testing.T) {
+	where2 := "a > 100"
+	cases := []struct {
+		name          string
+		mutate        func(*ir.Index)
+		wantInCreated string
+	}{
+		{"method", func(idx *ir.Index) { idx.Method = "gin" }, "USING gin"},
+		{"unique", func(idx *ir.Index) { idx.Unique = false }, `CREATE INDEX "t_idx"`},
+		{"columns_added", func(idx *ir.Index) {
+			idx.Columns = append(idx.Columns, pipeline.IndexColumn{Name: "c"})
+		}, `"c"`},
+		{"sort_order", func(idx *ir.Index) { idx.Columns[0].SortOrder = "DESC" }, `"a" DESC`},
+		{"where", func(idx *ir.Index) { idx.Where = &where2 }, "WHERE a > 100"},
+		{"include", func(idx *ir.Index) { idx.Include = []string{"b"} }, `INCLUDE ("b")`},
+		{"with", func(idx *ir.Index) {
+			idx.With = []pipeline.StorageParam{{Key: "fillfactor", Value: "50"}}
+		}, "WITH (fillfactor=50)"},
+		{"nulls_not_distinct", func(idx *ir.Index) { idx.NullsNotDistinct = true }, "NULLS NOT DISTINCT"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			d := New()
+			snap := &pipeline.Snapshot{}
+			if err := snapshot.Populate(snap, []pipeline.IRObject{baseFullIndexTable(baseFullIndex())}); err != nil {
+				t.Fatal(err)
+			}
+			desiredIdx := baseFullIndex()
+			tc.mutate(desiredIdx)
+			ops, err := d.Diff([]pipeline.IRObject{baseFullIndexTable(desiredIdx)}, snap)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			var dropSQL, createSQL string
+			for _, o := range ops {
+				sql := o.SQL()
+				if strings.HasPrefix(sql, "DROP INDEX") {
+					dropSQL = sql
+				} else if strings.Contains(sql, "CREATE") && strings.Contains(sql, "INDEX") {
+					createSQL = sql
+				}
+			}
+			if dropSQL == "" || createSQL == "" {
+				t.Fatalf("want DROP INDEX + CREATE INDEX ops, got %d ops: %v", len(ops), sqlList(ops))
+			}
+			if !strings.Contains(dropSQL, `DROP INDEX IF EXISTS "t_idx";`) {
+				t.Errorf("unexpected DROP: %s", dropSQL)
+			}
+			if !strings.Contains(createSQL, tc.wantInCreated) {
+				t.Errorf("recreated index missing %q: %s", tc.wantInCreated, createSQL)
+			}
+			for _, o := range ops {
+				if o.Safety() != pipeline.Caution {
+					t.Errorf("index recreate op safety = %v, want Caution: %s", o.Safety(), o.SQL())
+				}
+			}
+		})
+	}
+}
+
+// TestDiffIndexCascadeSuppressedWithSortSuffix guards translateIndexCols's
+// suffix-stripping fix: SnapIndex.Columns can now carry an " ASC"/" DESC"/
+// " NULLS FIRST"/" NULLS LAST" suffix (snapshot.ToSnapIndex), which
+// translateIndexCols must strip before checking whether a dropped column
+// takes the index with it — otherwise it would look for a column literally
+// named "a DESC", never match, and emit a redundant standalone DROP INDEX
+// alongside the DROP COLUMN cascade that already removes it in PG.
+func TestDiffIndexCascadeSuppressedWithSortSuffix(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.t", &snapshot.SnapObject{
+		Kind: "table",
+		Table: &snapshot.SnapTable{
+			Schema:  "public",
+			Name:    "t",
+			Columns: []snapshot.SnapColumn{{Name: "a", Type: "int4"}},
+			Indexes: []snapshot.SnapIndex{
+				{Name: "t_a_idx", Method: "btree", Columns: "a DESC"},
+			},
+		},
+	})
+	desired := []pipeline.IRObject{
+		&ir.Table{Schema: "public", Name: "t", Columns: []*ir.Column{}},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, o := range ops {
+		if strings.Contains(o.SQL(), "DROP INDEX") {
+			t.Errorf("expected no standalone DROP INDEX for a column-dropped index (DESC suffix must not break cascade detection), got: %s", o.SQL())
+		}
+	}
+}

@@ -311,3 +311,128 @@ func TestRoundtripIndexModeB(t *testing.T) {
     INDICES { i_modea_ab (a, b); }
 }`)
 }
+
+// TestRoundtripIndexDefinitionChangeAppliesLive is the live-catalog guard for
+// the diffIndexes name-only-matching fix (internal/diff/differ.go): previously
+// a same-named index was matched by name only, with zero comparison of its
+// actual definition, so editing an existing index's properties (here: adding
+// a WHERE predicate and switching btree -> gin) was a silent no-op against a
+// real database — plan/apply never touched it. This proves the structured
+// DROP + CREATE it now emits is valid SQL a real PostgreSQL instance accepts,
+// and that the live catalog actually reflects the new definition afterward.
+func TestRoundtripIndexDefinitionChangeAppliesLive(t *testing.T) {
+	connStr := testpg.Start(t)
+	ctx := context.Background()
+
+	differ := diff.New()
+	emitter := emit.New()
+	applyExec := executor.New()
+	ci := introspect.New()
+	store := newMemStore()
+
+	conn, err := executor.Connect(ctx, connStr)
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	defer conn.Close(ctx)
+
+	dir := t.TempDir()
+	f := filepath.Join(dir, "schema.dpg")
+	v1 := `TABLE t (a INTEGER, e TEXT) {
+    INDICES { t_idx (a); }
+}`
+	if err := os.WriteFile(f, []byte(v1), 0o644); err != nil {
+		t.Fatalf("write v1: %v", err)
+	}
+	applyFixture(t, ctx, conn, []string{f}, dir, differ, emitter, applyExec, store)
+
+	// Edit the index's definition (same name, WHERE added, method changed to
+	// gin over an expression) and diff against the snapshot from the v1
+	// apply — this must route through diffIndexes' new content-comparison
+	// branch, not the name-only-existence check.
+	v2 := `TABLE t (a INTEGER, e TEXT) {
+    INDICES { t_idx (to_tsvector('english', e)) USING gin WHERE (a > 0); }
+}`
+	if err := os.WriteFile(f, []byte(v2), 0o644); err != nil {
+		t.Fatalf("write v2: %v", err)
+	}
+	desired2, err := compiler.Compile([]string{f}, dir, pipeline.Default)
+	if err != nil {
+		t.Fatalf("compile v2: %v", err)
+	}
+	snap, _ := store.Load("test", "dpgtest")
+	ops, err := differ.Diff(desired2, snap)
+	if err != nil {
+		t.Fatalf("diff (index definition change): %v", err)
+	}
+	var sawDrop, sawCreate bool
+	for _, o := range ops {
+		sql := o.SQL()
+		if strings.Contains(sql, "DROP INDEX") && strings.Contains(sql, `"t_idx"`) {
+			sawDrop = true
+		}
+		if strings.Contains(sql, "CREATE INDEX") && strings.Contains(sql, `"t_idx"`) {
+			sawCreate = true
+		}
+	}
+	if !sawDrop || !sawCreate {
+		t.Fatalf("expected structured DROP INDEX + CREATE INDEX for t_idx, got: %v", ops)
+	}
+
+	migration, err := emitter.Emit(ops, pipeline.MigrationMeta{Cluster: "test", Database: "dpgtest"})
+	if err != nil {
+		t.Fatalf("emit: %v", err)
+	}
+	if err := applyExec.Apply(ctx, migration, conn); err != nil {
+		t.Fatalf("apply (index definition change) against live PostgreSQL: %v", err)
+	}
+
+	appliedSnap := &pipeline.Snapshot{}
+	if err := snapshot.Populate(appliedSnap, desired2); err != nil {
+		t.Fatalf("populate snapshot: %v", err)
+	}
+	if err := store.Save("test", "dpgtest", appliedSnap); err != nil {
+		t.Fatalf("save snapshot: %v", err)
+	}
+
+	liveObjects, err := ci.Introspect(ctx, conn)
+	if err != nil {
+		t.Fatalf("introspect: %v", err)
+	}
+	var managedLive []pipeline.IRObject
+	for _, obj := range liveObjects {
+		if _, ok := appliedSnap.Objects[obj.QualifiedName()]; ok {
+			managedLive = append(managedLive, obj)
+		}
+	}
+	liveSnap := &pipeline.Snapshot{}
+	if err := snapshot.Populate(liveSnap, managedLive); err != nil {
+		t.Fatalf("populate live snapshot: %v", err)
+	}
+	driftOps, err := differ.Diff(desired2, liveSnap)
+	if err != nil {
+		t.Fatalf("drift diff: %v", err)
+	}
+	if len(driftOps) != 0 {
+		t.Errorf("drift after index-definition-change apply (%d ops) — live catalog doesn't reflect the new definition:", len(driftOps))
+		for _, op := range driftOps {
+			t.Errorf("  [%s] %s", op.Safety(), op.SQL())
+		}
+	}
+
+	rs, err := conn.QueryRows(ctx, `SELECT indexdef FROM pg_indexes WHERE indexname = 't_idx'`)
+	if err != nil {
+		t.Fatalf("query pg_indexes: %v", err)
+	}
+	defer rs.Close()
+	if !rs.Next() {
+		t.Fatal("t_idx not found in pg_indexes after definition-change apply")
+	}
+	var indexdef string
+	if err := rs.Scan(&indexdef); err != nil {
+		t.Fatalf("scan indexdef: %v", err)
+	}
+	if !strings.Contains(indexdef, "gin") || !strings.Contains(indexdef, "WHERE") {
+		t.Errorf("live indexdef = %q, want it to reflect the gin+WHERE edit", indexdef)
+	}
+}

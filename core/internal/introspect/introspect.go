@@ -548,7 +548,11 @@ ORDER  BY n.nspname, c.relname, i.relname`
 		}
 		var where *string
 		if i := strings.Index(strings.ToUpper(def), " WHERE "); i >= 0 {
-			w := strings.TrimSpace(def[i+7:])
+			// Strip PG-added ::typename casts (e.g. from a WHERE clause
+			// comparing against a typed column) so this matches hand-written
+			// source and doesn't show as spurious drift — same treatment as
+			// column defaults below.
+			w := stripStringLiteralCasts(strings.TrimSpace(def[i+7:]))
 			where = &w
 		}
 		t.Indexes = append(t.Indexes, &ir.Index{
@@ -705,7 +709,10 @@ func parseIndexColumn(s string) pipeline.IndexColumn {
 	}
 
 	if strings.ContainsRune(s, '(') {
-		col.Expr = &pipeline.RawExpr{Text: s}
+		// Strip PG-added ::typename casts (e.g. to_tsvector('english'::regconfig, e)
+		// vs hand-written to_tsvector('english', e)) so an unchanged expression
+		// index doesn't show as spurious drift against a live catalog.
+		col.Expr = &pipeline.RawExpr{Text: stripStringLiteralCasts(s)}
 	} else {
 		col.Name = strings.Trim(s, `"`)
 	}

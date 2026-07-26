@@ -285,7 +285,7 @@ func toSnapTable(o *ir.Table) *SnapTable {
 		t.Constraints = append(t.Constraints, toSnapConstraint(cst))
 	}
 	for _, idx := range o.Indexes {
-		t.Indexes = append(t.Indexes, toSnapIndex(idx))
+		t.Indexes = append(t.Indexes, ToSnapIndex(idx))
 	}
 	for _, pol := range o.Policies {
 		t.Policies = append(t.Policies, toSnapPolicy(pol))
@@ -342,20 +342,48 @@ func toSnapConstraint(cst *ir.Constraint) SnapConstraint {
 	}
 }
 
-func toSnapIndex(idx *ir.Index) SnapIndex {
+// ToSnapIndex converts an ir.Index into its flat, fully comparable snapshot
+// form. Exported so diff.diffIndexes can build the same representation from
+// the desired side and compare it against the stored snapshot with `==` to
+// detect a same-named index whose definition changed.
+func ToSnapIndex(idx *ir.Index) SnapIndex {
 	cols := make([]string, 0, len(idx.Columns))
 	for _, c := range idx.Columns {
+		var s string
 		if c.Name != "" {
-			cols = append(cols, c.Name)
+			s = c.Name
 		} else if c.Expr != nil {
-			cols = append(cols, "("+c.Expr.Text+")")
+			s = "(" + c.Expr.Text + ")"
 		}
+		if c.SortOrder != "" {
+			s += " " + c.SortOrder
+		}
+		if c.Nulls != "" {
+			s += " NULLS " + c.Nulls
+		}
+		cols = append(cols, s)
+	}
+	withParts := make([]string, 0, len(idx.With))
+	for _, p := range idx.With {
+		// pg_get_indexdef always quotes reloption values (e.g. fillfactor='70'),
+		// while hand-written source may not (fillfactor = 70). Strip one layer
+		// of surrounding single quotes so the two spellings compare equal —
+		// otherwise every WITH-bearing index would show spurious drift against
+		// a live/introspected catalog despite being unchanged.
+		v := p.Value
+		if len(v) >= 2 && v[0] == '\'' && v[len(v)-1] == '\'' {
+			v = v[1 : len(v)-1]
+		}
+		withParts = append(withParts, p.Key+"="+v)
 	}
 	si := SnapIndex{
-		Name:    idx.Name,
-		Unique:  idx.Unique,
-		Method:  idx.Method,
-		Columns: strings.Join(cols, ", "),
+		Name:             idx.Name,
+		Unique:           idx.Unique,
+		Method:           idx.Method,
+		Columns:          strings.Join(cols, ", "),
+		Include:          strings.Join(idx.Include, ", "),
+		NullsNotDistinct: idx.NullsNotDistinct,
+		With:             strings.Join(withParts, ", "),
 	}
 	if idx.Where != nil {
 		si.Where = *idx.Where

@@ -2576,7 +2576,22 @@ func diffIndexes(schema, table string, o *ir.Table, snap *snapshot.SnapTable, re
 		))
 	}
 	for _, idx := range o.Indexes {
-		if _, exists := snapByName[idx.Name]; !exists {
+		si, exists := snapByName[idx.Name]
+		if !exists {
+			ops = append(ops, createIndex(schema, table, idx)...)
+			continue
+		}
+		// A same-named index must still be compared: PG has no generic ALTER
+		// for an index's structural definition, so any change to method,
+		// uniqueness, columns (incl. sort order/NULLS placement), WHERE,
+		// INCLUDE, WITH, or NULLS NOT DISTINCT requires DROP + recreate.
+		// Without this, an edited index that keeps its name was a silent
+		// no-op on plan/apply.
+		if snapshot.ToSnapIndex(idx) != *si {
+			ops = append(ops, cautionOp(
+				fmt.Sprintf("DROP INDEX IF EXISTS %s;", quoteIdent(idx.Name)),
+				idx.Pos,
+			))
 			ops = append(ops, createIndex(schema, table, idx)...)
 		}
 	}
@@ -2636,9 +2651,11 @@ func localConstraintCols(expr string) []string {
 }
 
 // translateIndexCols applies the rename map to a SnapIndex.Columns field
-// (a comma-separated list of column names or `(expression)` entries) and
-// returns the resulting plain column names. Expression entries are returned
-// as empty strings so they don't accidentally appear "dropped".
+// (a comma-separated list of column names or `(expression)` entries, each
+// optionally suffixed with ASC/DESC and/or NULLS FIRST/LAST — see
+// snapshot.ToSnapIndex) and returns the resulting plain column names.
+// Expression entries are returned as empty strings so they don't accidentally
+// appear "dropped".
 func translateIndexCols(cols string, renamedCols map[string]string) []string {
 	if cols == "" {
 		return nil
@@ -2650,6 +2667,11 @@ func translateIndexCols(cols string, renamedCols map[string]string) []string {
 		if strings.HasPrefix(p, "(") {
 			out = append(out, "")
 			continue
+		}
+		// Strip an optional " DESC"/" ASC"/" NULLS FIRST"/" NULLS LAST" suffix,
+		// mirroring localConstraintCols's identical treatment for constraints.
+		if sp := strings.IndexAny(p, " \t"); sp != -1 {
+			p = p[:sp]
 		}
 		if newName, ok := renamedCols[p]; ok {
 			p = newName

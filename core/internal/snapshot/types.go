@@ -115,12 +115,19 @@ type SnapConstraint struct {
 	Deferrable bool   `json:"deferrable,omitempty"`
 }
 
+// SnapIndex is a flat, fully comparable (string/bool fields only) snapshot of
+// an index's definition. diff.diffIndexes builds one from the desired ir.Index
+// via ToSnapIndex and compares it against the stored one with plain `==` to
+// decide whether a same-named index needs to be recreated.
 type SnapIndex struct {
-	Name    string `json:"name"`
-	Unique  bool   `json:"unique,omitempty"`
-	Method  string `json:"method"`
-	Columns string `json:"columns"` // comma-separated
-	Where   string `json:"where,omitempty"`
+	Name             string `json:"name"`
+	Unique           bool   `json:"unique,omitempty"`
+	Method           string `json:"method"`
+	Columns          string `json:"columns"` // comma-separated; may carry ASC/DESC and NULLS FIRST/LAST suffixes
+	Where            string `json:"where,omitempty"`
+	Include          string `json:"include,omitempty"` // comma-separated covering columns
+	NullsNotDistinct bool   `json:"nulls_not_distinct,omitempty"`
+	With             string `json:"with,omitempty"` // comma-separated key=value storage params
 }
 
 type SnapPolicy struct {

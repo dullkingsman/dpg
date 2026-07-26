@@ -160,6 +160,20 @@ func TestParseIndexColumn(t *testing.T) {
 	}
 }
 
+// TestParseIndexColumnStripsExpressionCasts guards against a spurious-drift
+// regression found while live-testing the diffIndexes content-comparison fix:
+// pg_get_indexdef adds an explicit ::typename cast to string literals inside
+// expression index columns (e.g. to_tsvector('english'::regconfig, e)) that
+// hand-written source doesn't have. Without stripping it, an unchanged
+// expression index would show drift on every verify/plan --live.
+func TestParseIndexColumnStripsExpressionCasts(t *testing.T) {
+	got := parseIndexColumn(`to_tsvector('english'::regconfig, e)`)
+	want := `to_tsvector('english', e)`
+	if got.Expr == nil || got.Expr.Text != want {
+		t.Errorf("parseIndexColumn cast-stripping: got %+v, want Expr.Text = %q", got, want)
+	}
+}
+
 // ── parsePartitionKey ─────────────────────────────────────────────────────────
 
 func TestParsePartitionKey(t *testing.T) {

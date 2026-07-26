@@ -31,17 +31,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   without a version-gated catalog column), emitted in `CREATE INDEX` SQL, and
   rendered back by `dump`. `WITH` was previously parsed into the IR (`idx.With`)
   but silently dropped everywhere downstream; `NULLS NOT DISTINCT` wasn't
-  represented at all. Known limitation (pre-existing, not introduced by this
-  fix): `diffIndexes` matches indexes by name only — it drops a snapshot index
-  absent from desired and creates a desired index absent from the snapshot,
-  but never compares the two when a name is present on both sides. So editing
-  *any* property of an index that keeps its name (method, uniqueness, columns,
-  `WHERE`, `INCLUDE`, and now `WITH`/`NULLS NOT DISTINCT` too) is a silent
-  no-op on `plan`/`apply`, not just these two new fields. Fixing that is a
-  larger, separate change (move `diffIndexes` to full content comparison,
-  which also means capturing `Include`/`With`/`NullsNotDistinct` in
-  `SnapIndex`, which today only stores `Name`/`Unique`/`Method`/`Columns`/
-  `Where`) and is out of scope here.
+  represented at all.
 - `INDEX name (...)` (Mode B, RFC §4.8's singular-keyword form) now parses for
   hand-written indexes. Previously the parser routed both `INDEX` and
   `INDICES` to the same brace-requiring block parser, so the singular form was
@@ -51,6 +41,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`diffIndexes` now compares a same-named index's actual definition instead
+  of only checking whether the name exists.** Previously an index present in
+  both desired and snapshot was never compared at all — editing its method,
+  uniqueness, columns, sort order/`NULLS` placement, `WHERE`, `INCLUDE`,
+  `WITH`, or `NULLS NOT DISTINCT` while keeping the name was a silent no-op on
+  `plan`/`apply`. `SnapIndex` gained `Include`/`With`/`NullsNotDistinct` fields
+  (previously only `Name`/`Unique`/`Method`/`Columns`/`Where` were stored) and
+  `Columns` now also carries sort-order/`NULLS` suffixes; any difference now
+  emits a `DROP INDEX` + `CREATE INDEX` pair, the same statement already used
+  when an index is removed outright. `translateIndexCols` (used to suppress a
+  redundant `DROP INDEX` when `DROP COLUMN` already cascades to it) was
+  updated to strip these new suffixes before matching column names — the
+  `Columns` format change would otherwise have broken that cascade check for
+  any sorted index.
+  Fixing this surfaced two additional spurious-drift bugs that only appear
+  once an index's definition is actually compared against a live catalog:
+  `pg_get_indexdef` always quotes `WITH` storage-parameter values (e.g.
+  `fillfactor='70'`) while hand-written source may not, and it adds an
+  explicit `::typename` cast to string literals inside expression index
+  columns (e.g. `to_tsvector('english'::regconfig, e)`) that source doesn't
+  have. Both are now normalized before comparison (quote-stripping in
+  `snapshot.ToSnapIndex`; the existing `stripStringLiteralCasts` — already
+  used for column defaults — applied to `WHERE` and expression columns during
+  introspection), so an unchanged index no longer shows drift against a real
+  database.
 - `dump` output now recompiles **and re-applies** for real-world tables:
   identifiers that are reserved keywords or otherwise non-bare (table/column/view/
   sequence/role/index/constraint names) are quoted; indexes render as the accepted
@@ -151,6 +166,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Postgres "other objects depend on it" error (loud failure, not silent
   corruption); drop/rebuild the dependents around the apply, or avoid the churn
   entirely by hand-editing the snapshot key to the new format before running.
+- **Index content-comparison self-heals on next apply.** `SnapIndex` gained
+  `Include`/`With`/`NullsNotDistinct` fields and `Columns` now carries sort-
+  order/`NULLS` suffixes. Snapshots written before this release don't have
+  this data for indexes that already use these properties (covering columns,
+  storage parameters, `NULLS NOT DISTINCT`, or non-default sort order), so the
+  first `plan`/`apply` after upgrading recreates those indexes once (a
+  `CAUTION`-level `DROP INDEX` + `CREATE INDEX`, not `DESTRUCTIVE` — same as a
+  plain index change) to bring the snapshot up to date; every run after that
+  is a genuine no-op.
 
 ## [idea-v0.5.2-alpha.13] — 2026-05-22
 
