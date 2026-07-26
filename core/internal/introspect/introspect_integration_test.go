@@ -65,6 +65,71 @@ func TestIntrospectTable(t *testing.T) {
 	}
 }
 
+// TestIntrospectColumnStorageIsTypeDefault is the live-catalog guard for a
+// new field added during a dump false-negative fix (Owner/Storage were
+// genuinely diffed but never rendered by dump): every real column has a
+// concrete pg_attribute.attstorage value, so Storage itself can't tell
+// "matches the type's own default" apart from "explicitly overridden" the
+// way a nil pointer normally would — StorageIsTypeDefault (computed via a
+// live join against pg_type.typstorage) is what dump uses to avoid adding a
+// STORAGE line to every ordinary variable-length column.
+func TestIntrospectColumnStorageIsTypeDefault(t *testing.T) {
+	connStr := testpg.Start(t)
+	ctx := context.Background()
+
+	conn, err := executor.Connect(ctx, connStr)
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	defer conn.Close(ctx)
+
+	// body: text, left at its type default (EXTENDED). id: integer, left at
+	// its type default (PLAIN). overridden: text, explicitly set to EXTERNAL
+	// (text's default is EXTENDED, so this is a genuine override).
+	_, err = conn.Exec(ctx,
+		`CREATE TABLE public.storage_t (
+			id         integer,
+			body       text,
+			overridden text
+		);
+		ALTER TABLE public.storage_t ALTER COLUMN overridden SET STORAGE EXTERNAL;`)
+	if err != nil {
+		t.Fatalf("create table: %v", err)
+	}
+
+	ci := introspect.New()
+	objects, err := ci.Introspect(ctx, conn)
+	if err != nil {
+		t.Fatalf("introspect: %v", err)
+	}
+
+	var found *ir.Table
+	for _, obj := range objects {
+		if tbl, ok := obj.(*ir.Table); ok && tbl.Name == "storage_t" && tbl.Schema == "public" {
+			found = tbl
+			break
+		}
+	}
+	if found == nil {
+		t.Fatal("introspect: table public.storage_t not found in results")
+	}
+
+	byName := map[string]*ir.Column{}
+	for _, col := range found.Columns {
+		byName[col.Name] = col
+	}
+
+	if col := byName["id"]; col == nil || col.Storage == nil || *col.Storage != "PLAIN" || !col.StorageIsTypeDefault {
+		t.Errorf("id: got Storage=%v StorageIsTypeDefault=%v, want PLAIN/true", col.Storage, col != nil && col.StorageIsTypeDefault)
+	}
+	if col := byName["body"]; col == nil || col.Storage == nil || *col.Storage != "EXTENDED" || !col.StorageIsTypeDefault {
+		t.Errorf("body: got Storage=%v StorageIsTypeDefault=%v, want EXTENDED/true", col.Storage, col != nil && col.StorageIsTypeDefault)
+	}
+	if col := byName["overridden"]; col == nil || col.Storage == nil || *col.Storage != "EXTERNAL" || col.StorageIsTypeDefault {
+		t.Errorf("overridden: got Storage=%v StorageIsTypeDefault=%v, want EXTERNAL/false", col.Storage, col != nil && col.StorageIsTypeDefault)
+	}
+}
+
 func TestIntrospectEnum(t *testing.T) {
 	connStr := testpg.Start(t)
 	ctx := context.Background()

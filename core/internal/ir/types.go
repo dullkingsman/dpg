@@ -56,12 +56,21 @@ type Column struct {
 	Statistics  *int
 	Compression *string
 	Storage     *string
-	Deprecated  *string
-	Using       *string // USING expression for ALTER COLUMN TYPE
-	Grants      []Grant
-	Revocations []Revocation
-	NameMaps    []pipeline.NameMapEntry
-	SrcPos      pipeline.SourcePos
+	// StorageIsTypeDefault is set only by introspection: true when Storage
+	// equals the column's type's own default storage mode (pg_type.typstorage),
+	// i.e. nobody ever explicitly overrode it. dump uses this to decide
+	// whether rendering STORAGE would be a genuine declaration or just noise —
+	// every real column has a concrete attstorage value, so Storage itself
+	// can't tell "unset" apart from "set to the default" the way a nil
+	// pointer normally would. Diffing is unaffected: diffColumns only acts
+	// when the DESIRED side sets Storage, never based on this flag.
+	StorageIsTypeDefault bool
+	Deprecated           *string
+	Using                *string // USING expression for ALTER COLUMN TYPE
+	Grants               []Grant
+	Revocations          []Revocation
+	NameMaps             []pipeline.NameMapEntry
+	SrcPos               pipeline.SourcePos
 }
 
 // Generated holds a GENERATED ALWAYS AS (expr) STORED column spec.

@@ -844,3 +844,132 @@ $$ {}`
 		t.Error("live seqcycle = false, want true after applying CYCLE")
 	}
 }
+
+// TestRoundtripSequenceOwner is the live regression guard for a bug found
+// reviewing the dump Owner-rendering fix: Sequence Owner was never actually
+// wired into createSequence/diffSequence/SnapSequence, unlike Table/Schema
+// (which both genuinely act on Owner) — a declared sequence Owner had zero
+// effect anywhere, for both initial creation and subsequent drift, even
+// though the IR builder correctly parsed it and dump had started rendering
+// it. Confirms OWNER TO actually reaches a real PostgreSQL 17 catalog on
+// both create and a follow-up change, and that verify sees zero drift after.
+func TestRoundtripSequenceOwner(t *testing.T) {
+	connStr := testpg.Start(t)
+	ctx := context.Background()
+
+	differ := diff.New()
+	emitter := emit.New()
+	applyExec := executor.New()
+	ci := introspect.New()
+	store := newMemStore()
+
+	conn, err := executor.Connect(ctx, connStr)
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	defer conn.Close(ctx)
+
+	if _, err := conn.Exec(ctx, `CREATE ROLE rt_seq_owner_a`); err != nil {
+		t.Fatalf("create role rt_seq_owner_a: %v", err)
+	}
+	if _, err := conn.Exec(ctx, `CREATE ROLE rt_seq_owner_b`); err != nil {
+		t.Fatalf("create role rt_seq_owner_b: %v", err)
+	}
+
+	dir := t.TempDir()
+	f := filepath.Join(dir, "schema.dpg")
+	v1 := `SEQUENCE seq_owned { OWNER rt_seq_owner_a; }`
+	if err := os.WriteFile(f, []byte(v1), 0o644); err != nil {
+		t.Fatalf("write v1: %v", err)
+	}
+	applyFixture(t, ctx, conn, []string{f}, dir, differ, emitter, applyExec, store)
+
+	queryOwner := func() string {
+		t.Helper()
+		rs, err := conn.QueryRows(ctx,
+			`SELECT r.rolname FROM pg_class c JOIN pg_roles r ON r.oid = c.relowner WHERE c.relname = 'seq_owned'`)
+		if err != nil {
+			t.Fatalf("query owner: %v", err)
+		}
+		defer rs.Close()
+		if !rs.Next() {
+			t.Fatal("seq_owned not found in pg_class")
+		}
+		var owner string
+		if err := rs.Scan(&owner); err != nil {
+			t.Fatalf("scan owner: %v", err)
+		}
+		return owner
+	}
+	if got := queryOwner(); got != "rt_seq_owner_a" {
+		t.Fatalf("owner after create = %q, want rt_seq_owner_a", got)
+	}
+
+	v2 := `SEQUENCE seq_owned { OWNER rt_seq_owner_b; }`
+	if err := os.WriteFile(f, []byte(v2), 0o644); err != nil {
+		t.Fatalf("write v2: %v", err)
+	}
+	desired2, err := compiler.Compile([]string{f}, dir, pipeline.Default)
+	if err != nil {
+		t.Fatalf("compile v2: %v", err)
+	}
+	snap, _ := store.Load("test", "dpgtest")
+	ops, err := differ.Diff(desired2, snap)
+	if err != nil {
+		t.Fatalf("diff (owner change): %v", err)
+	}
+	var sawOwnerChange bool
+	for _, o := range ops {
+		sql := o.SQL()
+		if strings.Contains(sql, "ALTER SEQUENCE") && strings.Contains(sql, "OWNER TO") && strings.Contains(sql, "rt_seq_owner_b") {
+			sawOwnerChange = true
+		}
+	}
+	if !sawOwnerChange {
+		t.Fatalf("expected ALTER SEQUENCE ... OWNER TO rt_seq_owner_b, got: %v", ops)
+	}
+
+	migration, err := emitter.Emit(ops, pipeline.MigrationMeta{Cluster: "test", Database: "dpgtest"})
+	if err != nil {
+		t.Fatalf("emit: %v", err)
+	}
+	if err := applyExec.Apply(ctx, migration, conn); err != nil {
+		t.Fatalf("apply (owner change) against live PostgreSQL: %v", err)
+	}
+	if got := queryOwner(); got != "rt_seq_owner_b" {
+		t.Fatalf("owner after change = %q, want rt_seq_owner_b", got)
+	}
+
+	appliedSnap := &pipeline.Snapshot{}
+	if err := snapshot.Populate(appliedSnap, desired2); err != nil {
+		t.Fatalf("populate snapshot: %v", err)
+	}
+	if err := store.Save("test", "dpgtest", appliedSnap); err != nil {
+		t.Fatalf("save snapshot: %v", err)
+	}
+
+	liveObjects, err := ci.Introspect(ctx, conn)
+	if err != nil {
+		t.Fatalf("introspect: %v", err)
+	}
+	var managedLive []pipeline.IRObject
+	for _, obj := range liveObjects {
+		if _, ok := appliedSnap.Objects[obj.QualifiedName()]; ok {
+			managedLive = append(managedLive, obj)
+		}
+	}
+	liveSnap := &pipeline.Snapshot{}
+	if err := snapshot.Populate(liveSnap, managedLive); err != nil {
+		t.Fatalf("populate live snapshot: %v", err)
+	}
+	driftOps, err := differ.Diff(desired2, liveSnap)
+	if err != nil {
+		t.Fatalf("drift diff: %v", err)
+	}
+	if len(driftOps) != 0 {
+		t.Errorf("drift after owner-change apply (%d ops) — live catalog doesn't reflect the change:", len(driftOps))
+		for _, op := range driftOps {
+			t.Errorf("  [%s] %s", op.Safety(), op.SQL())
+		}
+	}
+}

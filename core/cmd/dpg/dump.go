@@ -403,15 +403,62 @@ func renderObjectDPG(b *strings.Builder, obj pipeline.IRObject, fmtOpts format.O
 			hasContent = true
 		}
 		b.WriteString(")")
-		if o.Comment != nil || o.RLSEnabled || len(o.Indexes) > 0 {
+		var colsWithAttrs []*ir.Column
+		for _, col := range o.Columns {
+			hasStorage := col.Storage != nil && !col.StorageIsTypeDefault
+			if col.Comment != nil || hasStorage || col.Compression != nil || col.Statistics != nil {
+				colsWithAttrs = append(colsWithAttrs, col)
+			}
+		}
+		if o.Owner != nil || o.Comment != nil || o.RLSEnabled || len(o.Indexes) > 0 || len(colsWithAttrs) > 0 {
 			b.WriteString(" {\n")
 			blockHasContent := false
+			if o.Owner != nil {
+				fmt.Fprintf(b, "%s%s %s;\n", ind, kw("OWNER"), quoteIdentIfNeeded(*o.Owner))
+				blockHasContent = true
+			}
 			if o.Comment != nil {
 				fmt.Fprintf(b, "%s%s %s;\n", ind, kw("COMMENT"), sqlStringLit(*o.Comment))
 				blockHasContent = true
 			}
 			if o.RLSEnabled {
 				fmt.Fprintf(b, "%s%s %s %s %s;\n", ind, kw("ENABLE"), kw("ROW"), kw("LEVEL"), kw("SECURITY"))
+				blockHasContent = true
+			}
+			if len(colsWithAttrs) > 0 {
+				if blockHasContent {
+					b.WriteString("\n")
+				}
+				// Mode A (COLUMNS { … }) — each entry omits the COLUMN verb:
+				// "name { COMMENT/STORAGE/COMPRESSION/STATISTICS … }". These
+				// attributes are genuinely diffed (diffColumns) but were
+				// previously never rendered by dump, so a dumped project
+				// silently never detected drift on any of them. STORAGE is
+				// suppressed when it's just the column's type's own default
+				// (col.StorageIsTypeDefault, set by introspection from
+				// pg_type.typstorage) — unlike the others, every real column
+				// has a concrete storage mode, so rendering it unconditionally
+				// would add a STORAGE line to nearly every variable-length
+				// column in every dumped table for no reason.
+				fmt.Fprintf(b, "%s%s {\n", ind, kw("COLUMNS"))
+				colInd := ind + ind
+				for _, col := range colsWithAttrs {
+					fmt.Fprintf(b, "%s%s {\n", ind, quoteIdentIfNeeded(col.Name))
+					if col.Comment != nil {
+						fmt.Fprintf(b, "%s%s %s;\n", colInd, kw("COMMENT"), sqlStringLit(*col.Comment))
+					}
+					if col.Storage != nil && !col.StorageIsTypeDefault {
+						fmt.Fprintf(b, "%s%s %s;\n", colInd, kw("STORAGE"), quoteIdentIfNeeded(*col.Storage))
+					}
+					if col.Compression != nil {
+						fmt.Fprintf(b, "%s%s %s;\n", colInd, kw("COMPRESSION"), quoteIdentIfNeeded(*col.Compression))
+					}
+					if col.Statistics != nil {
+						fmt.Fprintf(b, "%s%s %d;\n", colInd, kw("STATISTICS"), *col.Statistics)
+					}
+					fmt.Fprintf(b, "%s}\n", ind)
+				}
+				fmt.Fprintf(b, "%s}\n", ind)
 				blockHasContent = true
 			}
 			if len(o.Indexes) > 0 {
@@ -478,21 +525,34 @@ func renderObjectDPG(b *strings.Builder, obj pipeline.IRObject, fmtOpts format.O
 			b.WriteString(" ")
 			b.WriteString(kw("CYCLE"))
 		}
-		b.WriteString(";\n")
+		if o.Owner != nil || o.Comment != nil {
+			b.WriteString(" {\n")
+			if o.Owner != nil {
+				fmt.Fprintf(b, "%s%s %s;\n", ind, kw("OWNER"), quoteIdentIfNeeded(*o.Owner))
+			}
+			if o.Comment != nil {
+				fmt.Fprintf(b, "%s%s %s;\n", ind, kw("COMMENT"), sqlStringLit(*o.Comment))
+			}
+			b.WriteString("}\n")
+		} else {
+			b.WriteString(";\n")
+		}
 
 	case *ir.Role:
 		fmt.Fprintf(b, "\n%s %s;\n", kw("ROLE"), quoteIdentIfNeeded(o.Name))
 
 	case *ir.Schema:
-		// A comment is rendered when present so plan --live doesn't emit a
-		// spurious COMMENT ... IS NULL; owner is left to the pre-existing
-		// owner-drift path.
+		// Owner/comment are rendered when present so plan --live doesn't
+		// perpetually miss owner drift or emit a spurious COMMENT ... IS NULL.
 		name := quoteIdentIfNeeded(o.Name)
-		if o.Comment != nil {
-			fmt.Fprintf(b, "\n%s %s {\n%s%s %s;\n}\n", kw("SCHEMA"), name, ind, kw("COMMENT"), sqlStringLit(*o.Comment))
-		} else {
-			fmt.Fprintf(b, "\n%s %s {\n}\n", kw("SCHEMA"), name)
+		fmt.Fprintf(b, "\n%s %s {\n", kw("SCHEMA"), name)
+		if o.Owner != nil {
+			fmt.Fprintf(b, "%s%s %s;\n", ind, kw("OWNER"), quoteIdentIfNeeded(*o.Owner))
 		}
+		if o.Comment != nil {
+			fmt.Fprintf(b, "%s%s %s;\n", ind, kw("COMMENT"), sqlStringLit(*o.Comment))
+		}
+		b.WriteString("}\n")
 
 	case *ir.Extension:
 		// Bare form (no VERSION) so plan --live never pins/updates a version:

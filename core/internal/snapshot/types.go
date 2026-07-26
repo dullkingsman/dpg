@@ -193,6 +193,7 @@ type SnapType struct {
 type SnapSequence struct {
 	Schema      string             `json:"schema"`
 	Name        string             `json:"name"`
+	Owner       *string            `json:"owner,omitempty"`
 	Comment     *string            `json:"comment,omitempty"`
 	IncrementBy *int64             `json:"increment_by,omitempty"`
 	MinValue    *int64             `json:"min_value,omitempty"`

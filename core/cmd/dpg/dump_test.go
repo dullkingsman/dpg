@@ -284,6 +284,99 @@ func TestRenderReservedWordAndStructuralCompile(t *testing.T) {
 	}
 }
 
+// TestRenderOwnerAndColumnStorage guards a dump false-negative found during
+// the diff-coverage push: Owner and column Comment/Storage/Compression/
+// Statistics are all genuinely diffed (diffTable/diffSchema/diffSequence/
+// diffColumns) but were never rendered by dump, so a dumped project could
+// never detect drift on any of them, forever. Also proves the Storage-vs-
+// type-default suppression: only a genuine STORAGE override renders, not
+// every column's ordinary type-driven default.
+func TestRenderOwnerAndColumnStorage(t *testing.T) {
+	fmtOpts := format.Options{IndentSize: 4, KeywordCase: "upper"}
+	owner := "app_owner"
+	colComment := "internal id"
+	compression := "lz4"
+	stats := 500
+	overrideStorage := "EXTERNAL"
+	defaultStorage := "EXTENDED"
+	objs := []pipeline.IRObject{
+		&ir.Schema{Name: "app", Owner: &owner},
+		&ir.Sequence{Schema: "public", Name: "seq_id", Owner: &owner},
+		&ir.Table{Schema: "public", Name: "t", Owner: &owner,
+			Columns: []*ir.Column{
+				{Name: "id", Type: ir.TypeRef{Name: "integer"}, Comment: &colComment,
+					Compression: &compression, Statistics: &stats,
+					Storage: &overrideStorage, StorageIsTypeDefault: false},
+				{Name: "body", Type: ir.TypeRef{Name: "text"},
+					Storage: &defaultStorage, StorageIsTypeDefault: true},
+			},
+		},
+	}
+	var b strings.Builder
+	for _, o := range objs {
+		renderObjectDPG(&b, o, fmtOpts)
+	}
+	rendered := b.String()
+
+	if !strings.Contains(rendered, "SCHEMA app {") || !strings.Contains(rendered, "OWNER app_owner;") {
+		t.Errorf("expected schema OWNER, got:\n%s", rendered)
+	}
+	if !strings.Contains(rendered, "SEQUENCE") || strings.Count(rendered, "OWNER app_owner;") != 3 {
+		t.Errorf("expected 3 OWNER declarations (schema, sequence, table), got:\n%s", rendered)
+	}
+	if !strings.Contains(rendered, `COMMENT 'internal id';`) {
+		t.Errorf("expected column COMMENT, got:\n%s", rendered)
+	}
+	if !strings.Contains(rendered, `COMPRESSION lz4;`) {
+		t.Errorf("expected column COMPRESSION, got:\n%s", rendered)
+	}
+	if !strings.Contains(rendered, "STATISTICS 500;") {
+		t.Errorf("expected column STATISTICS, got:\n%s", rendered)
+	}
+	if !strings.Contains(rendered, `STORAGE "EXTERNAL";`) {
+		t.Errorf("expected the overridden column's STORAGE to render, got:\n%s", rendered)
+	}
+	if strings.Contains(rendered, "EXTENDED") {
+		t.Errorf("type-default STORAGE must be suppressed (noise), got:\n%s", rendered)
+	}
+
+	dir := t.TempDir()
+	f := filepath.Join(dir, "schema.dpg")
+	if err := os.WriteFile(f, []byte(rendered), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	compiled, err := compiler.Compile([]string{f}, dir, pipeline.Default)
+	if err != nil {
+		t.Fatalf("owner/storage dump did not recompile: %v\n---\n%s", err, rendered)
+	}
+	var sawSchemaOwner, sawSeqOwner, sawTableOwner bool
+	var sawColAttrs bool
+	for _, o := range compiled {
+		switch v := o.(type) {
+		case *ir.Schema:
+			sawSchemaOwner = v.Owner != nil && *v.Owner == owner
+		case *ir.Sequence:
+			sawSeqOwner = v.Owner != nil && *v.Owner == owner
+		case *ir.Table:
+			sawTableOwner = v.Owner != nil && *v.Owner == owner
+			for _, col := range v.Columns {
+				if col.Name == "id" && col.Comment != nil && *col.Comment == colComment &&
+					col.Compression != nil && *col.Compression == compression &&
+					col.Statistics != nil && *col.Statistics == stats &&
+					col.Storage != nil && *col.Storage == overrideStorage {
+					sawColAttrs = true
+				}
+			}
+		}
+	}
+	if !sawSchemaOwner || !sawSeqOwner || !sawTableOwner {
+		t.Errorf("recompile missing owner: schema=%v sequence=%v table=%v", sawSchemaOwner, sawSeqOwner, sawTableOwner)
+	}
+	if !sawColAttrs {
+		t.Error("recompile missing column comment/compression/statistics/storage")
+	}
+}
+
 // TestRenderIndexVariantsRoundtrip guards the full render → recompile → createIndex
 // chain for every index variant. Apply runs createIndex's SQL, so asserting it
 // here (fast) is equivalent to dump → apply for the index class. Regressions in

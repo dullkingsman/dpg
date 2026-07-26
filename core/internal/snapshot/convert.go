@@ -496,6 +496,7 @@ func toSnapSequence(o *ir.Sequence) *SnapSequence {
 	return &SnapSequence{
 		Schema:      o.Schema,
 		Name:        o.Name,
+		Owner:       o.Owner,
 		Comment:     o.Comment,
 		IncrementBy: o.IncrementBy,
 		MinValue:    o.MinValue,

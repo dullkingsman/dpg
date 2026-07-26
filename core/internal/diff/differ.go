@@ -1639,6 +1639,12 @@ func createSequence(o *ir.Sequence) []pipeline.DiffOp {
 	writeSeqParams(&b, o)
 	b.WriteString(";")
 	ops := []pipeline.DiffOp{safeOp(b.String(), o.SrcPos)}
+	if o.Owner != nil {
+		ops = append(ops, safeOp(
+			fmt.Sprintf("ALTER SEQUENCE %s OWNER TO %s;", ident, quoteIdent(*o.Owner)),
+			o.SrcPos,
+		))
+	}
 	if o.Comment != nil {
 		ops = append(ops, safeOp(
 			fmt.Sprintf("COMMENT ON SEQUENCE %s IS %s;", ident, quoteLit(*o.Comment)),
@@ -1937,6 +1943,10 @@ func diffSequence(o *ir.Sequence, snap *snapshot.SnapSequence) []pipeline.DiffOp
 		writeSeqParams(&b, o)
 		b.WriteString(";")
 		ops = append(ops, safeOp(b.String(), pos))
+	}
+
+	if !ptrEq(o.Owner, snap.Owner) && o.Owner != nil {
+		ops = append(ops, safeOp(fmt.Sprintf("ALTER SEQUENCE %s OWNER TO %s;", ident, quoteIdent(*o.Owner)), pos))
 	}
 
 	if !ptrEq(o.Comment, snap.Comment) {

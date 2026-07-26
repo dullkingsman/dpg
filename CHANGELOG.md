@@ -188,6 +188,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `GRANT` declared alongside a `CREATE TABLE`. `PROCEDURE` had zero diff-level
   coverage of any kind, unit or live — added create/comment/grant/body-change
   unit tests plus a live round-trip test.
+- `dump` now renders a table/schema/sequence's `OWNER` and a column's
+  `COMMENT`/`STORAGE`/`COMPRESSION`/`STATISTICS`. For Table/Schema, `OWNER`
+  was already genuinely compared by the differ but never emitted into
+  dumped source, so drift went undetected forever. Sequence `OWNER` was a
+  deeper gap: it was not just unrendered but **completely inert** end to
+  end — the snapshot form had no `Owner` field at all, `CREATE SEQUENCE`
+  never emitted an `OWNER TO` for a new sequence, and the differ never
+  compared it against drift — so a declared sequence owner had zero effect
+  on initial apply or on any subsequent `verify`/`plan --live`, even though
+  the IR builder parsed it correctly. `SnapSequence` gained an `Owner`
+  field, and `createSequence`/`diffSequence` now emit `ALTER SEQUENCE ...
+  OWNER TO` the same way Table/Schema already did.
+  `STORAGE` needed separate care: PostgreSQL always has a concrete storage
+  mode for every column (there's no "unset" state at the catalog level,
+  unlike the other attributes), and it's usually just the column's type's
+  own default (e.g. every `text`/`varchar`/`jsonb` column defaults to
+  `EXTENDED`) — rendering it unconditionally would add a `STORAGE` line to
+  nearly every variable-length column in every dumped table. Introspection
+  now also captures whether a column's storage matches its type's own
+  default (via a live join against `pg_type.typstorage`), and `dump` only
+  renders `STORAGE` when it's a genuine override.
 - `dump` output now recompiles **and re-applies** for real-world tables:
   identifiers that are reserved keywords or otherwise non-bare (table/column/view/
   sequence/role/index/constraint names) are quoted; indexes render as the accepted

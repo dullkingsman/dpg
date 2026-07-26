@@ -399,10 +399,12 @@ SELECT n.nspname, c.relname,
            WHEN 'p' THEN 'PLAIN' WHEN 'e' THEN 'EXTERNAL'
            WHEN 'm' THEN 'MAIN'  WHEN 'x' THEN 'EXTENDED'
            ELSE NULL
-       END AS storage
+       END AS storage,
+       a.attstorage = t.typstorage AS storage_is_type_default
 FROM   pg_attribute a
 JOIN   pg_class c     ON c.oid = a.attrelid
 JOIN   pg_namespace n ON n.oid = c.relnamespace
+JOIN   pg_type t      ON t.oid = a.atttypid
 LEFT   JOIN pg_attrdef d ON d.adrelid = a.attrelid AND d.adnum = a.attnum
 WHERE  a.attnum > 0
 AND    NOT a.attisdropped
@@ -418,10 +420,10 @@ ORDER  BY n.nspname, c.relname, a.attnum`
 
 	for rs.Next() {
 		var schema, table, name, dataType string
-		var notNull bool
+		var notNull, storageIsDefault bool
 		var identityKind, generatedKind, def, comment, compression, storage *string
 		var stats *int
-		if err := rs.Scan(&schema, &table, &name, &dataType, &notNull, &identityKind, &generatedKind, &def, &comment, &stats, &compression, &storage); err != nil {
+		if err := rs.Scan(&schema, &table, &name, &dataType, &notNull, &identityKind, &generatedKind, &def, &comment, &stats, &compression, &storage, &storageIsDefault); err != nil {
 			return err
 		}
 		t, ok := idx[schema+"."+table]
@@ -429,12 +431,13 @@ ORDER  BY n.nspname, c.relname, a.attnum`
 			continue
 		}
 		col := &ir.Column{
-			Name:        name,
-			Type:        ir.TypeRef{Name: dataType},
-			NotNull:     notNull,
-			Comment:     comment,
-			Compression: compression,
-			Storage:     storage,
+			Name:                 name,
+			Type:                 ir.TypeRef{Name: dataType},
+			NotNull:              notNull,
+			Comment:              comment,
+			Compression:          compression,
+			Storage:              storage,
+			StorageIsTypeDefault: storageIsDefault,
 		}
 		switch {
 		case identityKind != nil && *identityKind == "a":

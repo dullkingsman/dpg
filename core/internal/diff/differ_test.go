@@ -3240,6 +3240,54 @@ func TestDiffSequenceCommentRemoved(t *testing.T) {
 	}
 }
 
+// TestDiffCreateSequenceWithOwner and TestDiffSequenceOwnerChanged are the
+// regression guard for a bug found reviewing the dump Owner-rendering fix:
+// createSequence never emitted ALTER SEQUENCE ... OWNER TO for a brand-new
+// sequence, SnapSequence had no Owner field at all, and diffSequence never
+// compared it — so a declared sequence Owner was completely inert, for both
+// initial creation and subsequent drift, unlike Table/Schema (which both
+// genuinely act on Owner). dump had already started rendering `OWNER role;`
+// into sequence source (see the render-side fix), which without this fix
+// would silently do nothing at either create or apply time.
+func TestDiffCreateSequenceWithOwner(t *testing.T) {
+	d := New()
+	owner := "app_owner"
+	desired := []pipeline.IRObject{
+		&ir.Sequence{Schema: "public", Name: "seq_id", Owner: &owner},
+	}
+	ops, err := d.Diff(desired, &pipeline.Snapshot{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsSQL(ops, "CREATE SEQUENCE IF NOT EXISTS") {
+		t.Errorf("expected CREATE SEQUENCE, got: %v", sqlList(ops))
+	}
+	if !containsSQL(ops, `ALTER SEQUENCE "public"."seq_id" OWNER TO "app_owner"`) {
+		t.Errorf("expected ALTER SEQUENCE ... OWNER TO for a new sequence, got: %v", sqlList(ops))
+	}
+}
+
+func TestDiffSequenceOwnerChanged(t *testing.T) {
+	d := New()
+	oldOwner := "old_owner"
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.seq_id", &snapshot.SnapObject{
+		Kind:     "sequence",
+		Sequence: &snapshot.SnapSequence{Schema: "public", Name: "seq_id", Owner: &oldOwner},
+	})
+	newOwner := "new_owner"
+	desired := []pipeline.IRObject{
+		&ir.Sequence{Schema: "public", Name: "seq_id", Owner: &newOwner},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsSQL(ops, `ALTER SEQUENCE "public"."seq_id" OWNER TO "new_owner"`) {
+		t.Errorf("expected ALTER SEQUENCE ... OWNER TO new_owner, got: %v", sqlList(ops))
+	}
+}
+
 // ── Role diff ─────────────────────────────────────────────────────────────────
 
 func TestDiffCreateRole(t *testing.T) {
