@@ -88,6 +88,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and removing a `REVOCATION` declaration re-`GRANT`s the privilege to
   restore it. `CASCADE` is supported at the table/view level and column
   level.
+- `POLICY name ...`/`TRIGGER name ...`/`PARTITION name ...` (Mode B, RFC
+  §4.8's singular-keyword form) now parse. Unlike `INDEX`/`GRANT`/
+  `REVOCATION`, these three weren't even in the block dispatch switch, so the
+  singular keyword was "unknown block directive", not just a brace mismatch.
+  `POLICY`/`TRIGGER` reuse the existing per-entry parser their plural block
+  already called internally; `PARTITION` needed one extracted
+  (`parseOnePartitionBound`), since `PartitionDef` wraps a list unlike the
+  other four collection types. Fixing `PARTITION` surfaced two further bugs,
+  both fixed alongside it:
+  - **`CREATE TABLE ... PARTITION OF ... FOR VALUES ...` had a duplicated
+    `FOR VALUES`, a syntax error.** Both the parser (raw text captured after
+    the partition name) and introspection (`pg_get_expr` on `relpartbound`)
+    already include the `FOR VALUES ...` (or `DEFAULT`) clause in a
+    partition's stored bounds text, but the SQL-emission code prepended a
+    second, hardcoded `FOR VALUES` on top. Pre-existing, present for both
+    Mode A and Mode B, in both the initial-create and update-diff paths —
+    just never live-tested against a real database before now.
+  - **A `PARTITIONS { }` block silently discarded any partitions a preceding
+    Mode-B `PARTITION` entry had already added**, because `PartitionDef`
+    wraps a list and the `PARTITIONS` dispatch case assigned outright
+    (`ast.Partitions = ...`) instead of merging into an existing value. Only
+    manifests when `PARTITION` precedes `PARTITIONS` on the same table; the
+    reverse order happened to work by accident.
+  Known limitation found live-testing this fix, **not fixed here**:
+  introspecting a partitioned parent table and re-diffing against source
+  reports spurious drift — columns show as missing (`ADD COLUMN` proposed for
+  columns that already exist) and triggers show as changed (`DROP`/`CREATE`
+  proposed for unchanged triggers). Pre-existing, unrelated to Mode A vs B —
+  no integration test exercised a partitioned table with columns or triggers
+  before now. Root cause not investigated; likely in how partitioned tables'
+  columns/triggers are matched during introspection or live-snapshot
+  filtering. `dpg apply` itself is unaffected (the generated SQL is correct
+  and applies cleanly); only `verify`/`plan --live` on an already-applied
+  partitioned table would show this.
 - `dump` output now recompiles **and re-applies** for real-world tables:
   identifiers that are reserved keywords or otherwise non-bare (table/column/view/
   sequence/role/index/constraint names) are quoted; indexes render as the accepted

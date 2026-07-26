@@ -425,6 +425,36 @@ func TestSimplePolicy(t *testing.T) {
 	}
 }
 
+// Mode B (§4.8 Dual Definition Modes): the singular POLICY keyword precedes a
+// single entry outside a plural block — previously this would have hit the
+// same conflation bug already fixed for INDEX/INDICES and GRANT/REVOCATION
+// (POLICY wasn't even in the dispatch switch at all, so it was "unknown block
+// directive", not just brace-mismatched).
+func TestPolicyModeBSingularKeyword(t *testing.T) {
+	ast := parse(t, `POLICY view_self FOR SELECT USING (id = auth.uid());`)
+	if len(ast.Policies) != 1 {
+		t.Fatalf("expected 1 policy, got %d", len(ast.Policies))
+	}
+	pol := ast.Policies[0]
+	if pol.Name.Name != "view_self" {
+		t.Errorf("policy name: got %q", pol.Name.Name)
+	}
+	if pol.Command != "SELECT" {
+		t.Errorf("policy command: got %q", pol.Command)
+	}
+}
+
+func TestPolicyModeAAndBCanMix(t *testing.T) {
+	src := `
+		POLICIES { p_a FOR SELECT USING (true); }
+		POLICY p_b FOR INSERT USING (true);
+	`
+	ast := parse(t, src)
+	if len(ast.Policies) != 2 {
+		t.Fatalf("expected 2 policies (one per mode), got %d", len(ast.Policies))
+	}
+}
+
 // ── TRIGGERS ─────────────────────────────────────────────────────────────────
 
 func TestSimpleTrigger(t *testing.T) {
@@ -471,6 +501,33 @@ func TestTriggerWithWhen(t *testing.T) {
 	}
 }
 
+// Mode B: the singular TRIGGER keyword precedes a single entry outside a
+// plural block — same conflation-bug family as POLICY/INDEX/GRANT/REVOCATION.
+func TestTriggerModeBSingularKeyword(t *testing.T) {
+	ast := parse(t, `TRIGGER after_insert AFTER INSERT FOR EACH ROW EXECUTE FUNCTION on_insert();`)
+	if len(ast.Triggers) != 1 {
+		t.Fatalf("expected 1 trigger, got %d", len(ast.Triggers))
+	}
+	tr := ast.Triggers[0]
+	if tr.Name.Name != "after_insert" {
+		t.Errorf("trigger name: got %q", tr.Name.Name)
+	}
+	if tr.Function.Name != "on_insert" {
+		t.Errorf("trigger function: got %q", tr.Function.Name)
+	}
+}
+
+func TestTriggerModeAAndBCanMix(t *testing.T) {
+	src := `
+		TRIGGERS { t_a AFTER INSERT FOR EACH ROW EXECUTE FUNCTION f_a(); }
+		TRIGGER t_b AFTER UPDATE FOR EACH ROW EXECUTE FUNCTION f_b();
+	`
+	ast := parse(t, src)
+	if len(ast.Triggers) != 2 {
+		t.Fatalf("expected 2 triggers (one per mode), got %d", len(ast.Triggers))
+	}
+}
+
 // ── CONSTRAINT ────────────────────────────────────────────────────────────────
 
 func TestConstraintNotValid(t *testing.T) {
@@ -501,6 +558,52 @@ func TestPartitions(t *testing.T) {
 	}
 	if ast.Partitions.Partitions[0].Name.Name != "events_2024_q1" {
 		t.Errorf("partition name: got %q", ast.Partitions.Partitions[0].Name.Name)
+	}
+}
+
+// Mode B: the singular PARTITION keyword precedes a single entry outside a
+// plural block — same conflation-bug family as POLICY/TRIGGER/INDEX/GRANT/
+// REVOCATION. PartitionDef wraps a slice (unlike the others, nothing else
+// merges multiple PARTITIONS{} declarations), so Mode B must lazily create it
+// on first use rather than assume it already exists.
+func TestPartitionModeBSingularKeyword(t *testing.T) {
+	ast := parse(t, `PARTITION events_2024_q1 FOR VALUES FROM ('2024-01-01') TO ('2024-04-01');`)
+	if ast.Partitions == nil || len(ast.Partitions.Partitions) != 1 {
+		t.Fatalf("expected 1 partition, got %v", ast.Partitions)
+	}
+	if ast.Partitions.Partitions[0].Name.Name != "events_2024_q1" {
+		t.Errorf("partition name: got %q", ast.Partitions.Partitions[0].Name.Name)
+	}
+}
+
+// Both orderings are exercised deliberately: PartitionDef wraps a slice, and
+// the PARTITIONS (plural) dispatch case originally did a bare assignment
+// (ast.Partitions = ...) rather than merging — which silently discarded
+// whatever a PRECEDING Mode-B PARTITION entry had already added. PARTITIONS-
+// then-PARTITION happens not to trigger it (PARTITIONS runs first and
+// PARTITION's lazy-init sees a non-nil ast.Partitions to append to), so only
+// testing that order would have missed the bug — confirmed by a live
+// integration test (TestRoundtripPolicyTriggerPartitionModeB) using the other
+// order, which failed until this was fixed.
+func TestPartitionModeAAndBCanMix(t *testing.T) {
+	src := `
+		PARTITIONS { events_2024_q1 FOR VALUES FROM ('2024-01-01') TO ('2024-04-01'); }
+		PARTITION events_2024_q2 FOR VALUES FROM ('2024-04-01') TO ('2024-07-01');
+	`
+	ast := parse(t, src)
+	if ast.Partitions == nil || len(ast.Partitions.Partitions) != 2 {
+		t.Fatalf("expected 2 partitions (one per mode), got %v", ast.Partitions)
+	}
+}
+
+func TestPartitionModeBThenModeACanMix(t *testing.T) {
+	src := `
+		PARTITION events_2024_q1 FOR VALUES FROM ('2024-01-01') TO ('2024-04-01');
+		PARTITIONS { events_2024_q2 FOR VALUES FROM ('2024-04-01') TO ('2024-07-01'); }
+	`
+	ast := parse(t, src)
+	if ast.Partitions == nil || len(ast.Partitions.Partitions) != 2 {
+		t.Fatalf("expected 2 partitions (one per mode), got %v — PARTITIONS must merge into, not overwrite, a preceding Mode-B PARTITION", ast.Partitions)
 	}
 }
 

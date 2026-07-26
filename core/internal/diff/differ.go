@@ -1091,8 +1091,14 @@ func createTable(o *ir.Table, vtypes map[string]string) []pipeline.DiffOp {
 	var ops []pipeline.DiffOp
 	ops = append(ops, safeOp(b.String(), o.SrcPos))
 	for _, p := range o.Partitions {
+		// p.Bounds already carries the full clause ("FOR VALUES FROM (...) TO
+		// (...)"/"FOR VALUES IN (...)"/"FOR VALUES WITH (...)"/"DEFAULT") —
+		// both the parser (raw text after the partition name) and
+		// introspection (pg_get_expr on relpartbound) capture it that way, so
+		// prepending "FOR VALUES" here would double it up (and be outright
+		// wrong for a DEFAULT partition, which has no FOR VALUES at all).
 		ops = append(ops, safeOp(
-			fmt.Sprintf("CREATE TABLE %s PARTITION OF %s FOR VALUES %s;",
+			fmt.Sprintf("CREATE TABLE %s PARTITION OF %s %s;",
 				qualIdent(o.Schema, p.Name), qualIdent(o.Schema, o.Name), p.Bounds),
 			p.SrcPos,
 		))
@@ -2329,8 +2335,10 @@ func diffPartitions(tbl string, o *ir.Table, snap *snapshot.SnapTable, pos pipel
 		sp, exists := snapMap[p.Name]
 		partTbl := qualIdent(o.Schema, p.Name)
 		if !exists {
+			// See createTable's identical construction: p.Bounds already
+			// carries the full "FOR VALUES ..."/"DEFAULT" clause.
 			ops = append(ops, safeOp(
-				fmt.Sprintf("CREATE TABLE %s PARTITION OF %s FOR VALUES %s;", partTbl, tbl, p.Bounds),
+				fmt.Sprintf("CREATE TABLE %s PARTITION OF %s %s;", partTbl, tbl, p.Bounds),
 				p.SrcPos,
 			))
 		} else if sp.Bound != p.Bounds {
@@ -2340,7 +2348,7 @@ func diffPartitions(tbl string, o *ir.Table, snap *snapshot.SnapTable, pos pipel
 				p.SrcPos,
 			))
 			ops = append(ops, safeOp(
-				fmt.Sprintf("CREATE TABLE %s PARTITION OF %s FOR VALUES %s;", partTbl, tbl, p.Bounds),
+				fmt.Sprintf("CREATE TABLE %s PARTITION OF %s %s;", partTbl, tbl, p.Bounds),
 				p.SrcPos,
 			))
 		}

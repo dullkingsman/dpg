@@ -1870,14 +1870,14 @@ func TestDiffCreateTableWithPartitions(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !containsSQL(ops, "CREATE TABLE") || !containsSQL(ops, "PARTITION OF") {
-		t.Errorf("expected CREATE TABLE … PARTITION OF, got: %v", sqlList(ops))
-	}
-	if !containsSQL(ops, "events_2024") {
-		t.Errorf("expected partition name in output, got: %v", sqlList(ops))
-	}
-	if !containsSQL(ops, "FOR VALUES FROM") {
-		t.Errorf("expected partition bounds in output, got: %v", sqlList(ops))
+	// Exact-text assertion, not a substring check: Bounds already carries the
+	// full "FOR VALUES ..." clause (matching both the parser and
+	// introspection), so a substring check for "FOR VALUES FROM" would pass
+	// even with the once-real bug of prepending "FOR VALUES" a second time
+	// ("... FOR VALUES FOR VALUES FROM (...)", a PG syntax error).
+	want := `CREATE TABLE "public"."events_2024" PARTITION OF "public"."events" FOR VALUES FROM ('2024-01-01') TO ('2025-01-01');`
+	if !containsSQL(ops, want) {
+		t.Errorf("expected exact partition CREATE statement %q, got: %v", want, sqlList(ops))
 	}
 }
 
@@ -1908,8 +1908,10 @@ func TestDiffPartitionAdded(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !containsSQL(ops, "CREATE TABLE") || !containsSQL(ops, "PARTITION OF") {
-		t.Errorf("expected CREATE TABLE … PARTITION OF for new partition, got: %v", sqlList(ops))
+	// Exact-text, not substring — see TestDiffCreateTableWithPartitions.
+	want := `CREATE TABLE "public"."events_2024" PARTITION OF "public"."events" FOR VALUES FROM ('2024-01-01') TO ('2025-01-01');`
+	if !containsSQL(ops, want) {
+		t.Errorf("expected exact partition CREATE statement %q, got: %v", want, sqlList(ops))
 	}
 }
 
@@ -1975,11 +1977,13 @@ func TestDiffPartitionBoundChangedDropsAndRecreates(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !containsSQL(ops, "DROP TABLE") {
+	if !containsSQL(ops, `DROP TABLE "public"."events_2024";`) {
 		t.Errorf("expected DROP TABLE for bound change, got: %v", sqlList(ops))
 	}
-	if !containsSQL(ops, "CREATE TABLE") {
-		t.Errorf("expected CREATE TABLE for bound change, got: %v", sqlList(ops))
+	// Exact-text, not substring — see TestDiffCreateTableWithPartitions.
+	want := `CREATE TABLE "public"."events_2024" PARTITION OF "public"."events" FOR VALUES FROM ('2024-01-01') TO ('2024-07-01');`
+	if !containsSQL(ops, want) {
+		t.Errorf("expected exact partition CREATE statement %q, got: %v", want, sqlList(ops))
 	}
 }
 

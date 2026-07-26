@@ -443,10 +443,20 @@ func (b *blockParser) parseBlock(pos pipeline.SourcePos) (pipeline.BlockAST, err
 			var policies []pipeline.PolicyDef
 			policies, err = b.parsePolicies(dirPos)
 			ast.Policies = append(ast.Policies, policies...)
+		case "POLICY":
+			// Mode B (§4.8 Dual Definition Modes): singular entry, no wrapping '{ }'.
+			var pol pipeline.PolicyDef
+			pol, err = b.parseOnePolicy()
+			ast.Policies = append(ast.Policies, pol)
 		case "TRIGGERS":
 			var triggers []pipeline.TriggerDef
 			triggers, err = b.parseTriggers(dirPos)
 			ast.Triggers = append(ast.Triggers, triggers...)
+		case "TRIGGER":
+			// Mode B: singular entry, no wrapping '{ }'.
+			var trig pipeline.TriggerDef
+			trig, err = b.parseOneTrigger()
+			ast.Triggers = append(ast.Triggers, trig)
 		case "GRANTS":
 			var grants []pipeline.GrantEntry
 			grants, err = b.parseGrantsBlock(dirPos)
@@ -466,7 +476,30 @@ func (b *blockParser) parseBlock(pos pipeline.SourcePos) (pipeline.BlockAST, err
 			r, err = b.parseOneRevocation(dirPos)
 			ast.Revocations = append(ast.Revocations, r)
 		case "PARTITIONS":
-			ast.Partitions, err = b.parsePartitionsBlock(dirPos)
+			// PartitionDef wraps a list, so a PARTITIONS block must MERGE into
+			// any partitions a prior Mode-B PARTITION entry already added —
+			// assigning outright would silently discard them.
+			var pd *pipeline.PartitionDef
+			pd, err = b.parsePartitionsBlock(dirPos)
+			if err == nil {
+				if ast.Partitions == nil {
+					ast.Partitions = pd
+				} else {
+					ast.Partitions.Partitions = append(ast.Partitions.Partitions, pd.Partitions...)
+				}
+			}
+		case "PARTITION":
+			// Mode B: singular entry, no wrapping '{ }'. PartitionDef wraps a list
+			// (unlike Policies/Triggers/Indices/Grants/Revocations, PARTITIONS
+			// isn't merged elsewhere), so lazily create it on first use.
+			var bound pipeline.PartitionBound
+			bound, err = b.parseOnePartitionBound()
+			if err == nil {
+				if ast.Partitions == nil {
+					ast.Partitions = &pipeline.PartitionDef{Pos: dirPos}
+				}
+				ast.Partitions.Partitions = append(ast.Partitions.Partitions, bound)
+			}
 		case "MIGRATE":
 			ast.MigrateRemove, err = b.parseMigrateRemove(dirPos)
 		case "DEFAULT":
@@ -1571,24 +1604,11 @@ func (b *blockParser) parsePartitionsBlock(pos pipeline.SourcePos) (*pipeline.Pa
 		if b.eof() || b.peek() == '}' {
 			break
 		}
-		pPos := b.srcPos()
-		name, err := b.readIdentifier()
+		bound, err := b.parseOnePartitionBound()
 		if err != nil {
 			return nil, err
 		}
-		// Read everything up to ';' or end of block as bounds
-		raw, err := b.readRawUntil(";}")
-		if err != nil {
-			return nil, err
-		}
-		if b.peek() == ';' {
-			b.advance()
-		}
-		pd.Partitions = append(pd.Partitions, pipeline.PartitionBound{
-			Name:   name,
-			Bounds: pipeline.RawExpr{Text: strings.TrimSpace(raw), Pos: pPos},
-			Pos:    pPos,
-		})
+		pd.Partitions = append(pd.Partitions, bound)
 	}
 	b.skipWS()
 	if b.peek() != '}' {
@@ -1596,6 +1616,30 @@ func (b *blockParser) parsePartitionsBlock(pos pipeline.SourcePos) (*pipeline.Pa
 	}
 	b.advance()
 	return pd, nil
+}
+
+// parseOnePartitionBound parses a single "name bounds;" entry, shared by
+// parsePartitionsBlock (Mode A, inside a PARTITIONS { } block) and the
+// PARTITION singular-keyword dispatch case (Mode B).
+func (b *blockParser) parseOnePartitionBound() (pipeline.PartitionBound, error) {
+	pPos := b.srcPos()
+	name, err := b.readIdentifier()
+	if err != nil {
+		return pipeline.PartitionBound{}, err
+	}
+	// Read everything up to ';' or end of block as bounds
+	raw, err := b.readRawUntil(";}")
+	if err != nil {
+		return pipeline.PartitionBound{}, err
+	}
+	if b.peek() == ';' {
+		b.advance()
+	}
+	return pipeline.PartitionBound{
+		Name:   name,
+		Bounds: pipeline.RawExpr{Text: strings.TrimSpace(raw), Pos: pPos},
+		Pos:    pPos,
+	}, nil
 }
 
 // ── MIGRATE REMOVE ────────────────────────────────────────────────────────────
