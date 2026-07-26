@@ -122,6 +122,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   filtering. `dpg apply` itself is unaffected (the generated SQL is correct
   and applies cleanly); only `verify`/`plan --live` on an already-applied
   partitioned table would show this.
+- `CONSTRAINTS { }` (Mode A, RFC §4.8's plural-block form) now parses.
+  Previously only the singular `CONSTRAINT name ...;` form worked at all —
+  unlike the other 7 collection types in RFC §4.8's Dual Definition Modes
+  table, `CONSTRAINTS` had no parser whatsoever, not even a buggy one. The
+  RFC lists `CONSTRAINTS`/`CONSTRAINT` as a pair but never otherwise
+  specifies or exemplifies the plural form anywhere in the document; judged
+  a gap worth closing for consistency with the other 7 rather than a
+  deliberate omission, since nothing calls out constraints as an intentional
+  exception. Reuses the existing `parseConstraint` unchanged — each entry
+  in the block gets its own position captured before calling it. May be
+  freely mixed with the singular form on the same table.
 - `dump` output now recompiles **and re-applies** for real-world tables:
   identifiers that are reserved keywords or otherwise non-bare (table/column/view/
   sequence/role/index/constraint names) are quoted; indexes render as the accepted

@@ -391,6 +391,23 @@ TABLE t (a INTEGER, created_at DATE NOT NULL) PARTITION BY RANGE (created_at) {
 	}
 }
 
+// TestRoundtripConstraintsBlockModeA is the live-catalog guard for the new
+// CONSTRAINTS { } plural block (Mode A, RFC §4.8): previously only the
+// singular CONSTRAINT form parsed at all — CONSTRAINTS had no parser
+// whatsoever, unlike the other 7 collection types, which at least had both
+// forms even when one was buggy. This proves the new block form parses,
+// applies, and round-trips against real PostgreSQL with zero drift, mixed
+// with a standalone Mode-B CONSTRAINT entry on the same table.
+func TestRoundtripConstraintsBlockModeA(t *testing.T) {
+	assertOpaqueRoundtrip(t, `TABLE t (a INTEGER, b INTEGER) {
+    CONSTRAINT ck_a CHECK (a > 0);
+    CONSTRAINTS {
+        ck_b CHECK (b > 0);
+        ck_sum CHECK (a + b < 1000);
+    }
+}`)
+}
+
 // TestRoundtripGrantRevocationModeBAppliesLive is the live-catalog guard for
 // the GRANT/GRANTS + REVOCATION/REVOCATIONS Mode-B fix (RFC §4.8 singular
 // keyword): previously "GRANT ...;"/"REVOCATION ...;" outside a

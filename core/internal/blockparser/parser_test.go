@@ -545,6 +545,39 @@ func TestConstraintNotValid(t *testing.T) {
 	}
 }
 
+// Mode A (§4.8 Dual Definition Modes): CONSTRAINTS { } is the plural-block
+// wrapper completing the pattern already offered for the other 7 collection
+// types (INDICES, POLICIES, TRIGGERS, GRANTS, REVOCATIONS, PARTITIONS,
+// COLUMNS) — previously CONSTRAINTS had no parser at all, only the singular
+// CONSTRAINT form worked.
+func TestConstraintsBlock(t *testing.T) {
+	src := `CONSTRAINTS {
+		ck_positive CHECK (amount > 0);
+		ck_reasonable CHECK (amount < 1000000) NOT VALID;
+	}`
+	ast := parse(t, src)
+	if len(ast.Constraints) != 2 {
+		t.Fatalf("expected 2 constraints, got %d", len(ast.Constraints))
+	}
+	if ast.Constraints[0].Name.Name != "ck_positive" {
+		t.Errorf("constraint[0] name: got %q", ast.Constraints[0].Name.Name)
+	}
+	if ast.Constraints[1].Name.Name != "ck_reasonable" || !ast.Constraints[1].NotValid {
+		t.Errorf("constraint[1]: got %+v", ast.Constraints[1])
+	}
+}
+
+func TestConstraintModeAAndBCanMix(t *testing.T) {
+	src := `
+		CONSTRAINTS { ck_a CHECK (a > 0); }
+		CONSTRAINT ck_b CHECK (b > 0);
+	`
+	ast := parse(t, src)
+	if len(ast.Constraints) != 2 {
+		t.Fatalf("expected 2 constraints (one per mode), got %d", len(ast.Constraints))
+	}
+}
+
 // ── PARTITIONS ────────────────────────────────────────────────────────────────
 
 func TestPartitions(t *testing.T) {

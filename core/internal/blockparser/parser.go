@@ -439,6 +439,13 @@ func (b *blockParser) parseBlock(pos pipeline.SourcePos) (pipeline.BlockAST, err
 			var cst pipeline.ConstraintDef
 			cst, err = b.parseConstraint(dirPos)
 			ast.Constraints = append(ast.Constraints, cst)
+		case "CONSTRAINTS":
+			// Mode A (§4.8 Dual Definition Modes): plural block header wrapping
+			// multiple entries, each omitting the singular keyword — completes
+			// the pattern already offered for the other 7 collection types.
+			var csts []pipeline.ConstraintDef
+			csts, err = b.parseConstraintsBlock(dirPos)
+			ast.Constraints = append(ast.Constraints, csts...)
 		case "POLICIES":
 			var policies []pipeline.PolicyDef
 			policies, err = b.parsePolicies(dirPos)
@@ -1103,6 +1110,36 @@ func (b *blockParser) parseConstraint(pos pipeline.SourcePos) (pipeline.Constrai
 	cst.Expr = pipeline.RawExpr{Text: raw, Pos: pos}
 	b.advance() // consume ;
 	return cst, nil
+}
+
+// parseConstraintsBlock parses a CONSTRAINTS { } block (Mode A), each entry
+// omitting the singular CONSTRAINT keyword. Mirrors parsePolicies/
+// parseTriggers's relationship to their own per-entry parser; unlike those,
+// parseConstraint takes an explicit pos rather than computing its own, so
+// each entry's position is captured fresh here before calling it.
+func (b *blockParser) parseConstraintsBlock(pos pipeline.SourcePos) ([]pipeline.ConstraintDef, error) {
+	if err := b.consumeBrace(); err != nil {
+		return nil, err
+	}
+	var constraints []pipeline.ConstraintDef
+	for {
+		b.skipWS()
+		if b.eof() || b.peek() == '}' {
+			break
+		}
+		cPos := b.srcPos()
+		cst, err := b.parseConstraint(cPos)
+		if err != nil {
+			return nil, err
+		}
+		constraints = append(constraints, cst)
+	}
+	b.skipWS()
+	if b.peek() != '}' {
+		return nil, b.errorf("expected '}' to close CONSTRAINTS block")
+	}
+	b.advance()
+	return constraints, nil
 }
 
 // ── POLICIES ─────────────────────────────────────────────────────────────────
