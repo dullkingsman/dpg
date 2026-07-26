@@ -290,6 +290,64 @@ func TestSchema(t *testing.T) {
 	assertPart2Contains(t, objs[0], "COMMENT")
 }
 
+// Part1 for a quoted schema name stays quoted (re-escaped from the unescaped
+// value) because it feeds into "CREATE SCHEMA <part1>" for pg_query parsing
+// (see pgparser.Reconstruct) — an unquoted reserved word there is a real PG
+// syntax error, same as in raw SQL.
+func TestSchemaQuotedReservedWordName(t *testing.T) {
+	src := `SCHEMA "select" {
+    OWNER "postgres";
+}`
+	objs := scan(t, src)
+	if len(objs) != 1 {
+		t.Fatalf("expected 1 object (schema only), got %d", len(objs))
+	}
+	assertKind(t, objs[0], pipeline.KindSchema)
+	if objs[0].Part1 != `"select"` {
+		t.Errorf("schema Part1: got %q, want %q", objs[0].Part1, `"select"`)
+	}
+}
+
+func TestSchemaQuotedNameWithSpecialChars(t *testing.T) {
+	src := `SCHEMA "my-schema" {
+}`
+	objs := scan(t, src)
+	if len(objs) != 1 {
+		t.Fatalf("expected 1 object (schema only), got %d", len(objs))
+	}
+	assertKind(t, objs[0], pipeline.KindSchema)
+	if objs[0].Part1 != `"my-schema"` {
+		t.Errorf("schema Part1: got %q, want %q", objs[0].Part1, `"my-schema"`)
+	}
+}
+
+func TestSchemaQuotedNameWithEscapedQuote(t *testing.T) {
+	src := `SCHEMA "weird""name" {
+}`
+	objs := scan(t, src)
+	if len(objs) != 1 {
+		t.Fatalf("expected 1 object (schema only), got %d", len(objs))
+	}
+	assertKind(t, objs[0], pipeline.KindSchema)
+	if objs[0].Part1 != `"weird""name"` {
+		t.Errorf("schema Part1: got %q, want %q", objs[0].Part1, `"weird""name"`)
+	}
+}
+
+// Unquoted schema names must still round-trip as bare Part1 (no regression).
+func TestSchemaUnquotedNameStaysBare(t *testing.T) {
+	src := `SCHEMA analytics {
+}`
+	objs := scan(t, src)
+	if len(objs) != 1 {
+		t.Fatalf("expected 1 object (schema only), got %d", len(objs))
+	}
+	assertKind(t, objs[0], pipeline.KindSchema)
+	if objs[0].Part1 != "analytics" {
+		t.Errorf("schema Part1: got %q, want %q", objs[0].Part1, "analytics")
+	}
+}
+
 func TestSchemaWithNestedObjects(t *testing.T) {
 	src := `SCHEMA public {
     OWNER "postgres";

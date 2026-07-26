@@ -185,6 +185,38 @@ func (s *state) peekWord() string {
 	return w
 }
 
+// readQuotedIdentifier reads a double-quoted SQL identifier (e.g. "My Schema"
+// or "select"), unescaping "" to a literal ". The opening " must not have
+// been consumed yet. Returns the unquoted, unescaped identifier text.
+func (s *state) readQuotedIdentifier() (string, error) {
+	s.advance() // consume opening "
+	var buf []byte
+	for {
+		if s.eof() {
+			return "", fmt.Errorf("unterminated quoted identifier")
+		}
+		b := s.advance()
+		if b == '"' {
+			if s.peek() == '"' {
+				buf = append(buf, '"')
+				s.advance()
+				continue
+			}
+			return string(buf), nil
+		}
+		buf = append(buf, b)
+	}
+}
+
+// readWordOrQuotedIdentifier reads either a bare word or a double-quoted
+// identifier, whichever is present at the current position.
+func (s *state) readWordOrQuotedIdentifier() (string, error) {
+	if s.peek() == '"' {
+		return s.readQuotedIdentifier()
+	}
+	return s.readWord(), nil
+}
+
 // ── string / dollar-quote helpers ─────────────────────────────────────────────
 
 // skipSingleQuoted advances past a single-quoted SQL string literal,
@@ -784,9 +816,21 @@ func (s *state) scanBody(schemaName string, stopAtBrace bool) ([]pipeline.RawObj
 //   - the schema's own RawObject (with schema DPG attributes as Part2)
 func (s *state) readSchemaDecl(pos pipeline.SourcePos) (nested []pipeline.RawObject, schemaObj pipeline.RawObject, err error) {
 	s.skipWS()
-	name := s.readWord()
+	quoted := s.peek() == '"'
+	name, err := s.readWordOrQuotedIdentifier()
+	if err != nil {
+		return nil, pipeline.RawObject{}, pipeline.Errorf(s.srcPos(), "%s", err.Error())
+	}
 	if name == "" {
 		return nil, pipeline.RawObject{}, pipeline.Errorf(pos, "expected schema name after SCHEMA")
+	}
+	// part1 feeds into "CREATE SCHEMA <part1>" for pg_query parsing (see
+	// pgparser.Reconstruct), so a name that was quoted in source (reserved
+	// word or special characters) must stay quoted here — pg_query itself
+	// unescapes it back to the same value scanBody uses as schemaName below.
+	part1 := name
+	if quoted {
+		part1 = `"` + strings.ReplaceAll(name, `"`, `""`) + `"`
 	}
 
 	s.skipWS()
@@ -812,7 +856,7 @@ func (s *state) readSchemaDecl(pos pipeline.SourcePos) (nested []pipeline.RawObj
 
 	obj := pipeline.RawObject{
 		Kind:  pipeline.KindSchema,
-		Part1: name,
+		Part1: part1,
 		Part2: schemaAttrs,
 		Pos:   pos,
 	}

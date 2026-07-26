@@ -484,16 +484,14 @@ func renderObjectDPG(b *strings.Builder, obj pipeline.IRObject, fmtOpts format.O
 		fmt.Fprintf(b, "\n%s %s;\n", kw("ROLE"), quoteIdentIfNeeded(o.Name))
 
 	case *ir.Schema:
-		// The scanner requires a { } block after SCHEMA and reads the name as a
-		// bare word (no quoted-identifier support), so the name is emitted bare —
-		// a reserved-word schema name is a pre-existing DPG language limitation,
-		// not a dump concern. A comment is rendered when present so plan --live
-		// doesn't emit a spurious COMMENT ... IS NULL; owner is left to the
-		// pre-existing owner-drift path.
+		// A comment is rendered when present so plan --live doesn't emit a
+		// spurious COMMENT ... IS NULL; owner is left to the pre-existing
+		// owner-drift path.
+		name := quoteIdentIfNeeded(o.Name)
 		if o.Comment != nil {
-			fmt.Fprintf(b, "\n%s %s {\n%s%s %s;\n}\n", kw("SCHEMA"), o.Name, ind, kw("COMMENT"), sqlStringLit(*o.Comment))
+			fmt.Fprintf(b, "\n%s %s {\n%s%s %s;\n}\n", kw("SCHEMA"), name, ind, kw("COMMENT"), sqlStringLit(*o.Comment))
 		} else {
-			fmt.Fprintf(b, "\n%s %s {\n}\n", kw("SCHEMA"), o.Name)
+			fmt.Fprintf(b, "\n%s %s {\n}\n", kw("SCHEMA"), name)
 		}
 
 	case *ir.Extension:

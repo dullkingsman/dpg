@@ -183,6 +183,7 @@ func TestRenderReservedWordAndStructuralCompile(t *testing.T) {
 	where := `"select" > 0`
 	objs := []pipeline.IRObject{
 		&ir.Schema{Name: "reporting", Comment: &comment},
+		&ir.Schema{Name: "select"},
 		&ir.Extension{Name: "hstore"},
 		// ENUM must render "AS ENUM (...)" with single-quoted labels.
 		&ir.Type{Schema: "public", Name: "mood", Variant: "ENUM", EnumValues: []string{"happy", "it's ok"}},
@@ -201,13 +202,14 @@ func TestRenderReservedWordAndStructuralCompile(t *testing.T) {
 		renderObjectDPG(&b, o, fmtOpts)
 	}
 	rendered := b.String()
-	// Reserved-word table/column names must be quoted (these support quoting via
-	// the PG parser). Schema names cannot be quoted (scanner limitation) so are
-	// emitted bare — a reserved-word schema name is out of scope.
+	// Reserved-word table/column/schema names must all be quoted.
 	for _, q := range []string{`"user"`, `"select"`} {
 		if !strings.Contains(rendered, q) {
 			t.Errorf("expected %s quoted in output:\n%s", q, rendered)
 		}
+	}
+	if !strings.Contains(rendered, `SCHEMA "select" {`) {
+		t.Errorf("expected reserved-word schema name quoted, got:\n%s", rendered)
 	}
 	if !strings.Contains(rendered, "EXTENSION hstore;") {
 		t.Errorf("expected bare EXTENSION hstore, got:\n%s", rendered)
@@ -225,12 +227,15 @@ func TestRenderReservedWordAndStructuralCompile(t *testing.T) {
 	if err != nil {
 		t.Fatalf("reserved-word/structural dump did not recompile: %v\n---\n%s", err, rendered)
 	}
-	var sawSchema, sawExt, sawTable bool
+	var sawSchema, sawReservedSchema, sawExt, sawTable bool
 	for _, o := range compiled {
 		switch v := o.(type) {
 		case *ir.Schema:
 			if v.Name == "reporting" {
 				sawSchema = true
+			}
+			if v.Name == "select" {
+				sawReservedSchema = true
 			}
 		case *ir.Extension:
 			if v.Name == "hstore" {
@@ -242,8 +247,8 @@ func TestRenderReservedWordAndStructuralCompile(t *testing.T) {
 			}
 		}
 	}
-	if !sawSchema || !sawExt || !sawTable {
-		t.Errorf("recompile missing objects: schema=%v ext=%v table=%v", sawSchema, sawExt, sawTable)
+	if !sawSchema || !sawReservedSchema || !sawExt || !sawTable {
+		t.Errorf("recompile missing objects: schema=%v reservedSchema=%v ext=%v table=%v", sawSchema, sawReservedSchema, sawExt, sawTable)
 	}
 
 	// Index columns must render bare in source (the differ's createIndex quotes

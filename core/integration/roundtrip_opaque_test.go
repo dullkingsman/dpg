@@ -359,6 +359,24 @@ TABLE t (a INTEGER, created_at DATE NOT NULL) PARTITION BY RANGE (created_at) {
 }`)
 }
 
+// TestRoundtripReservedWordSchema is the live-catalog guard for the
+// reserved-word/quoted SCHEMA name fix: the scanner's readSchemaDecl
+// previously read the name via a bare-word-only reader, so a schema named
+// after a reserved word or containing characters like a hyphen or an
+// embedded quote couldn't be declared at all. Proves such a schema
+// compiles, applies against a real PostgreSQL instance, and round-trips
+// with zero drift.
+func TestRoundtripReservedWordSchema(t *testing.T) {
+	assertOpaqueRoundtrip(t, `SCHEMA "select" {
+    COMMENT 'a reserved-word schema name';
+}
+
+SCHEMA "weird""name" {
+}
+
+TABLE "select".t (a INTEGER);`)
+}
+
 // TestRoundtripConstraintsBlockModeA is the live-catalog guard for the new
 // CONSTRAINTS { } plural block (Mode A, RFC §4.8): previously only the
 // singular CONSTRAINT form parsed at all — CONSTRAINTS had no parser

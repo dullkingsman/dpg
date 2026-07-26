@@ -158,6 +158,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   exception. Reuses the existing `parseConstraint` unchanged — each entry
   in the block gets its own position captured before calling it. May be
   freely mixed with the singular form on the same table.
+- A reserved-word or otherwise non-bare `SCHEMA` name (e.g. `SCHEMA "select"
+  { }`, or one containing a hyphen or an embedded quote) can now be declared
+  at all. The scanner's schema-name reader previously accepted only a bare
+  word, so any such name failed to parse; it now also accepts a double-quoted
+  identifier (with `""` escaping), reconstructed with its quoting intact when
+  fed to the PG parser. `dump` now quotes a schema name via the same
+  `quoteIdentIfNeeded` helper already used for roles/extensions, instead of
+  always emitting it bare.
 - `dump` output now recompiles **and re-applies** for real-world tables:
   identifiers that are reserved keywords or otherwise non-bare (table/column/view/
   sequence/role/index/constraint names) are quoted; indexes render as the accepted
