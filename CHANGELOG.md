@@ -41,6 +41,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`FUNCTION`'s `RETURNS SETOF <type>` was silently dropped everywhere** —
+  pg_query's `TypeName.Setof` field was never read anywhere in the codebase
+  (`typeNameToRef` ignored it), so a function declared with `RETURNS
+  SETOF integer` in DPG source was actually created live as a plain scalar
+  function, introspection never reported whether a live function was
+  set-returning, and `dump` never reconstructed `SETOF`. This also meant
+  `ROWS` (only valid together with `SETOF` — PostgreSQL rejects it on a
+  scalar function with "ROWS is not applicable when function does not
+  return a set") could never actually be exercised through DPG-compiled
+  source, only introspected, a scope limit this project's own ROWS work
+  had to document and work around. Fixed by adding `SetOf bool` to
+  `ir.TypeRef` (populated generically in `typeNameToRef` from pg_query's
+  field — the grammar only ever sets it true when parsing a function's
+  return type, so every other `TypeRef` consumer such as columns, casts,
+  and function arguments is unaffected), introspecting it from
+  `pg_proc.proretset`, and rendering `SETOF` in both `dump` and
+  diff-generated SQL. Also fixes a genuinely separate, pre-existing gap
+  found while wiring this up: a function's return type was never compared
+  in `diffFunction` at all, so ANY return-type-only change (`SETOF` or
+  otherwise) silently went undetected. Verified live against PostgreSQL 17
+  that `CREATE OR REPLACE FUNCTION` rejects a return-type change outright
+  ("cannot change return type of existing function", hinting to
+  `DROP FUNCTION` first) — a genuine return-type change (including toggling
+  `SETOF`) now diffs to a `DROP FUNCTION` + `CREATE FUNCTION` pair, the same
+  DROP-required pattern already used for a materialized view's query
+  change, rather than the invalid in-place `CREATE OR REPLACE`.
+  Scope note: `RETURNS TABLE (...)` and plain `OUT`-parameter-based
+  set-returning functions are a distinct PostgreSQL mechanism (parameter-list
+  based, not `TypeName`-based) with a separate, pre-existing rendering bug
+  in the function parameter list — not addressed here, and not made worse by
+  this fix (confirmed live: an ordinary composite-`OUT`-parameter, non-`SETOF`
+  function is unaffected, since PostgreSQL's own grammar never sets `Setof`
+  true for that case).
 - **`FUNCTION`'s `PARALLEL`/`COST`/`ROWS` attributes were parsed nowhere,
   introspected nowhere, and never diffed or rendered** — `ir.FuncAttrs`
   already had `Parallel`/`Cost`/`Rows` fields, but nothing populated them,

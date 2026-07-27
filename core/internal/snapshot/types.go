@@ -178,6 +178,7 @@ type SnapFunction struct {
 	Name       string             `json:"name"`
 	Args       string             `json:"args"` // type-only signature key
 	ReturnType string             `json:"return_type"`
+	ReturnsSet bool               `json:"returns_set,omitempty"`
 	Language   string             `json:"language"`
 	Volatility string             `json:"volatility"`
 	Parallel   string             `json:"parallel,omitempty"`

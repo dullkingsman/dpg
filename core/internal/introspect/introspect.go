@@ -1015,7 +1015,7 @@ ORDER  BY n.nspname, p.proname, args`
 			fn := &ir.Function{
 				Schema:     schema,
 				Name:       name,
-				ReturnType: ir.TypeRef{Name: retType},
+				ReturnType: ir.TypeRef{Name: retType, SetOf: retset},
 				Comment:    comment,
 				BodyHash:   ir.HashBody(prosrc),
 				Attrs:      attrs,

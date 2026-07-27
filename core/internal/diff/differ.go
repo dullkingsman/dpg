@@ -1562,6 +1562,9 @@ func buildFunctionSQL(o *ir.Function) string {
 		}
 	}
 	b.WriteString(") RETURNS ")
+	if o.ReturnType.SetOf {
+		b.WriteString("SETOF ")
+	}
 	b.WriteString(o.ReturnType.String())
 	b.WriteString(" LANGUAGE ")
 	b.WriteString(o.Attrs.Language)
@@ -2110,6 +2113,21 @@ func diffFunction(o *ir.Function, snap *snapshot.SnapFunction) []pipeline.DiffOp
 	var ops []pipeline.DiffOp
 	pos := o.SrcPos
 	sig := buildFuncSignature(o)
+
+	// A return-type change (including toggling SETOF) needs DROP + CREATE,
+	// not CREATE OR REPLACE: confirmed live against postgres:17 that PG
+	// rejects an in-place return-type change outright ("cannot change return
+	// type of existing function", hinting to DROP FUNCTION first) — the same
+	// DROP-required class of change diffView already handles for a
+	// materialized view's query. This also closes a genuinely separate,
+	// pre-existing gap found while wiring this up: ReturnType was never
+	// compared here at all before, so ANY return-type-only change (SETOF or
+	// otherwise) silently went undetected.
+	if o.ReturnType.String() != snap.ReturnType || o.ReturnType.SetOf != snap.ReturnsSet {
+		ops = append(ops, destructiveOp(fmt.Sprintf("DROP FUNCTION IF EXISTS %s;", sig), pos))
+		ops = append(ops, createFunction(o)...)
+		return ops
+	}
 
 	// Re-create if: desired has a hash and it differs from the snapshot (including
 	// "" when the snapshot predates body-hash tracking), or language/volatility/

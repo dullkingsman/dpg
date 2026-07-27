@@ -490,6 +490,10 @@ func renderObjectDPG(b *strings.Builder, obj pipeline.IRObject, fmtOpts format.O
 		b.WriteString(") ")
 		b.WriteString(kw("RETURNS"))
 		b.WriteString(" ")
+		if o.ReturnType.SetOf {
+			b.WriteString(kw("SETOF"))
+			b.WriteString(" ")
+		}
 		b.WriteString(o.ReturnType.String())
 		b.WriteString(" ")
 		b.WriteString(kw("LANGUAGE"))

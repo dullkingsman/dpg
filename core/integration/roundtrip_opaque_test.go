@@ -1807,17 +1807,16 @@ TABLE t4 (
 // same suppress-when-default problem already solved for column STORAGE).
 //
 // ROWS is deliberately NOT exercised through the normal DPG-compiled path
-// here: ROWS is only valid on a set-returning function ("RETURNS SETOF ..."
-// or "RETURNS TABLE (...)"), and a repo-wide search confirmed DPG has no
-// SETOF representation anywhere in ir.TypeRef/ir.Function today — a
-// genuine, separate, pre-existing gap found while building this fixture
-// (confirmed live: PostgreSQL itself rejects ROWS on a scalar function with
-// "ROWS is not applicable when function does not return a set"). ROWS
-// itself is still fully wired (parse/diff/dump, all unit-tested) and ready
-// for whenever SETOF support lands — see
-// TestIntrospectFunctionRowsSuppressesDefault (internal/introspect) for the
-// introspection-side proof, using a SETOF function created via raw SQL
-// (bypassing the DPG compiler, which can't yet author one).
+// here: ROWS is only valid on a set-returning function ("RETURNS SETOF ...").
+// At the time this test was written, DPG had no SETOF representation
+// anywhere in ir.TypeRef/ir.Function — a genuine, separate, pre-existing gap
+// found while building this fixture (confirmed live: PostgreSQL itself
+// rejects ROWS on a scalar function with "ROWS is not applicable when
+// function does not return a set"). That gap has since been closed (see
+// TestRoundtripFunctionSetOf, which exercises ROWS together with SETOF
+// through the full DPG-compiled path) — this test is left scoped to
+// PARALLEL/COST only since that's what it already covers correctly and
+// there's no need to touch a passing test to widen unrelated coverage.
 func TestRoundtripFunctionParallelCostRows(t *testing.T) {
 	connStr := testpg.Start(t)
 	ctx := context.Background()
@@ -1977,5 +1976,176 @@ $$ {}`
 	}
 	if newCost != 600 {
 		t.Errorf("live procost after apply = %v, want 600", newCost)
+	}
+}
+
+// TestRoundtripFunctionSetOf covers RETURNS SETOF fidelity end to end: a
+// set-returning function (also declaring ROWS, only valid together with
+// SETOF — closing the gap TestRoundtripFunctionParallelCostRows had to
+// document and scope around) and a plain scalar function, confirming both
+// round-trip with zero drift against a live catalog. ReturnType.SetOf
+// (pg_query's TypeName.Setof field) was previously never read anywhere in
+// the codebase, so DPG silently dropped SETOF from every function it
+// compiled — meaning a function declared as SETOF in DPG source was actually
+// being created live as a plain scalar function.
+//
+// Also exercises the return-type-change code path specifically: confirmed
+// live against postgres:17 that PostgreSQL rejects CREATE OR REPLACE
+// FUNCTION outright when the return type changes ("cannot change return type
+// of existing function"), so toggling SETOF on an existing function must
+// diff to a DROP FUNCTION + CREATE FUNCTION pair, not a plain
+// CREATE OR REPLACE — this was never diffed at all before (ReturnType had no
+// comparison in diffFunction whatsoever), a genuinely separate, pre-existing
+// gap found while wiring SetOf through the differ.
+func TestRoundtripFunctionSetOf(t *testing.T) {
+	connStr := testpg.Start(t)
+	ctx := context.Background()
+
+	differ := diff.New()
+	emitter := emit.New()
+	applyExec := executor.New()
+	ci := introspect.New()
+	store := newMemStore()
+
+	conn, err := executor.Connect(ctx, connStr)
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	defer conn.Close(ctx)
+
+	dir := t.TempDir()
+	f := filepath.Join(dir, "schema.dpg")
+	fixture := `FUNCTION f_setof(n integer) RETURNS SETOF integer
+LANGUAGE sql ROWS 50 AS $$
+    SELECT generate_series(1, n);
+$$ {}
+
+FUNCTION f_plain(n integer) RETURNS integer
+LANGUAGE sql AS $$
+    SELECT n;
+$$ {}`
+	if err := os.WriteFile(f, []byte(fixture), 0o644); err != nil {
+		t.Fatalf("write schema: %v", err)
+	}
+	applyFixture(t, ctx, conn, []string{f}, dir, differ, emitter, applyExec, store)
+
+	desired, err := compiler.Compile([]string{f}, dir, pipeline.Default)
+	if err != nil {
+		t.Fatalf("compile: %v", err)
+	}
+
+	liveObjects, err := ci.Introspect(ctx, conn)
+	if err != nil {
+		t.Fatalf("introspect: %v", err)
+	}
+	snap, _ := store.Load("test", "dpgtest")
+	var managedLive []pipeline.IRObject
+	for _, obj := range liveObjects {
+		if _, ok := snap.Objects[obj.QualifiedName()]; ok {
+			managedLive = append(managedLive, obj)
+		}
+	}
+	liveSnap := &pipeline.Snapshot{}
+	if err := snapshot.Populate(liveSnap, managedLive); err != nil {
+		t.Fatalf("populate live snapshot: %v", err)
+	}
+
+	// Confirm PostgreSQL actually recorded a genuine SETOF function — a
+	// guard against the zero-drift check below passing for the wrong reason
+	// (e.g. SETOF silently dropped again but nothing noticing).
+	rs, err := conn.QueryRows(ctx, `
+SELECT proname, proretset, prorows
+FROM pg_proc WHERE proname IN ('f_setof', 'f_plain') ORDER BY proname`)
+	if err != nil {
+		t.Fatalf("query pg_proc: %v", err)
+	}
+	defer rs.Close()
+	type attrs struct {
+		retset bool
+		rows   float64
+	}
+	got := map[string]attrs{}
+	for rs.Next() {
+		var name string
+		var retset bool
+		var rows float64
+		if err := rs.Scan(&name, &retset, &rows); err != nil {
+			t.Fatalf("scan: %v", err)
+		}
+		got[name] = attrs{retset, rows}
+	}
+	if got["f_setof"] != (attrs{true, 50}) {
+		t.Errorf("f_setof pg_proc attrs: got %+v, want {true 50}", got["f_setof"])
+	}
+	if got["f_plain"] != (attrs{false, 0}) {
+		t.Errorf("f_plain pg_proc attrs: got %+v, want {false 0}", got["f_plain"])
+	}
+
+	driftOps, err := differ.Diff(desired, liveSnap)
+	if err != nil {
+		t.Fatalf("drift diff: %v", err)
+	}
+	if len(driftOps) != 0 {
+		t.Errorf("expected zero drift for SETOF/ROWS (explicit and default) against a live catalog, got %d ops:", len(driftOps))
+		for _, op := range driftOps {
+			t.Errorf("  [%s] %s", op.Safety(), op.SQL())
+		}
+	}
+
+	// Toggle f_plain to SETOF and confirm this diffs to a real DROP + CREATE
+	// pair (not a plain CREATE OR REPLACE, which PostgreSQL would reject).
+	v2 := `FUNCTION f_setof(n integer) RETURNS SETOF integer
+LANGUAGE sql ROWS 50 AS $$
+    SELECT generate_series(1, n);
+$$ {}
+
+FUNCTION f_plain(n integer) RETURNS SETOF integer
+LANGUAGE sql AS $$
+    SELECT generate_series(1, n);
+$$ {}`
+	if err := os.WriteFile(f, []byte(v2), 0o644); err != nil {
+		t.Fatalf("write v2: %v", err)
+	}
+	desired2, err := compiler.Compile([]string{f}, dir, pipeline.Default)
+	if err != nil {
+		t.Fatalf("compile v2: %v", err)
+	}
+	snap2, _ := store.Load("test", "dpgtest")
+	changeOps, err := differ.Diff(desired2, snap2)
+	if err != nil {
+		t.Fatalf("diff (return-type change): %v", err)
+	}
+	var sql string
+	for _, op := range changeOps {
+		sql += op.SQL()
+	}
+	if !strings.Contains(sql, "DROP FUNCTION") {
+		t.Errorf("expected a DROP FUNCTION op for the SETOF toggle, got: %s", sql)
+	}
+	if !strings.Contains(sql, "RETURNS SETOF integer") {
+		t.Errorf("expected the recreate to declare RETURNS SETOF integer, got: %s", sql)
+	}
+
+	migration, err := emitter.Emit(changeOps, pipeline.MigrationMeta{Cluster: "test", Database: "dpgtest"})
+	if err != nil {
+		t.Fatalf("emit: %v", err)
+	}
+	if err := applyExec.Apply(ctx, migration, conn); err != nil {
+		t.Fatalf("apply (SETOF toggle) against live PostgreSQL: %v", err)
+	}
+	rs2, err := conn.QueryRows(ctx, `SELECT proretset FROM pg_proc WHERE proname = 'f_plain'`)
+	if err != nil {
+		t.Fatalf("query updated proretset: %v", err)
+	}
+	defer rs2.Close()
+	var nowRetset bool
+	if !rs2.Next() {
+		t.Fatal("expected a row for f_plain")
+	}
+	if err := rs2.Scan(&nowRetset); err != nil {
+		t.Fatalf("scan updated proretset: %v", err)
+	}
+	if !nowRetset {
+		t.Error("live proretset for f_plain after apply = false, want true")
 	}
 }

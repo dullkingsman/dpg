@@ -28,6 +28,12 @@ type TypeRef struct {
 	Name      string // e.g. "int4", "text", "varchar"
 	Mods      string // raw typemod text, e.g. "(255)" for varchar(255)
 	ArrayDims int    // number of [] dimensions (0 = scalar)
+	// SetOf is only meaningful on a Function's ReturnType (PostgreSQL's
+	// RETURNS SETOF <type>) — pg_query's TypeName carries this field
+	// regardless of context, but the grammar only ever sets it true when
+	// parsing a function's return type, so every other TypeRef consumer
+	// (columns, casts, function arguments) sees it as permanently false.
+	SetOf bool
 }
 
 func (t TypeRef) String() string {

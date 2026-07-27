@@ -318,6 +318,47 @@ func TestBuildFunctionParallelCostRowsUnspecified(t *testing.T) {
 	}
 }
 
+// TestBuildFunctionReturnsSetOf proves RETURNS SETOF <type> parses with
+// ReturnType.SetOf true — pg_query's TypeName.Setof field was previously
+// never read anywhere in the codebase (confirmed via a repo-wide grep), so
+// DPG silently dropped SETOF from every function it compiled.
+func TestBuildFunctionReturnsSetOf(t *testing.T) {
+	obj := buildObject(t, pipeline.KindFunction,
+		`f(n INT) RETURNS SETOF INT LANGUAGE sql AS $$ SELECT n $$;`, ``)
+	fn := obj.(*ir.Function)
+	if !fn.ReturnType.SetOf {
+		t.Error("ReturnType.SetOf: got false, want true")
+	}
+	if fn.ReturnType.Name != "integer" {
+		t.Errorf("ReturnType.Name: got %q, want integer", fn.ReturnType.Name)
+	}
+}
+
+// TestBuildFunctionReturnsPlainNotSetOf is the negative control: an ordinary
+// scalar RETURNS clause must leave SetOf false, not true by some fluke of
+// the shared typeNameToRef conversion.
+func TestBuildFunctionReturnsPlainNotSetOf(t *testing.T) {
+	obj := buildObject(t, pipeline.KindFunction,
+		`f(n INT) RETURNS INT LANGUAGE sql AS $$ SELECT n $$;`, ``)
+	fn := obj.(*ir.Function)
+	if fn.ReturnType.SetOf {
+		t.Error("ReturnType.SetOf: got true, want false for a plain scalar RETURNS")
+	}
+}
+
+// TestBuildFunctionArgTypeNeverSetOf guards typeNameToRef's shared-conversion
+// design: SetOf is a field on every parsed TypeName regardless of syntactic
+// context, but PostgreSQL's grammar only ever sets it true when parsing a
+// function's RETURNS clause — an argument's type must never pick it up.
+func TestBuildFunctionArgTypeNeverSetOf(t *testing.T) {
+	obj := buildObject(t, pipeline.KindFunction,
+		`f(n INT) RETURNS INT LANGUAGE sql AS $$ SELECT n $$;`, ``)
+	fn := obj.(*ir.Function)
+	if fn.Args[0].Type.SetOf {
+		t.Error("Args[0].Type.SetOf: got true, want false (SETOF is only valid on RETURNS)")
+	}
+}
+
 // ── Extension ─────────────────────────────────────────────────────────────────
 
 func TestBuildExtension(t *testing.T) {

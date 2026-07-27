@@ -768,6 +768,101 @@ func TestDiffFunctionLegacySnapshotParallelIsNoop(t *testing.T) {
 	}
 }
 
+// TestDiffCreateFunctionEmitsSetOf proves a fresh CREATE for a SETOF function
+// renders the SETOF keyword. ReturnType.SetOf was previously never read
+// anywhere (typeNameToRef never looked at pg_query's TypeName.Setof field),
+// so DPG silently dropped SETOF from every function it compiled.
+func TestDiffCreateFunctionEmitsSetOf(t *testing.T) {
+	d := New()
+	desired := []pipeline.IRObject{
+		&ir.Function{
+			Schema: "public", Name: "f",
+			ReturnType: ir.TypeRef{Name: "integer", SetOf: true},
+			Attrs:      ir.FuncAttrs{Language: "sql", Volatility: "VOLATILE", Parallel: "UNSAFE", Body: "SELECT n"},
+		},
+	}
+	ops, err := d.Diff(desired, &pipeline.Snapshot{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ops) == 0 || !strings.Contains(ops[0].SQL(), "RETURNS SETOF integer") {
+		t.Errorf("expected RETURNS SETOF integer, got: %v", sqlList(ops))
+	}
+}
+
+// TestDiffFunctionReturnTypeChangeRequiresDropCreate proves a return-type
+// change (here: adding SETOF) is NOT rendered as CREATE OR REPLACE FUNCTION —
+// confirmed live against postgres:17 that PostgreSQL rejects that outright
+// ("cannot change return type of existing function", hinting to DROP
+// FUNCTION first). It must instead be a DROP FUNCTION followed by a fresh
+// CREATE FUNCTION, the same DROP-required pattern diffView already uses for
+// a materialized view's query change.
+func TestDiffFunctionReturnTypeChangeRequiresDropCreate(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.f()", &snapshot.SnapObject{
+		Kind: "function",
+		Function: &snapshot.SnapFunction{
+			Schema: "public", Name: "f", ReturnType: "integer", ReturnsSet: false,
+			Language: "sql", Volatility: "VOLATILE", Parallel: "UNSAFE", BodyHash: "h",
+		},
+	})
+	desired := []pipeline.IRObject{
+		&ir.Function{
+			Schema: "public", Name: "f",
+			ReturnType: ir.TypeRef{Name: "integer", SetOf: true},
+			BodyHash:   "h",
+			Attrs:      ir.FuncAttrs{Language: "sql", Volatility: "VOLATILE", Parallel: "UNSAFE", Body: "SELECT n"},
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ops) < 2 {
+		t.Fatalf("expected a DROP FUNCTION + CREATE FUNCTION pair, got: %v", sqlList(ops))
+	}
+	if !strings.Contains(ops[0].SQL(), "DROP FUNCTION") {
+		t.Errorf("expected the first op to be DROP FUNCTION, got: %s", ops[0].SQL())
+	}
+	if ops[0].Safety() != pipeline.Destructive {
+		t.Errorf("expected DROP FUNCTION to be classified DESTRUCTIVE, got: %v", ops[0].Safety())
+	}
+	if !strings.Contains(ops[1].SQL(), "CREATE OR REPLACE FUNCTION") || !strings.Contains(ops[1].SQL(), "RETURNS SETOF integer") {
+		t.Errorf("expected the second op to (re)create with RETURNS SETOF integer, got: %s", ops[1].SQL())
+	}
+}
+
+// TestDiffFunctionSetOfUnchangedIsNoop is the zero-drift control: matching
+// SetOf on both sides (here: both false, the common case) must not itself
+// trigger the new DROP+CREATE path.
+func TestDiffFunctionSetOfUnchangedIsNoop(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.f()", &snapshot.SnapObject{
+		Kind: "function",
+		Function: &snapshot.SnapFunction{
+			Schema: "public", Name: "f", ReturnType: "integer", ReturnsSet: false,
+			Language: "sql", Volatility: "VOLATILE", Parallel: "UNSAFE", BodyHash: "h",
+		},
+	})
+	desired := []pipeline.IRObject{
+		&ir.Function{
+			Schema: "public", Name: "f",
+			ReturnType: ir.TypeRef{Name: "integer", SetOf: false},
+			BodyHash:   "h",
+			Attrs:      ir.FuncAttrs{Language: "sql", Volatility: "VOLATILE", Parallel: "UNSAFE", Body: "SELECT n"},
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ops) != 0 {
+		t.Errorf("expected zero ops for an unchanged return type, got: %v", sqlList(ops))
+	}
+}
+
 func TestDiffRegistration(t *testing.T) {
 	d, ok := pipeline.Resolve[pipeline.Differ](pipeline.Default, pipeline.KeyDiffer)
 	if !ok {

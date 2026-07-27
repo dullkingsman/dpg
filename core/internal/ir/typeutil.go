@@ -15,6 +15,7 @@ func typeNameToRef(tn *pg_query.TypeName) TypeRef {
 	}
 	ref := TypeRef{
 		ArrayDims: len(tn.ArrayBounds),
+		SetOf:     tn.Setof,
 	}
 
 	// Extract schema and type name from the Names list.

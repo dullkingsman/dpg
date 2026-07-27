@@ -467,6 +467,7 @@ func toSnapFunction(o *ir.Function) *SnapFunction {
 		Name:       o.Name,
 		Args:       ir.ArgsKey(o.Args),
 		ReturnType: o.ReturnType.String(),
+		ReturnsSet: o.ReturnType.SetOf,
 		Language:   o.Attrs.Language,
 		Volatility: o.Attrs.Volatility,
 		Parallel:   o.Attrs.Parallel,

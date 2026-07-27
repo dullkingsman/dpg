@@ -553,6 +553,65 @@ func TestRenderFunctionParallelCostRowsRoundtrip(t *testing.T) {
 	}
 }
 
+// TestRenderFunctionSetOfRoundtrip guards the render -> recompile chain for
+// RETURNS SETOF specifically: ReturnType.SetOf (pg_query's TypeName.Setof)
+// was previously never read anywhere in the codebase, so dump never rendered
+// SETOF and the compiler silently dropped it from hand-written source too.
+// Also covers the plain (non-SETOF) case as a negative control.
+func TestRenderFunctionSetOfRoundtrip(t *testing.T) {
+	fmtOpts := format.Options{IndentSize: 4, KeywordCase: "upper"}
+	objs := []pipeline.IRObject{
+		&ir.Function{
+			Schema: "public", Name: "f_setof",
+			ReturnType: ir.TypeRef{Name: "integer", SetOf: true},
+			Attrs:      ir.FuncAttrs{Language: "sql", Volatility: "VOLATILE", Parallel: "UNSAFE", Body: "SELECT n"},
+		},
+		&ir.Function{
+			Schema: "public", Name: "f_plain",
+			ReturnType: ir.TypeRef{Name: "integer", SetOf: false},
+			Attrs:      ir.FuncAttrs{Language: "sql", Volatility: "VOLATILE", Parallel: "UNSAFE", Body: "SELECT n"},
+		},
+	}
+	var b strings.Builder
+	for _, o := range objs {
+		renderObjectDPG(&b, o, fmtOpts)
+	}
+	rendered := b.String()
+
+	if !strings.Contains(rendered, "RETURNS SETOF integer") {
+		t.Errorf("expected RETURNS SETOF integer rendered for f_setof, got:\n%s", rendered)
+	}
+	if strings.Contains(rendered[strings.Index(rendered, "f_plain"):], "SETOF") {
+		t.Errorf("f_plain must not render SETOF, got:\n%s", rendered)
+	}
+
+	dir := t.TempDir()
+	f := filepath.Join(dir, "schema.dpg")
+	if err := os.WriteFile(f, []byte(rendered), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	compiled, err := compiler.Compile([]string{f}, dir, pipeline.Default)
+	if err != nil {
+		t.Fatalf("did not recompile: %v\n---\n%s", err, rendered)
+	}
+	for _, o := range compiled {
+		fn, ok := o.(*ir.Function)
+		if !ok {
+			continue
+		}
+		switch fn.Name {
+		case "f_setof":
+			if !fn.ReturnType.SetOf {
+				t.Error("f_setof ReturnType.SetOf round-trip: got false, want true")
+			}
+		case "f_plain":
+			if fn.ReturnType.SetOf {
+				t.Error("f_plain ReturnType.SetOf round-trip: got true, want false")
+			}
+		}
+	}
+}
+
 // TestRenderIndexVariantsRoundtrip guards the full render → recompile → createIndex
 // chain for every index variant. Apply runs createIndex's SQL, so asserting it
 // here (fast) is equivalent to dump → apply for the index class. Regressions in
