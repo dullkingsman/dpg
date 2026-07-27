@@ -974,6 +974,99 @@ func TestDiffFunctionReturnTableUnchangedIsNoop(t *testing.T) {
 	}
 }
 
+// TestBuildFunctionSQLImplicitReturnsSingleOut guards the fix for a function
+// whose source omitted RETURNS entirely (valid PostgreSQL for a signature
+// with at least one OUT/INOUT parameter — confirmed live against postgres:17
+// that PG itself computes and stores a concrete return type in this case).
+// Before the ir.Builder fix (internal/ir/builder.go's impliedReturnType),
+// ir.Function.ReturnType stayed the zero TypeRef for this input, and
+// buildFunctionSQL rendered a bare "RETURNS  LANGUAGE ..." (double space,
+// empty type) — a real syntax error on apply. This test operates purely at
+// the differ layer (constructing the ir.Function as the builder now would,
+// rather than re-parsing source) since buildFunctionSQL is what actually
+// turns ReturnType into SQL text.
+func TestBuildFunctionSQLImplicitReturnsSingleOut(t *testing.T) {
+	fn := &ir.Function{
+		Schema: "public", Name: "f_single_out",
+		Args: []ir.FuncArg{
+			{Name: "n", Mode: "IN", Type: ir.TypeRef{Name: "integer"}},
+			{Name: "a", Mode: "OUT", Type: ir.TypeRef{Name: "integer"}},
+		},
+		ReturnType: ir.TypeRef{Name: "integer"},
+		Attrs:      ir.FuncAttrs{Language: "sql", Body: "SELECT n + 1"},
+	}
+	sql := buildFunctionSQL(fn)
+	if strings.Contains(sql, "RETURNS  LANGUAGE") || strings.Contains(sql, "RETURNS  ") {
+		t.Fatalf("expected no bare/empty RETURNS clause, got: %s", sql)
+	}
+	if !strings.Contains(sql, "RETURNS integer LANGUAGE") {
+		t.Errorf("expected RETURNS integer LANGUAGE, got: %s", sql)
+	}
+	if !strings.Contains(sql, "OUT a integer") {
+		t.Errorf("expected the OUT parameter to render inline, got: %s", sql)
+	}
+}
+
+// TestBuildFunctionSQLImplicitReturnsMultiOut is the multi-OUT-parameter
+// sibling: PostgreSQL implies "record" (not the type of any one column) when
+// more than one OUT/INOUT parameter is present and RETURNS is omitted.
+func TestBuildFunctionSQLImplicitReturnsMultiOut(t *testing.T) {
+	fn := &ir.Function{
+		Schema: "public", Name: "f_multi_out",
+		Args: []ir.FuncArg{
+			{Name: "n", Mode: "IN", Type: ir.TypeRef{Name: "integer"}},
+			{Name: "a", Mode: "OUT", Type: ir.TypeRef{Name: "integer"}},
+			{Name: "b", Mode: "OUT", Type: ir.TypeRef{Name: "text"}},
+		},
+		ReturnType: ir.TypeRef{Name: "record"},
+		Attrs:      ir.FuncAttrs{Language: "sql", Body: "SELECT n, 'x'"},
+	}
+	sql := buildFunctionSQL(fn)
+	if !strings.Contains(sql, "RETURNS record LANGUAGE") {
+		t.Errorf("expected RETURNS record LANGUAGE, got: %s", sql)
+	}
+}
+
+// TestDiffFunctionImplicitReturnsNoLiveDrift proves that the implied return
+// type computed for an omitted-RETURNS function (ir.Builder's
+// impliedReturnType) matches what live introspection reports for the same
+// function — i.e. this doesn't just fix the syntax-error half of the bug,
+// it also avoids a permanent self-inconsistent DROP+CREATE loop on every
+// verify/plan --live (which an offline-only fix, e.g. simply omitting the
+// RETURNS clause from the rendered SQL, would NOT have avoided: the snapshot
+// side's ReturnType is always concrete since pg_proc.prorettype is never
+// null).
+func TestDiffFunctionImplicitReturnsNoLiveDrift(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.f_single_out(integer)", &snapshot.SnapObject{
+		Kind: "function",
+		Function: &snapshot.SnapFunction{
+			Schema: "public", Name: "f_single_out", ReturnType: "integer", ReturnsSet: false,
+			Language: "sql", Volatility: "VOLATILE", Parallel: "UNSAFE", BodyHash: "h",
+		},
+	})
+	desired := []pipeline.IRObject{
+		&ir.Function{
+			Schema: "public", Name: "f_single_out",
+			Args: []ir.FuncArg{
+				{Name: "n", Mode: "IN", Type: ir.TypeRef{Name: "integer"}},
+				{Name: "a", Mode: "OUT", Type: ir.TypeRef{Name: "integer"}},
+			},
+			ReturnType: ir.TypeRef{Name: "integer"}, // as impliedReturnType now computes it
+			BodyHash:   "h",
+			Attrs:      ir.FuncAttrs{Language: "sql", Volatility: "VOLATILE", Parallel: "UNSAFE", Body: "SELECT n + 1"},
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ops) != 0 {
+		t.Errorf("expected zero ops once the implied return type matches the live-introspected one, got: %v", sqlList(ops))
+	}
+}
+
 func TestDiffRegistration(t *testing.T) {
 	d, ok := pipeline.Resolve[pipeline.Differ](pipeline.Default, pipeline.KeyDiffer)
 	if !ok {

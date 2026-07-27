@@ -75,6 +75,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `buildFunctionSQL`/`dump`, a real syntax error on `apply`. Unrelated to
   this fix's Args-mode-capture scope; worked around in the new test with
   an explicit `RETURNS` clause, flagged for a future fix.
+- **A `FUNCTION` with no explicit `RETURNS` clause produced invalid SQL and
+  a permanent drift loop** — PostgreSQL allows omitting `RETURNS` entirely
+  when the signature has at least one `OUT`/`INOUT` parameter (the return
+  type is then implied: a single `OUT`/`INOUT` parameter's own type, or
+  `record` when there's more than one — confirmed live against
+  postgres:17). `pg_query` performs no semantic analysis, so
+  `CreateFunctionStmt.ReturnType` is simply `nil` for this form, and
+  `ir.Function.ReturnType` stayed the zero value — `buildFunctionSQL`
+  unconditionally rendered `"RETURNS " + ReturnType.String()`, producing a
+  bare `RETURNS  LANGUAGE ...` (empty type), a real syntax error on
+  `apply`. Fixing only the rendering (e.g. omitting `RETURNS` from the
+  generated SQL to match source) would have left a second, subtler bug:
+  the live-introspected snapshot's `ReturnType` is always concrete (PG
+  computes and stores a real type at `CREATE` time, and `pg_get_functiondef`
+  always reconstructs it explicitly), so an empty offline `ReturnType`
+  could never match it — every `verify`/`plan --live` would show a
+  permanent, self-inconsistent `DROP FUNCTION` + `CREATE FUNCTION` for the
+  function forever. Fixed at the source: `ir.Builder` now computes the
+  same implied type PostgreSQL itself would (new `impliedReturnType`,
+  internal/ir/builder.go) when `RETURNS` is omitted, so both the generated
+  `CREATE FUNCTION` SQL and the offline-vs-live diff comparison are
+  correct and mutually consistent. A signature with zero `OUT`/`INOUT`
+  parameters and no `RETURNS` clause is itself invalid PostgreSQL
+  independent of this fix ("function result type must be specified");
+  DPG doesn't add its own validation for that case and simply passes it
+  through to fail on `apply`, same as before.
 - **`FUNCTION`'s `RETURNS TABLE (...)` produced invalid SQL and lost its
   output columns on introspection** — a TABLE-mode argument (`ir.FuncArg`
   with `Mode: "TABLE"`) was already parsed correctly from source, but

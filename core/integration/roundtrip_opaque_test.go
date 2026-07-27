@@ -2350,12 +2350,10 @@ func TestRoundtripFunctionArgModes(t *testing.T) {
 
 	dir := t.TempDir()
 	f := filepath.Join(dir, "schema.dpg")
-	// RETURNS is explicit here even though PostgreSQL allows omitting it for
-	// an all-OUT/INOUT signature (it's then implied): a genuinely separate,
-	// pre-existing bug found while writing this fixture makes buildFunctionSQL/
-	// dump emit a bare "RETURNS  LANGUAGE ..." (double space, empty type) when
-	// ReturnType is entirely unset, a real PG syntax error on apply — flagged,
-	// not fixed here, as it's unrelated to this fix's Args-mode-capture scope.
+	// RETURNS is explicit here (PostgreSQL allows omitting it for an
+	// all-OUT/INOUT signature — the type is then implied; now fixed and
+	// covered separately by TestRoundtripFunctionImplicitReturns) to keep
+	// this test's scope isolated to Args-mode capture specifically.
 	fixture := `FUNCTION f_out(n integer, OUT a integer, OUT b text) RETURNS record
 LANGUAGE sql AS $$
     SELECT n, 'x';
@@ -2427,6 +2425,113 @@ $$ {}`
 	}
 	if len(driftOps) != 0 {
 		t.Errorf("expected zero drift for OUT/INOUT/VARIADIC functions against a live catalog, got %d ops:", len(driftOps))
+		for _, op := range driftOps {
+			t.Errorf("  [%s] %s", op.Safety(), op.SQL())
+		}
+	}
+}
+
+// TestRoundtripFunctionImplicitReturns exercises the omitted-RETURNS form
+// directly (TestRoundtripFunctionArgModes above deliberately worked around
+// it with an explicit RETURNS clause, flagging the gap instead of fixing
+// it) — PostgreSQL allows omitting RETURNS entirely for a signature with at
+// least one OUT/INOUT parameter, the return type then being implied
+// (confirmed live: single OUT/INOUT param -> that param's own type; more
+// than one -> "record"). Before ir.Builder's impliedReturnType fix, the
+// desired-side ir.Function.ReturnType stayed the zero TypeRef for this
+// input, so buildFunctionSQL's CREATE would itself have been a syntax error
+// ("RETURNS  LANGUAGE ...") — this test proves apply succeeds AND that the
+// implied type matches what live introspection reports (zero drift), not
+// just that PostgreSQL's own implicit-RETURNS inference works.
+func TestRoundtripFunctionImplicitReturns(t *testing.T) {
+	connStr := testpg.Start(t)
+	ctx := context.Background()
+
+	differ := diff.New()
+	emitter := emit.New()
+	applyExec := executor.New()
+	ci := introspect.New()
+	store := newMemStore()
+
+	conn, err := executor.Connect(ctx, connStr)
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	defer conn.Close(ctx)
+
+	dir := t.TempDir()
+	f := filepath.Join(dir, "schema.dpg")
+	fixture := `FUNCTION f_single_out(n integer, OUT a integer)
+LANGUAGE sql AS $$
+    SELECT n + 1;
+$$ {}
+
+FUNCTION f_multi_out(n integer, OUT a integer, OUT b text)
+LANGUAGE sql AS $$
+    SELECT n, 'x';
+$$ {}
+
+FUNCTION f_inout_implicit(INOUT n integer)
+LANGUAGE sql AS $$
+    SELECT n + 1;
+$$ {}`
+	if err := os.WriteFile(f, []byte(fixture), 0o644); err != nil {
+		t.Fatalf("write schema: %v", err)
+	}
+	applyFixture(t, ctx, conn, []string{f}, dir, differ, emitter, applyExec, store)
+
+	desired, err := compiler.Compile([]string{f}, dir, pipeline.Default)
+	if err != nil {
+		t.Fatalf("compile: %v", err)
+	}
+
+	liveObjects, err := ci.Introspect(ctx, conn)
+	if err != nil {
+		t.Fatalf("introspect: %v", err)
+	}
+	snap, _ := store.Load("test", "dpgtest")
+	var managedLive []pipeline.IRObject
+	for _, obj := range liveObjects {
+		if _, ok := snap.Objects[obj.QualifiedName()]; ok {
+			managedLive = append(managedLive, obj)
+		}
+	}
+	liveSnap := &pipeline.Snapshot{}
+	if err := snapshot.Populate(liveSnap, managedLive); err != nil {
+		t.Fatalf("populate live snapshot: %v", err)
+	}
+
+	// Confirm what real PostgreSQL actually implied, directly from the
+	// catalog, so a bug in this test's own expectations can't mask a bug in
+	// the fix (or vice versa).
+	assertFuncResultType := func(funcName, want string) {
+		t.Helper()
+		rs, err := conn.QueryRows(ctx, `SELECT pg_get_function_result(oid) FROM pg_proc WHERE proname = $1`, funcName)
+		if err != nil {
+			t.Fatalf("query pg_get_function_result for %s: %v", funcName, err)
+		}
+		defer rs.Close()
+		if !rs.Next() {
+			t.Fatalf("expected a row for %s", funcName)
+		}
+		var got string
+		if err := rs.Scan(&got); err != nil {
+			t.Fatalf("scan: %v", err)
+		}
+		if got != want {
+			t.Errorf("%s live result type: got %q, want %q", funcName, got, want)
+		}
+	}
+	assertFuncResultType("f_single_out", "integer")
+	assertFuncResultType("f_multi_out", "record")
+	assertFuncResultType("f_inout_implicit", "integer")
+
+	driftOps, err := differ.Diff(desired, liveSnap)
+	if err != nil {
+		t.Fatalf("drift diff: %v", err)
+	}
+	if len(driftOps) != 0 {
+		t.Errorf("expected zero drift for implicit-RETURNS functions against a live catalog, got %d ops:", len(driftOps))
 		for _, op := range driftOps {
 			t.Errorf("  [%s] %s", op.Safety(), op.SQL())
 		}

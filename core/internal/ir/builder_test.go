@@ -359,6 +359,55 @@ func TestBuildFunctionArgTypeNeverSetOf(t *testing.T) {
 	}
 }
 
+// TestBuildFunctionImplicitReturnsSingleOut proves that omitting RETURNS
+// entirely (valid PostgreSQL when at least one OUT/INOUT parameter is
+// present) infers the correct return type from that single OUT parameter —
+// confirmed live against postgres:17 (pg_get_functiondef always reconstructs
+// this as an explicit "RETURNS integer"), matching what a live-introspected
+// version of the same function would report. Before this fix, cfs.ReturnType
+// was nil (pg_query performs no semantic analysis) and fn.ReturnType stayed
+// the zero TypeRef, producing a broken "RETURNS  LANGUAGE" (empty type) on
+// buildFunctionSQL/dump.
+func TestBuildFunctionImplicitReturnsSingleOut(t *testing.T) {
+	obj := buildObject(t, pipeline.KindFunction,
+		`f_single_out(IN n INT, OUT a INT) LANGUAGE sql AS $$ SELECT n + 1 $$;`, ``)
+	fn := obj.(*ir.Function)
+	if fn.ReturnType.Name != "integer" {
+		t.Errorf("ReturnType.Name: got %q, want integer", fn.ReturnType.Name)
+	}
+	if fn.ReturnType.SetOf {
+		t.Error("ReturnType.SetOf: got true, want false")
+	}
+}
+
+// TestBuildFunctionImplicitReturnsMultiOut proves more than one OUT/INOUT
+// parameter with no RETURNS clause infers "record" — confirmed live against
+// postgres:17 (a 2-OUT-param function with no RETURNS reports
+// pg_get_function_result = "record", proretset = false).
+func TestBuildFunctionImplicitReturnsMultiOut(t *testing.T) {
+	obj := buildObject(t, pipeline.KindFunction,
+		`f_multi_out(IN n INT, OUT a INT, OUT b TEXT) LANGUAGE sql AS $$ SELECT n, 'x' $$;`, ``)
+	fn := obj.(*ir.Function)
+	if fn.ReturnType.Name != "record" {
+		t.Errorf("ReturnType.Name: got %q, want record", fn.ReturnType.Name)
+	}
+	if fn.ReturnType.SetOf {
+		t.Error("ReturnType.SetOf: got true, want false")
+	}
+}
+
+// TestBuildFunctionImplicitReturnsInout proves a single INOUT parameter (not
+// just OUT) also infers its own type as the return type — confirmed live
+// against postgres:17.
+func TestBuildFunctionImplicitReturnsInout(t *testing.T) {
+	obj := buildObject(t, pipeline.KindFunction,
+		`f_inout(INOUT n INT) LANGUAGE sql AS $$ SELECT n + 1 $$;`, ``)
+	fn := obj.(*ir.Function)
+	if fn.ReturnType.Name != "integer" {
+		t.Errorf("ReturnType.Name: got %q, want integer", fn.ReturnType.Name)
+	}
+}
+
 // ── Extension ─────────────────────────────────────────────────────────────────
 
 func TestBuildExtension(t *testing.T) {

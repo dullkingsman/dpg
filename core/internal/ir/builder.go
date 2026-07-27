@@ -1006,6 +1006,8 @@ func (b *Builder) buildFunction(cfs *pg_query.CreateFunctionStmt, pg pipeline.PG
 	}
 	if cfs.ReturnType != nil {
 		fn.ReturnType = typeNameToRef(cfs.ReturnType)
+	} else {
+		fn.ReturnType = impliedReturnType(fn.Args)
 	}
 	fn.Attrs = extractFuncAttrs(cfs.Options)
 
@@ -1090,6 +1092,34 @@ func buildFuncArg(fp *pg_query.FunctionParameter) FuncArg {
 		arg.Mode = "IN"
 	}
 	return arg
+}
+
+// impliedReturnType computes the return type PostgreSQL itself infers when a
+// CREATE FUNCTION's RETURNS clause is omitted entirely — valid only when at
+// least one OUT/INOUT parameter is present (pg_query performs no semantic
+// analysis, so cfs.ReturnType is simply nil in source here; PostgreSQL fills
+// this in at CREATE time and pg_get_functiondef always reconstructs it
+// explicitly). Confirmed live against postgres:17: exactly one OUT/INOUT
+// parameter yields that parameter's own type; more than one yields "record"
+// (matching a plain multi-column RETURNS TABLE(...) function, minus SetOf).
+// Zero OUT/INOUT parameters with no RETURNS clause is itself invalid
+// PostgreSQL ("function result type must be specified") — left as the zero
+// TypeRef, same as before this fix, since that input was already guaranteed
+// to fail on apply regardless of what DPG renders for it.
+func impliedReturnType(args []FuncArg) TypeRef {
+	var out []TypeRef
+	for _, a := range args {
+		if a.Mode == "OUT" || a.Mode == "INOUT" {
+			out = append(out, a.Type)
+		}
+	}
+	if len(out) == 1 {
+		return out[0]
+	}
+	if len(out) > 1 {
+		return TypeRef{Name: "record"}
+	}
+	return TypeRef{}
 }
 
 func extractFuncAttrs(options []*pg_query.Node) FuncAttrs {
