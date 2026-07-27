@@ -612,6 +612,62 @@ func TestRenderFunctionSetOfRoundtrip(t *testing.T) {
 	}
 }
 
+// TestRenderFunctionReturnsTableRoundtrip guards the render -> recompile
+// chain for RETURNS TABLE(...) specifically: TABLE-mode Args were previously
+// rendered inline in the main parameter list as an invalid "TABLE a integer"
+// literal (PostgreSQL rejects this as a syntax error) instead of inside a
+// separate RETURNS TABLE(...) clause.
+func TestRenderFunctionReturnsTableRoundtrip(t *testing.T) {
+	fmtOpts := format.Options{IndentSize: 4, KeywordCase: "upper"}
+	objs := []pipeline.IRObject{
+		&ir.Function{
+			Schema: "public", Name: "f_table",
+			ReturnType: ir.TypeRef{Name: "record", SetOf: true},
+			Args: []ir.FuncArg{
+				{Name: "n", Mode: "IN", Type: ir.TypeRef{Name: "integer"}},
+				{Name: "a", Mode: "TABLE", Type: ir.TypeRef{Name: "integer"}},
+				{Name: "b", Mode: "TABLE", Type: ir.TypeRef{Name: "text"}},
+			},
+			Attrs: ir.FuncAttrs{Language: "sql", Volatility: "VOLATILE", Parallel: "UNSAFE", Body: "SELECT 1, 'x'"},
+		},
+	}
+	var b strings.Builder
+	for _, o := range objs {
+		renderObjectDPG(&b, o, fmtOpts)
+	}
+	rendered := b.String()
+
+	if !strings.Contains(rendered, "(n integer) RETURNS TABLE(a integer, b text)") {
+		t.Errorf("expected (n integer) RETURNS TABLE(a integer, b text), got:\n%s", rendered)
+	}
+	if strings.Contains(rendered, "TABLE a integer") || strings.Contains(rendered, "TABLE b text") {
+		t.Errorf("TABLE-mode columns must not render inline in the parameter list, got:\n%s", rendered)
+	}
+
+	dir := t.TempDir()
+	f := filepath.Join(dir, "schema.dpg")
+	if err := os.WriteFile(f, []byte(rendered), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	compiled, err := compiler.Compile([]string{f}, dir, pipeline.Default)
+	if err != nil {
+		t.Fatalf("did not recompile: %v\n---\n%s", err, rendered)
+	}
+	var found *ir.Function
+	for _, o := range compiled {
+		if fn, ok := o.(*ir.Function); ok && fn.Name == "f_table" {
+			found = fn
+		}
+	}
+	if found == nil {
+		t.Fatal("f_table not found after recompile")
+	}
+	cols := ir.FuncTableColumns(found.Args)
+	if got := ir.FormatTableColumns(cols); got != "a integer, b text" {
+		t.Errorf("f_table TABLE column round-trip: got %q, want %q", got, "a integer, b text")
+	}
+}
+
 // TestRenderIndexVariantsRoundtrip guards the full render → recompile → createIndex
 // chain for every index variant. Apply runs createIndex's SQL, so asserting it
 // here (fast) is equivalent to dump → apply for the index class. Regressions in

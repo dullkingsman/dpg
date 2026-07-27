@@ -1543,10 +1543,17 @@ func buildFunctionSQL(o *ir.Function) string {
 	b.WriteString("CREATE OR REPLACE FUNCTION ")
 	b.WriteString(qualIdent(o.Schema, o.Name))
 	b.WriteString("(")
-	for i, a := range o.Args {
-		if i > 0 {
+	first := true
+	for _, a := range o.Args {
+		// RETURNS TABLE(...) columns are declared in a separate clause below,
+		// never inline here — "TABLE a integer" is not valid parameter syntax.
+		if a.Mode == "TABLE" {
+			continue
+		}
+		if !first {
 			b.WriteString(", ")
 		}
+		first = false
 		if a.Mode != "" && a.Mode != "IN" {
 			b.WriteString(a.Mode)
 			b.WriteString(" ")
@@ -1562,10 +1569,16 @@ func buildFunctionSQL(o *ir.Function) string {
 		}
 	}
 	b.WriteString(") RETURNS ")
-	if o.ReturnType.SetOf {
-		b.WriteString("SETOF ")
+	if tableCols := ir.FuncTableColumns(o.Args); len(tableCols) > 0 {
+		b.WriteString("TABLE(")
+		b.WriteString(ir.FormatTableColumns(tableCols))
+		b.WriteString(")")
+	} else {
+		if o.ReturnType.SetOf {
+			b.WriteString("SETOF ")
+		}
+		b.WriteString(o.ReturnType.String())
 	}
-	b.WriteString(o.ReturnType.String())
 	b.WriteString(" LANGUAGE ")
 	b.WriteString(o.Attrs.Language)
 	if o.Attrs.Volatility != "" && o.Attrs.Volatility != "VOLATILE" {
@@ -2114,16 +2127,23 @@ func diffFunction(o *ir.Function, snap *snapshot.SnapFunction) []pipeline.DiffOp
 	pos := o.SrcPos
 	sig := buildFuncSignature(o)
 
-	// A return-type change (including toggling SETOF) needs DROP + CREATE,
-	// not CREATE OR REPLACE: confirmed live against postgres:17 that PG
-	// rejects an in-place return-type change outright ("cannot change return
-	// type of existing function", hinting to DROP FUNCTION first) — the same
-	// DROP-required class of change diffView already handles for a
-	// materialized view's query. This also closes a genuinely separate,
-	// pre-existing gap found while wiring this up: ReturnType was never
-	// compared here at all before, so ANY return-type-only change (SETOF or
-	// otherwise) silently went undetected.
-	if o.ReturnType.String() != snap.ReturnType || o.ReturnType.SetOf != snap.ReturnsSet {
+	// A return-type change (including toggling SETOF, or a RETURNS TABLE(...)
+	// column-list edit) needs DROP + CREATE, not CREATE OR REPLACE: confirmed
+	// live against postgres:17 that PG rejects an in-place return-type change
+	// outright ("cannot change return type of existing function", hinting to
+	// DROP FUNCTION first) — the same DROP-required class of change diffView
+	// already handles for a materialized view's query. This also closes a
+	// genuinely separate, pre-existing gap found while wiring this up:
+	// ReturnType was never compared here at all before, so ANY return-type-
+	// only change (SETOF or otherwise) silently went undetected.
+	//
+	// ReturnTable is compared separately from ReturnType/ReturnsSet: a RETURNS
+	// TABLE(...) function's ReturnType is always "record"/SetOf=true no matter
+	// what its column list is (that's how PostgreSQL's own catalog represents
+	// it — prorettype is genuinely 'record' regardless), so two functions with
+	// different TABLE column lists would look identical to that check alone.
+	returnTable := ir.FormatTableColumns(ir.FuncTableColumns(o.Args))
+	if o.ReturnType.String() != snap.ReturnType || o.ReturnType.SetOf != snap.ReturnsSet || returnTable != snap.ReturnTable {
 		ops = append(ops, destructiveOp(fmt.Sprintf("DROP FUNCTION IF EXISTS %s;", sig), pos))
 		ops = append(ops, createFunction(o)...)
 		return ops

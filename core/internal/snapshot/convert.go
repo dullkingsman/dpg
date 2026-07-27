@@ -463,18 +463,19 @@ func toSnapView(o *ir.View) *SnapView {
 
 func toSnapFunction(o *ir.Function) *SnapFunction {
 	sf := &SnapFunction{
-		Schema:     o.Schema,
-		Name:       o.Name,
-		Args:       ir.ArgsKey(o.Args),
-		ReturnType: o.ReturnType.String(),
-		ReturnsSet: o.ReturnType.SetOf,
-		Language:   o.Attrs.Language,
-		Volatility: o.Attrs.Volatility,
-		Parallel:   o.Attrs.Parallel,
-		Cost:       o.Attrs.Cost,
-		Rows:       o.Attrs.Rows,
-		BodyHash:   o.BodyHash,
-		Comment:    o.Comment,
+		Schema:      o.Schema,
+		Name:        o.Name,
+		Args:        ir.ArgsKey(o.Args),
+		ReturnType:  o.ReturnType.String(),
+		ReturnsSet:  o.ReturnType.SetOf,
+		ReturnTable: ir.FormatTableColumns(ir.FuncTableColumns(o.Args)),
+		Language:    o.Attrs.Language,
+		Volatility:  o.Attrs.Volatility,
+		Parallel:    o.Attrs.Parallel,
+		Cost:        o.Attrs.Cost,
+		Rows:        o.Attrs.Rows,
+		BodyHash:    o.BodyHash,
+		Comment:     o.Comment,
 	}
 	for _, g := range o.Grants {
 		sf.Grants = append(sf.Grants, toSnapGrant(g))

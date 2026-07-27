@@ -790,6 +790,41 @@ func TestDiffCreateFunctionEmitsSetOf(t *testing.T) {
 	}
 }
 
+// TestDiffCreateFunctionEmitsReturnsTable proves a RETURNS TABLE(...) function
+// renders correctly: the TABLE-mode columns must appear ONLY inside the
+// RETURNS TABLE(...) clause, never inline in the main parameter list (that
+// was the actual bug — buildFunctionSQL previously wrote "TABLE a integer"
+// as a literal, invalid parameter-mode prefix into the main parens).
+func TestDiffCreateFunctionEmitsReturnsTable(t *testing.T) {
+	d := New()
+	desired := []pipeline.IRObject{
+		&ir.Function{
+			Schema: "public", Name: "f",
+			ReturnType: ir.TypeRef{Name: "record", SetOf: true},
+			Args: []ir.FuncArg{
+				{Name: "n", Mode: "IN", Type: ir.TypeRef{Name: "integer"}},
+				{Name: "a", Mode: "TABLE", Type: ir.TypeRef{Name: "integer"}},
+				{Name: "b", Mode: "TABLE", Type: ir.TypeRef{Name: "text"}},
+			},
+			Attrs: ir.FuncAttrs{Language: "sql", Volatility: "VOLATILE", Parallel: "UNSAFE", Body: "SELECT 1, 'x'"},
+		},
+	}
+	ops, err := d.Diff(desired, &pipeline.Snapshot{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ops) == 0 {
+		t.Fatal("expected a CREATE FUNCTION op")
+	}
+	sql := ops[0].SQL()
+	if !strings.Contains(sql, "(n integer) RETURNS TABLE(a integer, b text)") {
+		t.Errorf("expected the main parens to hold only n, and RETURNS TABLE(a integer, b text), got: %s", sql)
+	}
+	if strings.Contains(sql, "TABLE a integer") || strings.Contains(sql, "TABLE b text") {
+		t.Errorf("TABLE-mode columns must not be rendered inline in the parameter list, got: %s", sql)
+	}
+}
+
 // TestDiffFunctionReturnTypeChangeRequiresDropCreate proves a return-type
 // change (here: adding SETOF) is NOT rendered as CREATE OR REPLACE FUNCTION —
 // confirmed live against postgres:17 that PostgreSQL rejects that outright
@@ -860,6 +895,82 @@ func TestDiffFunctionSetOfUnchangedIsNoop(t *testing.T) {
 	}
 	if len(ops) != 0 {
 		t.Errorf("expected zero ops for an unchanged return type, got: %v", sqlList(ops))
+	}
+}
+
+// TestDiffFunctionReturnTableColumnListChanged proves a RETURNS TABLE(...)
+// column-list edit (here: adding a column) is detected — ReturnType/SetOf
+// alone can't tell two different TABLE column lists apart, since PostgreSQL's
+// own catalog reports "record"/true for a TABLE-mode function regardless of
+// its actual columns; this exercises the ReturnTable comparison specifically.
+func TestDiffFunctionReturnTableColumnListChanged(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.f()", &snapshot.SnapObject{
+		Kind: "function",
+		Function: &snapshot.SnapFunction{
+			Schema: "public", Name: "f", ReturnType: "record", ReturnsSet: true, ReturnTable: "a integer",
+			Language: "sql", Volatility: "VOLATILE", Parallel: "UNSAFE", BodyHash: "h",
+		},
+	})
+	desired := []pipeline.IRObject{
+		&ir.Function{
+			Schema: "public", Name: "f",
+			ReturnType: ir.TypeRef{Name: "record", SetOf: true},
+			Args: []ir.FuncArg{
+				{Name: "a", Mode: "TABLE", Type: ir.TypeRef{Name: "integer"}},
+				{Name: "b", Mode: "TABLE", Type: ir.TypeRef{Name: "text"}},
+			},
+			BodyHash: "h",
+			Attrs:    ir.FuncAttrs{Language: "sql", Volatility: "VOLATILE", Parallel: "UNSAFE", Body: "SELECT 1, 'x'"},
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ops) < 2 {
+		t.Fatalf("expected a DROP FUNCTION + CREATE FUNCTION pair for the column-list change, got: %v", sqlList(ops))
+	}
+	if !strings.Contains(ops[0].SQL(), "DROP FUNCTION") {
+		t.Errorf("expected the first op to be DROP FUNCTION, got: %s", ops[0].SQL())
+	}
+	if !strings.Contains(ops[1].SQL(), "RETURNS TABLE(a integer, b text)") {
+		t.Errorf("expected the recreate to declare RETURNS TABLE(a integer, b text), got: %s", ops[1].SQL())
+	}
+}
+
+// TestDiffFunctionReturnTableUnchangedIsNoop is the zero-drift control for
+// ReturnTable: an identical TABLE column list on both sides must not trigger
+// the DROP+CREATE path.
+func TestDiffFunctionReturnTableUnchangedIsNoop(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.f()", &snapshot.SnapObject{
+		Kind: "function",
+		Function: &snapshot.SnapFunction{
+			Schema: "public", Name: "f", ReturnType: "record", ReturnsSet: true, ReturnTable: "a integer, b text",
+			Language: "sql", Volatility: "VOLATILE", Parallel: "UNSAFE", BodyHash: "h",
+		},
+	})
+	desired := []pipeline.IRObject{
+		&ir.Function{
+			Schema: "public", Name: "f",
+			ReturnType: ir.TypeRef{Name: "record", SetOf: true},
+			Args: []ir.FuncArg{
+				{Name: "a", Mode: "TABLE", Type: ir.TypeRef{Name: "integer"}},
+				{Name: "b", Mode: "TABLE", Type: ir.TypeRef{Name: "text"}},
+			},
+			BodyHash: "h",
+			Attrs:    ir.FuncAttrs{Language: "sql", Volatility: "VOLATILE", Parallel: "UNSAFE", Body: "SELECT 1, 'x'"},
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ops) != 0 {
+		t.Errorf("expected zero ops for an unchanged TABLE column list, got: %v", sqlList(ops))
 	}
 }
 

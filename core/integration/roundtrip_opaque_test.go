@@ -2149,3 +2149,175 @@ $$ {}`
 		t.Error("live proretset for f_plain after apply = false, want true")
 	}
 }
+
+// TestRoundtripFunctionReturnsTable covers RETURNS TABLE(...) fidelity end to
+// end. Args entries with Mode "TABLE" were previously rendered inline in the
+// main parameter list as an invalid "TABLE a integer" literal (a genuine,
+// separate, pre-existing bug found while building SETOF support), and
+// introspection built Args purely from oidvectortypes(proargtypes), which —
+// like pg_get_function_identity_arguments — never reports OUT/TABLE-mode
+// columns at all, so a RETURNS TABLE function's output columns were silently
+// missing from introspected Args entirely, not just mis-rendered.
+func TestRoundtripFunctionReturnsTable(t *testing.T) {
+	connStr := testpg.Start(t)
+	ctx := context.Background()
+
+	differ := diff.New()
+	emitter := emit.New()
+	applyExec := executor.New()
+	ci := introspect.New()
+	store := newMemStore()
+
+	conn, err := executor.Connect(ctx, connStr)
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	defer conn.Close(ctx)
+
+	dir := t.TempDir()
+	f := filepath.Join(dir, "schema.dpg")
+	fixture := `FUNCTION f_table(n integer) RETURNS TABLE(a integer)
+LANGUAGE sql AS $$
+    SELECT n;
+$$ {}`
+	if err := os.WriteFile(f, []byte(fixture), 0o644); err != nil {
+		t.Fatalf("write schema: %v", err)
+	}
+	applyFixture(t, ctx, conn, []string{f}, dir, differ, emitter, applyExec, store)
+
+	desired, err := compiler.Compile([]string{f}, dir, pipeline.Default)
+	if err != nil {
+		t.Fatalf("compile: %v", err)
+	}
+
+	liveObjects, err := ci.Introspect(ctx, conn)
+	if err != nil {
+		t.Fatalf("introspect: %v", err)
+	}
+	snap, _ := store.Load("test", "dpgtest")
+	var managedLive []pipeline.IRObject
+	for _, obj := range liveObjects {
+		if _, ok := snap.Objects[obj.QualifiedName()]; ok {
+			managedLive = append(managedLive, obj)
+		}
+	}
+	liveSnap := &pipeline.Snapshot{}
+	if err := snapshot.Populate(liveSnap, managedLive); err != nil {
+		t.Fatalf("populate live snapshot: %v", err)
+	}
+
+	// Confirm PostgreSQL actually recorded a genuine RETURNS TABLE function
+	// (not, say, a plain scalar one from SETOF/TABLE silently being dropped
+	// again) — a guard against the zero-drift check below passing for the
+	// wrong reason.
+	rs, err := conn.QueryRows(ctx, `SELECT pg_get_function_result(oid) FROM pg_proc WHERE proname = 'f_table'`)
+	if err != nil {
+		t.Fatalf("query pg_get_function_result: %v", err)
+	}
+	var resultText string
+	if !rs.Next() {
+		t.Fatal("expected a row for f_table")
+	}
+	if err := rs.Scan(&resultText); err != nil {
+		t.Fatalf("scan: %v", err)
+	}
+	rs.Close()
+	if resultText != "TABLE(a integer)" {
+		t.Fatalf("pg_get_function_result: got %q, want TABLE(a integer)", resultText)
+	}
+
+	// Confirm introspection itself actually captured the TABLE-mode column
+	// (not just that PostgreSQL created it correctly) — this is the specific
+	// gap this fix closes.
+	var introFn *ir.Function
+	for _, obj := range liveObjects {
+		if fn, ok := obj.(*ir.Function); ok && fn.Name == "f_table" {
+			introFn = fn
+		}
+	}
+	if introFn == nil {
+		t.Fatal("introspect: function public.f_table not found")
+	}
+	if got := ir.FormatTableColumns(ir.FuncTableColumns(introFn.Args)); got != "a integer" {
+		t.Errorf("introspected f_table TABLE columns: got %q, want %q", got, "a integer")
+	}
+
+	driftOps, err := differ.Diff(desired, liveSnap)
+	if err != nil {
+		t.Fatalf("drift diff: %v", err)
+	}
+	if len(driftOps) != 0 {
+		t.Errorf("expected zero drift for RETURNS TABLE against a live catalog, got %d ops:", len(driftOps))
+		for _, op := range driftOps {
+			t.Errorf("  [%s] %s", op.Safety(), op.SQL())
+		}
+	}
+
+	// Rename the TABLE column (same type, same body) and confirm this diffs
+	// to a real DROP + CREATE pair. This isolates the ReturnTable comparison
+	// specifically: a plain column-list edit that leaves the body's SQL text
+	// completely unchanged means BodyHash stays identical, so if only
+	// ReturnTable were compared incorrectly (or not at all), nothing else
+	// would catch this change — confirmed live that PostgreSQL validates
+	// column COUNT at CREATE time for a SQL-language function ("return type
+	// mismatch ... too few columns"), which is why a rename (not an added
+	// column) is used here to keep the body byte-identical.
+	v2 := `FUNCTION f_table(n integer) RETURNS TABLE(a2 integer)
+LANGUAGE sql AS $$
+    SELECT n;
+$$ {}`
+	if err := os.WriteFile(f, []byte(v2), 0o644); err != nil {
+		t.Fatalf("write v2: %v", err)
+	}
+	desired2, err := compiler.Compile([]string{f}, dir, pipeline.Default)
+	if err != nil {
+		t.Fatalf("compile v2: %v", err)
+	}
+	snap2, _ := store.Load("test", "dpgtest")
+	changeOps, err := differ.Diff(desired2, snap2)
+	if err != nil {
+		t.Fatalf("diff (column-list change): %v", err)
+	}
+	var sql string
+	for _, op := range changeOps {
+		sql += op.SQL()
+	}
+	if !strings.Contains(sql, "DROP FUNCTION") {
+		t.Errorf("expected a DROP FUNCTION op for the TABLE column rename, got: %s", sql)
+	}
+	if !strings.Contains(sql, "RETURNS TABLE(a2 integer)") {
+		t.Errorf("expected the recreate to declare RETURNS TABLE(a2 integer), got: %s", sql)
+	}
+
+	migration, err := emitter.Emit(changeOps, pipeline.MigrationMeta{Cluster: "test", Database: "dpgtest"})
+	if err != nil {
+		t.Fatalf("emit: %v", err)
+	}
+	if err := applyExec.Apply(ctx, migration, conn); err != nil {
+		t.Fatalf("apply (column-list change) against live PostgreSQL: %v", err)
+	}
+	// Query via a proname filter, not a '...'::regproc cast: pgx's extended
+	// query protocol caches prepared statements by exact SQL text, and this
+	// exact text was already used (pre-apply) above — a regproc cast folds to
+	// a constant OID at prepare time, so re-executing the identical statement
+	// after DROP+CREATE (a new OID) would silently return NULL for the old,
+	// now-nonexistent OID rather than re-resolving the name. Not a product
+	// bug: confirmed by re-running the same regproc-cast query with oid-only
+	// debug output and seeing the stale OID, while a fresh proname-based
+	// query in the same session saw the correct new one.
+	rs2, err := conn.QueryRows(ctx, `SELECT pg_get_function_result(oid) FROM pg_proc WHERE proname = 'f_table'`)
+	if err != nil {
+		t.Fatalf("query updated pg_get_function_result: %v", err)
+	}
+	defer rs2.Close()
+	if !rs2.Next() {
+		t.Fatal("expected a row for f_table after apply")
+	}
+	var newResultText string
+	if err := rs2.Scan(&newResultText); err != nil {
+		t.Fatalf("scan updated pg_get_function_result: %v", err)
+	}
+	if newResultText != "TABLE(a2 integer)" {
+		t.Errorf("live pg_get_function_result after apply = %q, want TABLE(a2 integer)", newResultText)
+	}
+}

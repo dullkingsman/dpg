@@ -905,6 +905,7 @@ ORDER  BY n.nspname, c.relname`
 func introspectFunctions(ctx context.Context, conn pipeline.Querier) ([]pipeline.IRObject, error) {
 	const q = `
 SELECT n.nspname, p.proname,
+       p.oid::bigint AS oid,
        pg_get_function_identity_arguments(p.oid) AS args,
        pg_catalog.oidvectortypes(p.proargtypes)   AS arg_types,
        pg_catalog.format_type(p.prorettype, NULL) AS return_type,
@@ -944,16 +945,18 @@ ORDER  BY n.nspname, p.proname, args`
 
 	funcIdx := make(map[string]*ir.Function)
 	procIdx := make(map[string]*ir.Procedure)
+	fnByOID := make(map[int64]*ir.Function)
 	var out []pipeline.IRObject
 	for rs.Next() {
 		var schema, name, args, argTypes, retType, lang, volatility string
+		var oid int64
 		var secDef, strict bool
 		var parallel string
 		var cost, rows float64
 		var retset, isCOrInternal bool
 		var comment *string
 		var prokind, prosrc string
-		if err := rs.Scan(&schema, &name, &args, &argTypes, &retType, &lang, &volatility, &secDef, &strict,
+		if err := rs.Scan(&schema, &name, &oid, &args, &argTypes, &retType, &lang, &volatility, &secDef, &strict,
 			&parallel, &cost, &rows, &retset, &isCOrInternal, &comment, &prokind, &prosrc); err != nil {
 			return nil, err
 		}
@@ -1028,6 +1031,7 @@ ORDER  BY n.nspname, p.proname, args`
 				}
 			}
 			funcIdx[schema+"."+name+"("+args+")"] = fn
+			fnByOID[oid] = fn
 			out = append(out, fn)
 		}
 	}
@@ -1036,6 +1040,10 @@ ORDER  BY n.nspname, p.proname, args`
 	}
 	rs.Close()
 
+	if err := introspectFunctionTableArgs(ctx, conn, fnByOID); err != nil {
+		return nil, err
+	}
+
 	if err := introspectFunctionGrants(ctx, conn, funcIdx); err != nil {
 		return nil, err
 	}
@@ -1043,6 +1051,67 @@ ORDER  BY n.nspname, p.proname, args`
 		return nil, err
 	}
 	return out, nil
+}
+
+// introspectFunctionTableArgs fixes up Args for RETURNS TABLE(...) functions
+// specifically. The main introspectFunctions query builds Args from
+// oidvectortypes(proargtypes), which — like pg_get_function_identity_arguments
+// — only ever reports IN/INOUT/VARIADIC arguments; PostgreSQL's own OUT and
+// TABLE-mode arguments are invisible to it entirely, so a RETURNS TABLE
+// function's output columns were silently missing from Args altogether (not
+// just mis-rendered). Scoped narrowly to functions that actually use TABLE
+// mode (via proargmodes containing 't') so every other function — including
+// ones with plain OUT/INOUT/VARIADIC parameters, already handled correctly by
+// the main query for their own IN/INOUT/VARIADIC identity args — is completely
+// unaffected by this second pass.
+func introspectFunctionTableArgs(ctx context.Context, conn pipeline.Querier, fnByOID map[int64]*ir.Function) error {
+	const q = `
+SELECT p.oid::bigint, u.mode::text, u.nm, pg_catalog.format_type(u.ty, NULL)
+FROM   pg_proc p,
+       LATERAL unnest(p.proargmodes, p.proargnames, p.proallargtypes) WITH ORDINALITY AS u(mode, nm, ty, ord)
+WHERE  p.proargmodes IS NOT NULL AND 't' = ANY(p.proargmodes::text[])
+ORDER  BY p.oid, u.ord`
+
+	rs, err := conn.QueryRows(ctx, q)
+	if err != nil {
+		return fmt.Errorf("introspect function table args: %w", err)
+	}
+	defer rs.Close()
+
+	argsByOID := make(map[int64][]ir.FuncArg)
+	var order []int64
+	for rs.Next() {
+		var oid int64
+		var mode, name, typ string
+		if err := rs.Scan(&oid, &mode, &name, &typ); err != nil {
+			return err
+		}
+		if _, ok := argsByOID[oid]; !ok {
+			order = append(order, oid)
+		}
+		argMode := "IN"
+		switch mode {
+		case "o":
+			argMode = "OUT"
+		case "b":
+			argMode = "INOUT"
+		case "v":
+			argMode = "VARIADIC"
+		case "t":
+			argMode = "TABLE"
+		}
+		argsByOID[oid] = append(argsByOID[oid], ir.FuncArg{Name: name, Mode: argMode, Type: ir.TypeRef{Name: typ}})
+	}
+	if err := rs.Err(); err != nil {
+		return err
+	}
+
+	for _, oid := range order {
+		if fn, ok := fnByOID[oid]; ok {
+			fn.Args = argsByOID[oid]
+		}
+	}
+	return nil
 }
 
 // ── types ─────────────────────────────────────────────────────────────────────

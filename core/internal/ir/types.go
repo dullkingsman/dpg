@@ -842,6 +842,42 @@ func ArgsKey(args []FuncArg) string {
 	return result
 }
 
+// FuncTableColumns returns just the RETURNS TABLE(...) column list from a
+// function's Args, in declaration order. A function using RETURNS TABLE
+// carries its output columns as ordinary Args entries with Mode "TABLE" —
+// they must never be rendered inline in the main parameter list (that's a
+// distinct, invalid syntax; the real columns belong inside a separate
+// RETURNS TABLE(...) clause).
+func FuncTableColumns(args []FuncArg) []FuncArg {
+	var cols []FuncArg
+	for _, a := range args {
+		if a.Mode == "TABLE" {
+			cols = append(cols, a)
+		}
+	}
+	return cols
+}
+
+// FormatTableColumns renders a RETURNS TABLE(...) column list's inner text
+// ("name type, name type, ..."). Used both to render the clause (dump,
+// diff-generated SQL) and as the comparable snapshot representation for
+// drift detection — the two must always agree, since a mismatch here would
+// either silently miss a genuine column-list change or falsely report one.
+func FormatTableColumns(cols []FuncArg) string {
+	parts := make([]string, 0, len(cols))
+	for _, c := range cols {
+		parts = append(parts, c.Name+" "+c.Type.String())
+	}
+	result := ""
+	for i, p := range parts {
+		if i > 0 {
+			result += ", "
+		}
+		result += p
+	}
+	return result
+}
+
 // Assert that all concrete types implement pipeline.IRObject.
 var (
 	_ pipeline.IRObject = (*Schema)(nil)

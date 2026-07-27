@@ -174,20 +174,25 @@ type SnapView struct {
 }
 
 type SnapFunction struct {
-	Schema     string             `json:"schema"`
-	Name       string             `json:"name"`
-	Args       string             `json:"args"` // type-only signature key
-	ReturnType string             `json:"return_type"`
-	ReturnsSet bool               `json:"returns_set,omitempty"`
-	Language   string             `json:"language"`
-	Volatility string             `json:"volatility"`
-	Parallel   string             `json:"parallel,omitempty"`
-	Cost       *float64           `json:"cost,omitempty"`
-	Rows       *float64           `json:"rows,omitempty"`
-	BodyHash   string             `json:"body_hash"`
-	Comment    *string            `json:"comment,omitempty"`
-	Grants     []SnapGrant        `json:"grants,omitempty"`
-	NameMaps   []SnapNameMapEntry `json:"name_maps,omitempty"`
+	Schema     string `json:"schema"`
+	Name       string `json:"name"`
+	Args       string `json:"args"` // type-only signature key
+	ReturnType string `json:"return_type"`
+	ReturnsSet bool   `json:"returns_set,omitempty"`
+	// ReturnTable is the RETURNS TABLE(...) column list ("a integer, b text"),
+	// empty for an ordinary function. ReturnType/ReturnsSet alone can't tell
+	// two different TABLE column lists apart (both show "record"/true), so
+	// this is compared independently — see ir.FormatTableColumns.
+	ReturnTable string             `json:"return_table,omitempty"`
+	Language    string             `json:"language"`
+	Volatility  string             `json:"volatility"`
+	Parallel    string             `json:"parallel,omitempty"`
+	Cost        *float64           `json:"cost,omitempty"`
+	Rows        *float64           `json:"rows,omitempty"`
+	BodyHash    string             `json:"body_hash"`
+	Comment     *string            `json:"comment,omitempty"`
+	Grants      []SnapGrant        `json:"grants,omitempty"`
+	NameMaps    []SnapNameMapEntry `json:"name_maps,omitempty"`
 }
 
 type SnapType struct {

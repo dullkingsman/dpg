@@ -490,11 +490,18 @@ func renderObjectDPG(b *strings.Builder, obj pipeline.IRObject, fmtOpts format.O
 		b.WriteString(") ")
 		b.WriteString(kw("RETURNS"))
 		b.WriteString(" ")
-		if o.ReturnType.SetOf {
-			b.WriteString(kw("SETOF"))
-			b.WriteString(" ")
+		if tableCols := ir.FuncTableColumns(o.Args); len(tableCols) > 0 {
+			b.WriteString(kw("TABLE"))
+			b.WriteString("(")
+			b.WriteString(ir.FormatTableColumns(tableCols))
+			b.WriteString(")")
+		} else {
+			if o.ReturnType.SetOf {
+				b.WriteString(kw("SETOF"))
+				b.WriteString(" ")
+			}
+			b.WriteString(o.ReturnType.String())
 		}
-		b.WriteString(o.ReturnType.String())
 		b.WriteString(" ")
 		b.WriteString(kw("LANGUAGE"))
 		b.WriteString(" ")
@@ -652,10 +659,18 @@ func renderObjectDPG(b *strings.Builder, obj pipeline.IRObject, fmtOpts format.O
 // ("mode name type [DEFAULT expr]", comma-joined) — shared between the two,
 // since their parameter syntax is identical.
 func writeFuncArgs(b *strings.Builder, args []ir.FuncArg) {
-	for i, a := range args {
-		if i > 0 {
+	first := true
+	for _, a := range args {
+		// RETURNS TABLE(...) columns are rendered in a separate clause by the
+		// caller, never inline here — "TABLE a integer" is not valid parameter
+		// syntax (PostgreSQL rejects it outright).
+		if a.Mode == "TABLE" {
+			continue
+		}
+		if !first {
 			b.WriteString(", ")
 		}
+		first = false
 		if a.Mode != "" && a.Mode != "IN" {
 			b.WriteString(a.Mode)
 			b.WriteString(" ")

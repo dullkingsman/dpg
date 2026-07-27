@@ -41,6 +41,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`FUNCTION`'s `RETURNS TABLE (...)` produced invalid SQL and lost its
+  output columns on introspection** — a TABLE-mode argument (`ir.FuncArg`
+  with `Mode: "TABLE"`) was already parsed correctly from source, but
+  `buildFunctionSQL`/`dump`'s parameter-list rendering wrote it inline as a
+  literal `TABLE a integer` mode-prefix in the main parens — not valid
+  PostgreSQL syntax (`RETURNS TABLE(...)` columns belong in a separate
+  clause) — so any hand-written `RETURNS TABLE (...)` function failed to
+  apply with a real parse error. Separately, introspection built a
+  function's `Args` purely from `oidvectortypes(proargtypes)`, which — like
+  `pg_get_function_identity_arguments` — never reports `OUT`/`TABLE`-mode
+  parameters at all, so a live `RETURNS TABLE` function's output columns
+  were silently missing from introspected `Args` entirely, not merely
+  mis-rendered; `dump`ing such a function produced a broken definition with
+  no columns. Fixed by skipping `TABLE`-mode args in the main parameter-list
+  rendering (both `dump` and diff-generated SQL) and rendering them inside a
+  proper `RETURNS TABLE(col type, ...)` clause instead (new
+  `ir.FuncTableColumns`/`ir.FormatTableColumns` helpers, shared by both
+  rendering and the new comparison below), and by adding a second, narrowly
+  scoped introspection query (via `unnest(proargmodes, proargnames,
+  proallargtypes)`, filtered to functions whose `proargmodes` actually
+  contains `'t'`) that reconstructs the full, correctly-moded `Args` list
+  for TABLE-mode functions specifically — every other function keeps using
+  the existing, unmodified introspection path, so this carries no
+  regression risk for the common case.
+  Also fixes a related diffing gap: a `RETURNS TABLE` function's
+  `ReturnType`/`SetOf` are always `record`/`true` regardless of its actual
+  column list (that's genuinely how PostgreSQL's own catalog represents
+  it), so two functions with different `TABLE` column lists looked
+  identical to the SETOF work's return-type comparison. Added a separate
+  `SnapFunction.ReturnTable` field (the column list's comparable text) so a
+  column-list-only edit — verified live to require the same `DROP FUNCTION`
+  + `CREATE FUNCTION` pattern as any other return-type change — is
+  correctly detected as drift instead of silently ignored.
+  Scope note: plain `OUT`/`INOUT`/`VARIADIC`-only functions (no `TABLE`
+  mode) are unaffected by either fix and were already rendering correctly;
+  introspection's handling of `VARIADIC`'s keyword and plain `OUT`-only
+  functions' `Args` was not investigated as part of this item and may carry
+  its own separate gaps, not confirmed either way.
 - **`FUNCTION`'s `RETURNS SETOF <type>` was silently dropped everywhere** —
   pg_query's `TypeName.Setof` field was never read anywhere in the codebase
   (`typeNameToRef` ignored it), so a function declared with `RETURNS
