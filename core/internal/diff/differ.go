@@ -2653,14 +2653,17 @@ func diffConstraints(tbl string, o *ir.Table, snap *snapshot.SnapTable, fullSnap
 	//      the verify/plan --live path: live introspection's
 	//      pg_constraint.conname is NEVER empty, since PG always assigns a
 	//      name (e.g. "t_pkey") even when the user wrote none, so without
-	//      this an unnamed inline PK/UNIQUE/FK produced a self-inconsistent
-	//      DROP+ADD pair on every single run. Limited to PRIMARY KEY/UNIQUE/
-	//      FOREIGN KEY: CHECK's naming rule needs to know whether the
-	//      expression references exactly one distinct column (which neither
-	//      the IR builder nor the introspector currently extract), and
-	//      EXCLUDE bodies aren't round-tripped at all yet (buildConstraint
-	//      stores only a placeholder "EXCLUDE" Expr, no columns) — both
-	//      pre-existing gaps, not addressed here.
+	//      this an unnamed inline PK/UNIQUE/FK/CHECK produced a
+	//      self-inconsistent DROP+ADD pair on every single run. Covers
+	//      PRIMARY KEY/UNIQUE/FOREIGN KEY/CHECK. EXCLUDE remains excluded —
+	//      not merely a missing-column-extraction gap like the others were:
+	//      buildConstraint's CONSTR_EXCLUSION case never parses the real
+	//      EXCLUDE body from source at all (access method, per-column
+	//      operators, WHERE), only ever storing a placeholder "EXCLUDE" Expr
+	//      that would already fail to apply as invalid SQL — so there's no
+	//      real desired-side definition to name in the first place. Fixing
+	//      that is a separate, larger feature (full EXCLUDE round-tripping),
+	//      not a naming-reconciliation gap.
 	// Note both matching strategies are identity-only, never full-definition
 	// equality — this is a pre-existing property of this function (a named
 	// constraint whose definition changes while keeping the same name was
@@ -2693,7 +2696,9 @@ func diffConstraints(tbl string, o *ir.Table, snap *snapshot.SnapTable, fullSnap
 	// PLUS — for PRIMARY KEY/UNIQUE specifically, since those are index-backed —
 	// every other RELATION name in the schema (schemaRelationNames), matching
 	// PostgreSQL's own ChooseRelationName, which checks pg_class, not just
-	// pg_constraint. FOREIGN KEY isn't index-backed, so it only gets the
+	// pg_constraint. FOREIGN KEY and CHECK aren't index-backed (their default
+	// names go through ChooseConstraintName, which only ever checks
+	// pg_constraint — see heap.c/pg_constraint.c), so they only get the
 	// narrower constraint-name set (see schemaRelationNames' doc comment).
 	// The current table's own names are excluded from both — those are
 	// exactly the pre-existing assignments a recomputed name is trying to
@@ -2706,10 +2711,20 @@ func diffConstraints(tbl string, o *ir.Table, snap *snapshot.SnapTable, fullSnap
 	otherRelationNames := schemaRelationNames(fullSnap, o.Schema, o.Name)
 	predictName := func(c *ir.Constraint, label string) string {
 		existing := maps.Clone(otherTableNames)
-		if label != "fkey" {
+		if label == "pkey" || label == "key" {
 			maps.Copy(existing, otherRelationNames)
 		}
-		return pgAutoConstraintName(o.Name, c.Columns, label, existing)
+		cols := c.Columns
+		if label == "check" {
+			// CHECK's name2 is the single referenced column, not the full
+			// set c.Columns carries for other purposes (createTable's
+			// inline-rendering marker) — see CheckColumn's doc comment.
+			cols = nil
+			if c.CheckColumn != nil {
+				cols = []string{*c.CheckColumn}
+			}
+		}
+		return pgAutoConstraintName(o.Name, cols, label, existing)
 	}
 
 	desiredByKey := make(map[string]*ir.Constraint, len(o.Constraints))
@@ -2776,8 +2791,8 @@ func diffConstraints(tbl string, o *ir.Table, snap *snapshot.SnapTable, fullSnap
 
 // pgConstraintNameLabel returns the label PostgreSQL's auto-naming
 // algorithm uses for a constraint type, and whether pgAutoConstraintName
-// can reconstruct a name for it. CHECK and EXCLUDE are deliberately
-// excluded — see the comment in diffConstraints for why.
+// can reconstruct a name for it. EXCLUDE is deliberately excluded — see the
+// comment in diffConstraints for why.
 func pgConstraintNameLabel(typ string) (label string, ok bool) {
 	switch typ {
 	case "PRIMARY KEY":
@@ -2786,6 +2801,8 @@ func pgConstraintNameLabel(typ string) (label string, ok bool) {
 		return "key", true
 	case "FOREIGN KEY":
 		return "fkey", true
+	case "CHECK":
+		return "check", true
 	default:
 		return "", false
 	}
@@ -2798,11 +2815,15 @@ func pgConstraintNameLabel(typ string) (label string, ok bool) {
 // that verify/plan --live can recognize a live catalog's auto-generated
 // name as the SAME constraint an inline unnamed declaration refers to.
 //
-// label is "pkey"/"key"/"fkey" (see pgConstraintNameLabel); cols is ignored
-// for "pkey" (PG's primary key name never depends on columns — a table can
-// only have one), and is the constraint's own column list for the others
-// (for "fkey" this must be the LOCAL/referencing columns, matching
-// ChooseForeignKeyConstraintNameAddition, not the referenced table's).
+// label is "pkey"/"key"/"fkey"/"check" (see pgConstraintNameLabel); cols is
+// ignored for "pkey" (PG's primary key name never depends on columns — a
+// table can only have one), and is joined with "_" for the others (for
+// "fkey" this must be the LOCAL/referencing columns, matching
+// ChooseForeignKeyConstraintNameAddition, not the referenced table's; for
+// "check" the caller must pass either a single-element slice — when the
+// expression references exactly one distinct column — or nil, matching
+// heap.c's pull_var_clause-based name2 selection, not the constraint's full
+// column set).
 // existingNames is mutated: each name this function returns is added to it,
 // so a second call sharing the same map correctly avoids colliding with the
 // first — callers that want independent (non-batch) predictions, as

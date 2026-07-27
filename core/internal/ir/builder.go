@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	pg_query "github.com/pganalyze/pg_query_go/v6"
+	"google.golang.org/protobuf/reflect/protoreflect"
 
 	"github.com/dullkingsman/dpg/internal/ast"
 	"github.com/dullkingsman/dpg/internal/pipeline"
@@ -318,15 +319,18 @@ func (b *Builder) buildColumn(cd *pg_query.ColumnDef, pos pipeline.SourcePos) (*
 
 		case pg_query.ConstrType_CONSTR_CHECK:
 			// Inline CHECK — promote to a table-level constraint.
-			// Columns is set to [colname] so createTable can inline it back.
+			// Columns is set to [colname] so createTable can inline it back
+			// (a syntactic-position marker, deliberately independent of
+			// CheckColumn below — see the Columns/CheckColumn doc comments).
 			if cst.RawExpr != nil {
 				expr := nodeToText(cst.RawExpr)
 				tc := &Constraint{
-					Name:    cst.Conname,
-					Type:    "CHECK",
-					Columns: []string{cd.Colname},
-					Expr:    "CHECK (" + expr + ")",
-					Pos:     pos,
+					Name:        cst.Conname,
+					Type:        "CHECK",
+					Columns:     []string{cd.Colname},
+					CheckColumn: checkExprSingleColumn(cst.RawExpr),
+					Expr:        "CHECK (" + expr + ")",
+					Pos:         pos,
 				}
 				promoted = append(promoted, tc)
 			}
@@ -414,6 +418,7 @@ func buildConstraint(c *pg_query.Constraint, pos pipeline.SourcePos) *Constraint
 		if c.RawExpr != nil {
 			expr := nodeToText(c.RawExpr)
 			cst.Expr = "CHECK (" + expr + ")"
+			cst.CheckColumn = checkExprSingleColumn(c.RawExpr)
 		}
 
 	case pg_query.ConstrType_CONSTR_FOREIGN:
@@ -455,6 +460,16 @@ func buildConstraint(c *pg_query.Constraint, pos pipeline.SourcePos) *Constraint
 
 	case pg_query.ConstrType_CONSTR_EXCLUSION:
 		cst.Type = "EXCLUDE"
+		// c.Exclusions (per-element IndexElem + operator list), c.AccessMethod,
+		// and c.WhereClause are all dropped here — the real body is never
+		// parsed at all, not just missing a column extraction. This is a
+		// pre-existing, separate gap (EXCLUDE bodies aren't round-tripped by
+		// DPG in any capacity today): an unnamed EXCLUDE constraint can't be
+		// given a real predicted auto-generated name (pgConstraintNameLabel
+		// deliberately excludes "EXCLUDE") because there's no real desired-side
+		// definition to name in the first place — this placeholder Expr would
+		// already fail to apply ("ALTER TABLE t ADD EXCLUDE;" is invalid SQL)
+		// before naming ever mattered.
 		cst.Expr = "EXCLUDE" // full exclusion body is complex; preserve via rawSQL if needed
 	default:
 		cst.Type = "UNKNOWN"
@@ -1402,6 +1417,62 @@ func nodeToText(n *pg_query.Node) string {
 }
 
 // fmt is imported for Sprintf in nodeToText; declare the import.
+
+// checkExprSingleColumn returns the single column a CHECK expression
+// references, if it references exactly one distinct column — mirroring
+// PostgreSQL's own default-name selection for CHECK constraints (heap.c's
+// AddRelationNewConstraints: pull_var_clause(expr) then list_union to dedup;
+// nil unless exactly one Var remains). Returns nil for zero or multiple
+// distinct columns, or when n is nil.
+func checkExprSingleColumn(n *pg_query.Node) *string {
+	if n == nil {
+		return nil
+	}
+	seen := make(map[string]bool)
+	walkColumnRefs(n.ProtoReflect(), seen)
+	if len(seen) != 1 {
+		return nil
+	}
+	for name := range seen {
+		return &name
+	}
+	return nil
+}
+
+// walkColumnRefs recursively visits every populated message field (including
+// repeated ones) reachable from m, recording the final (rightmost — i.e. the
+// unqualified column name, since a CHECK expression's ColumnRef has no table
+// qualifier) Fields entry of every pg_query.ColumnRef it finds. Walking
+// generically via protobuf reflection, rather than special-casing every
+// expression node type (FuncCall args, CASE, COALESCE, BoolExpr, TypeCast,
+// nested A_Expr, ...) by hand, is what makes this equivalent to PostgreSQL's
+// own pull_var_clause for any CHECK expression that (like the vast majority
+// of real-world constraints) references only its own table's columns.
+func walkColumnRefs(m protoreflect.Message, seen map[string]bool) {
+	if !m.IsValid() {
+		return
+	}
+	if cr, ok := m.Interface().(*pg_query.ColumnRef); ok {
+		if names := nodeListToNames(cr.Fields); len(names) > 0 {
+			seen[names[len(names)-1]] = true
+		}
+		return
+	}
+	m.Range(func(fd protoreflect.FieldDescriptor, v protoreflect.Value) bool {
+		if fd.Kind() != protoreflect.MessageKind && fd.Kind() != protoreflect.GroupKind {
+			return true
+		}
+		if fd.IsList() {
+			list := v.List()
+			for i := 0; i < list.Len(); i++ {
+				walkColumnRefs(list.Get(i).Message(), seen)
+			}
+			return true
+		}
+		walkColumnRefs(v.Message(), seen)
+		return true
+	})
+}
 
 func blockGrantToIR(g pipeline.GrantEntry) Grant {
 	gr := Grant{WithGrant: g.WithGrant, Privileges: g.Privileges, Pos: g.Pos}

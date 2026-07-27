@@ -101,10 +101,23 @@ type Index struct {
 
 // Constraint is a table or column constraint.
 type Constraint struct {
-	Name              string
-	Type              string // "PRIMARY KEY", "UNIQUE", "CHECK", "FOREIGN KEY", "EXCLUDE"
-	Expr              string // raw constraint expression/definition
-	Columns           []string
+	Name    string
+	Type    string // "PRIMARY KEY", "UNIQUE", "CHECK", "FOREIGN KEY", "EXCLUDE"
+	Expr    string // raw constraint expression/definition
+	Columns []string
+	// CheckColumn is the single column PostgreSQL's own auto-naming
+	// algorithm considers this CHECK constraint's own (heap.c's
+	// AddRelationNewConstraints: pull_var_clause over the expression, then
+	// nil unless exactly one distinct column remains after dedup). Set only
+	// when Type == "CHECK" and the expression references exactly one
+	// distinct column; nil for zero or multiple. Populated by an AST walk,
+	// not syntactic position, so it matches PG's real (expression-based)
+	// behavior even for a promoted column-level CHECK that references other
+	// columns too. Used solely to reconstruct PG's generated constraint name
+	// (see pgAutoConstraintName in internal/diff) — unrelated to Columns,
+	// which createTable uses for a different purpose (inline-rendering
+	// promotion signal).
+	CheckColumn       *string
 	NotValid          bool
 	Deferrable        bool
 	InitiallyDeferred bool

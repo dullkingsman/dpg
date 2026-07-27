@@ -4,6 +4,7 @@ package integration
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -1044,6 +1045,102 @@ TABLE orders (
 	}
 	if len(driftOps) != 0 {
 		t.Errorf("expected zero drift for inline unnamed PK/UNIQUE/FK against a live catalog, got %d ops:", len(driftOps))
+		for _, op := range driftOps {
+			t.Errorf("  [%s] %s", op.Safety(), op.SQL())
+		}
+	}
+}
+
+// TestRoundtripUnnamedCheckConstraintNoLiveDrift extends the unnamed-naming
+// reconciliation fix (TestRoundtripUnnamedConstraintsNoLiveDrift, PK/UNIQUE/
+// FK only) to CHECK: an unnamed single-column CHECK and an unnamed
+// multi-column CHECK, applied against a real PostgreSQL 17 container, must
+// each match their real auto-generated name (heap.c's pull_var_clause-based
+// "tab_col_check" vs "tab_check" rule) on re-introspection, not produce a
+// self-inconsistent DROP+ADD pair on every verify/plan --live.
+func TestRoundtripUnnamedCheckConstraintNoLiveDrift(t *testing.T) {
+	connStr := testpg.Start(t)
+	ctx := context.Background()
+
+	differ := diff.New()
+	emitter := emit.New()
+	applyExec := executor.New()
+	ci := introspect.New()
+	store := newMemStore()
+
+	conn, err := executor.Connect(ctx, connStr)
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	defer conn.Close(ctx)
+
+	dir := t.TempDir()
+	f := filepath.Join(dir, "schema.dpg")
+	v1 := `TABLE orders (
+    amount INTEGER,
+    a INTEGER,
+    b INTEGER,
+    CHECK (amount > 0),
+    CHECK (a > 0 AND b > 0)
+);`
+	if err := os.WriteFile(f, []byte(v1), 0o644); err != nil {
+		t.Fatalf("write v1: %v", err)
+	}
+	desired, err := compiler.Compile([]string{f}, dir, pipeline.Default)
+	if err != nil {
+		t.Fatalf("compile: %v", err)
+	}
+	applyFixture(t, ctx, conn, []string{f}, dir, differ, emitter, applyExec, store)
+
+	liveObjects, err := ci.Introspect(ctx, conn)
+	if err != nil {
+		t.Fatalf("introspect: %v", err)
+	}
+	appliedSnap := &pipeline.Snapshot{}
+	if err := snapshot.Populate(appliedSnap, desired); err != nil {
+		t.Fatalf("populate snapshot: %v", err)
+	}
+	var managedLive []pipeline.IRObject
+	for _, obj := range liveObjects {
+		if _, ok := appliedSnap.Objects[obj.QualifiedName()]; ok {
+			managedLive = append(managedLive, obj)
+		}
+	}
+	liveSnap := &pipeline.Snapshot{}
+	if err := snapshot.Populate(liveSnap, managedLive); err != nil {
+		t.Fatalf("populate live snapshot: %v", err)
+	}
+
+	// Confirm PG actually generated the names this test's rationale claims —
+	// a guard against the test passing for the wrong reason.
+	var tbl *snapshot.SnapTable
+	for _, raw := range liveSnap.Objects {
+		var so snapshot.SnapObject
+		if err := json.Unmarshal(raw, &so); err == nil && so.Table != nil && so.Table.Name == "orders" {
+			tbl = so.Table
+		}
+	}
+	if tbl == nil {
+		t.Fatal("orders table not found in live snapshot")
+	}
+	wantNames := map[string]bool{"orders_amount_check": false, "orders_check": false}
+	for _, c := range tbl.Constraints {
+		if _, ok := wantNames[c.Name]; ok {
+			wantNames[c.Name] = true
+		}
+	}
+	for name, found := range wantNames {
+		if !found {
+			t.Errorf("expected live-generated constraint name %q, got constraints: %+v", name, tbl.Constraints)
+		}
+	}
+
+	driftOps, err := differ.Diff(desired, liveSnap)
+	if err != nil {
+		t.Fatalf("drift diff: %v", err)
+	}
+	if len(driftOps) != 0 {
+		t.Errorf("expected zero drift for inline unnamed CHECK constraints against a live catalog, got %d ops:", len(driftOps))
 		for _, op := range driftOps {
 			t.Errorf("  [%s] %s", op.Safety(), op.SQL())
 		}

@@ -972,6 +972,154 @@ func TestDiffUnnamedForeignKeyMatchesLiveGeneratedName(t *testing.T) {
 	}
 }
 
+// TestDiffUnnamedCheckMatchesLiveGeneratedName proves an unnamed CHECK whose
+// expression references exactly one distinct column matches PG's real
+// generated name ("orders_amount_check" — heap.c's single-Var name2 rule).
+func TestDiffUnnamedCheckMatchesLiveGeneratedName(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.orders", &snapshot.SnapObject{
+		Kind: "table",
+		Table: &snapshot.SnapTable{
+			Schema:  "public",
+			Name:    "orders",
+			Columns: []snapshot.SnapColumn{{Name: "amount", Type: "integer"}},
+			Constraints: []snapshot.SnapConstraint{
+				{Name: "orders_amount_check", Type: "CHECK", Expr: `CHECK ((amount > 0))`},
+			},
+		},
+	})
+	col := "amount"
+	desired := []pipeline.IRObject{
+		&ir.Table{
+			Schema: "public", Name: "orders",
+			Columns: []*ir.Column{{Name: "amount", Type: ir.TypeRef{Name: "integer"}}},
+			Constraints: []*ir.Constraint{
+				{Type: "CHECK", CheckColumn: &col, Expr: `CHECK (amount > 0)`},
+			},
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ops) != 0 {
+		t.Errorf("expected zero ops (unnamed CHECK must match live-generated orders_amount_check), got: %v", sqlList(ops))
+	}
+}
+
+// TestDiffUnnamedCheckMultiColumnMatchesLiveGeneratedName covers the other
+// branch of heap.c's rule: when more than one distinct column is
+// referenced, name2 is omitted entirely ("orders_check", not
+// "orders_a_b_check").
+func TestDiffUnnamedCheckMultiColumnMatchesLiveGeneratedName(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.orders", &snapshot.SnapObject{
+		Kind: "table",
+		Table: &snapshot.SnapTable{
+			Schema:  "public",
+			Name:    "orders",
+			Columns: []snapshot.SnapColumn{{Name: "a", Type: "integer"}, {Name: "b", Type: "integer"}},
+			Constraints: []snapshot.SnapConstraint{
+				{Name: "orders_check", Type: "CHECK", Expr: `CHECK (((a > 0) AND (b > 0)))`},
+			},
+		},
+	})
+	desired := []pipeline.IRObject{
+		&ir.Table{
+			Schema: "public", Name: "orders",
+			Columns: []*ir.Column{{Name: "a", Type: ir.TypeRef{Name: "integer"}}, {Name: "b", Type: ir.TypeRef{Name: "integer"}}},
+			Constraints: []*ir.Constraint{
+				{Type: "CHECK", Expr: `CHECK (a > 0 AND b > 0)`}, // CheckColumn nil: 2 distinct columns
+			},
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ops) != 0 {
+		t.Errorf("expected zero ops (unnamed multi-column CHECK must match live-generated orders_check), got: %v", sqlList(ops))
+	}
+}
+
+// TestDiffUnnamedCheckRemovalStillDetected proves the fix doesn't paper over
+// a genuinely removed CHECK constraint.
+func TestDiffUnnamedCheckRemovalStillDetected(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.orders", &snapshot.SnapObject{
+		Kind: "table",
+		Table: &snapshot.SnapTable{
+			Schema:  "public",
+			Name:    "orders",
+			Columns: []snapshot.SnapColumn{{Name: "amount", Type: "integer"}},
+			Constraints: []snapshot.SnapConstraint{
+				{Name: "orders_amount_check", Type: "CHECK", Expr: `CHECK ((amount > 0))`},
+			},
+		},
+	})
+	desired := []pipeline.IRObject{
+		&ir.Table{
+			Schema: "public", Name: "orders",
+			Columns: []*ir.Column{{Name: "amount", Type: ir.TypeRef{Name: "integer"}}},
+			// No CHECK constraint at all — genuinely removed.
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsSQL(ops, "DROP CONSTRAINT") || !containsSQL(ops, `orders_amount_check`) {
+		t.Errorf("expected DROP CONSTRAINT orders_amount_check for the removed CHECK, got: %v", sqlList(ops))
+	}
+}
+
+// TestDiffUnnamedCheckDifferentColumnDetectedAsChange proves a single-column
+// unnamed CHECK is NOT subject to the same identity-only blind spot as an
+// unnamed PRIMARY KEY (TestDiffUnnamedPrimaryKeyRemovalStillDetected's doc
+// comment): unlike a PK's name, which never encodes columns at all, a
+// single-column CHECK's predicted name DOES encode its column — so moving
+// the check to a different column produces a genuinely different predicted
+// name, correctly surfacing as DROP old + ADD new rather than a silent
+// no-op.
+func TestDiffUnnamedCheckDifferentColumnDetectedAsChange(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.orders", &snapshot.SnapObject{
+		Kind: "table",
+		Table: &snapshot.SnapTable{
+			Schema:  "public",
+			Name:    "orders",
+			Columns: []snapshot.SnapColumn{{Name: "a", Type: "integer"}, {Name: "b", Type: "integer"}},
+			Constraints: []snapshot.SnapConstraint{
+				{Name: "orders_a_check", Type: "CHECK", Expr: `CHECK ((a > 0))`},
+			},
+		},
+	})
+	colB := "b"
+	desired := []pipeline.IRObject{
+		&ir.Table{
+			Schema: "public", Name: "orders",
+			Columns: []*ir.Column{{Name: "a", Type: ir.TypeRef{Name: "integer"}}, {Name: "b", Type: ir.TypeRef{Name: "integer"}}},
+			Constraints: []*ir.Constraint{
+				{Type: "CHECK", CheckColumn: &colB, Expr: `CHECK (b > 0)`},
+			},
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsSQL(ops, "DROP CONSTRAINT") || !containsSQL(ops, "orders_a_check") {
+		t.Errorf("expected DROP CONSTRAINT orders_a_check, got: %v", sqlList(ops))
+	}
+	if !containsSQL(ops, "ADD") || !containsSQL(ops, "b > 0") {
+		t.Errorf("expected ADD for the new b-based CHECK, got: %v", sqlList(ops))
+	}
+}
+
 // TestDiffUnnamedPrimaryKeyRemovalStillDetected proves the fix doesn't paper
 // over a genuinely removed PK: when desired drops the PRIMARY KEY
 // constraint entirely, a live-style "orders_pkey" in the snapshot must still
@@ -1128,6 +1276,54 @@ func TestDiffUnnamedPrimaryKeyRelationNameCollision(t *testing.T) {
 	}
 	if len(ops) != 0 {
 		t.Errorf("expected zero ops: unnamed PK on \"bar\" must predict \"bar_pkey1\" (relation-name collision with table \"bar_pkey\"), got: %v", sqlList(ops))
+	}
+}
+
+// TestDiffUnnamedCheckNoRelationNameCollision proves CHECK's collision
+// universe stays constraint-names-only, unlike PRIMARY KEY/UNIQUE: CHECK
+// isn't index-backed, so its real default-naming path (ChooseConstraintName,
+// heap.c) never scans pg_class — a plain table named "orders_amount_check"
+// must NOT force a predicted CHECK name to fall back to a "1" suffix.
+func TestDiffUnnamedCheckNoRelationNameCollision(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.orders_amount_check", &snapshot.SnapObject{
+		Kind: "table",
+		Table: &snapshot.SnapTable{
+			Schema:  "public",
+			Name:    "orders_amount_check",
+			Columns: []snapshot.SnapColumn{{Name: "x", Type: "bigint"}},
+		},
+	})
+	_ = snap.SetObject("public.orders", &snapshot.SnapObject{
+		Kind: "table",
+		Table: &snapshot.SnapTable{
+			Schema:  "public",
+			Name:    "orders",
+			Columns: []snapshot.SnapColumn{{Name: "amount", Type: "integer"}},
+			Constraints: []snapshot.SnapConstraint{
+				{Name: "orders_amount_check", Type: "CHECK", Expr: `CHECK ((amount > 0))`},
+			},
+		},
+	})
+	col := "amount"
+	desired := []pipeline.IRObject{
+		&ir.Table{
+			Schema: "public", Name: "orders_amount_check",
+			Columns: []*ir.Column{{Name: "x", Type: ir.TypeRef{Name: "bigint"}}},
+		},
+		&ir.Table{
+			Schema: "public", Name: "orders",
+			Columns:     []*ir.Column{{Name: "amount", Type: ir.TypeRef{Name: "integer"}}},
+			Constraints: []*ir.Constraint{{Type: "CHECK", CheckColumn: &col, Expr: `CHECK (amount > 0)`}},
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ops) != 0 {
+		t.Errorf("expected zero ops: CHECK naming must not collide with an unrelated relation name, got: %v", sqlList(ops))
 	}
 }
 

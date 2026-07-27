@@ -83,11 +83,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   structural-signature fallback (which already correctly handled the
   offline `plan`/`apply` path, where a persisted snapshot preserves the
   original unnamed declaration verbatim). Covers `PRIMARY KEY`, `UNIQUE`,
-  and `FOREIGN KEY`; `CHECK` naming is not covered by this fix, since
-  PostgreSQL's rule for it depends on whether the expression references
-  exactly one distinct column, information neither the IR builder nor the
-  introspector currently extract; `EXCLUDE` constraints aren't
-  round-tripped at all yet (a pre-existing, separate gap). The
+  `FOREIGN KEY`, and `CHECK` (see the `CHECK`-specific entry below for how
+  its single-column naming rule was reconstructed). `EXCLUDE` constraints
+  remain excluded: they aren't round-tripped by DPG at all yet (a
+  pre-existing, separate, larger gap — the body isn't parsed from source in
+  any capacity, so there's no real desired-side definition to name in the
+  first place). The
   collision-avoidance check is schema-wide in the same way PostgreSQL's own
   is: for `PRIMARY KEY`/`UNIQUE` (both index-backed) it considers every
   relation name in the schema — tables, views, sequences, indexes — not
@@ -97,6 +98,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   KEY` on table `orders`, even with no colliding constraint name);
   `FOREIGN KEY` only needs the narrower constraint-name check, since it
   isn't backed by an index.
+- **An inline, unnamed `CHECK` constraint (e.g. `CHECK (amount > 0)`, or
+  `a INTEGER CHECK (a > 0)`) had the same self-inconsistent `DROP CONSTRAINT`
+  + `ADD` problem as the unnamed `PRIMARY KEY`/`UNIQUE`/`FOREIGN KEY` fix
+  above, but was left uncovered by it at the time: PostgreSQL's default name
+  for a `CHECK` constraint (`ChooseConstraintName`, called from
+  `AddRelationNewConstraints` in `heap.c`) depends on whether its expression
+  references exactly one distinct column — `tab_col_check` if so,
+  `tab_check` otherwise — which neither the IR builder nor the introspector
+  previously extracted. Fixed by walking the constraint's parsed expression
+  tree (via protobuf reflection over every populated message field, rather
+  than hand-listing each expression node type — `A_Expr`, `FuncCall`,
+  `CASE`, `BoolExpr`, etc. — individually) to collect the distinct columns
+  it references, mirroring PostgreSQL's own `pull_var_clause`-based
+  approach. This is expression-based, not syntactic-position-based: a
+  column-level `CHECK` that references another column (e.g.
+  `a INTEGER CHECK (a > b)`) correctly predicts the same `tab_check`
+  (no-name2) form PostgreSQL itself would generate, rather than assuming the
+  column it's attached to. `CHECK`'s collision-avoidance check is
+  constraint-names-only (like `FOREIGN KEY`), not schema-wide over relation
+  names — `CHECK` isn't index-backed, so its real naming path never scans
+  `pg_class`. `EXCLUDE` remains excluded, unchanged from the entry above.
 - **`diffIndexes` now compares a same-named index's actual definition instead
   of only checking whether the name exists.** Previously an index present in
   both desired and snapshot was never compared at all — editing its method,

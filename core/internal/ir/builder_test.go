@@ -347,6 +347,134 @@ func TestBuildSequenceAllOptions(t *testing.T) {
 	}
 }
 
+// ── CHECK constraint column extraction ──────────────────────────────────────────
+
+func findCheck(cs []*ir.Constraint, expr string) *ir.Constraint {
+	for _, c := range cs {
+		if c.Type == "CHECK" && strings.Contains(c.Expr, expr) {
+			return c
+		}
+	}
+	return nil
+}
+
+// TestBuildCheckConstraintSingleColumn mirrors PostgreSQL's own default-name
+// selection for CHECK constraints (heap.c's AddRelationNewConstraints):
+// when the expression references exactly one distinct column, CheckColumn
+// must carry it (used only for reconstructing PG's auto-generated name).
+func TestBuildCheckConstraintSingleColumn(t *testing.T) {
+	obj := buildObject(t, pipeline.KindTable,
+		`t (a INTEGER, b INTEGER, CONSTRAINT chk CHECK (a > 0))`, ``)
+	tbl := obj.(*ir.Table)
+	c := findCheck(tbl.Constraints, "a > 0")
+	if c == nil {
+		t.Fatal("CHECK constraint not found")
+	}
+	if c.CheckColumn == nil || *c.CheckColumn != "a" {
+		t.Errorf("CheckColumn: got %v, want \"a\"", c.CheckColumn)
+	}
+}
+
+func TestBuildCheckConstraintMultiColumn(t *testing.T) {
+	obj := buildObject(t, pipeline.KindTable,
+		`t (a INTEGER, b INTEGER, CONSTRAINT chk CHECK (a > 0 AND b > 0))`, ``)
+	tbl := obj.(*ir.Table)
+	c := findCheck(tbl.Constraints, "a > 0")
+	if c == nil {
+		t.Fatal("CHECK constraint not found")
+	}
+	if c.CheckColumn != nil {
+		t.Errorf("CheckColumn: got %q, want nil (2 distinct columns referenced)", *c.CheckColumn)
+	}
+}
+
+// TestBuildCheckConstraintDedupSameColumn proves a repeated reference to the
+// SAME column still counts as exactly one distinct column, matching PG's
+// list_union dedup in heap.c.
+func TestBuildCheckConstraintDedupSameColumn(t *testing.T) {
+	obj := buildObject(t, pipeline.KindTable,
+		`t (a INTEGER, CONSTRAINT chk CHECK (a > 0 AND a < 100))`, ``)
+	tbl := obj.(*ir.Table)
+	c := findCheck(tbl.Constraints, "a > 0")
+	if c == nil {
+		t.Fatal("CHECK constraint not found")
+	}
+	if c.CheckColumn == nil || *c.CheckColumn != "a" {
+		t.Errorf("CheckColumn: got %v, want \"a\" (deduped)", c.CheckColumn)
+	}
+}
+
+func TestBuildCheckConstraintNoColumn(t *testing.T) {
+	obj := buildObject(t, pipeline.KindTable,
+		`t (a INTEGER, CONSTRAINT chk CHECK (1 = 1))`, ``)
+	tbl := obj.(*ir.Table)
+	c := findCheck(tbl.Constraints, "1 = 1")
+	if c == nil {
+		t.Fatal("CHECK constraint not found")
+	}
+	if c.CheckColumn != nil {
+		t.Errorf("CheckColumn: got %q, want nil (no column referenced)", *c.CheckColumn)
+	}
+}
+
+// TestBuildCheckConstraintNestedExpression proves the extraction walks
+// arbitrarily nested expression nodes (CASE, function calls), not just a
+// flat A_Expr — needed since a generic protoreflect walk, not a hand-picked
+// set of node types, is what makes this robust.
+func TestBuildCheckConstraintNestedExpression(t *testing.T) {
+	obj := buildObject(t, pipeline.KindTable,
+		`t (a INTEGER, CONSTRAINT chk CHECK (CASE WHEN a > 0 THEN true ELSE false END))`, ``)
+	tbl := obj.(*ir.Table)
+	c := findCheck(tbl.Constraints, "CASE")
+	if c == nil {
+		t.Fatal("CHECK constraint not found")
+	}
+	if c.CheckColumn == nil || *c.CheckColumn != "a" {
+		t.Errorf("CheckColumn: got %v, want \"a\"", c.CheckColumn)
+	}
+}
+
+// TestBuildCheckConstraintPromotedColumnLevelSingleColumn proves an inline
+// column-level CHECK gets a CheckColumn consistent with its (only) column,
+// same as the existing syntactic-position-based Columns marker.
+func TestBuildCheckConstraintPromotedColumnLevelSingleColumn(t *testing.T) {
+	obj := buildObject(t, pipeline.KindTable, `t (a INTEGER CHECK (a > 0))`, ``)
+	tbl := obj.(*ir.Table)
+	c := findCheck(tbl.Constraints, "a > 0")
+	if c == nil {
+		t.Fatal("CHECK constraint not found")
+	}
+	if len(c.Columns) != 1 || c.Columns[0] != "a" {
+		t.Errorf("Columns: got %v, want [a]", c.Columns)
+	}
+	if c.CheckColumn == nil || *c.CheckColumn != "a" {
+		t.Errorf("CheckColumn: got %v, want \"a\"", c.CheckColumn)
+	}
+}
+
+// TestBuildCheckConstraintPromotedColumnLevelReferencesOtherColumn is the
+// key divergence case: a column-level CHECK is free to reference OTHER
+// columns too (valid SQL), and PG's real naming rule is expression-based,
+// not position-based. Columns must stay the syntactic-position marker
+// ([a], used only by createTable's inline-rendering decision) while
+// CheckColumn must correctly reflect that 2 distinct columns are referenced
+// (nil), not silently inherit the wrong single-column assumption.
+func TestBuildCheckConstraintPromotedColumnLevelReferencesOtherColumn(t *testing.T) {
+	obj := buildObject(t, pipeline.KindTable,
+		`t (a INTEGER CHECK (a > b), b INTEGER)`, ``)
+	tbl := obj.(*ir.Table)
+	c := findCheck(tbl.Constraints, "a > b")
+	if c == nil {
+		t.Fatal("CHECK constraint not found")
+	}
+	if len(c.Columns) != 1 || c.Columns[0] != "a" {
+		t.Errorf("Columns: got %v, want [a] (syntactic-position marker, unaffected)", c.Columns)
+	}
+	if c.CheckColumn != nil {
+		t.Errorf("CheckColumn: got %q, want nil (references 2 distinct columns)", *c.CheckColumn)
+	}
+}
+
 // ── TypeRef ───────────────────────────────────────────────────────────────────
 
 func TestTypeRefBuiltIn(t *testing.T) {
