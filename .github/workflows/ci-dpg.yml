@@ -27,6 +27,21 @@ jobs:
         working-directory: core
         run: go test ./...
 
+      # internal/diff is currently at 80.8% (raised from a 67.1% baseline via
+      # a targeted coverage push). 75% is a floor, not a target: several
+      # points of buffer for ordinary test churn, while still catching a
+      # real regression back toward the pre-push baseline.
+      - name: internal/diff coverage floor
+        working-directory: core
+        run: |
+          go test ./internal/diff/... -coverprofile=coverage.out
+          pct=$(go tool cover -func=coverage.out | grep '^total:' | grep -oE '[0-9]+\.[0-9]+')
+          echo "internal/diff coverage: ${pct}%"
+          awk -v p="$pct" 'BEGIN { exit !(p >= 75.0) }' || {
+            echo "::error::internal/diff coverage ${pct}% is below the 75% floor"
+            exit 1
+          }
+
   integration:
     name: Integration tests
     runs-on: ubuntu-latest

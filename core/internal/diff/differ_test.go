@@ -6310,3 +6310,85 @@ func TestDiffCreateTableWithPolicyAndGrant(t *testing.T) {
 		t.Errorf("expected inline GRANT on new table, got: %v", sqlList(ops))
 	}
 }
+
+// ── trivial helpers (coverage tail, see .dpg-notes/dpg-status-accounting.md §9's
+// "#5 diff coverage push, remaining tail") ─────────────────────────────────────
+
+// TestOpPos guards the op.Pos() accessor — trivial but was the last uncovered
+// method on the pipeline.DiffOp implementation.
+func TestOpPos(t *testing.T) {
+	pos := pipeline.SourcePos{File: "t.dpg", Line: 3, Col: 7}
+	o := safeOp("SELECT 1;", pos)
+	if o.Pos() != pos {
+		t.Errorf("Pos(): got %+v, want %+v", o.Pos(), pos)
+	}
+}
+
+// TestPtrStr covers both branches of the nil-safe string-pointer dereference.
+func TestPtrStr(t *testing.T) {
+	if got := ptrStr(nil); got != "" {
+		t.Errorf("ptrStr(nil): got %q, want empty", got)
+	}
+	s := "hello"
+	if got := ptrStr(&s); got != "hello" {
+		t.Errorf("ptrStr(&s): got %q, want hello", got)
+	}
+}
+
+// TestInt64PtrEq covers all 4 branches of the nil-safe int64-pointer
+// comparison: both nil, one nil, both set equal, both set different.
+func TestInt64PtrEq(t *testing.T) {
+	a, b := int64(5), int64(5)
+	c := int64(6)
+	cases := []struct {
+		name     string
+		x, y     *int64
+		expected bool
+	}{
+		{"both nil", nil, nil, true},
+		{"x nil", nil, &a, false},
+		{"y nil", &a, nil, false},
+		{"equal", &a, &b, true},
+		{"different", &a, &c, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := int64PtrEq(tc.x, tc.y); got != tc.expected {
+				t.Errorf("int64PtrEq(%v, %v): got %v, want %v", tc.x, tc.y, got, tc.expected)
+			}
+		})
+	}
+}
+
+// TestCompositeAttrsChanged covers compositeAttrsChanged's 3 change signals
+// (length, name, type) plus the unchanged control.
+func TestCompositeAttrsChanged(t *testing.T) {
+	base := []*ir.Column{
+		{Name: "a", Type: ir.TypeRef{Name: "integer"}},
+		{Name: "b", Type: ir.TypeRef{Name: "text"}},
+	}
+	baseSnap := []snapshot.SnapColumn{
+		{Name: "a", Type: "integer"},
+		{Name: "b", Type: "text"},
+	}
+	if compositeAttrsChanged(base, baseSnap) {
+		t.Error("expected no change for identical attribute lists")
+	}
+	if !compositeAttrsChanged(base[:1], baseSnap) {
+		t.Error("expected a change when the attribute count differs")
+	}
+	renamedSnap := []snapshot.SnapColumn{
+		{Name: "a", Type: "integer"},
+		{Name: "c", Type: "text"},
+	}
+	if !compositeAttrsChanged(base, renamedSnap) {
+		t.Error("expected a change when an attribute name differs")
+	}
+	retypedSnap := []snapshot.SnapColumn{
+		{Name: "a", Type: "integer"},
+		{Name: "b", Type: "varchar"},
+	}
+	if !compositeAttrsChanged(base, retypedSnap) {
+		t.Error("expected a change when an attribute type differs")
+	}
+}

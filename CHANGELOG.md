@@ -38,6 +38,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a hard parse error (`expected '{', got '('`), not just silently unsupported.
   Mode A (`INDICES { ... }`) is unchanged and the two may be freely mixed, as
   the RFC requires.
+- CI now enforces a 75% `internal/diff` coverage floor (`.github/workflows/ci-dpg.yml`),
+  guarding against a regression back toward that package's pre-coverage-push
+  baseline (67.1%) rather than tracking a specific target. The last four
+  0%-covered functions left over from the earlier targeted coverage pass
+  (`op.Pos`, `ptrStr`, `int64PtrEq`, `compositeAttrsChanged` — all trivial
+  helpers with no prior gap in correctness) now have unit tests, bringing the
+  package to 80.8%.
 
 ### Fixed
 
