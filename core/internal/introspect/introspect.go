@@ -1040,7 +1040,7 @@ ORDER  BY n.nspname, p.proname, args`
 	}
 	rs.Close()
 
-	if err := introspectFunctionTableArgs(ctx, conn, fnByOID); err != nil {
+	if err := introspectFunctionArgModes(ctx, conn, fnByOID); err != nil {
 		return nil, err
 	}
 
@@ -1053,23 +1053,33 @@ ORDER  BY n.nspname, p.proname, args`
 	return out, nil
 }
 
-// introspectFunctionTableArgs fixes up Args for RETURNS TABLE(...) functions
-// specifically. The main introspectFunctions query builds Args from
+// introspectFunctionArgModes fixes up Args for any function that has at least
+// one non-plain-IN parameter (OUT, INOUT, VARIADIC, or TABLE mode). The main
+// introspectFunctions query builds Args purely from
 // oidvectortypes(proargtypes), which — like pg_get_function_identity_arguments
-// — only ever reports IN/INOUT/VARIADIC arguments; PostgreSQL's own OUT and
-// TABLE-mode arguments are invisible to it entirely, so a RETURNS TABLE
-// function's output columns were silently missing from Args altogether (not
-// just mis-rendered). Scoped narrowly to functions that actually use TABLE
-// mode (via proargmodes containing 't') so every other function — including
-// ones with plain OUT/INOUT/VARIADIC parameters, already handled correctly by
-// the main query for their own IN/INOUT/VARIADIC identity args — is completely
-// unaffected by this second pass.
-func introspectFunctionTableArgs(ctx context.Context, conn pipeline.Querier, fnByOID map[int64]*ir.Function) error {
+// — only ever reports IN/INOUT/VARIADIC argument TYPES, with no mode or name
+// information at all, and OUT/TABLE-mode arguments are invisible to it
+// entirely. That meant, before this fix: a RETURNS TABLE function's output
+// columns were silently missing from Args altogether (not just
+// mis-rendered); a plain OUT-only function's OUT columns were equally
+// missing; and an INOUT or VARIADIC function's argument TYPE was present but
+// its mode keyword was always lost (dump/diff would render it as a plain IN
+// argument — a different, non-equivalent declaration for VARIADIC in
+// particular, since it changes callable arity).
+//
+// Scoped to functions where proargmodes IS NOT NULL — PostgreSQL's own
+// signal that at least one argument uses a non-default mode — which covers
+// OUT/INOUT/VARIADIC/TABLE all at once and leaves the overwhelming common
+// case (plain IN-only functions, where proargmodes is NULL) completely
+// untouched, using the original, unmodified oidvectortypes-based path.
+func introspectFunctionArgModes(ctx context.Context, conn pipeline.Querier, fnByOID map[int64]*ir.Function) error {
 	const q = `
 SELECT p.oid::bigint, u.mode::text, u.nm, pg_catalog.format_type(u.ty, NULL)
-FROM   pg_proc p,
+FROM   pg_proc p
+JOIN   pg_namespace n ON n.oid = p.pronamespace,
        LATERAL unnest(p.proargmodes, p.proargnames, p.proallargtypes) WITH ORDINALITY AS u(mode, nm, ty, ord)
-WHERE  p.proargmodes IS NOT NULL AND 't' = ANY(p.proargmodes::text[])
+WHERE  p.proargmodes IS NOT NULL
+AND    n.nspname NOT IN ('pg_catalog','information_schema','pg_toast')
 ORDER  BY p.oid, u.ord`
 
 	rs, err := conn.QueryRows(ctx, q)
@@ -1082,12 +1092,17 @@ ORDER  BY p.oid, u.ord`
 	var order []int64
 	for rs.Next() {
 		var oid int64
-		var mode, name, typ string
+		var mode, typ string
+		var name *string
 		if err := rs.Scan(&oid, &mode, &name, &typ); err != nil {
 			return err
 		}
 		if _, ok := argsByOID[oid]; !ok {
 			order = append(order, oid)
+		}
+		argName := ""
+		if name != nil {
+			argName = *name
 		}
 		argMode := "IN"
 		switch mode {
@@ -1100,7 +1115,7 @@ ORDER  BY p.oid, u.ord`
 		case "t":
 			argMode = "TABLE"
 		}
-		argsByOID[oid] = append(argsByOID[oid], ir.FuncArg{Name: name, Mode: argMode, Type: ir.TypeRef{Name: typ}})
+		argsByOID[oid] = append(argsByOID[oid], ir.FuncArg{Name: argName, Mode: argMode, Type: ir.TypeRef{Name: typ}})
 	}
 	if err := rs.Err(); err != nil {
 		return err

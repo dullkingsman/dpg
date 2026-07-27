@@ -41,6 +41,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Introspection silently dropped `OUT` columns and lost `INOUT`/`VARIADIC`
+  mode keywords for any function using them** — `introspectFunctions` built
+  `Args` purely from `oidvectortypes(proargtypes)`, which — like
+  `pg_get_function_identity_arguments` — only ever reports `IN`/`INOUT`/
+  `VARIADIC` argument *types*, with no mode or name information at all, and
+  `OUT` arguments are invisible to it entirely. A plain `OUT`-only
+  function's `OUT` columns were completely missing from introspected
+  `Args` (the same severity as the `RETURNS TABLE` bug above); an `INOUT`
+  or `VARIADIC` function's argument type was captured but its mode
+  keyword was silently lost, so `dump`/diff-generated SQL would recreate
+  it as a plain `IN` argument — a different, non-equivalent declaration
+  for `VARIADIC` in particular, since it changes callable arity. Fixed by
+  widening the `RETURNS TABLE` fix's existing raw-catalog-array query
+  (`unnest` over `proargmodes`/`proargnames`/`proallargtypes`) from
+  TABLE-mode-only to any function where `proargmodes IS NOT NULL` —
+  PostgreSQL's own signal that at least one argument uses a non-default
+  mode — covering `OUT`/`INOUT`/`VARIADIC`/`TABLE` all at once. The
+  overwhelming common case (plain `IN`-only functions, where `proargmodes`
+  is `NULL`) is untouched, using the original, unmodified path. Also fixed
+  two query bugs surfaced by this widening specifically: the query lacked
+  the schema exclusion every other introspection query has, so it also
+  matched PostgreSQL's own catalog functions (many of which use `OUT`/
+  `VARIADIC` with unnamed arguments), crashing on a null scan; and an
+  unnamed argument is a real, valid construct for a *user* function too
+  (`proargnames` comes back entirely `NULL`, not per-position empty
+  strings), handled with a nullable scan.
+  Scope note: a genuinely separate, pre-existing bug was found (not fixed)
+  while building this fix's test fixture — a function declared with no
+  explicit `RETURNS` clause at all (valid PostgreSQL when the signature
+  has `OUT`/`INOUT` parameters, since the return type is then implied)
+  produces a bare `RETURNS  LANGUAGE ...` (empty type) from
+  `buildFunctionSQL`/`dump`, a real syntax error on `apply`. Unrelated to
+  this fix's Args-mode-capture scope; worked around in the new test with
+  an explicit `RETURNS` clause, flagged for a future fix.
 - **`FUNCTION`'s `RETURNS TABLE (...)` produced invalid SQL and lost its
   output columns on introspection** — a TABLE-mode argument (`ir.FuncArg`
   with `Mode: "TABLE"`) was already parsed correctly from source, but

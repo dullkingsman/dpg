@@ -2321,3 +2321,114 @@ $$ {}`
 		t.Errorf("live pg_get_function_result after apply = %q, want TABLE(a2 integer)", newResultText)
 	}
 }
+
+// TestRoundtripFunctionArgModes covers OUT/INOUT/VARIADIC argument fidelity
+// end to end. Found while fixing RETURNS TABLE(...) introspection:
+// oidvectortypes(proargtypes) — the source introspectFunctions used for
+// Args — never reports OUT-mode arguments at all, and never carries mode
+// information for any argument, so a plain OUT-only function's OUT columns
+// were completely missing from introspected Args (the same severity as the
+// RETURNS TABLE bug), and an INOUT/VARIADIC function's mode keyword was
+// silently lost even though its type was captured correctly. This exercises
+// the full pipeline (apply from DPG source, introspect back, zero drift),
+// not just introspection in isolation.
+func TestRoundtripFunctionArgModes(t *testing.T) {
+	connStr := testpg.Start(t)
+	ctx := context.Background()
+
+	differ := diff.New()
+	emitter := emit.New()
+	applyExec := executor.New()
+	ci := introspect.New()
+	store := newMemStore()
+
+	conn, err := executor.Connect(ctx, connStr)
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	defer conn.Close(ctx)
+
+	dir := t.TempDir()
+	f := filepath.Join(dir, "schema.dpg")
+	// RETURNS is explicit here even though PostgreSQL allows omitting it for
+	// an all-OUT/INOUT signature (it's then implied): a genuinely separate,
+	// pre-existing bug found while writing this fixture makes buildFunctionSQL/
+	// dump emit a bare "RETURNS  LANGUAGE ..." (double space, empty type) when
+	// ReturnType is entirely unset, a real PG syntax error on apply — flagged,
+	// not fixed here, as it's unrelated to this fix's Args-mode-capture scope.
+	fixture := `FUNCTION f_out(n integer, OUT a integer, OUT b text) RETURNS record
+LANGUAGE sql AS $$
+    SELECT n, 'x';
+$$ {}
+
+FUNCTION f_inout(INOUT n integer) RETURNS integer
+LANGUAGE sql AS $$
+    SELECT n;
+$$ {}
+
+FUNCTION f_variadic(VARIADIC n integer[]) RETURNS integer
+LANGUAGE sql AS $$
+    SELECT 1;
+$$ {}`
+	if err := os.WriteFile(f, []byte(fixture), 0o644); err != nil {
+		t.Fatalf("write schema: %v", err)
+	}
+	applyFixture(t, ctx, conn, []string{f}, dir, differ, emitter, applyExec, store)
+
+	desired, err := compiler.Compile([]string{f}, dir, pipeline.Default)
+	if err != nil {
+		t.Fatalf("compile: %v", err)
+	}
+
+	liveObjects, err := ci.Introspect(ctx, conn)
+	if err != nil {
+		t.Fatalf("introspect: %v", err)
+	}
+	snap, _ := store.Load("test", "dpgtest")
+	var managedLive []pipeline.IRObject
+	for _, obj := range liveObjects {
+		if _, ok := snap.Objects[obj.QualifiedName()]; ok {
+			managedLive = append(managedLive, obj)
+		}
+	}
+	liveSnap := &pipeline.Snapshot{}
+	if err := snapshot.Populate(liveSnap, managedLive); err != nil {
+		t.Fatalf("populate live snapshot: %v", err)
+	}
+
+	// Confirm introspection itself actually captured the OUT columns and
+	// INOUT/VARIADIC modes (not just that PostgreSQL created the functions
+	// correctly) — the specific gap this fix closes.
+	byName := map[string]*ir.Function{}
+	for _, obj := range liveObjects {
+		if fn, ok := obj.(*ir.Function); ok {
+			byName[fn.Name] = fn
+		}
+	}
+	fOut := byName["f_out"]
+	if fOut == nil {
+		t.Fatal("introspect: function public.f_out not found")
+	}
+	if len(fOut.Args) != 3 {
+		t.Fatalf("introspected f_out: got %d args, want 3 (n, a, b)", len(fOut.Args))
+	}
+	fInout := byName["f_inout"]
+	if fInout == nil || len(fInout.Args) != 1 || fInout.Args[0].Mode != "INOUT" {
+		t.Errorf("introspected f_inout: got %+v, want a single Mode=INOUT arg", fInout)
+	}
+	fVariadic := byName["f_variadic"]
+	if fVariadic == nil || len(fVariadic.Args) != 1 || fVariadic.Args[0].Mode != "VARIADIC" {
+		t.Errorf("introspected f_variadic: got %+v, want a single Mode=VARIADIC arg", fVariadic)
+	}
+
+	driftOps, err := differ.Diff(desired, liveSnap)
+	if err != nil {
+		t.Fatalf("drift diff: %v", err)
+	}
+	if len(driftOps) != 0 {
+		t.Errorf("expected zero drift for OUT/INOUT/VARIADIC functions against a live catalog, got %d ops:", len(driftOps))
+		for _, op := range driftOps {
+			t.Errorf("  [%s] %s", op.Safety(), op.SQL())
+		}
+	}
+}

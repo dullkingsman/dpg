@@ -267,6 +267,114 @@ $$;`)
 	}
 }
 
+// TestIntrospectFunctionArgModes is the live-catalog guard for the gap found
+// while fixing RETURNS TABLE(...) introspection: oidvectortypes(proargtypes)
+// — the source introspectFunctions used for Args — only ever reports
+// IN/INOUT/VARIADIC argument TYPES with no mode or name at all, and OUT
+// arguments are invisible to it entirely. Before this fix: a plain OUT-only
+// function's OUT columns were completely missing from introspected Args
+// (not just mis-rendered, the same severity as the RETURNS TABLE bug); an
+// INOUT or VARIADIC function's mode keyword was silently lost even though
+// its type was captured correctly. Covers all three plus a plain-IN control
+// (confirmed to still take the original, unmodified introspection path).
+func TestIntrospectFunctionArgModes(t *testing.T) {
+	connStr := testpg.Start(t)
+	ctx := context.Background()
+
+	conn, err := executor.Connect(ctx, connStr)
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	defer conn.Close(ctx)
+
+	_, err = conn.Exec(ctx, `
+CREATE FUNCTION public.f_out(n integer, OUT a integer, OUT b text) LANGUAGE sql AS $$
+    SELECT n, 'x';
+$$;
+
+CREATE FUNCTION public.f_inout(INOUT n integer) LANGUAGE sql AS $$
+    SELECT n;
+$$;
+
+CREATE FUNCTION public.f_variadic(VARIADIC n integer[]) RETURNS integer LANGUAGE sql AS $$
+    SELECT 1;
+$$;
+
+CREATE FUNCTION public.f_plain(n integer, m text) RETURNS integer LANGUAGE sql AS $$
+    SELECT n;
+$$;
+
+CREATE FUNCTION public.f_unnamed_out(integer, OUT integer) LANGUAGE sql AS $$
+    SELECT $1;
+$$;`)
+	if err != nil {
+		t.Fatalf("create functions: %v", err)
+	}
+
+	ci := introspect.New()
+	objects, err := ci.Introspect(ctx, conn)
+	if err != nil {
+		t.Fatalf("introspect: %v", err)
+	}
+
+	byName := map[string]*ir.Function{}
+	for _, obj := range objects {
+		if fn, ok := obj.(*ir.Function); ok {
+			byName[fn.Name] = fn
+		}
+	}
+
+	fOut := byName["f_out"]
+	if fOut == nil {
+		t.Fatal("introspect: function public.f_out not found")
+	}
+	if len(fOut.Args) != 3 {
+		t.Fatalf("f_out: got %d args, want 3 (n, a, b) — OUT columns must not be missing", len(fOut.Args))
+	}
+	if fOut.Args[1].Mode != "OUT" || fOut.Args[1].Name != "a" || fOut.Args[1].Type.Name != "integer" {
+		t.Errorf("f_out.Args[1]: got %+v, want Mode=OUT Name=a Type=integer", fOut.Args[1])
+	}
+	if fOut.Args[2].Mode != "OUT" || fOut.Args[2].Name != "b" || fOut.Args[2].Type.Name != "text" {
+		t.Errorf("f_out.Args[2]: got %+v, want Mode=OUT Name=b Type=text", fOut.Args[2])
+	}
+
+	fInout := byName["f_inout"]
+	if fInout == nil {
+		t.Fatal("introspect: function public.f_inout not found")
+	}
+	if len(fInout.Args) != 1 || fInout.Args[0].Mode != "INOUT" || fInout.Args[0].Name != "n" {
+		t.Errorf("f_inout.Args: got %+v, want a single Mode=INOUT Name=n arg", fInout.Args)
+	}
+
+	fVariadic := byName["f_variadic"]
+	if fVariadic == nil {
+		t.Fatal("introspect: function public.f_variadic not found")
+	}
+	if len(fVariadic.Args) != 1 || fVariadic.Args[0].Mode != "VARIADIC" || fVariadic.Args[0].Name != "n" {
+		t.Errorf("f_variadic.Args: got %+v, want a single Mode=VARIADIC Name=n arg", fVariadic.Args)
+	}
+
+	fPlain := byName["f_plain"]
+	if fPlain == nil {
+		t.Fatal("introspect: function public.f_plain not found")
+	}
+	if len(fPlain.Args) != 2 {
+		t.Errorf("f_plain.Args: got %d, want 2 (unaffected by this fix, still uses the original oidvectortypes path)", len(fPlain.Args))
+	}
+
+	// An unnamed OUT parameter is a real, valid PostgreSQL construct (verified
+	// live: proargnames comes back as an entirely NULL array in this case, not
+	// per-position empty strings) — guards against a naive non-nullable scan
+	// crashing introspection for any user function shaped this way.
+	fUnnamedOut := byName["f_unnamed_out"]
+	if fUnnamedOut == nil {
+		t.Fatal("introspect: function public.f_unnamed_out not found")
+	}
+	if len(fUnnamedOut.Args) != 2 || fUnnamedOut.Args[1].Mode != "OUT" || fUnnamedOut.Args[1].Name != "" {
+		t.Errorf("f_unnamed_out.Args: got %+v, want [{Mode:IN} {Mode:OUT Name:\"\"}]", fUnnamedOut.Args)
+	}
+}
+
 func TestIntrospectEnum(t *testing.T) {
 	connStr := testpg.Start(t)
 	ctx := context.Background()
