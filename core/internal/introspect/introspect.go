@@ -916,6 +916,15 @@ SELECT n.nspname, p.proname,
        END,
        p.prosecdef,
        p.proisstrict,
+       CASE p.proparallel
+           WHEN 'r' THEN 'RESTRICTED'
+           WHEN 's' THEN 'SAFE'
+           ELSE 'UNSAFE'
+       END,
+       p.procost,
+       p.prorows,
+       p.proretset,
+       l.lanname IN ('c', 'internal') AS is_c_or_internal,
        obj_description(p.oid, 'pg_proc') AS comment,
        p.prokind::text,
        p.prosrc
@@ -939,9 +948,13 @@ ORDER  BY n.nspname, p.proname, args`
 	for rs.Next() {
 		var schema, name, args, argTypes, retType, lang, volatility string
 		var secDef, strict bool
+		var parallel string
+		var cost, rows float64
+		var retset, isCOrInternal bool
 		var comment *string
 		var prokind, prosrc string
-		if err := rs.Scan(&schema, &name, &args, &argTypes, &retType, &lang, &volatility, &secDef, &strict, &comment, &prokind, &prosrc); err != nil {
+		if err := rs.Scan(&schema, &name, &args, &argTypes, &retType, &lang, &volatility, &secDef, &strict,
+			&parallel, &cost, &rows, &retset, &isCOrInternal, &comment, &prokind, &prosrc); err != nil {
 			return nil, err
 		}
 		if prokind == "p" {
@@ -967,19 +980,45 @@ ORDER  BY n.nspname, p.proname, args`
 			procIdx[schema+"."+name+"("+args+")"] = proc
 			out = append(out, proc)
 		} else {
+			// procost/prorows are NOT NULL in pg_proc — every function has a
+			// concrete value, PG's own default among them (1 for C/internal
+			// language, 100 otherwise for cost; 0 for a scalar function, 1000
+			// for a set-returning one, for rows). Only surface a value when
+			// it genuinely differs from that computed default — otherwise
+			// every ordinary function would render a noisy "COST 100" on
+			// dump, the same suppress-when-default problem already solved
+			// for column STORAGE (ir.Column.StorageIsTypeDefault).
+			defaultCost := 100.0
+			if isCOrInternal {
+				defaultCost = 1
+			}
+			defaultRows := 0.0
+			if retset {
+				defaultRows = 1000
+			}
+			attrs := ir.FuncAttrs{
+				Language:    lang,
+				Volatility:  volatility,
+				SecurityDef: secDef,
+				Strict:      strict,
+				Parallel:    parallel,
+				Body:        prosrc,
+			}
+			if cost != defaultCost {
+				c := cost
+				attrs.Cost = &c
+			}
+			if rows != defaultRows {
+				r := rows
+				attrs.Rows = &r
+			}
 			fn := &ir.Function{
 				Schema:     schema,
 				Name:       name,
 				ReturnType: ir.TypeRef{Name: retType},
 				Comment:    comment,
 				BodyHash:   ir.HashBody(prosrc),
-				Attrs: ir.FuncAttrs{
-					Language:    lang,
-					Volatility:  volatility,
-					SecurityDef: secDef,
-					Strict:      strict,
-					Body:        prosrc,
-				},
+				Attrs:      attrs,
 			}
 			// Use argTypes (type-only) so QualifiedName matches argsKey() in IR builder.
 			// Keep args (with parameter names) for the grants index key only.

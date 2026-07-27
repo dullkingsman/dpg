@@ -562,6 +562,212 @@ func TestDiffFunctionChanged(t *testing.T) {
 	}
 }
 
+// TestDiffCreateFunctionEmitsParallelCostRows proves a fresh CREATE FUNCTION
+// emits explicit PARALLEL/COST/ROWS clauses when the desired side declares
+// them, in PostgreSQL's own documented attribute ordering (LANGUAGE ->
+// volatility -> STRICT -> SECURITY DEFINER -> PARALLEL -> COST -> ROWS -> AS).
+func TestDiffCreateFunctionEmitsParallelCostRows(t *testing.T) {
+	d := New()
+	cost := 500.0
+	rows := 50.0
+	desired := []pipeline.IRObject{
+		&ir.Function{
+			Schema: "public", Name: "f",
+			ReturnType: ir.TypeRef{Name: "integer"},
+			Attrs: ir.FuncAttrs{
+				Language: "sql", Volatility: "STABLE", Parallel: "SAFE",
+				Cost: &cost, Rows: &rows, Body: "SELECT 1",
+			},
+		},
+	}
+	ops, err := d.Diff(desired, &pipeline.Snapshot{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ops) == 0 {
+		t.Fatal("expected a CREATE FUNCTION op")
+	}
+	sql := ops[0].SQL()
+	if !strings.Contains(sql, "PARALLEL SAFE") {
+		t.Errorf("expected PARALLEL SAFE, got: %s", sql)
+	}
+	if !strings.Contains(sql, "COST 500") {
+		t.Errorf("expected COST 500, got: %s", sql)
+	}
+	if !strings.Contains(sql, "ROWS 50") {
+		t.Errorf("expected ROWS 50, got: %s", sql)
+	}
+}
+
+// TestDiffCreateFunctionOmitsDefaultParallelCostRows proves the common case
+// (no explicit PARALLEL/COST/ROWS in source) renders none of those clauses
+// — PARALLEL UNSAFE is PostgreSQL's own default and would be pure noise if
+// always emitted, and unset Cost/Rows have nothing meaningful to render.
+func TestDiffCreateFunctionOmitsDefaultParallelCostRows(t *testing.T) {
+	d := New()
+	desired := []pipeline.IRObject{
+		&ir.Function{
+			Schema: "public", Name: "f",
+			ReturnType: ir.TypeRef{Name: "integer"},
+			Attrs:      ir.FuncAttrs{Language: "sql", Volatility: "VOLATILE", Parallel: "UNSAFE", Body: "SELECT 1"},
+		},
+	}
+	ops, err := d.Diff(desired, &pipeline.Snapshot{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sql := ops[0].SQL()
+	if strings.Contains(sql, "PARALLEL") || strings.Contains(sql, "COST") || strings.Contains(sql, "ROWS") {
+		t.Errorf("expected no PARALLEL/COST/ROWS clause for the default case, got: %s", sql)
+	}
+}
+
+// TestDiffFunctionParallelChanged proves an explicit PARALLEL change alone
+// (no body/language/volatility change) still triggers CREATE OR REPLACE, when
+// the snapshot already carries a real (non-empty) Parallel value — the common
+// case for any snapshot written by this feature's own introspection/apply
+// path. See TestDiffFunctionLegacySnapshotParallelIsNoop for the other case
+// (an empty snapshot value from a pre-upgrade snapshot.json), which must NOT
+// be treated as a genuine difference.
+func TestDiffFunctionParallelChanged(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.f()", &snapshot.SnapObject{
+		Kind: "function",
+		Function: &snapshot.SnapFunction{
+			Schema: "public", Name: "f", ReturnType: "integer",
+			Language: "sql", Volatility: "VOLATILE", Parallel: "UNSAFE", BodyHash: "h",
+		},
+	})
+	desired := []pipeline.IRObject{
+		&ir.Function{
+			Schema: "public", Name: "f",
+			ReturnType: ir.TypeRef{Name: "integer"},
+			BodyHash:   "h",
+			Attrs:      ir.FuncAttrs{Language: "sql", Volatility: "VOLATILE", Parallel: "SAFE", Body: "SELECT 1"},
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ops) == 0 || !strings.Contains(ops[0].SQL(), "CREATE OR REPLACE FUNCTION") {
+		t.Errorf("expected CREATE OR REPLACE FUNCTION for the PARALLEL change, got: %v", sqlList(ops))
+	}
+}
+
+// TestDiffFunctionExplicitCostChanged proves an explicit COST change
+// against a snapshot with a different value triggers CREATE OR REPLACE.
+func TestDiffFunctionExplicitCostChanged(t *testing.T) {
+	d := New()
+	oldCost := 100.0
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.f()", &snapshot.SnapObject{
+		Kind: "function",
+		Function: &snapshot.SnapFunction{
+			Schema: "public", Name: "f", ReturnType: "integer",
+			Language: "sql", Volatility: "VOLATILE", Parallel: "UNSAFE", Cost: &oldCost, BodyHash: "h",
+		},
+	})
+	newCost := 500.0
+	desired := []pipeline.IRObject{
+		&ir.Function{
+			Schema: "public", Name: "f",
+			ReturnType: ir.TypeRef{Name: "integer"},
+			BodyHash:   "h",
+			Attrs:      ir.FuncAttrs{Language: "sql", Volatility: "VOLATILE", Parallel: "UNSAFE", Cost: &newCost, Body: "SELECT 1"},
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ops) == 0 || !strings.Contains(ops[0].SQL(), "COST 500") {
+		t.Errorf("expected a recreate with COST 500, got: %v", sqlList(ops))
+	}
+}
+
+// TestDiffFunctionUnspecifiedCostRowsIsNoop is the core regression guard
+// for the suppress-when-unspecified rule: a snapshot carrying a concrete
+// Cost/Rows (e.g. from a prior live introspection, which always records
+// PostgreSQL's own real catalog value) must NOT be treated as drift when
+// the desired side simply never mentions COST/ROWS at all — the same
+// "only act when the desired side actually declares it" rule already
+// established for column STORAGE.
+func TestDiffFunctionUnspecifiedCostRowsIsNoop(t *testing.T) {
+	d := New()
+	introspectedCost := 250.0
+	introspectedRows := 75.0
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.f()", &snapshot.SnapObject{
+		Kind: "function",
+		Function: &snapshot.SnapFunction{
+			Schema: "public", Name: "f", ReturnType: "integer",
+			Language: "sql", Volatility: "VOLATILE", Parallel: "UNSAFE",
+			Cost: &introspectedCost, Rows: &introspectedRows, BodyHash: "h",
+		},
+	})
+	desired := []pipeline.IRObject{
+		&ir.Function{
+			Schema: "public", Name: "f",
+			ReturnType: ir.TypeRef{Name: "integer"},
+			BodyHash:   "h",
+			// Cost/Rows intentionally nil — source never mentions COST/ROWS.
+			Attrs: ir.FuncAttrs{Language: "sql", Volatility: "VOLATILE", Parallel: "UNSAFE", Body: "SELECT 1"},
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ops) != 0 {
+		t.Errorf("expected zero ops (unspecified COST/ROWS must not flag drift against a live-introspected default), got: %v", sqlList(ops))
+	}
+}
+
+// TestDiffFunctionLegacySnapshotParallelIsNoop guards a real asymmetry an
+// independent verification pass caught: unlike Cost/Rows (a *float64, nil on
+// the DESIRED side means "unspecified"), Parallel is a plain string that the
+// IR builder ALWAYS defaults to a concrete "UNSAFE" on the desired side even
+// when source never mentions PARALLEL. A snapshot.json written before this
+// field existed has no "parallel" JSON key at all, so snap.Parallel comes
+// back as the Go zero value "" — comparing that bare-string against the
+// desired side's always-concrete "UNSAFE" would spuriously flag every
+// function in every pre-existing project as changed on the very first
+// plan/apply after upgrading, which is exactly the primary offline workflow
+// this project's CLAUDE.md calls out as must-work-without-a-DB. Confirmed
+// this reproduces before the fix (parallelChanged treating snap=="" as
+// "unknown, don't diff yet") and disappears after.
+func TestDiffFunctionLegacySnapshotParallelIsNoop(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.f()", &snapshot.SnapObject{
+		Kind: "function",
+		Function: &snapshot.SnapFunction{
+			// Parallel deliberately omitted, simulating a pre-upgrade
+			// snapshot.json with no "parallel" key at all.
+			Schema: "public", Name: "f", ReturnType: "integer",
+			Language: "sql", Volatility: "VOLATILE", BodyHash: "h",
+		},
+	})
+	desired := []pipeline.IRObject{
+		&ir.Function{
+			Schema: "public", Name: "f",
+			ReturnType: ir.TypeRef{Name: "integer"},
+			BodyHash:   "h",
+			// source never mentions PARALLEL -> builder defaults to "UNSAFE"
+			Attrs: ir.FuncAttrs{Language: "sql", Volatility: "VOLATILE", Parallel: "UNSAFE", Body: "SELECT 1"},
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ops) != 0 {
+		t.Errorf("expected zero ops against a legacy (pre-feature) snapshot with no recorded Parallel value, got: %v", sqlList(ops))
+	}
+}
+
 func TestDiffRegistration(t *testing.T) {
 	d, ok := pipeline.Resolve[pipeline.Differ](pipeline.Default, pipeline.KeyDiffer)
 	if !ok {

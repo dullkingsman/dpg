@@ -469,6 +469,9 @@ func toSnapFunction(o *ir.Function) *SnapFunction {
 		ReturnType: o.ReturnType.String(),
 		Language:   o.Attrs.Language,
 		Volatility: o.Attrs.Volatility,
+		Parallel:   o.Attrs.Parallel,
+		Cost:       o.Attrs.Cost,
+		Rows:       o.Attrs.Rows,
 		BodyHash:   o.BodyHash,
 		Comment:    o.Comment,
 	}

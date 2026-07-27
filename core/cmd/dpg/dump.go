@@ -505,6 +505,15 @@ func renderObjectDPG(b *strings.Builder, obj pipeline.IRObject, fmtOpts format.O
 		if o.Attrs.SecurityDef {
 			fmt.Fprintf(b, " %s %s", kw("SECURITY"), kw("DEFINER"))
 		}
+		if o.Attrs.Parallel != "" && o.Attrs.Parallel != "UNSAFE" {
+			fmt.Fprintf(b, " %s %s", kw("PARALLEL"), kw(o.Attrs.Parallel))
+		}
+		if o.Attrs.Cost != nil {
+			fmt.Fprintf(b, " %s %v", kw("COST"), *o.Attrs.Cost)
+		}
+		if o.Attrs.Rows != nil {
+			fmt.Fprintf(b, " %s %v", kw("ROWS"), *o.Attrs.Rows)
+		}
 		fmt.Fprintf(b, " %s $$%s$$", kw("AS"), o.Attrs.Body)
 		writeFuncBlock(b, ind, fmtOpts, o.Comment, o.Grants)
 

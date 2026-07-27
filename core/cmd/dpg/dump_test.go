@@ -472,6 +472,87 @@ func TestRenderFunctionAndProcedureBody(t *testing.T) {
 	}
 }
 
+// TestRenderFunctionParallelCostRowsRoundtrip guards the full render →
+// recompile chain for PARALLEL/COST/ROWS specifically — previously not
+// rendered by dump at all despite ir.FuncAttrs already having fields for
+// them. Covers both the explicit-value case and the default-suppression
+// case (PARALLEL UNSAFE and unset Cost/Rows must render nothing, matching
+// the same "don't render PostgreSQL's own default" precedent already
+// established for column STORAGE).
+func TestRenderFunctionParallelCostRowsRoundtrip(t *testing.T) {
+	fmtOpts := format.Options{IndentSize: 4, KeywordCase: "upper"}
+	cost := 500.0
+	rows := 50.0
+	objs := []pipeline.IRObject{
+		&ir.Function{
+			Schema: "public", Name: "f_explicit",
+			ReturnType: ir.TypeRef{Name: "integer"},
+			Attrs: ir.FuncAttrs{
+				Language: "sql", Volatility: "STABLE", Parallel: "SAFE",
+				Cost: &cost, Rows: &rows, Body: "SELECT 1",
+			},
+		},
+		&ir.Function{
+			Schema: "public", Name: "f_default",
+			ReturnType: ir.TypeRef{Name: "integer"},
+			Attrs:      ir.FuncAttrs{Language: "sql", Volatility: "VOLATILE", Parallel: "UNSAFE", Body: "SELECT 1"},
+		},
+	}
+	var b strings.Builder
+	for _, o := range objs {
+		renderObjectDPG(&b, o, fmtOpts)
+	}
+	rendered := b.String()
+
+	if !strings.Contains(rendered, "PARALLEL SAFE") {
+		t.Errorf("expected PARALLEL SAFE rendered for f_explicit, got:\n%s", rendered)
+	}
+	if !strings.Contains(rendered, "COST 500") {
+		t.Errorf("expected COST 500 rendered for f_explicit, got:\n%s", rendered)
+	}
+	if !strings.Contains(rendered, "ROWS 50") {
+		t.Errorf("expected ROWS 50 rendered for f_explicit, got:\n%s", rendered)
+	}
+
+	dir := t.TempDir()
+	f := filepath.Join(dir, "schema.dpg")
+	if err := os.WriteFile(f, []byte(rendered), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	compiled, err := compiler.Compile([]string{f}, dir, pipeline.Default)
+	if err != nil {
+		t.Fatalf("did not recompile: %v\n---\n%s", err, rendered)
+	}
+	for _, o := range compiled {
+		fn, ok := o.(*ir.Function)
+		if !ok {
+			continue
+		}
+		switch fn.Name {
+		case "f_explicit":
+			if fn.Attrs.Parallel != "SAFE" {
+				t.Errorf("f_explicit Parallel round-trip: got %q", fn.Attrs.Parallel)
+			}
+			if fn.Attrs.Cost == nil || *fn.Attrs.Cost != 500 {
+				t.Errorf("f_explicit Cost round-trip: got %v", fn.Attrs.Cost)
+			}
+			if fn.Attrs.Rows == nil || *fn.Attrs.Rows != 50 {
+				t.Errorf("f_explicit Rows round-trip: got %v", fn.Attrs.Rows)
+			}
+		case "f_default":
+			if strings.Contains(rendered[strings.Index(rendered, "f_default"):], "PARALLEL") {
+				t.Errorf("f_default must not render PARALLEL (matches PostgreSQL's own UNSAFE default)")
+			}
+			if fn.Attrs.Cost != nil {
+				t.Errorf("f_default Cost: got %v, want nil (never rendered, so never re-parsed)", fn.Attrs.Cost)
+			}
+			if fn.Attrs.Rows != nil {
+				t.Errorf("f_default Rows: got %v, want nil", fn.Attrs.Rows)
+			}
+		}
+	}
+}
+
 // TestRenderIndexVariantsRoundtrip guards the full render → recompile → createIndex
 // chain for every index variant. Apply runs createIndex's SQL, so asserting it
 // here (fast) is equivalent to dump → apply for the index class. Regressions in

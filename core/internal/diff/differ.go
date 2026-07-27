@@ -1575,6 +1575,16 @@ func buildFunctionSQL(o *ir.Function) string {
 	if o.Attrs.SecurityDef {
 		b.WriteString(" SECURITY DEFINER")
 	}
+	if o.Attrs.Parallel != "" && o.Attrs.Parallel != "UNSAFE" {
+		b.WriteString(" PARALLEL ")
+		b.WriteString(o.Attrs.Parallel)
+	}
+	if o.Attrs.Cost != nil {
+		fmt.Fprintf(&b, " COST %v", *o.Attrs.Cost)
+	}
+	if o.Attrs.Rows != nil {
+		fmt.Fprintf(&b, " ROWS %v", *o.Attrs.Rows)
+	}
 	b.WriteString(" AS $$")
 	b.WriteString(o.Attrs.Body)
 	b.WriteString("$$;")
@@ -1972,6 +1982,33 @@ func int64PtrEq(a, b *int64) bool {
 	return *a == *b
 }
 
+// desiredFloatChanged reports whether an explicitly-declared desired value
+// (e.g. Function.Attrs.Cost/Rows) differs from the snapshot's. A nil
+// desired means the source doesn't mention the attribute at all — that
+// must never itself trigger drift, since the snapshot side always carries
+// a concrete value (PostgreSQL's own catalog default, once introspected)
+// even when nothing was ever declared. Only a genuinely explicit,
+// different desired value counts as a change.
+func desiredFloatChanged(desired, snap *float64) bool {
+	if desired == nil {
+		return false
+	}
+	return snap == nil || *desired != *snap
+}
+
+// parallelChanged compares a function's PARALLEL setting, treating an empty
+// snapshot value as "unknown" (a pre-upgrade snapshot.json that predates this
+// field) rather than a real "UNSAFE": desired is always concrete (the IR
+// builder defaults unspecified source to "UNSAFE"), but snap can be "" purely
+// from JSON's zero-value-on-missing-key behavior, which must never itself be
+// read as a genuine difference.
+func parallelChanged(desired, snap string) bool {
+	if snap == "" {
+		return false
+	}
+	return desired != snap
+}
+
 func diffRole(o *ir.Role, snap *snapshot.SnapRole) []pipeline.DiffOp {
 	var ops []pipeline.DiffOp
 	pos := o.SrcPos
@@ -2075,9 +2112,32 @@ func diffFunction(o *ir.Function, snap *snapshot.SnapFunction) []pipeline.DiffOp
 	sig := buildFuncSignature(o)
 
 	// Re-create if: desired has a hash and it differs from the snapshot (including
-	// "" when the snapshot predates body-hash tracking), or language/volatility changed.
+	// "" when the snapshot predates body-hash tracking), or language/volatility/
+	// parallel changed, or an EXPLICITLY declared Cost/Rows differs. Cost/Rows
+	// use desiredFloatChanged rather than a plain !=: an unspecified COST/ROWS
+	// in source (o.Attrs.Cost == nil) must never trigger a recreate on its own,
+	// the same "only act when the desired side actually declares it" rule
+	// already established for column STORAGE — otherwise every function that
+	// has never mentioned COST/ROWS would show permanent drift the moment
+	// introspection (or a prior apply) records PostgreSQL's own concrete
+	// default value for it.
+	//
+	// Parallel needs the same "don't trust an absent value" treatment, but from
+	// the opposite side: unlike Cost/Rows (a *float64, nil on the DESIRED side
+	// means "not declared"), Parallel is a plain string that the IR builder
+	// ALWAYS sets to a concrete default ("UNSAFE") even when source never
+	// mentions PARALLEL — so o.Attrs.Parallel is never "". snap.Parallel CAN be
+	// "" though: any snapshot.json written before this field existed has no
+	// "parallel" key at all, so JSON unmarshalling leaves it at the Go zero
+	// value. A bare != would then compare "UNSAFE" against "" for every single
+	// function in every pre-existing project and spuriously recreate all of
+	// them on the first plan/apply after upgrading. parallelChanged treats an
+	// empty snapshot value as "unknown, don't diff yet" — self-healing after
+	// that first apply records a real value.
 	if (o.BodyHash != "" && o.BodyHash != snap.BodyHash) ||
-		o.Attrs.Language != snap.Language || o.Attrs.Volatility != snap.Volatility {
+		o.Attrs.Language != snap.Language || o.Attrs.Volatility != snap.Volatility ||
+		parallelChanged(o.Attrs.Parallel, snap.Parallel) ||
+		desiredFloatChanged(o.Attrs.Cost, snap.Cost) || desiredFloatChanged(o.Attrs.Rows, snap.Rows) {
 		ops = append(ops, safeOp(buildFunctionSQL(o), pos))
 	}
 	if !ptrEq(o.Comment, snap.Comment) {

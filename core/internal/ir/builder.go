@@ -4,6 +4,7 @@ package ir
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 
 	pg_query "github.com/pganalyze/pg_query_go/v6"
@@ -1115,6 +1116,14 @@ func extractFuncAttrs(options []*pg_query.Node) FuncAttrs {
 			if sv := de.Arg.GetString_(); sv != nil {
 				attrs.Parallel = strings.ToUpper(sv.Sval)
 			}
+		case "cost":
+			if v, ok := numericOnlyToFloat(de.Arg); ok {
+				attrs.Cost = &v
+			}
+		case "rows":
+			if v, ok := numericOnlyToFloat(de.Arg); ok {
+				attrs.Rows = &v
+			}
 		case "as":
 			// The body is in the Arg list as a List node for dollar-quoted bodies.
 			if list := de.Arg.GetList(); list != nil && len(list.Items) > 0 {
@@ -1127,6 +1136,23 @@ func extractFuncAttrs(options []*pg_query.Node) FuncAttrs {
 		}
 	}
 	return attrs
+}
+
+// numericOnlyToFloat converts a pg_query NumericOnly node (COST/ROWS'
+// argument) to a float64. Confirmed live that pg_query represents an
+// integer-looking value (e.g. "COST 500") as an Integer node and a
+// fractional one (e.g. "COST 500.5") as a Float node — never as a String,
+// unlike LANGUAGE/VOLATILITY/PARALLEL's plain identifier arguments.
+func numericOnlyToFloat(n *pg_query.Node) (float64, bool) {
+	if iv := n.GetInteger(); iv != nil {
+		return float64(iv.Ival), true
+	}
+	if fv := n.GetFloat(); fv != nil {
+		if v, err := strconv.ParseFloat(fv.Fval, 64); err == nil {
+			return v, true
+		}
+	}
+	return 0, false
 }
 
 // ── Enum ─────────────────────────────────────────────────────────────────────

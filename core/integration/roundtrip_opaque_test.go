@@ -1799,3 +1799,183 @@ TABLE t4 (
 		}
 	}
 }
+
+// TestRoundtripFunctionParallelCostRows covers PARALLEL/COST/ROWS fidelity
+// end to end: a scalar function that explicitly declares PARALLEL/COST, and
+// a plain function that declares neither (the common case, which must not
+// show spurious drift against PostgreSQL's own live catalog defaults — the
+// same suppress-when-default problem already solved for column STORAGE).
+//
+// ROWS is deliberately NOT exercised through the normal DPG-compiled path
+// here: ROWS is only valid on a set-returning function ("RETURNS SETOF ..."
+// or "RETURNS TABLE (...)"), and a repo-wide search confirmed DPG has no
+// SETOF representation anywhere in ir.TypeRef/ir.Function today — a
+// genuine, separate, pre-existing gap found while building this fixture
+// (confirmed live: PostgreSQL itself rejects ROWS on a scalar function with
+// "ROWS is not applicable when function does not return a set"). ROWS
+// itself is still fully wired (parse/diff/dump, all unit-tested) and ready
+// for whenever SETOF support lands — see
+// TestIntrospectFunctionRowsSuppressesDefault (internal/introspect) for the
+// introspection-side proof, using a SETOF function created via raw SQL
+// (bypassing the DPG compiler, which can't yet author one).
+func TestRoundtripFunctionParallelCostRows(t *testing.T) {
+	connStr := testpg.Start(t)
+	ctx := context.Background()
+
+	differ := diff.New()
+	emitter := emit.New()
+	applyExec := executor.New()
+	ci := introspect.New()
+	store := newMemStore()
+
+	conn, err := executor.Connect(ctx, connStr)
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	defer conn.Close(ctx)
+
+	dir := t.TempDir()
+	f := filepath.Join(dir, "schema.dpg")
+	fixture := `FUNCTION f_explicit(n integer) RETURNS integer
+LANGUAGE sql STABLE PARALLEL SAFE COST 500 AS $$
+    SELECT n + 1;
+$$ {}
+
+FUNCTION f_default(n integer) RETURNS integer
+LANGUAGE sql AS $$
+    SELECT n + 1;
+$$ {}`
+	if err := os.WriteFile(f, []byte(fixture), 0o644); err != nil {
+		t.Fatalf("write schema: %v", err)
+	}
+	applyFixture(t, ctx, conn, []string{f}, dir, differ, emitter, applyExec, store)
+
+	desired, err := compiler.Compile([]string{f}, dir, pipeline.Default)
+	if err != nil {
+		t.Fatalf("compile: %v", err)
+	}
+
+	liveObjects, err := ci.Introspect(ctx, conn)
+	if err != nil {
+		t.Fatalf("introspect: %v", err)
+	}
+	snap, _ := store.Load("test", "dpgtest")
+	var managedLive []pipeline.IRObject
+	for _, obj := range liveObjects {
+		if _, ok := snap.Objects[obj.QualifiedName()]; ok {
+			managedLive = append(managedLive, obj)
+		}
+	}
+	liveSnap := &pipeline.Snapshot{}
+	if err := snapshot.Populate(liveSnap, managedLive); err != nil {
+		t.Fatalf("populate live snapshot: %v", err)
+	}
+
+	// Confirm PostgreSQL actually recorded the explicit values — a guard
+	// against the zero-drift check below passing for the wrong reason.
+	rs, err := conn.QueryRows(ctx, `
+SELECT proname, proparallel::text, procost
+FROM pg_proc WHERE proname IN ('f_explicit', 'f_default') ORDER BY proname`)
+	if err != nil {
+		t.Fatalf("query pg_proc: %v", err)
+	}
+	defer rs.Close()
+	type attrs struct {
+		parallel string
+		cost     float64
+	}
+	got := map[string]attrs{}
+	for rs.Next() {
+		var name, parallel string
+		var cost float64
+		if err := rs.Scan(&name, &parallel, &cost); err != nil {
+			t.Fatalf("scan: %v", err)
+		}
+		got[name] = attrs{parallel, cost}
+	}
+	if got["f_explicit"] != (attrs{"s", 500}) {
+		t.Errorf("f_explicit pg_proc attrs: got %+v, want {s 500}", got["f_explicit"])
+	}
+	if got["f_default"] != (attrs{"u", 100}) {
+		t.Errorf("f_default pg_proc attrs: got %+v, want {u 100} (PostgreSQL's own defaults)", got["f_default"])
+	}
+
+	driftOps, err := differ.Diff(desired, liveSnap)
+	if err != nil {
+		t.Fatalf("drift diff: %v", err)
+	}
+	if len(driftOps) != 0 {
+		t.Errorf("expected zero drift for PARALLEL/COST (explicit and default) against a live catalog, got %d ops:", len(driftOps))
+		for _, op := range driftOps {
+			t.Errorf("  [%s] %s", op.Safety(), op.SQL())
+		}
+	}
+
+	// A zero-drift check alone doesn't exercise diffFunction's Parallel/Cost
+	// comparison at all — f_explicit was already correctly created with the
+	// right attributes on the FIRST apply (via buildFunctionSQL, unaffected
+	// by this check), so there's genuinely nothing to detect either way.
+	// Change f_explicit's PARALLEL/COST and confirm the diff against the
+	// snapshot from the v1 apply is a real, non-empty CREATE OR REPLACE —
+	// the actual code path diffFunction's new Parallel/Cost comparison adds.
+	v2 := `FUNCTION f_explicit(n integer) RETURNS integer
+LANGUAGE sql STABLE PARALLEL UNSAFE COST 600 AS $$
+    SELECT n + 1;
+$$ {}
+
+FUNCTION f_default(n integer) RETURNS integer
+LANGUAGE sql AS $$
+    SELECT n + 1;
+$$ {}`
+	if err := os.WriteFile(f, []byte(v2), 0o644); err != nil {
+		t.Fatalf("write v2: %v", err)
+	}
+	desired2, err := compiler.Compile([]string{f}, dir, pipeline.Default)
+	if err != nil {
+		t.Fatalf("compile v2: %v", err)
+	}
+	snap2, _ := store.Load("test", "dpgtest")
+	changeOps, err := differ.Diff(desired2, snap2)
+	if err != nil {
+		t.Fatalf("diff (attribute change): %v", err)
+	}
+	if len(changeOps) == 0 {
+		t.Fatal("expected a CREATE OR REPLACE FUNCTION op for the PARALLEL/COST change, got none")
+	}
+	var sql string
+	for _, op := range changeOps {
+		sql += op.SQL()
+	}
+	if !strings.Contains(sql, "f_explicit") {
+		t.Errorf("expected the recreate op to target f_explicit, got: %s", sql)
+	}
+	if !strings.Contains(sql, "COST 600") {
+		t.Errorf("expected the recreate to reflect the new COST 600, got: %s", sql)
+	}
+	if strings.Contains(sql, "PARALLEL") {
+		t.Errorf("expected no PARALLEL clause (UNSAFE is PostgreSQL's own default), got: %s", sql)
+	}
+
+	migration, err := emitter.Emit(changeOps, pipeline.MigrationMeta{Cluster: "test", Database: "dpgtest"})
+	if err != nil {
+		t.Fatalf("emit: %v", err)
+	}
+	if err := applyExec.Apply(ctx, migration, conn); err != nil {
+		t.Fatalf("apply (attribute change) against live PostgreSQL: %v", err)
+	}
+	rs2, err := conn.QueryRows(ctx, `SELECT procost FROM pg_proc WHERE proname = 'f_explicit'`)
+	if err != nil {
+		t.Fatalf("query updated procost: %v", err)
+	}
+	defer rs2.Close()
+	var newCost float64
+	if !rs2.Next() {
+		t.Fatal("expected a row for f_explicit")
+	}
+	if err := rs2.Scan(&newCost); err != nil {
+		t.Fatalf("scan updated procost: %v", err)
+	}
+	if newCost != 600 {
+		t.Errorf("live procost after apply = %v, want 600", newCost)
+	}
+}

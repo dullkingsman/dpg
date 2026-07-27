@@ -4,6 +4,7 @@ package introspect_test
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -195,6 +196,74 @@ $$;`)
 	}
 	if !strings.Contains(proc.Attrs.Body, "NULL") {
 		t.Errorf("procedure Attrs.Body = %q, want it to contain the real procedure body", proc.Attrs.Body)
+	}
+}
+
+// TestIntrospectFunctionRowsSuppressesDefault is the live-catalog guard for
+// ROWS suppression specifically: ROWS is only syntactically valid on a
+// set-returning function ("RETURNS SETOF ..."), which DPG's own compiler
+// can't yet author (ir.TypeRef has no SETOF representation — a separate,
+// pre-existing gap). So this exercises introspection directly against a
+// SETOF function created via raw SQL: one with an explicit ROWS override,
+// one left at PostgreSQL's own default (1000 for a set-returning function),
+// confirming Attrs.Rows is populated only when it genuinely differs from
+// that live default — mirroring TestIntrospectColumnStorageIsTypeDefault's
+// suppress-when-default pattern for COST/ROWS/PARALLEL.
+func TestIntrospectFunctionRowsSuppressesDefault(t *testing.T) {
+	connStr := testpg.Start(t)
+	ctx := context.Background()
+
+	conn, err := executor.Connect(ctx, connStr)
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	defer conn.Close(ctx)
+
+	_, err = conn.Exec(ctx, `
+CREATE FUNCTION public.gen_default(n integer) RETURNS SETOF integer
+LANGUAGE sql AS $$
+    SELECT generate_series(1, n);
+$$;
+
+CREATE FUNCTION public.gen_explicit(n integer) RETURNS SETOF integer
+LANGUAGE sql ROWS 50 AS $$
+    SELECT generate_series(1, n);
+$$;`)
+	if err != nil {
+		t.Fatalf("create functions: %v", err)
+	}
+
+	ci := introspect.New()
+	objects, err := ci.Introspect(ctx, conn)
+	if err != nil {
+		t.Fatalf("introspect: %v", err)
+	}
+
+	var byName = map[string]*ir.Function{}
+	for _, obj := range objects {
+		if fn, ok := obj.(*ir.Function); ok {
+			byName[fn.Name] = fn
+		}
+	}
+
+	def := byName["gen_default"]
+	if def == nil {
+		t.Fatal("introspect: function public.gen_default not found")
+	}
+	if def.Attrs.Rows != nil {
+		t.Errorf("gen_default: Attrs.Rows = %v, want nil (matches PostgreSQL's own default of 1000 for a set-returning function)", *def.Attrs.Rows)
+	}
+
+	explicit := byName["gen_explicit"]
+	if explicit == nil {
+		t.Fatal("introspect: function public.gen_explicit not found")
+	}
+	if explicit.Attrs.Rows == nil || *explicit.Attrs.Rows != 50 {
+		got := "nil"
+		if explicit.Attrs.Rows != nil {
+			got = fmt.Sprintf("%v", *explicit.Attrs.Rows)
+		}
+		t.Errorf("gen_explicit: Attrs.Rows = %s, want 50", got)
 	}
 }
 

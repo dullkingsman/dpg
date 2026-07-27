@@ -41,6 +41,51 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`FUNCTION`'s `PARALLEL`/`COST`/`ROWS` attributes were parsed nowhere,
+  introspected nowhere, and never diffed or rendered** — `ir.FuncAttrs`
+  already had `Parallel`/`Cost`/`Rows` fields, but nothing populated them,
+  so DPG silently dropped these clauses from hand-written source, never
+  detected drift when they changed live, and `dump` never reconstructed
+  them. Verified live against PostgreSQL 17 that `procost` defaults to `1`
+  for `internal`/`c`-language functions and `100` otherwise, `prorows`
+  defaults to `0` for a scalar function and `1000` for a set-returning one,
+  and `proparallel` defaults to `'u'` (UNSAFE) — introspection now suppresses
+  each attribute when it merely matches that computed default, the same
+  suppress-when-default treatment already used for column `STORAGE`, so an
+  ordinary function doesn't grow a noisy `COST 100` on every dump. Fixed by
+  parsing `COST`/`ROWS`/`PARALLEL` in `extractFuncAttrs`, introspecting
+  `proparallel`/`procost`/`prorows`/`proretset` with the live-default
+  comparison above, diffing them (an explicit desired value differing from
+  the snapshot's now correctly triggers `CREATE OR REPLACE FUNCTION`, while
+  an *unspecified* desired value never counts as drift even though the
+  snapshot always carries PostgreSQL's own concrete catalog value), and
+  rendering `PARALLEL`/`COST`/`ROWS` in both `dump` and diff-generated SQL
+  in PostgreSQL's documented clause order. `PROCEDURE` is intentionally
+  unaffected — PostgreSQL doesn't support these attributes on procedures.
+  Scope note: `ROWS` is only valid on a set-returning function
+  (`RETURNS SETOF ...`/`RETURNS TABLE (...)`), and DPG's IR has no `SETOF`
+  representation yet (a separate, pre-existing gap, not addressed here) —
+  `ROWS` is fully wired and unit-tested end to end regardless, and its
+  introspection-side suppression is verified live against a `SETOF`
+  function created via raw SQL.
+  **Correction (caught by an independent verification pass, same day):** the
+  initial fix compared `PARALLEL` with a bare inequality on the assumption
+  that, unlike `COST`/`ROWS`, it's always a concrete value on both sides with
+  no "unspecified" ambiguity — true for the desired side (the IR builder
+  always defaults unmentioned `PARALLEL` to `"UNSAFE"`) but not for the
+  snapshot side: any `snapshot.json` written before this field existed has no
+  `parallel` JSON key at all, so unmarshalling leaves it at the Go zero value
+  `""`. Reproduced live: diffing an ordinary function (source never mentions
+  `PARALLEL`) against exactly such a pre-upgrade snapshot produced a spurious
+  `CREATE OR REPLACE FUNCTION` — for every function in every existing
+  project, on the very first `plan`/`apply` after upgrading, directly
+  affecting the offline `plan`/`apply` path this project's design treats as
+  the primary workflow. Fixed with a new `parallelChanged` helper that treats
+  an empty snapshot value as "unknown, don't diff yet" rather than a genuine
+  `UNSAFE`, self-healing after the first apply records a real value (the same
+  transitional-pain class already documented for the Operator `QualifiedName`
+  change). Confirmed the bug reproduces before this fix and disappears after,
+  via a new regression test.
 - **An inline, unnamed `EXCLUDE` constraint produced a self-inconsistent
   `DROP CONSTRAINT` + `ADD` pair on every single `verify`/`plan --live`
   run**, the same class of bug already fixed for unnamed `PRIMARY

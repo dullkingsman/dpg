@@ -180,6 +180,9 @@ type SnapFunction struct {
 	ReturnType string             `json:"return_type"`
 	Language   string             `json:"language"`
 	Volatility string             `json:"volatility"`
+	Parallel   string             `json:"parallel,omitempty"`
+	Cost       *float64           `json:"cost,omitempty"`
+	Rows       *float64           `json:"rows,omitempty"`
 	BodyHash   string             `json:"body_hash"`
 	Comment    *string            `json:"comment,omitempty"`
 	Grants     []SnapGrant        `json:"grants,omitempty"`

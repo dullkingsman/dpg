@@ -264,6 +264,60 @@ func TestBuildFunction(t *testing.T) {
 	}
 }
 
+// TestBuildFunctionParallelCostRows proves PARALLEL/COST/ROWS all parse
+// correctly. COST/ROWS use pg_query's NumericOnly grammar production
+// (Integer or Float node, never String — confirmed via a live probe before
+// writing this test), unlike LANGUAGE/VOLATILITY/PARALLEL's plain
+// identifier arguments.
+func TestBuildFunctionParallelCostRows(t *testing.T) {
+	obj := buildObject(t, pipeline.KindFunction,
+		`f(x INT) RETURNS INT LANGUAGE sql STABLE PARALLEL SAFE COST 500 ROWS 50 AS $$ SELECT x $$;`, ``)
+	fn := obj.(*ir.Function)
+	if fn.Attrs.Parallel != "SAFE" {
+		t.Errorf("Parallel: got %q, want SAFE", fn.Attrs.Parallel)
+	}
+	if fn.Attrs.Cost == nil || *fn.Attrs.Cost != 500 {
+		t.Errorf("Cost: got %v, want 500", fn.Attrs.Cost)
+	}
+	if fn.Attrs.Rows == nil || *fn.Attrs.Rows != 50 {
+		t.Errorf("Rows: got %v, want 50", fn.Attrs.Rows)
+	}
+}
+
+// TestBuildFunctionFractionalCost proves a fractional COST value (a real,
+// documented PostgreSQL grammar form — NumericOnly reduces to a Float node
+// for FCONST, confirmed via a live probe) parses correctly, not just the
+// integer-looking common case.
+func TestBuildFunctionFractionalCost(t *testing.T) {
+	obj := buildObject(t, pipeline.KindFunction,
+		`f() RETURNS INT LANGUAGE sql COST 500.5 AS $$ SELECT 1 $$;`, ``)
+	fn := obj.(*ir.Function)
+	if fn.Attrs.Cost == nil || *fn.Attrs.Cost != 500.5 {
+		t.Errorf("Cost: got %v, want 500.5", fn.Attrs.Cost)
+	}
+}
+
+// TestBuildFunctionParallelCostRowsUnspecified proves Parallel defaults to
+// PostgreSQL's own real default ("UNSAFE", matching what a live-introspected
+// function with no explicit PARALLEL clause also reports), while Cost/Rows
+// stay nil rather than defaulting to a guessed number — nil is what lets
+// diffFunction distinguish "source doesn't mention it" from "source
+// explicitly set it to a value that happens to match the default."
+func TestBuildFunctionParallelCostRowsUnspecified(t *testing.T) {
+	obj := buildObject(t, pipeline.KindFunction,
+		`f() RETURNS INT LANGUAGE sql AS $$ SELECT 1 $$;`, ``)
+	fn := obj.(*ir.Function)
+	if fn.Attrs.Parallel != "UNSAFE" {
+		t.Errorf("Parallel: got %q, want UNSAFE (PostgreSQL's own default)", fn.Attrs.Parallel)
+	}
+	if fn.Attrs.Cost != nil {
+		t.Errorf("Cost: got %v, want nil (unspecified)", fn.Attrs.Cost)
+	}
+	if fn.Attrs.Rows != nil {
+		t.Errorf("Rows: got %v, want nil (unspecified)", fn.Attrs.Rows)
+	}
+}
+
 // ── Extension ─────────────────────────────────────────────────────────────────
 
 func TestBuildExtension(t *testing.T) {
