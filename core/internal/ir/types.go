@@ -124,8 +124,9 @@ type Constraint struct {
 	// and dump rendering, the same way every other constraint type's Expr
 	// works; Exclude exists alongside it because the exclusion elements and
 	// operators can't be losslessly recovered by re-parsing Expr's text, and
-	// a future EXCLUDE-naming feature (deferred — see pgConstraintNameLabel)
-	// will need the element list directly, not a re-parse of rendered SQL.
+	// the EXCLUDE-naming reconciliation (see pgConstraintNameLabel/
+	// predictName's "excl" case in internal/diff) needs the element list
+	// directly, not a re-parse of rendered SQL.
 	Exclude           *ExcludeSpec
 	NotValid          bool
 	Deferrable        bool
@@ -146,13 +147,33 @@ type ExcludeSpec struct {
 // (the same production CREATE INDEX uses), plus the WITH operator EXCLUDE
 // adds on top.
 type ExcludeElement struct {
-	Column    string // plain column name; "" if Expr is set instead
-	Expr      string // parenthesization-free expression text; "" if Column is set instead
-	Collation string // optional COLLATE target; "" if unspecified
-	OpClass   string // optional operator class; "" if unspecified (uses the type's default)
-	SortOrder string // "ASC", "DESC", or "" (unspecified)
-	Nulls     string // "FIRST", "LAST", or "" (unspecified)
-	Operator  string // the WITH operator, e.g. "=", "&&"
+	Column string // plain column name; "" if Expr is set instead
+	Expr   string // parenthesization-free expression text; "" if Column is set instead
+	// PredictedName is set when Expr's shape lets PostgreSQL's own naming
+	// rule (FigureColnameInternal, parser/parse_target.c — called via
+	// FigureIndexColname from parse_utilcmd.c's transformIndexStmt BEFORE
+	// transformExpr runs, confirmed live and via source that this is
+	// genuinely syntax-only, no catalog/OID resolution involved) be
+	// reconstructed purely from the parsed tree: a bare column reference in
+	// parens ("(a)" -> "a"), a bare top-level function call ("lower(a)" ->
+	// "lower", schema stripped, NEVER descending into the call's own
+	// arguments regardless of their complexity — confirmed live), a
+	// NULLIF(a,b) call (-> the literal "nullif"), or a type cast (-> its
+	// argument's own PredictedName if that one is itself "strong" —
+	// ColumnRef or FuncCall — else the cast's OWN target type name, e.g.
+	// "(a + b)::text" -> "text", confirmed live). "" for any other
+	// expression shape (a bare, uncast operator expression — PostgreSQL's
+	// own algorithm produces no usable name for that shape at all, confirmed
+	// live). Used solely to reconstruct PostgreSQL's own auto-generated
+	// constraint name (see pgAutoConstraintName's "excl" case in
+	// internal/diff) — extracted directly from the parsed tree, never by
+	// re-parsing Expr's rendered text.
+	PredictedName string
+	Collation     string // optional COLLATE target; "" if unspecified
+	OpClass       string // optional operator class; "" if unspecified (uses the type's default)
+	SortOrder     string // "ASC", "DESC", or "" (unspecified)
+	Nulls         string // "FIRST", "LAST", or "" (unspecified)
+	Operator      string // the WITH operator, e.g. "=", "&&"
 }
 
 // Policy is a row-security policy.

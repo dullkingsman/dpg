@@ -9,7 +9,9 @@ import (
 	"fmt"
 	"maps"
 	"regexp"
+	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"unicode/utf8"
 
@@ -2652,17 +2654,16 @@ func diffConstraints(tbl string, o *ir.Table, snap *snapshot.SnapTable, fullSnap
 	//      the verify/plan --live path: live introspection's
 	//      pg_constraint.conname is NEVER empty, since PG always assigns a
 	//      name (e.g. "t_pkey") even when the user wrote none, so without
-	//      this an unnamed inline PK/UNIQUE/FK/CHECK produced a
+	//      this an unnamed inline PK/UNIQUE/FK/CHECK/EXCLUDE produced a
 	//      self-inconsistent DROP+ADD pair on every single run. Covers
-	//      PRIMARY KEY/UNIQUE/FOREIGN KEY/CHECK. EXCLUDE remains excluded —
-	//      not merely a missing-column-extraction gap like the others were:
-	//      buildConstraint's CONSTR_EXCLUSION case never parses the real
-	//      EXCLUDE body from source at all (access method, per-column
-	//      operators, WHERE), only ever storing a placeholder "EXCLUDE" Expr
-	//      that would already fail to apply as invalid SQL — so there's no
-	//      real desired-side definition to name in the first place. Fixing
-	//      that is a separate, larger feature (full EXCLUDE round-tripping),
-	//      not a naming-reconciliation gap.
+	//      PRIMARY KEY/UNIQUE/FOREIGN KEY/CHECK/EXCLUDE — with one
+	//      narrower carve-out for EXCLUDE specifically: an element that's
+	//      an expression rather than a plain column can't be predicted
+	//      offline at all (see predictName's "excl" case for why), so an
+	//      EXCLUDE with at least one expression-based element falls back
+	//      to strategy 1 only (still correct for the offline plan/apply
+	//      path; only verify/plan --live loses the reconciliation for that
+	//      specific EXCLUDE).
 	// Note both matching strategies are identity-only, never full-definition
 	// equality — this is a pre-existing property of this function (a named
 	// constraint whose definition changes while keeping the same name was
@@ -2708,22 +2709,78 @@ func diffConstraints(tbl string, o *ir.Table, snap *snapshot.SnapTable, fullSnap
 	// reconstructed after the fact).
 	otherTableNames := schemaConstraintNames(fullSnap, o.Schema, o.Name)
 	otherRelationNames := schemaRelationNames(fullSnap, o.Schema, o.Name)
-	predictName := func(c *ir.Constraint, label string) string {
+	// predictName returns PostgreSQL's predicted auto-generated name for an
+	// unnamed constraint, and whether a prediction was possible at all —
+	// distinct from CHECK's cols==nil case (still a real, valid PG-generated
+	// name, "tab_check" with no name2), EXCLUDE can be genuinely
+	// unpredictable: see the "excl" case below.
+	predictName := func(c *ir.Constraint, label string) (string, bool) {
 		existing := maps.Clone(otherTableNames)
-		if label == "pkey" || label == "key" {
+		if label == "pkey" || label == "key" || label == "excl" {
+			// EXCLUDE is index-backed (ChooseIndexName's exclusionOpNames
+			// branch calls ChooseRelationName, the same pg_class-scanning
+			// path PRIMARY KEY/UNIQUE use) — confirmed live: a plain table
+			// coincidentally named like an EXCLUDE's predicted name forces
+			// PostgreSQL to fall back to a "1"-suffixed name, exactly the
+			// PRIMARY KEY/UNIQUE relation-name-collision case already
+			// guarded for those two.
 			maps.Copy(existing, otherRelationNames)
 		}
-		cols := c.Columns
-		if label == "check" {
+		var cols []string
+		switch label {
+		case "check":
 			// CHECK's name2 is the single referenced column, not the full
 			// set c.Columns carries for other purposes (createTable's
 			// inline-rendering marker) — see CheckColumn's doc comment.
-			cols = nil
 			if c.CheckColumn != nil {
 				cols = []string{*c.CheckColumn}
 			}
+		case "excl":
+			// EXCLUDE's name2 is built from each element's own name, in
+			// order, joined by "_" (ChooseIndexNameAddition — confirmed
+			// live: EXCLUDE USING gist (room WITH =, during WITH &&) on
+			// table "bookings" generates "bookings_room_during_excl"). A
+			// plain column contributes its own name; any OTHER element
+			// shape's contribution is Exclude.Elements[i].PredictedName,
+			// populated by figureIndexColname (internal/ir/builder.go) — a
+			// port of PostgreSQL's real FigureColnameInternal, confirmed
+			// live to run BEFORE expression analysis (no catalog/OID
+			// resolution involved), covering a bare function call (its own
+			// name, never descending into arguments), NULLIF(a,b) (the
+			// literal "nullif"), and a type cast (recursing into its
+			// argument, falling back to the cast's own target type name
+			// only when the argument isn't itself a column or function
+			// call). A genuinely unpredictable shape — a bare, uncast
+			// operator expression, e.g. "a + b" — leaves PredictedName
+			// empty, since PostgreSQL's own algorithm produces no usable
+			// name for it either (confirmed live). This returns false
+			// rather than guessing for that case: a false "match" would
+			// silently hide a real definition change, worse than the
+			// spurious-but-visible DROP+ADD it would replace.
+			if c.Exclude == nil || len(c.Exclude.Elements) == 0 {
+				return "", false
+			}
+			var raw []string
+			for _, el := range c.Exclude.Elements {
+				switch {
+				case el.Column != "":
+					raw = append(raw, el.Column)
+				case el.PredictedName != "":
+					raw = append(raw, el.PredictedName)
+				default:
+					return "", false
+				}
+			}
+			// PostgreSQL also deduplicates same-derived-name elements
+			// within the one index (ChooseIndexColumnNames — confirmed
+			// live: two lower(...) elements on different columns produce
+			// "lower" and "lower1", joined as name2 "lower_lower1", not a
+			// name2 with two identical "lower" components).
+			cols = dedupIndexColNames(raw)
+		default:
+			cols = c.Columns
 		}
-		return pgAutoConstraintName(o.Name, cols, label, existing)
+		return pgAutoConstraintName(o.Name, cols, label, existing), true
 	}
 
 	desiredByKey := make(map[string]*ir.Constraint, len(o.Constraints))
@@ -2731,7 +2788,9 @@ func diffConstraints(tbl string, o *ir.Table, snap *snapshot.SnapTable, fullSnap
 		desiredByKey[key(c.Name, c.Type, c.Expr)] = c
 		if c.Name == "" {
 			if label, ok := pgConstraintNameLabel(c.Type); ok {
-				desiredByKey["n:"+predictName(c, label)] = c
+				if predicted, predOK := predictName(c, label); predOK {
+					desiredByKey["n:"+predicted] = c
+				}
 			}
 		}
 	}
@@ -2767,8 +2826,10 @@ func diffConstraints(tbl string, o *ir.Table, snap *snapshot.SnapTable, fullSnap
 		}
 		if c.Name == "" {
 			if label, ok := pgConstraintNameLabel(c.Type); ok {
-				if _, exists := snapByKey["n:"+predictName(c, label)]; exists {
-					continue
+				if predicted, predOK := predictName(c, label); predOK {
+					if _, exists := snapByKey["n:"+predicted]; exists {
+						continue
+					}
 				}
 			}
 		}
@@ -2789,9 +2850,12 @@ func diffConstraints(tbl string, o *ir.Table, snap *snapshot.SnapTable, fullSnap
 }
 
 // pgConstraintNameLabel returns the label PostgreSQL's auto-naming
-// algorithm uses for a constraint type, and whether pgAutoConstraintName
-// can reconstruct a name for it. EXCLUDE is deliberately excluded — see the
-// comment in diffConstraints for why.
+// algorithm uses for a constraint type, and whether pgAutoConstraintName can
+// reconstruct a name for it at all. For EXCLUDE this is necessary but not
+// sufficient: a per-instance check in diffConstraints' predictName further
+// restricts prediction to an EXCLUDE whose every element resolves to SOME
+// name (a plain column, or the result of figureIndexColname for anything
+// else) — see the comment there for exactly what that covers.
 func pgConstraintNameLabel(typ string) (label string, ok bool) {
 	switch typ {
 	case "PRIMARY KEY":
@@ -2802,6 +2866,8 @@ func pgConstraintNameLabel(typ string) (label string, ok bool) {
 		return "fkey", true
 	case "CHECK":
 		return "check", true
+	case "EXCLUDE":
+		return "excl", true
 	default:
 		return "", false
 	}
@@ -2814,15 +2880,17 @@ func pgConstraintNameLabel(typ string) (label string, ok bool) {
 // that verify/plan --live can recognize a live catalog's auto-generated
 // name as the SAME constraint an inline unnamed declaration refers to.
 //
-// label is "pkey"/"key"/"fkey"/"check" (see pgConstraintNameLabel); cols is
-// ignored for "pkey" (PG's primary key name never depends on columns — a
-// table can only have one), and is joined with "_" for the others (for
-// "fkey" this must be the LOCAL/referencing columns, matching
+// label is "pkey"/"key"/"fkey"/"check"/"excl" (see pgConstraintNameLabel);
+// cols is ignored for "pkey" (PG's primary key name never depends on
+// columns — a table can only have one), and is joined with "_" for the
+// others (for "fkey" this must be the LOCAL/referencing columns, matching
 // ChooseForeignKeyConstraintNameAddition, not the referenced table's; for
 // "check" the caller must pass either a single-element slice — when the
 // expression references exactly one distinct column — or nil, matching
 // heap.c's pull_var_clause-based name2 selection, not the constraint's full
-// column set).
+// column set; for "excl" the caller must pass every element's column name
+// in source order, matching ChooseIndexNameAddition — never called at all
+// when any element is an expression, see predictName's "excl" case).
 // existingNames is mutated: each name this function returns is added to it,
 // so a second call sharing the same map correctly avoids colliding with the
 // first — callers that want independent (non-batch) predictions, as
@@ -2897,6 +2965,33 @@ func mbClipLen(s string, limit int) int {
 	return limit
 }
 
+// dedupIndexColNames replicates PostgreSQL's ChooseIndexColumnNames: when
+// two index elements independently derive the SAME name (e.g. two EXCLUDE
+// elements that are both a call to the same function, on different
+// columns), the second (and any further) conflicting one gets a numeric
+// suffix — 1, 2, ... — appended, truncating the ORIGINAL name (never the
+// suffix) down to a complete UTF-8 rune boundary if needed to fit
+// NAMEDATALEN-1 bytes total. Confirmed live: EXCLUDE ((lower(a)) WITH =,
+// (lower(b)) WITH =) generates the per-element names "lower"/"lower1"
+// (joined by pgAutoConstraintName's caller into name2 "lower_lower1"), not
+// two identical "lower" components. Each name is checked against every
+// PRIOR (already-deduped) name in the same call, matching PG's own
+// grow-the-result-list-as-you-go comparison.
+func dedupIndexColNames(names []string) []string {
+	const nameDataLen = 64 // PostgreSQL's NAMEDATALEN
+	result := make([]string, 0, len(names))
+	for _, origname := range names {
+		curname := origname
+		for i := 1; slices.Contains(result, curname); i++ {
+			suffix := strconv.Itoa(i)
+			n := mbClipLen(origname, nameDataLen-1-len(suffix))
+			curname = origname[:n] + suffix
+		}
+		result = append(result, curname)
+	}
+	return result
+}
+
 // schemaConstraintNames collects every constraint name already in use by
 // any OTHER table in the given schema, per fullSnap — the collision
 // universe pgAutoConstraintName needs, since PostgreSQL's auto-naming
@@ -2929,14 +3024,17 @@ func schemaConstraintNames(fullSnap *pipeline.Snapshot, schema, excludeTable str
 // and index) already in use in the given schema, per fullSnap. This is the
 // BROADER collision universe PostgreSQL's ChooseRelationName actually
 // checks — a pg_class scan, not just a pg_constraint one — for PRIMARY
-// KEY/UNIQUE specifically: those constraint types are backed by an index,
-// so the auto-generated name must be unique among ALL relations in the
-// namespace (a plain table happening to be named "orders_pkey" would force
-// PG to fall back to "orders_pkey1" for an unnamed PK on "orders", even
-// though no OTHER constraint is named "orders_pkey"). FOREIGN KEY is not
-// index-backed (ChooseConstraintName only ever checks pg_constraint, never
-// pg_class — see ChooseConstraintName in pg_constraint.c), so callers must
-// not add this set for "fkey".
+// KEY/UNIQUE/EXCLUDE specifically: those constraint types are backed by an
+// index, so the auto-generated name must be unique among ALL relations in
+// the namespace (a plain table happening to be named "orders_pkey" would
+// force PG to fall back to "orders_pkey1" for an unnamed PK on "orders",
+// even though no OTHER constraint is named "orders_pkey" — confirmed the
+// same holds for EXCLUDE live: ChooseIndexName's exclusionOpNames branch
+// calls ChooseRelationName too, exactly like the PRIMARY KEY branch).
+// FOREIGN KEY and CHECK are NOT index-backed (their default names go
+// through ChooseConstraintName, which only ever checks pg_constraint, never
+// pg_class — see ChooseConstraintName in pg_constraint.c and heap.c's CHECK
+// naming), so callers must not add this set for "fkey"/"check".
 // excludeTable's own index names are left out — those are exactly the
 // pre-existing backing-index assignment a recomputed name is trying to
 // reproduce, not a competitor to avoid.

@@ -1375,3 +1375,427 @@ ORDER BY con.conname`)
 		}
 	}
 }
+
+// TestRoundtripUnnamedExcludeNoLiveDrift is the naming-reconciliation
+// counterpart to TestRoundtripExcludeConstraint (which used named
+// constraints, so it never exercised the naming path at all): an inline
+// UNNAMED EXCLUDE — no CONSTRAINT keyword anywhere in source — must match
+// PostgreSQL's own auto-generated name on re-introspection, not produce a
+// self-inconsistent DROP+ADD pair on every verify/plan --live, the same
+// class of bug already fixed for unnamed PRIMARY KEY/UNIQUE/FOREIGN
+// KEY/CHECK. Covers both a multi-element gist EXCLUDE and a single-element
+// no-USING (defaults to btree) EXCLUDE, confirming each got its real
+// predicted name via a direct pg_constraint query before checking drift — a
+// guard against the zero-drift check passing for the wrong reason.
+func TestRoundtripUnnamedExcludeNoLiveDrift(t *testing.T) {
+	connStr := testpg.Start(t)
+	ctx := context.Background()
+
+	differ := diff.New()
+	emitter := emit.New()
+	applyExec := executor.New()
+	ci := introspect.New()
+	store := newMemStore()
+
+	conn, err := executor.Connect(ctx, connStr)
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	defer conn.Close(ctx)
+
+	if _, err := conn.Exec(ctx, `CREATE EXTENSION IF NOT EXISTS btree_gist`); err != nil {
+		t.Fatalf("create btree_gist: %v", err)
+	}
+
+	dir := t.TempDir()
+	f := filepath.Join(dir, "schema.dpg")
+	fixture := `TABLE bookings (
+    room integer,
+    during tsrange,
+    EXCLUDE USING gist (room WITH =, during WITH &&)
+);
+
+TABLE singles (
+    a integer,
+    EXCLUDE (a WITH =)
+);`
+	if err := os.WriteFile(f, []byte(fixture), 0o644); err != nil {
+		t.Fatalf("write schema: %v", err)
+	}
+	applyFixture(t, ctx, conn, []string{f}, dir, differ, emitter, applyExec, store)
+
+	desired, err := compiler.Compile([]string{f}, dir, pipeline.Default)
+	if err != nil {
+		t.Fatalf("compile: %v", err)
+	}
+	appliedSnap := &pipeline.Snapshot{}
+	if err := snapshot.Populate(appliedSnap, desired); err != nil {
+		t.Fatalf("populate snapshot: %v", err)
+	}
+
+	liveObjects, err := ci.Introspect(ctx, conn)
+	if err != nil {
+		t.Fatalf("introspect: %v", err)
+	}
+	var managedLive []pipeline.IRObject
+	for _, obj := range liveObjects {
+		if _, ok := appliedSnap.Objects[obj.QualifiedName()]; ok {
+			managedLive = append(managedLive, obj)
+		}
+	}
+	liveSnap := &pipeline.Snapshot{}
+	if err := snapshot.Populate(liveSnap, managedLive); err != nil {
+		t.Fatalf("populate live snapshot: %v", err)
+	}
+
+	// Confirm PG actually generated the names this test's rationale claims —
+	// a guard against the zero-drift check below passing for the wrong
+	// reason (e.g. the constraints silently missing).
+	rs, err := conn.QueryRows(ctx, `SELECT conname FROM pg_constraint WHERE contype = 'x' ORDER BY conname`)
+	if err != nil {
+		t.Fatalf("query pg_constraint: %v", err)
+	}
+	defer rs.Close()
+	wantNames := map[string]bool{"bookings_room_during_excl": false, "singles_a_excl": false}
+	for rs.Next() {
+		var name string
+		if err := rs.Scan(&name); err != nil {
+			t.Fatalf("scan: %v", err)
+		}
+		if _, ok := wantNames[name]; ok {
+			wantNames[name] = true
+		}
+	}
+	for name, found := range wantNames {
+		if !found {
+			t.Errorf("expected live-generated constraint name %q, not found in pg_constraint", name)
+		}
+	}
+
+	driftOps, err := differ.Diff(desired, liveSnap)
+	if err != nil {
+		t.Fatalf("drift diff: %v", err)
+	}
+	if len(driftOps) != 0 {
+		t.Errorf("expected zero drift for inline unnamed EXCLUDE constraints against a live catalog, got %d ops:", len(driftOps))
+		for _, op := range driftOps {
+			t.Errorf("  [%s] %s", op.Safety(), op.SQL())
+		}
+	}
+}
+
+// TestRoundtripUnnamedExcludeFuncCallElementNoLiveDrift covers the
+// function-call-element naming case an independent verification pass
+// found was incorrectly excluded from the original EXCLUDE-naming fix: a
+// bare, top-level function-call element (lower(a)) predicts PostgreSQL's
+// real generated name without needing OID resolution, since PG's own
+// algorithm never descends into the call's arguments for naming. Also
+// covers the two-elements-same-function-name case, which PostgreSQL
+// disambiguates with its own per-element numeric suffix
+// (confirmed live: "lower"/"lower1").
+func TestRoundtripUnnamedExcludeFuncCallElementNoLiveDrift(t *testing.T) {
+	connStr := testpg.Start(t)
+	ctx := context.Background()
+
+	differ := diff.New()
+	emitter := emit.New()
+	applyExec := executor.New()
+	ci := introspect.New()
+	store := newMemStore()
+
+	conn, err := executor.Connect(ctx, connStr)
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	defer conn.Close(ctx)
+
+	dir := t.TempDir()
+	f := filepath.Join(dir, "schema.dpg")
+	fixture := `TABLE t1 (
+    a text,
+    EXCLUDE ((lower(a)) WITH =)
+);
+
+TABLE t2 (
+    a text,
+    b text,
+    EXCLUDE ((lower(a)) WITH =, (lower(b)) WITH =)
+);`
+	if err := os.WriteFile(f, []byte(fixture), 0o644); err != nil {
+		t.Fatalf("write schema: %v", err)
+	}
+	applyFixture(t, ctx, conn, []string{f}, dir, differ, emitter, applyExec, store)
+
+	desired, err := compiler.Compile([]string{f}, dir, pipeline.Default)
+	if err != nil {
+		t.Fatalf("compile: %v", err)
+	}
+	appliedSnap := &pipeline.Snapshot{}
+	if err := snapshot.Populate(appliedSnap, desired); err != nil {
+		t.Fatalf("populate snapshot: %v", err)
+	}
+
+	liveObjects, err := ci.Introspect(ctx, conn)
+	if err != nil {
+		t.Fatalf("introspect: %v", err)
+	}
+	var managedLive []pipeline.IRObject
+	for _, obj := range liveObjects {
+		if _, ok := appliedSnap.Objects[obj.QualifiedName()]; ok {
+			managedLive = append(managedLive, obj)
+		}
+	}
+	liveSnap := &pipeline.Snapshot{}
+	if err := snapshot.Populate(liveSnap, managedLive); err != nil {
+		t.Fatalf("populate live snapshot: %v", err)
+	}
+
+	// Confirm PG actually generated the names this test's rationale claims —
+	// a guard against the zero-drift check below passing for the wrong
+	// reason (e.g. the constraints silently missing).
+	rs, err := conn.QueryRows(ctx, `SELECT conname FROM pg_constraint WHERE contype = 'x' ORDER BY conname`)
+	if err != nil {
+		t.Fatalf("query pg_constraint: %v", err)
+	}
+	defer rs.Close()
+	wantNames := map[string]bool{"t1_lower_excl": false, "t2_lower_lower1_excl": false}
+	for rs.Next() {
+		var name string
+		if err := rs.Scan(&name); err != nil {
+			t.Fatalf("scan: %v", err)
+		}
+		if _, ok := wantNames[name]; ok {
+			wantNames[name] = true
+		}
+	}
+	for name, found := range wantNames {
+		if !found {
+			t.Errorf("expected live-generated constraint name %q, not found in pg_constraint", name)
+		}
+	}
+
+	driftOps, err := differ.Diff(desired, liveSnap)
+	if err != nil {
+		t.Fatalf("drift diff: %v", err)
+	}
+	if len(driftOps) != 0 {
+		t.Errorf("expected zero drift for unnamed function-call EXCLUDE elements against a live catalog, got %d ops:", len(driftOps))
+		for _, op := range driftOps {
+			t.Errorf("  [%s] %s", op.Safety(), op.SQL())
+		}
+	}
+}
+
+// TestRoundtripUnnamedExcludeCastElementNoLiveDrift covers the type-cast
+// naming case an independent verification pass found was missing from the
+// FuncCall-only fix above: PostgreSQL's real algorithm for a TypeCast
+// element (FigureColnameInternal, confirmed via source and live testing)
+// prefers a "strong" name (a column or function call) from the cast's own
+// argument over the cast's target type — and only falls back to the
+// target type's name when the argument gives nothing better. Covers both
+// branches: a cast over a plain column (predicts the column's name) and a
+// cast over a bare operator expression (predicts the cast's own type name,
+// since the operator alone gives nothing usable).
+func TestRoundtripUnnamedExcludeCastElementNoLiveDrift(t *testing.T) {
+	connStr := testpg.Start(t)
+	ctx := context.Background()
+
+	differ := diff.New()
+	emitter := emit.New()
+	applyExec := executor.New()
+	ci := introspect.New()
+	store := newMemStore()
+
+	conn, err := executor.Connect(ctx, connStr)
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	defer conn.Close(ctx)
+
+	dir := t.TempDir()
+	f := filepath.Join(dir, "schema.dpg")
+	fixture := `TABLE t1 (
+    a integer,
+    EXCLUDE ((a::text) WITH =)
+);
+
+TABLE t2 (
+    a integer,
+    b integer,
+    EXCLUDE (((a + b)::text) WITH =)
+);`
+	if err := os.WriteFile(f, []byte(fixture), 0o644); err != nil {
+		t.Fatalf("write schema: %v", err)
+	}
+	applyFixture(t, ctx, conn, []string{f}, dir, differ, emitter, applyExec, store)
+
+	desired, err := compiler.Compile([]string{f}, dir, pipeline.Default)
+	if err != nil {
+		t.Fatalf("compile: %v", err)
+	}
+	appliedSnap := &pipeline.Snapshot{}
+	if err := snapshot.Populate(appliedSnap, desired); err != nil {
+		t.Fatalf("populate snapshot: %v", err)
+	}
+
+	liveObjects, err := ci.Introspect(ctx, conn)
+	if err != nil {
+		t.Fatalf("introspect: %v", err)
+	}
+	var managedLive []pipeline.IRObject
+	for _, obj := range liveObjects {
+		if _, ok := appliedSnap.Objects[obj.QualifiedName()]; ok {
+			managedLive = append(managedLive, obj)
+		}
+	}
+	liveSnap := &pipeline.Snapshot{}
+	if err := snapshot.Populate(liveSnap, managedLive); err != nil {
+		t.Fatalf("populate live snapshot: %v", err)
+	}
+
+	// Confirm PG actually generated the names this test's rationale claims —
+	// a guard against the zero-drift check below passing for the wrong
+	// reason (e.g. the constraints silently missing).
+	rs, err := conn.QueryRows(ctx, `SELECT conname FROM pg_constraint WHERE contype = 'x' ORDER BY conname`)
+	if err != nil {
+		t.Fatalf("query pg_constraint: %v", err)
+	}
+	defer rs.Close()
+	wantNames := map[string]bool{"t1_a_excl": false, "t2_text_excl": false}
+	for rs.Next() {
+		var name string
+		if err := rs.Scan(&name); err != nil {
+			t.Fatalf("scan: %v", err)
+		}
+		if _, ok := wantNames[name]; ok {
+			wantNames[name] = true
+		}
+	}
+	for name, found := range wantNames {
+		if !found {
+			t.Errorf("expected live-generated constraint name %q, not found in pg_constraint", name)
+		}
+	}
+
+	driftOps, err := differ.Diff(desired, liveSnap)
+	if err != nil {
+		t.Fatalf("drift diff: %v", err)
+	}
+	if len(driftOps) != 0 {
+		t.Errorf("expected zero drift for unnamed cast-based EXCLUDE elements against a live catalog, got %d ops:", len(driftOps))
+		for _, op := range driftOps {
+			t.Errorf("  [%s] %s", op.Safety(), op.SQL())
+		}
+	}
+}
+
+// TestRoundtripUnnamedExcludeExtraNodeTypesNoLiveDrift covers the four
+// remaining FigureColnameInternal node shapes an independent verification
+// pass confirmed were also predictable and worth closing: COALESCE, CASE
+// (with and without an ELSE clause), an array subscript, and COLLATE.
+func TestRoundtripUnnamedExcludeExtraNodeTypesNoLiveDrift(t *testing.T) {
+	connStr := testpg.Start(t)
+	ctx := context.Background()
+
+	differ := diff.New()
+	emitter := emit.New()
+	applyExec := executor.New()
+	ci := introspect.New()
+	store := newMemStore()
+
+	conn, err := executor.Connect(ctx, connStr)
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	defer conn.Close(ctx)
+
+	dir := t.TempDir()
+	f := filepath.Join(dir, "schema.dpg")
+	fixture := `TABLE t1 (
+    a integer,
+    EXCLUDE ((coalesce(a, 0)) WITH =)
+);
+
+TABLE t2 (
+    a integer,
+    EXCLUDE ((case when a > 0 then 1 else 2 end) WITH =)
+);
+
+TABLE t3 (
+    a integer[],
+    EXCLUDE ((a[1]) WITH =)
+);
+
+TABLE t4 (
+    a text,
+    EXCLUDE ((a COLLATE "C") WITH =)
+);`
+	if err := os.WriteFile(f, []byte(fixture), 0o644); err != nil {
+		t.Fatalf("write schema: %v", err)
+	}
+	applyFixture(t, ctx, conn, []string{f}, dir, differ, emitter, applyExec, store)
+
+	desired, err := compiler.Compile([]string{f}, dir, pipeline.Default)
+	if err != nil {
+		t.Fatalf("compile: %v", err)
+	}
+	appliedSnap := &pipeline.Snapshot{}
+	if err := snapshot.Populate(appliedSnap, desired); err != nil {
+		t.Fatalf("populate snapshot: %v", err)
+	}
+
+	liveObjects, err := ci.Introspect(ctx, conn)
+	if err != nil {
+		t.Fatalf("introspect: %v", err)
+	}
+	var managedLive []pipeline.IRObject
+	for _, obj := range liveObjects {
+		if _, ok := appliedSnap.Objects[obj.QualifiedName()]; ok {
+			managedLive = append(managedLive, obj)
+		}
+	}
+	liveSnap := &pipeline.Snapshot{}
+	if err := snapshot.Populate(liveSnap, managedLive); err != nil {
+		t.Fatalf("populate live snapshot: %v", err)
+	}
+
+	// Confirm PG actually generated the names this test's rationale claims —
+	// a guard against the zero-drift check below passing for the wrong
+	// reason (e.g. the constraints silently missing).
+	rs, err := conn.QueryRows(ctx, `SELECT conname FROM pg_constraint WHERE contype = 'x' ORDER BY conname`)
+	if err != nil {
+		t.Fatalf("query pg_constraint: %v", err)
+	}
+	defer rs.Close()
+	wantNames := map[string]bool{
+		"t1_coalesce_excl": false,
+		"t2_case_excl":     false,
+		"t3_a_excl":        false,
+		"t4_a_excl":        false,
+	}
+	for rs.Next() {
+		var name string
+		if err := rs.Scan(&name); err != nil {
+			t.Fatalf("scan: %v", err)
+		}
+		if _, ok := wantNames[name]; ok {
+			wantNames[name] = true
+		}
+	}
+	for name, found := range wantNames {
+		if !found {
+			t.Errorf("expected live-generated constraint name %q, not found in pg_constraint", name)
+		}
+	}
+
+	driftOps, err := differ.Diff(desired, liveSnap)
+	if err != nil {
+		t.Fatalf("drift diff: %v", err)
+	}
+	if len(driftOps) != 0 {
+		t.Errorf("expected zero drift for these EXCLUDE elements against a live catalog, got %d ops:", len(driftOps))
+		for _, op := range driftOps {
+			t.Errorf("  [%s] %s", op.Safety(), op.SQL())
+		}
+	}
+}

@@ -478,6 +478,7 @@ func buildConstraint(c *pg_query.Constraint, pos pipeline.SourcePos) *Constraint
 					cols = append(cols, ie.Name)
 				case ie.Expr != nil:
 					el.Expr = nodeToText(ie.Expr)
+					el.PredictedName, _ = figureIndexColname(ie.Expr)
 				}
 				el.Collation = qualifiedNameText(ie.Collation)
 				el.OpClass = qualifiedNameText(ie.Opclass)
@@ -531,6 +532,101 @@ func operatorNameText(nodes []*pg_query.Node) string {
 		return parts[1]
 	}
 	return strings.Join(parts, ".")
+}
+
+// lastNamePart returns the final component of a (possibly schema-qualified)
+// name-part list — used for a FuncCall's Funcname and a TypeCast's target
+// type name, mirroring PostgreSQL's own get_func_name/format_type-style
+// behavior, which never includes the schema (confirmed live:
+// myschema.myfunc(a) predicts the same bare "myfunc" name PG itself uses).
+func lastNamePart(nodes []*pg_query.Node) string {
+	names := nodeListToNames(nodes)
+	if len(names) == 0 {
+		return ""
+	}
+	return names[len(names)-1]
+}
+
+// figureIndexColname ports PostgreSQL's FigureColnameInternal (parser/
+// parse_target.c), called via FigureIndexColname from parse_utilcmd.c's
+// transformIndexStmt BEFORE transformExpr runs — confirmed via source that
+// this genuinely operates on the raw, untransformed parse tree (no
+// catalog/OID resolution), and confirmed live across every case below
+// (NULLIF, nested casts, a cast wrapping an operator, a parenthesized bare
+// column, COALESCE, CASE, an array subscript, and COLLATE) that the real
+// output matches exactly.
+//
+// Returns the predicted name and its strength: 0 = no information (caller
+// should not predict at all), 1 = a "weak" name (a cast's own target type,
+// or the literal "case" when CASE's ELSE clause gives nothing better —
+// used only when nothing stronger is available), 2 = a "strong" name (a
+// column, function call, COALESCE, or a CASE whose ELSE clause is itself
+// strong). The strength only matters for the two nodes that fall back to
+// a name of their own when their argument is weak — TypeCast (falls back
+// to its own target type: confirmed live "lower(a)::text" predicts
+// "lower", but "(a + b)::text" predicts "text") and CaseExpr (falls back
+// to the literal "case": PG only ever consults the ELSE clause for this,
+// deliberately ignoring every WHEN branch, confirmed live).
+//
+// Deliberately narrower than FigureColnameInternal's full node-type switch
+// (which also covers SubLink, RowExpr, MinMaxExpr, GroupingFunc, etc. —
+// irrelevant here since transformExpr's EXPR_KIND_INDEX_EXPRESSION already
+// rejects subqueries, and the others are vanishingly rare inside an
+// EXCLUDE element): ColumnRef, FuncCall, TypeCast, A_Expr's NULLIF form,
+// A_Indirection (field access / array subscript), CollateClause, CaseExpr,
+// and CoalesceExpr cover every shape confirmed live.
+func figureIndexColname(node *pg_query.Node) (name string, strength int) {
+	if node == nil {
+		return "", 0
+	}
+	switch n := node.Node.(type) {
+	case *pg_query.Node_ColumnRef:
+		if last := lastNamePart(n.ColumnRef.Fields); last != "" {
+			return last, 2
+		}
+		return "", 0
+	case *pg_query.Node_FuncCall:
+		return lastNamePart(n.FuncCall.Funcname), 2
+	case *pg_query.Node_TypeCast:
+		innerName, innerStrength := figureIndexColname(n.TypeCast.Arg)
+		if innerStrength > 1 {
+			return innerName, innerStrength
+		}
+		if n.TypeCast.TypeName != nil {
+			return lastNamePart(n.TypeCast.TypeName.Names), 1
+		}
+		return innerName, innerStrength
+	case *pg_query.Node_AExpr:
+		if n.AExpr.Kind == pg_query.A_Expr_Kind_AEXPR_NULLIF {
+			return "nullif", 2
+		}
+		return "", 0
+	case *pg_query.Node_AIndirection:
+		// A field-access suffix (".field", ignoring "*" and array subscripts
+		// — nodeListToNames/lastNamePart already skip anything that isn't a
+		// plain name, i.e. AIndices subscript nodes) wins outright; a
+		// subscript-only indirection (e.g. "a[1]") has none, so this falls
+		// through to the base expression's own name, unchanged strength.
+		if last := lastNamePart(n.AIndirection.Indirection); last != "" {
+			return last, 2
+		}
+		return figureIndexColname(n.AIndirection.Arg)
+	case *pg_query.Node_CollateClause:
+		return figureIndexColname(n.CollateClause.Arg)
+	case *pg_query.Node_CaseExpr:
+		// Only the ELSE clause (Defresult) is consulted — the WHEN branches
+		// are deliberately ignored, matching PG's own rule — falling back to
+		// the literal "case" (weak) when Defresult is absent or itself weak.
+		innerName, innerStrength := figureIndexColname(n.CaseExpr.Defresult)
+		if innerStrength > 1 {
+			return innerName, innerStrength
+		}
+		return "case", 1
+	case *pg_query.Node_CoalesceExpr:
+		return "coalesce", 2
+	default:
+		return "", 0
+	}
 }
 
 // renderExclude renders an ExcludeSpec as PostgreSQL's own EXCLUDE syntax:

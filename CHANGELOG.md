@@ -41,6 +41,83 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **An inline, unnamed `EXCLUDE` constraint produced a self-inconsistent
+  `DROP CONSTRAINT` + `ADD` pair on every single `verify`/`plan --live`
+  run**, the same class of bug already fixed for unnamed `PRIMARY
+  KEY`/`UNIQUE`/`FOREIGN KEY`/`CHECK`. Verified live that `EXCLUDE`'s
+  default name follows the exact same pattern as `UNIQUE`
+  (`table_col1_col2_excl`, every element's column name joined by `_`) and
+  goes through PostgreSQL's `ChooseRelationName` — the same schema-wide,
+  `pg_class`-scanning collision path `PRIMARY KEY`/`UNIQUE` use, not the
+  narrower constraint-name-only path `FOREIGN KEY`/`CHECK` use (confirmed
+  live: a plain table coincidentally named like an `EXCLUDE`'s predicted
+  name forces PostgreSQL to fall back to a `1`-suffixed name, exactly the
+  existing `PRIMARY KEY`/`UNIQUE` relation-name-collision case). Fixed by
+  extending the existing PK/UNIQUE/FK/CHECK auto-naming reconciliation to
+  cover `EXCLUDE` too, deriving name2 from every element's column name in
+  source order.
+  Scope: a plain column element contributes its own name; a bare,
+  top-level function-call element (e.g. `EXCLUDE ((lower(a)) WITH =)`)
+  contributes its function's name (schema-qualification stripped, matching
+  `get_func_name`'s own behavior) — confirmed live across single-arg,
+  multi-arg, nested, and schema-qualified calls that PostgreSQL's real
+  algorithm uses ONLY the bare function name for such an element, with no
+  dependence on its arguments at all, so no catalog/OID lookup is actually
+  needed to predict it. Two elements that independently derive the same
+  name (e.g. two `lower(...)` calls on different columns) get PostgreSQL's
+  own per-element disambiguating suffix (`lower`/`lower1`, confirmed
+  live), which this reconstructs too.
+  **Correction (caught by an independent verification pass, same day):**
+  the original version of this fix excluded ALL expression-based elements
+  outright, reasoning that PostgreSQL's real naming algorithm
+  (`ChooseIndexExpressionName`) needs a resolved function OID
+  (`get_func_name(FuncExpr.funcid)`) unavailable to an offline, syntax-only
+  parser. That premise doesn't hold for the common case: `get_func_name`
+  only ever returns the bare, already-known function name — never
+  schema-qualified, and identical across every overload of that name — so
+  resolving the OID is needed to disambiguate WHICH overload was called,
+  not to know what string PostgreSQL uses for the constraint name. Once
+  verified live that PostgreSQL's real algorithm doesn't even look at a
+  function call's arguments for naming purposes (confirmed extensively:
+  `lower(a)` → `lower`, `date_trunc('day', ts)` → `date_trunc`,
+  `upper(lower(a))` → `upper` — never anything derived from the
+  argument(s)), a bare top-level function-call element turned out to be
+  entirely predictable from the raw parse tree alone.
+  **Second correction (caught by an independent verification pass, same
+  day):** the claim above that a type cast (e.g. `(a::text)`) can't be
+  predicted without catalog access was ALSO too broad — repeating the
+  exact same category of mistake the first correction had just corrected
+  for function calls. PostgreSQL's real per-element naming rule
+  (`FigureColnameInternal` in `parser/parse_target.c`, invoked via
+  `FigureIndexColname` from `parse_utilcmd.c`'s `transformIndexStmt` —
+  confirmed via source that this runs BEFORE expression analysis, on the
+  raw parse tree, genuinely no catalog/OID access involved) handles a type
+  cast by recursing into its own argument first: if that argument is
+  itself a column or function call (a "strong" name), the cast is
+  transparent and the argument's name wins (confirmed live: `a::text` →
+  `a`, `lower(a)::text` → `lower`, even through two nested casts). Only
+  when the argument gives nothing usable does the cast fall back to its
+  own written target type name (confirmed live: `(a + b)::text` → `text`,
+  matching the cast's type, not the discarded operator). `NULLIF(a, b)` is
+  a further special case, always predicting the literal `nullif`. What
+  remains genuinely unpredictable is narrower than either prior version
+  claimed: only a bare, uncast operator/arithmetic/concatenation
+  expression with no column, function call, or cast anywhere in it (e.g.
+  `(a + b)` with no `::` around it) — PostgreSQL's own algorithm produces
+  no usable name for that shape either (confirmed live), so it's a
+  genuine limitation of PostgreSQL's own naming rule, not a gap this
+  tool is choosing not to close.
+  **Extension (same day, following up on an independent verification
+  pass's live-tested suggestion):** the same `FigureColnameInternal` port
+  was extended to four more node shapes confirmed live to be handled by
+  the identical mechanism: `COALESCE(...)` (always predicts the literal
+  `coalesce`, the same "act like a function" treatment PostgreSQL gives it
+  — never inspecting its arguments), `CASE ... END` (consults only the
+  `ELSE` clause, never a `WHEN` branch, falling back to the literal `case`
+  when the `ELSE` clause is absent or itself weak), an array subscript
+  (e.g. `a[1]`, which has no naming contribution of its own and recurses
+  through to the base column), and a `COLLATE` clause (transparent
+  pass-through to its argument, same as it is for `TypeCast`).
 - **`EXCLUDE` constraints could not actually be declared in DPG source at
   all.** `buildConstraint`'s `CONSTR_EXCLUSION` case discarded the entire
   body — access method, per-element operators, `WHERE` clause — down to a

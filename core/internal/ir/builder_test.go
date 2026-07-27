@@ -628,6 +628,275 @@ func TestBuildExcludeOperatorSchemaQualificationStripped(t *testing.T) {
 	}
 }
 
+// TestBuildExcludeFuncCallElementPredictedName proves a bare, top-level
+// function-call element captures its function name — needed to predict
+// PostgreSQL's real auto-generated constraint name for such an element
+// (verified live: PG's own algorithm uses only the bare function name for
+// this shape, never descending into the call's arguments).
+func TestBuildExcludeFuncCallElementPredictedName(t *testing.T) {
+	obj := buildObject(t, pipeline.KindTable,
+		`t (a text, CONSTRAINT c EXCLUDE ((lower(a)) WITH =))`, ``)
+	tbl := obj.(*ir.Table)
+	c := findExclude(tbl.Constraints)
+	if c == nil {
+		t.Fatal("EXCLUDE constraint not found")
+	}
+	if c.Exclude.Elements[0].PredictedName != "lower" {
+		t.Errorf("PredictedName: got %q, want lower", c.Exclude.Elements[0].PredictedName)
+	}
+}
+
+// TestBuildExcludeFuncCallElementMultiArgPredictedName proves the function
+// name is captured regardless of how many arguments the call has (verified
+// live: PostgreSQL's algorithm never appends argument-derived text for a
+// function-call element).
+func TestBuildExcludeFuncCallElementMultiArgPredictedName(t *testing.T) {
+	obj := buildObject(t, pipeline.KindTable,
+		`t (ts timestamp, CONSTRAINT c EXCLUDE ((date_trunc('day', ts)) WITH =))`, ``)
+	tbl := obj.(*ir.Table)
+	c := findExclude(tbl.Constraints)
+	if c == nil {
+		t.Fatal("EXCLUDE constraint not found")
+	}
+	if c.Exclude.Elements[0].PredictedName != "date_trunc" {
+		t.Errorf("PredictedName: got %q, want date_trunc", c.Exclude.Elements[0].PredictedName)
+	}
+}
+
+// TestBuildExcludeFuncCallElementSchemaQualifiedPredictedName proves a
+// schema-qualified function call's PredictedName is the bare function name
+// only — matching PostgreSQL's get_func_name, which never includes the
+// schema (verified live for both pg_catalog and a user-defined schema).
+func TestBuildExcludeFuncCallElementSchemaQualifiedPredictedName(t *testing.T) {
+	obj := buildObject(t, pipeline.KindTable,
+		`t (a integer, CONSTRAINT c EXCLUDE ((myschema.myfunc(a)) WITH =))`, ``)
+	tbl := obj.(*ir.Table)
+	c := findExclude(tbl.Constraints)
+	if c == nil {
+		t.Fatal("EXCLUDE constraint not found")
+	}
+	if c.Exclude.Elements[0].PredictedName != "myfunc" {
+		t.Errorf("PredictedName: got %q, want myfunc (schema stripped)", c.Exclude.Elements[0].PredictedName)
+	}
+}
+
+// TestBuildExcludeBareOperatorElementPredictedNameEmpty proves PredictedName
+// stays empty for a bare, uncast operator expression — PostgreSQL's real
+// generated name for this shape is the literal "expr" (verified live), a
+// constant this tool does not attempt to reproduce (it carries no
+// information about the actual expression, so hardcoding it would be pure
+// guesswork dressed up as a prediction, not meaningfully better than not
+// predicting at all).
+func TestBuildExcludeBareOperatorElementPredictedNameEmpty(t *testing.T) {
+	obj := buildObject(t, pipeline.KindTable,
+		`t (a integer, b integer, CONSTRAINT c EXCLUDE ((a + b) WITH =))`, ``)
+	tbl := obj.(*ir.Table)
+	c := findExclude(tbl.Constraints)
+	if c == nil {
+		t.Fatal("EXCLUDE constraint not found")
+	}
+	if c.Exclude.Elements[0].PredictedName != "" {
+		t.Errorf("PredictedName: got %q, want empty (bare operator, no cast)", c.Exclude.Elements[0].PredictedName)
+	}
+}
+
+// TestBuildExcludeParenthesizedColumnPredictedName proves a bare column
+// wrapped in redundant parens — "(a)" rather than "a" — still predicts
+// correctly, matching PostgreSQL's own ColumnRef handling (verified live:
+// EXCLUDE ((a) WITH =) generates the same name as EXCLUDE (a WITH =) would).
+func TestBuildExcludeParenthesizedColumnPredictedName(t *testing.T) {
+	obj := buildObject(t, pipeline.KindTable,
+		`t (a integer, CONSTRAINT c EXCLUDE ((a) WITH =))`, ``)
+	tbl := obj.(*ir.Table)
+	c := findExclude(tbl.Constraints)
+	if c == nil {
+		t.Fatal("EXCLUDE constraint not found")
+	}
+	if c.Exclude.Elements[0].PredictedName != "a" {
+		t.Errorf("PredictedName: got %q, want a", c.Exclude.Elements[0].PredictedName)
+	}
+}
+
+// TestBuildExcludeNullifElementPredictedName proves NULLIF(a, b) predicts
+// the literal "nullif" — PostgreSQL's own FigureColnameInternal special-cases
+// NULLIF to act like a regular function call for naming purposes (verified
+// live: EXCLUDE ((nullif(a,b)) WITH =) generates "..._nullif_excl").
+func TestBuildExcludeNullifElementPredictedName(t *testing.T) {
+	obj := buildObject(t, pipeline.KindTable,
+		`t (a integer, b integer, CONSTRAINT c EXCLUDE ((nullif(a, b)) WITH =))`, ``)
+	tbl := obj.(*ir.Table)
+	c := findExclude(tbl.Constraints)
+	if c == nil {
+		t.Fatal("EXCLUDE constraint not found")
+	}
+	if c.Exclude.Elements[0].PredictedName != "nullif" {
+		t.Errorf("PredictedName: got %q, want nullif", c.Exclude.Elements[0].PredictedName)
+	}
+}
+
+// TestBuildExcludeCastOverColumnPredictedName proves a cast wrapping a
+// plain column predicts the COLUMN's name, not the cast's target type —
+// PostgreSQL's real algorithm prefers a "strong" name (a column or function
+// call) from the cast's argument over its own type name (verified live:
+// EXCLUDE ((a::text) WITH =) generates "..._a_excl", not "..._text_excl").
+func TestBuildExcludeCastOverColumnPredictedName(t *testing.T) {
+	obj := buildObject(t, pipeline.KindTable,
+		`t (a integer, CONSTRAINT c EXCLUDE ((a::text) WITH =))`, ``)
+	tbl := obj.(*ir.Table)
+	c := findExclude(tbl.Constraints)
+	if c == nil {
+		t.Fatal("EXCLUDE constraint not found")
+	}
+	if c.Exclude.Elements[0].PredictedName != "a" {
+		t.Errorf("PredictedName: got %q, want a (the column, not the cast type)", c.Exclude.Elements[0].PredictedName)
+	}
+}
+
+// TestBuildExcludeCastOverFuncCallPredictedName proves a cast wrapping a
+// function call ALSO prefers the function's name over the cast's target
+// type (verified live: EXCLUDE ((lower(a)::text) WITH =) generates
+// "..._lower_excl", not "..._text_excl").
+func TestBuildExcludeCastOverFuncCallPredictedName(t *testing.T) {
+	obj := buildObject(t, pipeline.KindTable,
+		`t (a text, CONSTRAINT c EXCLUDE ((lower(a)::text) WITH =))`, ``)
+	tbl := obj.(*ir.Table)
+	c := findExclude(tbl.Constraints)
+	if c == nil {
+		t.Fatal("EXCLUDE constraint not found")
+	}
+	if c.Exclude.Elements[0].PredictedName != "lower" {
+		t.Errorf("PredictedName: got %q, want lower (the function, not the cast type)", c.Exclude.Elements[0].PredictedName)
+	}
+}
+
+// TestBuildExcludeCastOverOperatorPredictedNameFallsBackToType is the key
+// divergence case: a cast wrapping a BARE OPERATOR expression (which alone
+// predicts nothing at all — see
+// TestBuildExcludeBareOperatorElementPredictedNameEmpty) falls back to the
+// cast's OWN target type name, since the operator gave nothing "strong" to
+// prefer instead (verified live: EXCLUDE (((a + b)::text) WITH =) generates
+// "..._text_excl").
+func TestBuildExcludeCastOverOperatorPredictedNameFallsBackToType(t *testing.T) {
+	obj := buildObject(t, pipeline.KindTable,
+		`t (a integer, b integer, CONSTRAINT c EXCLUDE (((a + b)::text) WITH =))`, ``)
+	tbl := obj.(*ir.Table)
+	c := findExclude(tbl.Constraints)
+	if c == nil {
+		t.Fatal("EXCLUDE constraint not found")
+	}
+	if c.Exclude.Elements[0].PredictedName != "text" {
+		t.Errorf("PredictedName: got %q, want text (cast's own target type, operator gave nothing strong)", c.Exclude.Elements[0].PredictedName)
+	}
+}
+
+// TestBuildExcludeNestedCastPredictedName proves a cast-of-a-cast still
+// resolves through to the innermost strong name (verified live:
+// EXCLUDE (((a::text)::varchar) WITH =) generates "..._a_excl").
+func TestBuildExcludeNestedCastPredictedName(t *testing.T) {
+	obj := buildObject(t, pipeline.KindTable,
+		`t (a integer, CONSTRAINT c EXCLUDE (((a::text)::varchar) WITH =))`, ``)
+	tbl := obj.(*ir.Table)
+	c := findExclude(tbl.Constraints)
+	if c == nil {
+		t.Fatal("EXCLUDE constraint not found")
+	}
+	if c.Exclude.Elements[0].PredictedName != "a" {
+		t.Errorf("PredictedName: got %q, want a", c.Exclude.Elements[0].PredictedName)
+	}
+}
+
+// TestBuildExcludeCoalesceElementPredictedName proves COALESCE(...) predicts
+// the literal "coalesce" — PostgreSQL's own FigureColnameInternal treats it
+// like a regular function call for naming, but unlike a real FuncCall it
+// never even inspects which function-like node it is (verified live:
+// EXCLUDE ((coalesce(a,0)) WITH =) generates "..._coalesce_excl", the same
+// literal regardless of COALESCE's arguments).
+func TestBuildExcludeCoalesceElementPredictedName(t *testing.T) {
+	obj := buildObject(t, pipeline.KindTable,
+		`t (a integer, CONSTRAINT c EXCLUDE ((coalesce(a, 0)) WITH =))`, ``)
+	tbl := obj.(*ir.Table)
+	c := findExclude(tbl.Constraints)
+	if c == nil {
+		t.Fatal("EXCLUDE constraint not found")
+	}
+	if c.Exclude.Elements[0].PredictedName != "coalesce" {
+		t.Errorf("PredictedName: got %q, want coalesce", c.Exclude.Elements[0].PredictedName)
+	}
+}
+
+// TestBuildExcludeCaseElementWithElsePredictedName proves a CASE expression
+// falls back to the literal "case" when its ELSE clause (Defresult) isn't
+// itself a strong name — PostgreSQL's real algorithm deliberately only ever
+// consults the ELSE clause, never the WHEN branches, for naming purposes
+// (verified live: EXCLUDE ((case when a>0 then 1 else 2 end) WITH =)
+// generates "..._case_excl", regardless of what the WHEN branch contains).
+func TestBuildExcludeCaseElementWithElsePredictedName(t *testing.T) {
+	obj := buildObject(t, pipeline.KindTable,
+		`t (a integer, CONSTRAINT c EXCLUDE ((case when a > 0 then 1 else 2 end) WITH =))`, ``)
+	tbl := obj.(*ir.Table)
+	c := findExclude(tbl.Constraints)
+	if c == nil {
+		t.Fatal("EXCLUDE constraint not found")
+	}
+	if c.Exclude.Elements[0].PredictedName != "case" {
+		t.Errorf("PredictedName: got %q, want case", c.Exclude.Elements[0].PredictedName)
+	}
+}
+
+// TestBuildExcludeCaseElementNoElsePredictedName proves a CASE expression
+// with NO ELSE clause at all (Defresult absent) also falls back to "case",
+// not empty/unpredictable (verified live: EXCLUDE
+// ((case when a>0 then 1 end) WITH =) generates "..._case_excl" too).
+func TestBuildExcludeCaseElementNoElsePredictedName(t *testing.T) {
+	obj := buildObject(t, pipeline.KindTable,
+		`t (a integer, CONSTRAINT c EXCLUDE ((case when a > 0 then 1 end) WITH =))`, ``)
+	tbl := obj.(*ir.Table)
+	c := findExclude(tbl.Constraints)
+	if c == nil {
+		t.Fatal("EXCLUDE constraint not found")
+	}
+	if c.Exclude.Elements[0].PredictedName != "case" {
+		t.Errorf("PredictedName: got %q, want case", c.Exclude.Elements[0].PredictedName)
+	}
+}
+
+// TestBuildExcludeArraySubscriptElementPredictedName proves an array
+// subscript expression (with no field-access component) recurses through
+// to the underlying column — PostgreSQL's A_Indirection handling only
+// takes a name directly from a genuine field-access suffix, never from a
+// subscript, falling back to the base expression otherwise (verified live:
+// EXCLUDE (((array[a,b])[1]) WITH =) generates "..._a_excl", the base
+// column's name, not something subscript-derived).
+func TestBuildExcludeArraySubscriptElementPredictedName(t *testing.T) {
+	obj := buildObject(t, pipeline.KindTable,
+		`t (a integer, CONSTRAINT c EXCLUDE ((a[1]) WITH =))`, ``)
+	tbl := obj.(*ir.Table)
+	c := findExclude(tbl.Constraints)
+	if c == nil {
+		t.Fatal("EXCLUDE constraint not found")
+	}
+	if c.Exclude.Elements[0].PredictedName != "a" {
+		t.Errorf("PredictedName: got %q, want a", c.Exclude.Elements[0].PredictedName)
+	}
+}
+
+// TestBuildExcludeCollateElementPredictedName proves a COLLATE clause is
+// transparent for naming purposes — PostgreSQL's CollateClause handling is
+// a pure pass-through to its argument, no naming contribution of its own
+// (verified live: EXCLUDE ((a COLLATE "C") WITH =) generates "..._a_excl").
+func TestBuildExcludeCollateElementPredictedName(t *testing.T) {
+	obj := buildObject(t, pipeline.KindTable,
+		`t (a text, CONSTRAINT c EXCLUDE ((a COLLATE "C") WITH =))`, ``)
+	tbl := obj.(*ir.Table)
+	c := findExclude(tbl.Constraints)
+	if c == nil {
+		t.Fatal("EXCLUDE constraint not found")
+	}
+	if c.Exclude.Elements[0].PredictedName != "a" {
+		t.Errorf("PredictedName: got %q, want a", c.Exclude.Elements[0].PredictedName)
+	}
+}
+
 // ── TypeRef ───────────────────────────────────────────────────────────────────
 
 func TestTypeRefBuiltIn(t *testing.T) {

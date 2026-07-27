@@ -1668,6 +1668,575 @@ func TestDiffUnnamedCheckNoRelationNameCollision(t *testing.T) {
 	}
 }
 
+// ── Unnamed EXCLUDE / live-generated-name matching ──────────────────────────────
+
+// TestDiffUnnamedExcludeMatchesLiveGeneratedName proves an unnamed EXCLUDE
+// whose every element is a plain column matches PG's real generated name
+// (confirmed live: "bookings_room_during_excl" for
+// EXCLUDE USING gist (room WITH =, during WITH &&) on table "bookings" —
+// heap.c/indexcmds.c's name2-is-every-colname-joined-by-underscore rule,
+// same as UNIQUE).
+func TestDiffUnnamedExcludeMatchesLiveGeneratedName(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.bookings", &snapshot.SnapObject{
+		Kind: "table",
+		Table: &snapshot.SnapTable{
+			Schema: "public",
+			Name:   "bookings",
+			Columns: []snapshot.SnapColumn{
+				{Name: "room", Type: "integer"},
+				{Name: "during", Type: "tsrange"},
+			},
+			Constraints: []snapshot.SnapConstraint{
+				{Name: "bookings_room_during_excl", Type: "EXCLUDE",
+					Expr: `EXCLUDE USING gist ("room" WITH =, "during" WITH &&)`},
+			},
+		},
+	})
+	desired := []pipeline.IRObject{
+		&ir.Table{
+			Schema: "public", Name: "bookings",
+			Columns: []*ir.Column{
+				{Name: "room", Type: ir.TypeRef{Name: "integer"}},
+				{Name: "during", Type: ir.TypeRef{Name: "tsrange"}},
+			},
+			Constraints: []*ir.Constraint{
+				{Type: "EXCLUDE", Columns: []string{"room", "during"},
+					Exclude: &ir.ExcludeSpec{
+						AccessMethod: "gist",
+						Elements: []ir.ExcludeElement{
+							{Column: "room", Operator: "="},
+							{Column: "during", Operator: "&&"},
+						},
+					},
+					Expr: `EXCLUDE USING gist ("room" WITH =, "during" WITH &&)`,
+				},
+			},
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ops) != 0 {
+		t.Errorf("expected zero ops (unnamed EXCLUDE must match live-generated bookings_room_during_excl), got: %v", sqlList(ops))
+	}
+}
+
+// TestDiffUnnamedExcludeSingleColumnMatchesLiveGeneratedName covers the
+// single-element case (confirmed live: "singles_a_excl" for
+// EXCLUDE (a WITH =) on table "singles").
+func TestDiffUnnamedExcludeSingleColumnMatchesLiveGeneratedName(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.singles", &snapshot.SnapObject{
+		Kind: "table",
+		Table: &snapshot.SnapTable{
+			Schema:  "public",
+			Name:    "singles",
+			Columns: []snapshot.SnapColumn{{Name: "a", Type: "integer"}},
+			Constraints: []snapshot.SnapConstraint{
+				{Name: "singles_a_excl", Type: "EXCLUDE", Expr: `EXCLUDE USING btree ("a" WITH =)`},
+			},
+		},
+	})
+	desired := []pipeline.IRObject{
+		&ir.Table{
+			Schema: "public", Name: "singles",
+			Columns: []*ir.Column{{Name: "a", Type: ir.TypeRef{Name: "integer"}}},
+			Constraints: []*ir.Constraint{
+				{Type: "EXCLUDE", Columns: []string{"a"},
+					Exclude: &ir.ExcludeSpec{
+						AccessMethod: "btree",
+						Elements:     []ir.ExcludeElement{{Column: "a", Operator: "="}},
+					},
+					Expr: `EXCLUDE USING btree ("a" WITH =)`,
+				},
+			},
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ops) != 0 {
+		t.Errorf("expected zero ops (unnamed EXCLUDE must match live-generated singles_a_excl), got: %v", sqlList(ops))
+	}
+}
+
+// TestDiffUnnamedExcludeRemovalStillDetected proves the fix doesn't paper
+// over a genuinely removed EXCLUDE constraint.
+func TestDiffUnnamedExcludeRemovalStillDetected(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.singles", &snapshot.SnapObject{
+		Kind: "table",
+		Table: &snapshot.SnapTable{
+			Schema:  "public",
+			Name:    "singles",
+			Columns: []snapshot.SnapColumn{{Name: "a", Type: "integer"}},
+			Constraints: []snapshot.SnapConstraint{
+				{Name: "singles_a_excl", Type: "EXCLUDE", Expr: `EXCLUDE USING btree ("a" WITH =)`},
+			},
+		},
+	})
+	desired := []pipeline.IRObject{
+		&ir.Table{
+			Schema: "public", Name: "singles",
+			Columns: []*ir.Column{{Name: "a", Type: ir.TypeRef{Name: "integer"}}},
+			// No EXCLUDE constraint at all — genuinely removed.
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsSQL(ops, "DROP CONSTRAINT") || !containsSQL(ops, "singles_a_excl") {
+		t.Errorf("expected DROP CONSTRAINT singles_a_excl for the removed EXCLUDE, got: %v", sqlList(ops))
+	}
+}
+
+// TestDiffUnnamedExcludeExpressionElementNotPredicted proves an EXCLUDE with
+// an expression-based element (not a plain column) is correctly NOT given a
+// predicted name — PostgreSQL's own ChooseIndexExpressionName needs a fully
+// analyzed, OID-resolved expression tree that pg_query's raw parse never
+// has, so guessing would risk a FALSE match (silently hiding a real
+// definition change) rather than just a missed one. This must fall back to
+// the structural-signature-only strategy (still correct offline; only
+// verify/plan --live loses reconciliation for this specific EXCLUDE) rather
+// than silently predicting a wrong name.
+func TestDiffUnnamedExcludeExpressionElementNotPredicted(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.t", &snapshot.SnapObject{
+		Kind: "table",
+		Table: &snapshot.SnapTable{
+			Schema:  "public",
+			Name:    "t",
+			Columns: []snapshot.SnapColumn{{Name: "a", Type: "integer"}, {Name: "b", Type: "integer"}},
+			Constraints: []snapshot.SnapConstraint{
+				// A live-generated name for an operator-based expression
+				// element — confirmed live that PostgreSQL's real algorithm
+				// produces the literal "expr" here (unlike a bare function
+				// call, which gets its own name — see
+				// TestDiffUnnamedExcludeFuncCallElementMatchesLiveGeneratedName),
+				// which this tool does not attempt to replicate.
+				{Name: "t_expr_excl", Type: "EXCLUDE", Expr: `EXCLUDE USING btree ((a + b) WITH =)`},
+			},
+		},
+	})
+	desired := []pipeline.IRObject{
+		&ir.Table{
+			Schema: "public", Name: "t",
+			Columns: []*ir.Column{{Name: "a", Type: ir.TypeRef{Name: "integer"}}, {Name: "b", Type: ir.TypeRef{Name: "integer"}}},
+			Constraints: []*ir.Constraint{
+				{Type: "EXCLUDE",
+					Exclude: &ir.ExcludeSpec{
+						AccessMethod: "btree",
+						// PredictedName intentionally left unset — "a + b" is
+						// a bare, uncast operator expression, matching what
+						// buildConstraint would actually produce for it.
+						Elements: []ir.ExcludeElement{{Expr: "a + b", Operator: "="}},
+					},
+					Expr: `EXCLUDE USING btree ((a + b) WITH =)`,
+				},
+			},
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Not predicted, so the unnamed desired side and the named snapshot side
+	// don't match by name — but the desired side's structural signature also
+	// doesn't match the snapshot's (named) key, so this correctly falls
+	// through to "genuinely different constraint": a DROP of the old name
+	// plus an ADD of the new (unnamed) one. This is the documented, accepted
+	// limitation — not silence, and not a false match.
+	if !containsSQL(ops, "DROP CONSTRAINT") || !containsSQL(ops, "t_expr_excl") {
+		t.Errorf("expected DROP CONSTRAINT t_expr_excl (no false match), got: %v", sqlList(ops))
+	}
+	if !containsSQL(ops, "ADD") {
+		t.Errorf("expected the unnamed EXCLUDE to be (re-)added, got: %v", sqlList(ops))
+	}
+}
+
+// TestDiffUnnamedExcludeFuncCallElementMatchesLiveGeneratedName proves an
+// unnamed EXCLUDE with a bare, top-level function-call element predicts
+// PostgreSQL's real generated name (confirmed live: "t_lower_excl" for
+// EXCLUDE ((lower(a)) WITH =) on table "t") — this is the case an earlier
+// pass of this feature incorrectly excluded as "requires OID resolution,
+// infeasible offline"; the exclusion's premise didn't hold once verified
+// live: PostgreSQL's real algorithm only ever uses the bare function name
+// for such an element, never descending into its arguments, so no OID
+// lookup is actually needed.
+func TestDiffUnnamedExcludeFuncCallElementMatchesLiveGeneratedName(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.t", &snapshot.SnapObject{
+		Kind: "table",
+		Table: &snapshot.SnapTable{
+			Schema:  "public",
+			Name:    "t",
+			Columns: []snapshot.SnapColumn{{Name: "a", Type: "text"}},
+			Constraints: []snapshot.SnapConstraint{
+				{Name: "t_lower_excl", Type: "EXCLUDE", Expr: `EXCLUDE USING btree ((lower(a)) WITH =)`},
+			},
+		},
+	})
+	desired := []pipeline.IRObject{
+		&ir.Table{
+			Schema: "public", Name: "t",
+			Columns: []*ir.Column{{Name: "a", Type: ir.TypeRef{Name: "text"}}},
+			Constraints: []*ir.Constraint{
+				{Type: "EXCLUDE",
+					Exclude: &ir.ExcludeSpec{
+						AccessMethod: "btree",
+						Elements:     []ir.ExcludeElement{{Expr: "lower(a)", PredictedName: "lower", Operator: "="}},
+					},
+					Expr: `EXCLUDE USING btree ((lower(a)) WITH =)`,
+				},
+			},
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ops) != 0 {
+		t.Errorf("expected zero ops (unnamed function-call EXCLUDE must match live-generated t_lower_excl), got: %v", sqlList(ops))
+	}
+}
+
+// TestDiffUnnamedExcludeSameFuncNameElementsDeduped proves two elements
+// that independently derive the SAME function name (different columns,
+// same function) get PostgreSQL's own per-element disambiguating suffix —
+// confirmed live: EXCLUDE ((lower(a)) WITH =, (lower(b)) WITH =) on table
+// "t" generates "t_lower_lower1_excl", not "t_lower_lower_excl".
+func TestDiffUnnamedExcludeSameFuncNameElementsDeduped(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.t", &snapshot.SnapObject{
+		Kind: "table",
+		Table: &snapshot.SnapTable{
+			Schema:  "public",
+			Name:    "t",
+			Columns: []snapshot.SnapColumn{{Name: "a", Type: "text"}, {Name: "b", Type: "text"}},
+			Constraints: []snapshot.SnapConstraint{
+				{Name: "t_lower_lower1_excl", Type: "EXCLUDE", Expr: `EXCLUDE USING btree ((lower(a)) WITH =, (lower(b)) WITH =)`},
+			},
+		},
+	})
+	desired := []pipeline.IRObject{
+		&ir.Table{
+			Schema: "public", Name: "t",
+			Columns: []*ir.Column{{Name: "a", Type: ir.TypeRef{Name: "text"}}, {Name: "b", Type: ir.TypeRef{Name: "text"}}},
+			Constraints: []*ir.Constraint{
+				{Type: "EXCLUDE",
+					Exclude: &ir.ExcludeSpec{
+						AccessMethod: "btree",
+						Elements: []ir.ExcludeElement{
+							{Expr: "lower(a)", PredictedName: "lower", Operator: "="},
+							{Expr: "lower(b)", PredictedName: "lower", Operator: "="},
+						},
+					},
+					Expr: `EXCLUDE USING btree ((lower(a)) WITH =, (lower(b)) WITH =)`,
+				},
+			},
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ops) != 0 {
+		t.Errorf("expected zero ops (must predict deduped t_lower_lower1_excl), got: %v", sqlList(ops))
+	}
+}
+
+// TestDiffUnnamedExcludeMixedColumnAndFuncCallElements proves a mix of a
+// plain column element and a function-call element predicts correctly
+// (confirmed live: "t_a_lower_excl" for EXCLUDE (a WITH =, (lower(b)) WITH =)).
+func TestDiffUnnamedExcludeMixedColumnAndFuncCallElements(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.t", &snapshot.SnapObject{
+		Kind: "table",
+		Table: &snapshot.SnapTable{
+			Schema:  "public",
+			Name:    "t",
+			Columns: []snapshot.SnapColumn{{Name: "a", Type: "integer"}, {Name: "b", Type: "text"}},
+			Constraints: []snapshot.SnapConstraint{
+				{Name: "t_a_lower_excl", Type: "EXCLUDE", Expr: `EXCLUDE USING btree ("a" WITH =, (lower(b)) WITH =)`},
+			},
+		},
+	})
+	desired := []pipeline.IRObject{
+		&ir.Table{
+			Schema: "public", Name: "t",
+			Columns: []*ir.Column{{Name: "a", Type: ir.TypeRef{Name: "integer"}}, {Name: "b", Type: ir.TypeRef{Name: "text"}}},
+			Constraints: []*ir.Constraint{
+				{Type: "EXCLUDE", Columns: []string{"a"},
+					Exclude: &ir.ExcludeSpec{
+						AccessMethod: "btree",
+						Elements: []ir.ExcludeElement{
+							{Column: "a", Operator: "="},
+							{Expr: "lower(b)", PredictedName: "lower", Operator: "="},
+						},
+					},
+					Expr: `EXCLUDE USING btree ("a" WITH =, (lower(b)) WITH =)`,
+				},
+			},
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ops) != 0 {
+		t.Errorf("expected zero ops (must predict mixed-element t_a_lower_excl), got: %v", sqlList(ops))
+	}
+}
+
+// TestDiffUnnamedExcludeCastElementMatchesLiveGeneratedName proves a cast
+// wrapping a plain column predicts PostgreSQL's real generated name
+// end-to-end through the diff layer — confirmed live: "t_a_excl" for
+// EXCLUDE ((a::text) WITH =) on table "t" (the column's own name wins over
+// the cast's target type, since a ColumnRef is a "strong" name).
+func TestDiffUnnamedExcludeCastElementMatchesLiveGeneratedName(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.t", &snapshot.SnapObject{
+		Kind: "table",
+		Table: &snapshot.SnapTable{
+			Schema:  "public",
+			Name:    "t",
+			Columns: []snapshot.SnapColumn{{Name: "a", Type: "integer"}},
+			Constraints: []snapshot.SnapConstraint{
+				{Name: "t_a_excl", Type: "EXCLUDE", Expr: `EXCLUDE USING btree ((a::text) WITH =)`},
+			},
+		},
+	})
+	desired := []pipeline.IRObject{
+		&ir.Table{
+			Schema: "public", Name: "t",
+			Columns: []*ir.Column{{Name: "a", Type: ir.TypeRef{Name: "integer"}}},
+			Constraints: []*ir.Constraint{
+				{Type: "EXCLUDE",
+					Exclude: &ir.ExcludeSpec{
+						AccessMethod: "btree",
+						Elements:     []ir.ExcludeElement{{Expr: "a::text", PredictedName: "a", Operator: "="}},
+					},
+					Expr: `EXCLUDE USING btree ((a::text) WITH =)`,
+				},
+			},
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ops) != 0 {
+		t.Errorf("expected zero ops (unnamed cast-over-column EXCLUDE must match live-generated t_a_excl), got: %v", sqlList(ops))
+	}
+}
+
+// TestDiffUnnamedExcludeCastOverOperatorMatchesLiveGeneratedName proves a
+// cast wrapping a bare operator expression predicts the cast's OWN target
+// type name — confirmed live: "t_text_excl" for
+// EXCLUDE (((a + b)::text) WITH =) on table "t".
+func TestDiffUnnamedExcludeCastOverOperatorMatchesLiveGeneratedName(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.t", &snapshot.SnapObject{
+		Kind: "table",
+		Table: &snapshot.SnapTable{
+			Schema:  "public",
+			Name:    "t",
+			Columns: []snapshot.SnapColumn{{Name: "a", Type: "integer"}, {Name: "b", Type: "integer"}},
+			Constraints: []snapshot.SnapConstraint{
+				{Name: "t_text_excl", Type: "EXCLUDE", Expr: `EXCLUDE USING btree (((a + b)::text) WITH =)`},
+			},
+		},
+	})
+	desired := []pipeline.IRObject{
+		&ir.Table{
+			Schema: "public", Name: "t",
+			Columns: []*ir.Column{{Name: "a", Type: ir.TypeRef{Name: "integer"}}, {Name: "b", Type: ir.TypeRef{Name: "integer"}}},
+			Constraints: []*ir.Constraint{
+				{Type: "EXCLUDE",
+					Exclude: &ir.ExcludeSpec{
+						AccessMethod: "btree",
+						Elements:     []ir.ExcludeElement{{Expr: "(a + b)::text", PredictedName: "text", Operator: "="}},
+					},
+					Expr: `EXCLUDE USING btree (((a + b)::text) WITH =)`,
+				},
+			},
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ops) != 0 {
+		t.Errorf("expected zero ops (unnamed cast-over-operator EXCLUDE must match live-generated t_text_excl), got: %v", sqlList(ops))
+	}
+}
+
+// TestDiffUnnamedExcludeCoalesceElementMatchesLiveGeneratedName proves a
+// COALESCE element predicts PostgreSQL's real generated name end-to-end
+// through the diff layer — confirmed live: "t_coalesce_excl" for
+// EXCLUDE ((coalesce(a,0)) WITH =) on table "t".
+func TestDiffUnnamedExcludeCoalesceElementMatchesLiveGeneratedName(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.t", &snapshot.SnapObject{
+		Kind: "table",
+		Table: &snapshot.SnapTable{
+			Schema:  "public",
+			Name:    "t",
+			Columns: []snapshot.SnapColumn{{Name: "a", Type: "integer"}},
+			Constraints: []snapshot.SnapConstraint{
+				{Name: "t_coalesce_excl", Type: "EXCLUDE", Expr: `EXCLUDE USING btree ((coalesce(a, 0)) WITH =)`},
+			},
+		},
+	})
+	desired := []pipeline.IRObject{
+		&ir.Table{
+			Schema: "public", Name: "t",
+			Columns: []*ir.Column{{Name: "a", Type: ir.TypeRef{Name: "integer"}}},
+			Constraints: []*ir.Constraint{
+				{Type: "EXCLUDE",
+					Exclude: &ir.ExcludeSpec{
+						AccessMethod: "btree",
+						Elements:     []ir.ExcludeElement{{Expr: "coalesce(a, 0)", PredictedName: "coalesce", Operator: "="}},
+					},
+					Expr: `EXCLUDE USING btree ((coalesce(a, 0)) WITH =)`,
+				},
+			},
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ops) != 0 {
+		t.Errorf("expected zero ops (unnamed coalesce EXCLUDE must match live-generated t_coalesce_excl), got: %v", sqlList(ops))
+	}
+}
+
+// TestDiffUnnamedExcludeRelationNameCollision is the regression guard for
+// EXCLUDE's schema-wide relation-name collision scope — confirmed live: a
+// plain table literally named "t2_a_excl" forces PostgreSQL to fall back to
+// "t2_a_excl1" for an unnamed EXCLUDE on table "t2", even though no OTHER
+// constraint is named "t2_a_excl". Mirrors
+// TestDiffUnnamedPrimaryKeyRelationNameCollision's PK case exactly.
+func TestDiffUnnamedExcludeRelationNameCollision(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.t2_a_excl", &snapshot.SnapObject{
+		Kind: "table",
+		Table: &snapshot.SnapTable{
+			Schema:  "public",
+			Name:    "t2_a_excl",
+			Columns: []snapshot.SnapColumn{{Name: "x", Type: "bigint"}},
+		},
+	})
+	_ = snap.SetObject("public.t2", &snapshot.SnapObject{
+		Kind: "table",
+		Table: &snapshot.SnapTable{
+			Schema:  "public",
+			Name:    "t2",
+			Columns: []snapshot.SnapColumn{{Name: "a", Type: "integer"}},
+			Constraints: []snapshot.SnapConstraint{
+				// The name PG actually assigns once "t2_a_excl" the relation
+				// is taken: it falls back to the next available suffix.
+				{Name: "t2_a_excl1", Type: "EXCLUDE", Expr: `EXCLUDE USING btree ("a" WITH =)`},
+			},
+		},
+	})
+	desired := []pipeline.IRObject{
+		&ir.Table{
+			Schema: "public", Name: "t2_a_excl",
+			Columns: []*ir.Column{{Name: "x", Type: ir.TypeRef{Name: "bigint"}}},
+		},
+		&ir.Table{
+			Schema: "public", Name: "t2",
+			Columns: []*ir.Column{{Name: "a", Type: ir.TypeRef{Name: "integer"}}},
+			Constraints: []*ir.Constraint{
+				{Type: "EXCLUDE", Columns: []string{"a"},
+					Exclude: &ir.ExcludeSpec{
+						AccessMethod: "btree",
+						Elements:     []ir.ExcludeElement{{Column: "a", Operator: "="}},
+					},
+					Expr: `EXCLUDE USING btree ("a" WITH =)`,
+				},
+			},
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ops) != 0 {
+		t.Errorf("expected zero ops: unnamed EXCLUDE on \"t2\" must predict \"t2_a_excl1\" (relation-name collision with table \"t2_a_excl\"), got: %v", sqlList(ops))
+	}
+}
+
+// TestDiffUnnamedExcludeNoFalseCrossTableCollision proves two different
+// tables' own unnamed EXCLUDE constraints predict two DIFFERENT names
+// (name1 embeds the table name), so schemaConstraintNames/
+// schemaRelationNames don't cause a false cross-table collision.
+func TestDiffUnnamedExcludeNoFalseCrossTableCollision(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.widgets", &snapshot.SnapObject{
+		Kind: "table",
+		Table: &snapshot.SnapTable{
+			Schema:  "public",
+			Name:    "widgets",
+			Columns: []snapshot.SnapColumn{{Name: "a", Type: "integer"}},
+			Constraints: []snapshot.SnapConstraint{
+				{Name: "widgets_a_excl", Type: "EXCLUDE", Expr: `EXCLUDE USING btree ("a" WITH =)`},
+			},
+		},
+	})
+	_ = snap.SetObject("public.orders", &snapshot.SnapObject{
+		Kind: "table",
+		Table: &snapshot.SnapTable{
+			Schema:  "public",
+			Name:    "orders",
+			Columns: []snapshot.SnapColumn{{Name: "a", Type: "integer"}},
+			Constraints: []snapshot.SnapConstraint{
+				{Name: "orders_a_excl", Type: "EXCLUDE", Expr: `EXCLUDE USING btree ("a" WITH =)`},
+			},
+		},
+	})
+	excl := func() *ir.ExcludeSpec {
+		return &ir.ExcludeSpec{AccessMethod: "btree", Elements: []ir.ExcludeElement{{Column: "a", Operator: "="}}}
+	}
+	desired := []pipeline.IRObject{
+		&ir.Table{
+			Schema: "public", Name: "widgets",
+			Columns:     []*ir.Column{{Name: "a", Type: ir.TypeRef{Name: "integer"}}},
+			Constraints: []*ir.Constraint{{Type: "EXCLUDE", Columns: []string{"a"}, Exclude: excl(), Expr: `EXCLUDE USING btree ("a" WITH =)`}},
+		},
+		&ir.Table{
+			Schema: "public", Name: "orders",
+			Columns:     []*ir.Column{{Name: "a", Type: ir.TypeRef{Name: "integer"}}},
+			Constraints: []*ir.Constraint{{Type: "EXCLUDE", Columns: []string{"a"}, Exclude: excl(), Expr: `EXCLUDE USING btree ("a" WITH =)`}},
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ops) != 0 {
+		t.Errorf("expected zero ops for both tables' unnamed EXCLUDEs matching their own distinct generated names, got: %v", sqlList(ops))
+	}
+}
+
 // ── Virtual type JSONB resolution ─────────────────────────────────────────────
 
 // makeVtype is a helper to build a VirtualType with a simple type-ref body.
