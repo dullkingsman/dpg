@@ -41,6 +41,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Removing an operator from source (or editing its body) produced an
+  invalid `DROP OPERATOR` statement, a PostgreSQL syntax error.**
+  PostgreSQL requires a mandatory `(lefttype, righttype)` operand clause on
+  `DROP OPERATOR`, which `ir.Operator` never captured — `dropObject` emitted
+  a bare `DROP OPERATOR IF EXISTS name;`, so genuinely removing an operator
+  from a DPG project always failed to apply. The same missing information
+  meant `diffOpaqueIR` deliberately excluded "operator" from the structured
+  drop+recreate path other opaque kinds got, falling back to a manual
+  `-- WARNING: ... manual DROP + recreate required` comment on a body edit
+  instead. Separately, operators are identified by `(schema, name, lefttype,
+  righttype)` — the same symbol can be overloaded across operand types (e.g.
+  `+` for `integer` vs `numeric`) — but `ir.Operator.QualifiedName` keyed
+  only on `(schema, name)`, so a second overload of an existing symbol
+  silently overwrote the first in the flat, name-keyed snapshot and diff
+  maps, the same collision class already fixed for `OperatorClass`/
+  `OperatorFamily`. Fixed by extracting `LEFTARG`/`RIGHTARG` in both
+  directions — from source (`buildDefineStmt`'s `DefElem` walk, the same
+  pattern `Cast` already uses) and from the live catalog
+  (`introspectOperators`, already scanning `oprleft`/`oprright` but
+  previously discarding them) — and widening `QualifiedName` to
+  `schema.name(lefttype, righttype)`, PostgreSQL's own `DROP OPERATOR`
+  operand-list syntax verbatim (with the literal `NONE` for the side a
+  unary/prefix operator omits), so the same rendering doubles as both the
+  identity suffix and the `DROP OPERATOR` argument list. `dropObject`'s
+  operator case also had a second, previously-unexercised bug caught while
+  fixing the first: it quoted the operator symbol itself
+  (`qualIdent("public", "===")` → `"public"."==="`), which is also a syntax
+  error — an operator symbol is a lexical token, not a quotable identifier.
+  Fixed via a new `qualOperatorIdent` helper that quotes only the schema,
+  mirroring introspection's existing `operatorRef`.
+  Upgrade note: `QualifiedName`'s format change means any operator already
+  in a project's snapshot is keyed differently after upgrading — the first
+  `plan`/`apply` will show it as removed-and-re-added once (self-heals, same
+  pattern as the prior `OperatorClass`/`OperatorFamily` and index-format
+  snapshot changes).
 - **`dump` could not reconstruct a `FUNCTION`'s body at all, and dropped
   every `PROCEDURE` from generated source entirely.** A dumped function
   rendered only `-- function ... (body omitted; use source files for full

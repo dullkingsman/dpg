@@ -505,16 +505,48 @@ func (c *Collation) irObject()               {}
 
 // Operator is a CREATE OPERATOR declaration.
 type Operator struct {
-	Schema        string
-	Name          string
+	Schema string
+	Name   string
+	// LeftType/RightType are the operator's operand types (nil for the side
+	// a unary/prefix operator omits — PostgreSQL requires RightType in
+	// practice since postfix operators were removed in PG14, but this
+	// mirrors the grammar's actual optionality rather than assuming it).
+	LeftType      *TypeRef
+	RightType     *TypeRef
 	Body          string
 	Reconstructed bool // Body rebuilt from the catalog; see Tablespace.Reconstructed
 	SrcPos        pipeline.SourcePos
 }
 
-func (o *Operator) QualifiedName() string   { return qualName(o.Schema, o.Name) }
+// QualifiedName includes the operand types because PostgreSQL identifies an
+// operator by (schema, name, lefttype, righttype) — the same symbol can be
+// overloaded across operand types (e.g. integer + integer vs numeric +
+// numeric) — so the flat, name-keyed snapshot and diff maps must key on all
+// of it or two distinct operators would silently collide, one overwriting
+// the other (the same class of bug OperatorClass/OperatorFamily had before
+// their QualifiedName was widened for the same reason). The format mirrors
+// PostgreSQL's own DROP OPERATOR operand-list syntax verbatim (including the
+// literal NONE for a missing side) so OperandsKey doubles as both the
+// identity suffix here and dropObject's DROP OPERATOR argument list.
+func (o *Operator) QualifiedName() string {
+	return qualName(o.Schema, o.Name) + "(" + OperandsKey(o.LeftType, o.RightType) + ")"
+}
 func (o *Operator) Pos() pipeline.SourcePos { return o.SrcPos }
 func (o *Operator) irObject()               {}
+
+// OperandsKey renders an operator's operand types as PostgreSQL's own DROP
+// OPERATOR syntax requires them: "lefttype, righttype", substituting the
+// literal NONE for whichever side a unary operator omits.
+func OperandsKey(left, right *TypeRef) string {
+	l, r := "NONE", "NONE"
+	if left != nil {
+		l = left.String()
+	}
+	if right != nil {
+		r = right.String()
+	}
+	return l + ", " + r
+}
 
 // OperatorClass is a CREATE OPERATOR CLASS declaration.
 type OperatorClass struct {

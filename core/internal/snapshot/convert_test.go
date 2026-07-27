@@ -382,6 +382,34 @@ func TestPopulateOperatorClassFamilyNoCollision(t *testing.T) {
 	}
 }
 
+// TestPopulateOperatorOverloadNoCollision guards the same class of data-loss
+// bug for a different pair: PostgreSQL operators can be overloaded — the same
+// symbol declared for different operand types (e.g. + for integer vs
+// numeric) — but ir.Operator.QualifiedName previously keyed only on
+// (schema, name), so a second overload silently overwrote the first in the
+// flat snapshot map. Both must survive Populate under distinct keys.
+func TestPopulateOperatorOverloadNoCollision(t *testing.T) {
+	snap := &pipeline.Snapshot{}
+	intType := ir.TypeRef{Name: "integer"}
+	numType := ir.TypeRef{Name: "numeric"}
+	objects := []pipeline.IRObject{
+		&ir.Operator{
+			Schema: "public", Name: "+", LeftType: &intType, RightType: &intType,
+			Body: "CREATE OPERATOR public.+ (FUNCTION = int4pl, LEFTARG = integer, RIGHTARG = integer)",
+		},
+		&ir.Operator{
+			Schema: "public", Name: "+", LeftType: &numType, RightType: &numType,
+			Body: "CREATE OPERATOR public.+ (FUNCTION = numeric_add, LEFTARG = numeric, RIGHTARG = numeric)",
+		},
+	}
+	if err := Populate(snap, objects); err != nil {
+		t.Fatal(err)
+	}
+	if len(snap.Objects) != 2 {
+		t.Errorf("expected 2 distinct operators (same symbol, different operand types) to survive; got %d (collision dropped one)", len(snap.Objects))
+	}
+}
+
 // TestToSnapIndexWithQuoteNormalization guards against a spurious-drift
 // regression found while live-testing the diffIndexes content-comparison fix:
 // pg_get_indexdef always quotes reloption values (e.g. fillfactor='70'), while

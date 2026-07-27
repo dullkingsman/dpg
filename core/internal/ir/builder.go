@@ -1242,7 +1242,26 @@ func (b *Builder) buildDefineStmt(ds *pg_query.DefineStmt, block pipeline.BlockA
 		return agg, nil
 
 	case pg_query.ObjectType_OBJECT_OPERATOR:
-		return &Operator{Schema: schema, Name: name, Body: rawBody, SrcPos: pos}, nil
+		op := &Operator{Schema: schema, Name: name, Body: rawBody, SrcPos: pos}
+		for _, de := range ds.Definition {
+			elem := de.GetDefElem()
+			if elem == nil {
+				continue
+			}
+			tn := elem.Arg.GetTypeName()
+			if tn == nil {
+				continue
+			}
+			switch elem.Defname {
+			case "leftarg":
+				t := typeNameToRef(tn)
+				op.LeftType = &t
+			case "rightarg":
+				t := typeNameToRef(tn)
+				op.RightType = &t
+			}
+		}
+		return op, nil
 
 	case pg_query.ObjectType_OBJECT_COLLATION:
 		return &Collation{Schema: schema, Name: name, Body: rawBody, SrcPos: pos}, nil

@@ -882,3 +882,64 @@ func TestBuildOperatorFamilyAccessMethod(t *testing.T) {
 		t.Errorf("AccessMethod: got %q, want %q", of.AccessMethod, "gist")
 	}
 }
+
+// ── Operator LEFTARG/RIGHTARG extraction ────────────────────────────────────────
+
+// TestBuildOperatorBinaryOperandTypes proves a binary operator's LEFTARG/
+// RIGHTARG are captured, needed so QualifiedName can disambiguate overloaded
+// operator symbols (same name, different operand types) instead of colliding
+// in the flat, name-keyed snapshot/diff maps.
+func TestBuildOperatorBinaryOperandTypes(t *testing.T) {
+	obj := buildObject(t, pipeline.KindOperator,
+		`public.## (LEFTARG = integer, RIGHTARG = integer, FUNCTION = int4eq)`, ``)
+	op, ok := obj.(*ir.Operator)
+	if !ok {
+		t.Fatalf("expected *ir.Operator, got %T", obj)
+	}
+	if op.LeftType == nil || op.LeftType.String() != "integer" {
+		t.Errorf("LeftType: got %v, want integer", op.LeftType)
+	}
+	if op.RightType == nil || op.RightType.String() != "integer" {
+		t.Errorf("RightType: got %v, want integer", op.RightType)
+	}
+	if want := `public.##(integer, integer)`; op.QualifiedName() != want {
+		t.Errorf("QualifiedName: got %q, want %q", op.QualifiedName(), want)
+	}
+}
+
+// TestBuildOperatorPrefixOperandTypes proves a unary (prefix) operator, which
+// omits LEFTARG entirely, leaves LeftType nil rather than defaulting to a
+// zero value that could be mistaken for a real type.
+func TestBuildOperatorPrefixOperandTypes(t *testing.T) {
+	obj := buildObject(t, pipeline.KindOperator,
+		`public.!! (RIGHTARG = integer, FUNCTION = fact)`, ``)
+	op, ok := obj.(*ir.Operator)
+	if !ok {
+		t.Fatalf("expected *ir.Operator, got %T", obj)
+	}
+	if op.LeftType != nil {
+		t.Errorf("LeftType: got %v, want nil (prefix operator has no left operand)", op.LeftType)
+	}
+	if op.RightType == nil || op.RightType.String() != "integer" {
+		t.Errorf("RightType: got %v, want integer", op.RightType)
+	}
+	if want := `public.!!(NONE, integer)`; op.QualifiedName() != want {
+		t.Errorf("QualifiedName: got %q, want %q", op.QualifiedName(), want)
+	}
+}
+
+// TestBuildOperatorOverloadDistinctQualifiedNames is the core regression
+// guard: two operators sharing the same symbol but different operand types
+// (the common overload shape, e.g. + for integer vs numeric) must produce
+// different QualifiedName values, or one would silently overwrite the other
+// in the flat snapshot/diff maps — the same collision class already fixed
+// for OperatorClass/OperatorFamily.
+func TestBuildOperatorOverloadDistinctQualifiedNames(t *testing.T) {
+	intOp := buildObject(t, pipeline.KindOperator,
+		`public.+ (LEFTARG = integer, RIGHTARG = integer, FUNCTION = int4pl)`, ``).(*ir.Operator)
+	numOp := buildObject(t, pipeline.KindOperator,
+		`public.+ (LEFTARG = numeric, RIGHTARG = numeric, FUNCTION = numeric_add)`, ``).(*ir.Operator)
+	if intOp.QualifiedName() == numOp.QualifiedName() {
+		t.Errorf("expected distinct QualifiedName for overloaded operators, both got %q", intOp.QualifiedName())
+	}
+}

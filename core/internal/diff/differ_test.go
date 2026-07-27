@@ -4232,10 +4232,13 @@ func TestDiffPublicationOfflineDetectsEdit(t *testing.T) {
 // for #3 (real update path for opaque objects): a genuine offline body edit
 // must emit a structured DROP (matching what dropObject emits when the object
 // is removed outright) followed by a CREATE from the new body — not the old
-// "-- WARNING: ... manual DROP + recreate required" comment placeholder. Every
-// opaque kind except "operator" is covered; see
-// TestDiffOperatorOfflineEditStillWarnsManual for why operator is excluded.
+// "-- WARNING: ... manual DROP + recreate required" comment placeholder. All
+// 17 opaque kinds are covered, including "operator" — previously excluded
+// because dropObject's operator case couldn't safely build a DROP OPERATOR
+// statement (PG requires a mandatory (lefttype, righttype) clause ir.Operator
+// didn't capture); see ir.Operator.LeftType/RightType and ir.OperandsKey.
 func TestDiffOpaqueOfflineEditEmitsStructuredDropRecreate(t *testing.T) {
+	intType := ir.TypeRef{Name: "integer"}
 	cases := []struct {
 		name           string
 		oldObj, newObj pipeline.IRObject
@@ -4297,6 +4300,15 @@ func TestDiffOpaqueOfflineEditEmitsStructuredDropRecreate(t *testing.T) {
 			newObj:         &ir.Collation{Schema: "public", Name: "c", Body: "CREATE COLLATION public.c (LOCALE = 'POSIX')"},
 			wantDropSubstr: `DROP COLLATION IF EXISTS "public"."c";`,
 			wantNewInBody:  "POSIX",
+		},
+		{
+			name: "operator",
+			oldObj: &ir.Operator{Schema: "public", Name: "===", LeftType: &intType, RightType: &intType,
+				Body: "CREATE OPERATOR public.=== (FUNCTION = f1, LEFTARG = integer, RIGHTARG = integer)"},
+			newObj: &ir.Operator{Schema: "public", Name: "===", LeftType: &intType, RightType: &intType,
+				Body: "CREATE OPERATOR public.=== (FUNCTION = f2, LEFTARG = integer, RIGHTARG = integer)"},
+			wantDropSubstr: `DROP OPERATOR IF EXISTS "public".===(integer, integer);`, // symbol never quoted — see qualOperatorIdent
+			wantNewInBody:  "f2",
 		},
 		{
 			name:           "operator_class",
@@ -4393,37 +4405,45 @@ func TestDiffOpaqueOfflineEditEmitsStructuredDropRecreate(t *testing.T) {
 	}
 }
 
-// TestDiffOperatorOfflineEditStillWarnsManual guards the intentional exclusion
-// of "operator" from the structured drop+recreate path: dropObject's operator
-// case cannot safely construct "DROP OPERATOR" (PG requires a mandatory
-// (lefttype, righttype) clause that ir.Operator does not capture), so wiring it
-// in would emit invalid SQL. Until operand types are modelled, operator keeps
-// the old manual-warning behavior — this must not regress to either the broken
-// DROP or silence.
-func TestDiffOperatorOfflineEditStillWarnsManual(t *testing.T) {
+// TestDiffOperatorOverloadOnlyEditedOneChanges proves the QualifiedName
+// widening (see ir.Operator.QualifiedName) doesn't just avoid a collision at
+// rest — it also keeps two overloaded operators (same symbol, different
+// operand types) independently diffable: editing one's body must produce ops
+// for that one only, leaving the untouched overload alone.
+func TestDiffOperatorOverloadOnlyEditedOneChanges(t *testing.T) {
 	d := New()
+	intType := ir.TypeRef{Name: "integer"}
+	numType := ir.TypeRef{Name: "numeric"}
 	snap := &pipeline.Snapshot{}
 	if err := snapshot.Populate(snap, []pipeline.IRObject{
-		&ir.Operator{Schema: "public", Name: "=>", Body: "CREATE OPERATOR public.=> (PROCEDURE = f1, LEFTARG = int4, RIGHTARG = int4)"},
+		&ir.Operator{Schema: "public", Name: "+", LeftType: &intType, RightType: &intType,
+			Body: "CREATE OPERATOR public.+ (FUNCTION = int4pl, LEFTARG = integer, RIGHTARG = integer)"},
+		&ir.Operator{Schema: "public", Name: "+", LeftType: &numType, RightType: &numType,
+			Body: "CREATE OPERATOR public.+ (FUNCTION = numeric_add, LEFTARG = numeric, RIGHTARG = numeric)"},
 	}); err != nil {
 		t.Fatal(err)
 	}
 	desired := []pipeline.IRObject{
-		&ir.Operator{Schema: "public", Name: "=>", Body: "CREATE OPERATOR public.=> (PROCEDURE = f2, LEFTARG = int4, RIGHTARG = int4)"},
+		&ir.Operator{Schema: "public", Name: "+", LeftType: &intType, RightType: &intType,
+			Body: "CREATE OPERATOR public.+ (FUNCTION = int4pl_v2, LEFTARG = integer, RIGHTARG = integer)"},
+		&ir.Operator{Schema: "public", Name: "+", LeftType: &numType, RightType: &numType,
+			Body: "CREATE OPERATOR public.+ (FUNCTION = numeric_add, LEFTARG = numeric, RIGHTARG = numeric)"},
 	}
 	ops, err := d.Diff(desired, snap)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(ops) != 1 {
-		t.Fatalf("want 1 op (manual warning), got %d: %v", len(ops), ops)
+	if len(ops) != 2 {
+		t.Fatalf("want 2 ops (DROP+CREATE for the edited integer overload only), got %d: %v", len(ops), sqlList(ops))
 	}
-	sql := ops[0].SQL()
-	if !strings.Contains(sql, "manual DROP + recreate required") {
-		t.Errorf("expected manual-warning fallback for operator, got: %s", sql)
+	if !containsSQL(ops, `DROP OPERATOR IF EXISTS "public".+(integer, integer);`) {
+		t.Errorf("expected DROP for the edited integer overload, got: %v", sqlList(ops))
 	}
-	if strings.Contains(sql, "DROP OPERATOR") {
-		t.Errorf("operator must not emit a bare (invalid) DROP OPERATOR statement, got: %s", sql)
+	if !containsSQL(ops, "int4pl_v2") {
+		t.Errorf("expected CREATE with the new function, got: %v", sqlList(ops))
+	}
+	if containsSQL(ops, "numeric_add") {
+		t.Errorf("untouched numeric overload must not be touched, got: %v", sqlList(ops))
 	}
 }
 

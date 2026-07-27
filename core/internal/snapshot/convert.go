@@ -142,7 +142,9 @@ func toSnapObject(obj pipeline.IRObject) *SnapObject {
 		}}
 	case *ir.Operator:
 		return &SnapObject{Kind: "operator", Opaque: &SnapOpaque{
-			Kind: "operator", Schema: o.Schema, Name: o.Name, BodyHash: sourceBodyHash(o.Body, o.Reconstructed),
+			Kind: "operator", Schema: o.Schema, Name: o.Name,
+			Args:     ir.OperandsKey(o.LeftType, o.RightType),
+			BodyHash: sourceBodyHash(o.Body, o.Reconstructed),
 		}}
 	case *ir.OperatorClass:
 		return &SnapObject{Kind: "operator_class", Opaque: &SnapOpaque{

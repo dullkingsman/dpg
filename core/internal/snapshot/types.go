@@ -32,10 +32,16 @@ type SnapObject struct {
 // ForeignServer, UserMapping, Publication, Subscription, EventTrigger, Collation,
 // Operator, OperatorClass, OperatorFamily, Cast, StatisticsObject, and TS objects.
 type SnapOpaque struct {
-	Kind     string             `json:"kind"` // e.g. "procedure", "tablespace"
-	Schema   string             `json:"schema,omitempty"`
-	Name     string             `json:"name"`
-	Args     string             `json:"args,omitempty"`  // type-only arg list (proc/agg identity)
+	Kind   string `json:"kind"` // e.g. "procedure", "tablespace"
+	Schema string `json:"schema,omitempty"`
+	Name   string `json:"name"`
+	// Args is reused across two unrelated purposes, distinguished by Kind:
+	// for procedure/aggregate it's the type-only arg list used for identity
+	// AND for DROP PROCEDURE/AGGREGATE's "(args)" clause; for operator it's
+	// "lefttype, righttype" (see ir.OperandsKey) used for DROP OPERATOR's
+	// mandatory operand-type clause, in the same string-goes-straight-into-
+	// the-parens shape.
+	Args     string             `json:"args,omitempty"`
 	Using    string             `json:"using,omitempty"` // index access method (operator_class/operator_family)
 	BodyHash string             `json:"body_hash,omitempty"`
 	Comment  *string            `json:"comment,omitempty"`

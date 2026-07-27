@@ -1146,3 +1146,122 @@ func TestRoundtripUnnamedCheckConstraintNoLiveDrift(t *testing.T) {
 		}
 	}
 }
+
+// TestRoundtripOperatorBodyEditAppliesLive mirrors
+// TestRoundtripOpaqueBodyEditAppliesLive's pattern, but for "operator" —
+// previously the one opaque kind excluded from the structured DROP+CREATE
+// path (diffOpaqueIR fell back to a manual-warning comment) because
+// dropObject couldn't safely build a DROP OPERATOR statement: PostgreSQL
+// requires a mandatory (lefttype, righttype) clause that ir.Operator didn't
+// capture. This proves the real DROP OPERATOR statement (with operand types)
+// actually works against a live server, not just compiles.
+func TestRoundtripOperatorBodyEditAppliesLive(t *testing.T) {
+	connStr := testpg.Start(t)
+	ctx := context.Background()
+
+	differ := diff.New()
+	emitter := emit.New()
+	applyExec := executor.New()
+	ci := introspect.New()
+	store := newMemStore()
+
+	conn, err := executor.Connect(ctx, connStr)
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	defer conn.Close(ctx)
+
+	dir := t.TempDir()
+	f := filepath.Join(dir, "schema.dpg")
+	v1 := `OPERATOR public.#+# (FUNCTION = int4pl, LEFTARG = integer, RIGHTARG = integer);`
+	if err := os.WriteFile(f, []byte(v1), 0o644); err != nil {
+		t.Fatalf("write v1: %v", err)
+	}
+	applyFixture(t, ctx, conn, []string{f}, dir, differ, emitter, applyExec, store)
+
+	// Edit the body (same identity — same schema/name/operand types — but a
+	// different FUNCTION) and diff against the snapshot from the v1 apply.
+	// This must route through diffOpaqueIR's structured drop+recreate path,
+	// not the old manual-warning fallback.
+	v2 := `OPERATOR public.#+# (FUNCTION = int4mi, LEFTARG = integer, RIGHTARG = integer);`
+	if err := os.WriteFile(f, []byte(v2), 0o644); err != nil {
+		t.Fatalf("write v2: %v", err)
+	}
+	desired2, err := compiler.Compile([]string{f}, dir, pipeline.Default)
+	if err != nil {
+		t.Fatalf("compile v2: %v", err)
+	}
+	snap, _ := store.Load("test", "dpgtest")
+	ops, err := differ.Diff(desired2, snap)
+	if err != nil {
+		t.Fatalf("diff (body edit): %v", err)
+	}
+	if len(ops) != 2 {
+		t.Fatalf("expected 2 ops (structured DROP+CREATE) for the body edit, got %d: %v", len(ops), ops)
+	}
+	for _, op := range ops {
+		if strings.Contains(op.SQL(), "manual DROP + recreate required") {
+			t.Fatalf("must not fall back to the manual warning for operator: %s", op.SQL())
+		}
+	}
+	if !strings.Contains(ops[0].SQL(), `DROP OPERATOR IF EXISTS "public".#+#(integer, integer);`) {
+		t.Fatalf("expected a valid DROP OPERATOR with operand types, got: %s", ops[0].SQL())
+	}
+
+	migration, err := emitter.Emit(ops, pipeline.MigrationMeta{Cluster: "test", Database: "dpgtest"})
+	if err != nil {
+		t.Fatalf("emit: %v", err)
+	}
+	if err := applyExec.Apply(ctx, migration, conn); err != nil {
+		t.Fatalf("apply (body edit) against live PostgreSQL: %v", err)
+	}
+
+	appliedSnap := &pipeline.Snapshot{}
+	if err := snapshot.Populate(appliedSnap, desired2); err != nil {
+		t.Fatalf("populate snapshot: %v", err)
+	}
+	if err := store.Save("test", "dpgtest", appliedSnap); err != nil {
+		t.Fatalf("save snapshot: %v", err)
+	}
+
+	liveObjects, err := ci.Introspect(ctx, conn)
+	if err != nil {
+		t.Fatalf("introspect: %v", err)
+	}
+	var managedLive []pipeline.IRObject
+	for _, obj := range liveObjects {
+		if _, ok := appliedSnap.Objects[obj.QualifiedName()]; ok {
+			managedLive = append(managedLive, obj)
+		}
+	}
+	liveSnap := &pipeline.Snapshot{}
+	if err := snapshot.Populate(liveSnap, managedLive); err != nil {
+		t.Fatalf("populate live snapshot: %v", err)
+	}
+	driftOps, err := differ.Diff(desired2, liveSnap)
+	if err != nil {
+		t.Fatalf("drift diff: %v", err)
+	}
+	if len(driftOps) != 0 {
+		t.Errorf("drift after body-edit apply (%d ops) — live catalog doesn't reflect the new body:", len(driftOps))
+		for _, op := range driftOps {
+			t.Errorf("  [%s] %s", op.Safety(), op.SQL())
+		}
+	}
+
+	rs, err := conn.QueryRows(ctx, `SELECT oprcode::regproc::text FROM pg_operator WHERE oprname = '#+#'`)
+	if err != nil {
+		t.Fatalf("query pg_operator: %v", err)
+	}
+	defer rs.Close()
+	if !rs.Next() {
+		t.Fatal("#+# not found in pg_operator after body-edit apply")
+	}
+	var fn string
+	if err := rs.Scan(&fn); err != nil {
+		t.Fatalf("scan oprcode: %v", err)
+	}
+	if fn != "int4mi" {
+		t.Errorf("live oprcode = %q, want int4mi (the edit)", fn)
+	}
+}

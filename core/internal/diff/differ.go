@@ -262,6 +262,19 @@ func qualIdent(schema, name string) string {
 	return quoteIdent(schema) + "." + quoteIdent(name)
 }
 
+// qualOperatorIdent qualifies an operator symbol with its schema, like
+// qualIdent, except the symbol itself (e.g. "===", "@>") is never quoted —
+// unlike a regular identifier, it's a lexical operator token, and quoting it
+// (as qualIdent would) is a PostgreSQL syntax error. Mirrors introspection's
+// operatorRef (internal/introspect/opaque.go), which renders the same way
+// for the same reason.
+func qualOperatorIdent(schema, name string) string {
+	if schema == "" {
+		return name
+	}
+	return quoteIdent(schema) + "." + name
+}
+
 // quoteLit single-quotes a SQL string literal.
 func quoteLit(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", "''") + "'"
@@ -549,7 +562,7 @@ func dropObject(so *snapshot.SnapObject) []pipeline.DiffOp {
 		}
 	case "operator":
 		if so.Opaque != nil {
-			return []pipeline.DiffOp{destructiveOp(fmt.Sprintf("DROP OPERATOR IF EXISTS %s;", qualIdent(so.Opaque.Schema, so.Opaque.Name)), zero)}
+			return []pipeline.DiffOp{destructiveOp(fmt.Sprintf("DROP OPERATOR IF EXISTS %s(%s);", qualOperatorIdent(so.Opaque.Schema, so.Opaque.Name), so.Opaque.Args), zero)}
 		}
 	case "operator_class":
 		if so.Opaque != nil {
@@ -1869,21 +1882,6 @@ func diffOpaqueIR(name, body string, reconstructed bool, snap *snapshot.SnapOpaq
 	newHash := fmt.Sprintf("%x", sum)
 	if snap.BodyHash == "" || newHash == snap.BodyHash {
 		return nil, nil
-	}
-	if snap.Kind == "operator" {
-		// Unlike the other 16 opaque kinds, dropObject's "operator" case cannot
-		// be reused safely here: DROP OPERATOR requires a mandatory
-		// (lefttype, righttype) clause that ir.Operator does not capture (a
-		// pre-existing gap - see dropObject), so a bare "DROP OPERATOR IF
-		// EXISTS name" is a PG syntax error. Operator names can also be
-		// overloaded across operand types, which the flat schema.name identity
-		// used here cannot disambiguate anyway. Emitting invalid or
-		// misdirected DDL is worse than a manual warning, so fall back until
-		// operand types are modelled end-to-end (known limitation).
-		return []pipeline.DiffOp{destructiveOp(
-			fmt.Sprintf("-- WARNING: %s body changed; manual DROP + recreate required", name),
-			pos,
-		)}, nil
 	}
 	ops := dropObject(&snapshot.SnapObject{Kind: snap.Kind, Opaque: snap})
 	createOps, err := createOpaque(name, body, snap.Kind, pos)

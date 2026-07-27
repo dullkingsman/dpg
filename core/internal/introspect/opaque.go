@@ -672,7 +672,16 @@ ORDER  BY n.nspname, o.oprname`
 			parts = append(parts, "MERGES")
 		}
 		body := fmt.Sprintf("CREATE OPERATOR %s (%s)", operatorRef(schema, name), strings.Join(parts, ", "))
-		out = append(out, &ir.Operator{Schema: schema, Name: name, Body: canonicalDDL(body), Reconstructed: true})
+		op := &ir.Operator{Schema: schema, Name: name, Body: canonicalDDL(body), Reconstructed: true}
+		if leftArg != nil {
+			t := ir.TypeRef{Name: *leftArg}
+			op.LeftType = &t
+		}
+		if rightArg != nil {
+			t := ir.TypeRef{Name: *rightArg}
+			op.RightType = &t
+		}
+		out = append(out, op)
 	}
 	return out, rs.Err()
 }
