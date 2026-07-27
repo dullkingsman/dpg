@@ -475,6 +475,159 @@ func TestBuildCheckConstraintPromotedColumnLevelReferencesOtherColumn(t *testing
 	}
 }
 
+// ── EXCLUDE constraint round-tripping ────────────────────────────────────────────
+
+func findExclude(cs []*ir.Constraint) *ir.Constraint {
+	for _, c := range cs {
+		if c.Type == "EXCLUDE" {
+			return c
+		}
+	}
+	return nil
+}
+
+// TestBuildExcludeBinaryGistWithWhere is the core regression guard: a
+// realistic multi-element EXCLUDE (the canonical "no overlapping bookings"
+// shape) must capture its access method, both elements' operators, and its
+// WHERE predicate — not the old "EXCLUDE" placeholder, which would already
+// fail to apply as invalid SQL.
+func TestBuildExcludeBinaryGistWithWhere(t *testing.T) {
+	obj := buildObject(t, pipeline.KindTable,
+		`t (room integer, during tsrange, CONSTRAINT no_overlap EXCLUDE USING gist (room WITH =, during WITH &&) WHERE (room > 0))`,
+		``)
+	tbl := obj.(*ir.Table)
+	c := findExclude(tbl.Constraints)
+	if c == nil {
+		t.Fatal("EXCLUDE constraint not found")
+	}
+	if c.Exclude == nil {
+		t.Fatal("Exclude spec not populated")
+	}
+	if c.Exclude.AccessMethod != "gist" {
+		t.Errorf("AccessMethod: got %q, want gist", c.Exclude.AccessMethod)
+	}
+	if c.Exclude.Where != "room > 0" {
+		t.Errorf("Where: got %q, want %q", c.Exclude.Where, "room > 0")
+	}
+	if len(c.Exclude.Elements) != 2 {
+		t.Fatalf("Elements: got %d, want 2", len(c.Exclude.Elements))
+	}
+	if c.Exclude.Elements[0].Column != "room" || c.Exclude.Elements[0].Operator != "=" {
+		t.Errorf("Elements[0]: got %+v, want Column=room Operator= =", c.Exclude.Elements[0])
+	}
+	if c.Exclude.Elements[1].Column != "during" || c.Exclude.Elements[1].Operator != "&&" {
+		t.Errorf("Elements[1]: got %+v, want Column=during Operator=&&", c.Exclude.Elements[1])
+	}
+	if len(c.Columns) != 2 || c.Columns[0] != "room" || c.Columns[1] != "during" {
+		t.Errorf("Columns: got %v, want [room during]", c.Columns)
+	}
+	wantExpr := `EXCLUDE USING gist ("room" WITH =, "during" WITH &&) WHERE (room > 0)`
+	if c.Expr != wantExpr {
+		t.Errorf("Expr: got %q, want %q", c.Expr, wantExpr)
+	}
+}
+
+// TestBuildExcludeDefaultsToBtreeAccessMethod proves an EXCLUDE with no
+// USING clause still gets a real access method ("btree", PostgreSQL's
+// grammar-level default — confirmed live: PG itself both accepts
+// "EXCLUDE (a WITH =)" with no USING and reports
+// "EXCLUDE USING btree (a WITH =)" back via pg_get_constraintdef), not an
+// empty one that would render invalid/ambiguous SQL.
+func TestBuildExcludeDefaultsToBtreeAccessMethod(t *testing.T) {
+	obj := buildObject(t, pipeline.KindTable,
+		`t (a integer, CONSTRAINT c EXCLUDE (a WITH =))`, ``)
+	tbl := obj.(*ir.Table)
+	c := findExclude(tbl.Constraints)
+	if c == nil {
+		t.Fatal("EXCLUDE constraint not found")
+	}
+	if c.Exclude.AccessMethod != "btree" {
+		t.Errorf("AccessMethod: got %q, want btree", c.Exclude.AccessMethod)
+	}
+	wantExpr := `EXCLUDE USING btree ("a" WITH =)`
+	if c.Expr != wantExpr {
+		t.Errorf("Expr: got %q, want %q", c.Expr, wantExpr)
+	}
+}
+
+// TestBuildExcludeExpressionElement proves an element that's an expression
+// (parenthesized, not a bare column) rather than a plain column reference
+// round-trips too — EXCLUDE elements follow the same IndexElem grammar as
+// CREATE INDEX, which allows either.
+func TestBuildExcludeExpressionElement(t *testing.T) {
+	obj := buildObject(t, pipeline.KindTable,
+		`t (a text, CONSTRAINT c EXCLUDE ((lower(a)) WITH =))`, ``)
+	tbl := obj.(*ir.Table)
+	c := findExclude(tbl.Constraints)
+	if c == nil {
+		t.Fatal("EXCLUDE constraint not found")
+	}
+	if len(c.Exclude.Elements) != 1 {
+		t.Fatalf("Elements: got %d, want 1", len(c.Exclude.Elements))
+	}
+	el := c.Exclude.Elements[0]
+	if el.Column != "" {
+		t.Errorf("Column: got %q, want empty (expression element)", el.Column)
+	}
+	if el.Expr != "lower(a)" {
+		t.Errorf("Expr: got %q, want %q", el.Expr, "lower(a)")
+	}
+	if len(c.Columns) != 0 {
+		t.Errorf("Columns: got %v, want empty (no plain-column elements)", c.Columns)
+	}
+	wantExpr := `EXCLUDE USING btree ((lower(a)) WITH =)`
+	if c.Expr != wantExpr {
+		t.Errorf("Expr: got %q, want %q", c.Expr, wantExpr)
+	}
+}
+
+// TestBuildExcludeCollationOpclassSortNulls proves the full IndexElem
+// attribute set — COLLATE, opclass, sort direction, NULLS placement — is
+// captured, in PostgreSQL's own rendering order.
+func TestBuildExcludeCollationOpclassSortNulls(t *testing.T) {
+	obj := buildObject(t, pipeline.KindTable,
+		`t (a text, CONSTRAINT c EXCLUDE (a COLLATE "C" text_ops DESC NULLS LAST WITH =))`, ``)
+	tbl := obj.(*ir.Table)
+	c := findExclude(tbl.Constraints)
+	if c == nil {
+		t.Fatal("EXCLUDE constraint not found")
+	}
+	el := c.Exclude.Elements[0]
+	if el.Collation != "C" {
+		t.Errorf("Collation: got %q, want C", el.Collation)
+	}
+	if el.OpClass != "text_ops" {
+		t.Errorf("OpClass: got %q, want text_ops", el.OpClass)
+	}
+	if el.SortOrder != "DESC" {
+		t.Errorf("SortOrder: got %q, want DESC", el.SortOrder)
+	}
+	if el.Nulls != "LAST" {
+		t.Errorf("Nulls: got %q, want LAST", el.Nulls)
+	}
+	wantExpr := `EXCLUDE USING btree ("a" COLLATE C text_ops DESC NULLS LAST WITH =)`
+	if c.Expr != wantExpr {
+		t.Errorf("Expr: got %q, want %q", c.Expr, wantExpr)
+	}
+}
+
+// TestBuildExcludeOperatorSchemaQualificationStripped proves an explicitly
+// schema-qualified built-in operator (OPERATOR(pg_catalog.=)) renders
+// without the redundant "pg_catalog." prefix, mirroring pgCatalogName's
+// identical treatment of built-in type names.
+func TestBuildExcludeOperatorSchemaQualificationStripped(t *testing.T) {
+	obj := buildObject(t, pipeline.KindTable,
+		`t (a integer, CONSTRAINT c EXCLUDE (a WITH OPERATOR(pg_catalog.=)))`, ``)
+	tbl := obj.(*ir.Table)
+	c := findExclude(tbl.Constraints)
+	if c == nil {
+		t.Fatal("EXCLUDE constraint not found")
+	}
+	if c.Exclude.Elements[0].Operator != "=" {
+		t.Errorf("Operator: got %q, want = (pg_catalog. prefix stripped)", c.Exclude.Elements[0].Operator)
+	}
+}
+
 // ── TypeRef ───────────────────────────────────────────────────────────────────
 
 func TestTypeRefBuiltIn(t *testing.T) {

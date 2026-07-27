@@ -166,6 +166,52 @@ func TestDiffCreateTable(t *testing.T) {
 	}
 }
 
+// TestDiffCreateTableWithExcludeConstraint proves a fresh CREATE TABLE
+// carrying a named EXCLUDE constraint emits the constraint's real SQL body
+// (via createTable's generic table-level rendering path — EXCLUDE isn't in
+// isInlineable/the inline-classification switch, so it must fall through to
+// "CONSTRAINT name <Expr>" unchanged), not the old "EXCLUDE" placeholder
+// that would already fail to apply.
+func TestDiffCreateTableWithExcludeConstraint(t *testing.T) {
+	d := New()
+	desired := []pipeline.IRObject{
+		&ir.Table{
+			Schema: "public",
+			Name:   "bookings",
+			Columns: []*ir.Column{
+				{Name: "room", Type: ir.TypeRef{Name: "integer"}},
+				{Name: "during", Type: ir.TypeRef{Name: "tsrange"}},
+			},
+			Constraints: []*ir.Constraint{
+				{Name: "no_overlap", Type: "EXCLUDE", Columns: []string{"room", "during"},
+					Exclude: &ir.ExcludeSpec{
+						AccessMethod: "gist",
+						Elements: []ir.ExcludeElement{
+							{Column: "room", Operator: "="},
+							{Column: "during", Operator: "&&"},
+						},
+					},
+					Expr: `EXCLUDE USING gist ("room" WITH =, "during" WITH &&)`,
+				},
+			},
+		},
+	}
+	ops, err := d.Diff(desired, &pipeline.Snapshot{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ops) == 0 {
+		t.Fatal("expected ops")
+	}
+	sql := ops[0].SQL()
+	if !strings.Contains(sql, `CONSTRAINT "no_overlap" EXCLUDE USING gist ("room" WITH =, "during" WITH &&)`) {
+		t.Errorf("expected the real EXCLUDE body inline in CREATE TABLE, got: %s", sql)
+	}
+	if strings.Contains(sql, `EXCLUDE;`) || strings.Contains(sql, `EXCLUDE,`) || strings.Contains(sql, `EXCLUDE\n`) {
+		t.Errorf("must not regress to the old bare-EXCLUDE placeholder, got: %s", sql)
+	}
+}
+
 func TestDiffDropTable(t *testing.T) {
 	d := New()
 	snap := &pipeline.Snapshot{}
@@ -741,6 +787,240 @@ func TestDiffColumnRenameKeepsConstraints(t *testing.T) {
 	}
 }
 
+// TestDiffColumnRenameKeepsCheckConstraintUnquotedReference is the
+// regression guard for a PRE-EXISTING bug an independent verification pass
+// found (while checking a related EXCLUDE fix, but reproducible here too,
+// unrelated to EXCLUDE specifically): replaceQuotedIdents originally matched
+// only the quoted "old" form, but nodeToText/pg_query.Deparse — which
+// renders a CHECK expression — leaves a plain lowercase identifier unquoted
+// (confirmed live: `SELECT room > 0` deparses to `room > 0`, not
+// `"room" > 0`). A CHECK whose expression is a bare comparison like
+// `room > 0` (the overwhelmingly common shape) never got its renamed column
+// translated at all.
+func TestDiffColumnRenameKeepsCheckConstraintUnquotedReference(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.bookings", &snapshot.SnapObject{
+		Kind: "table",
+		Table: &snapshot.SnapTable{
+			Schema:  "public",
+			Name:    "bookings",
+			Columns: []snapshot.SnapColumn{{Name: "room", Type: "integer"}},
+			Constraints: []snapshot.SnapConstraint{
+				{Name: "", Type: "CHECK", Expr: `CHECK (room > 0)`},
+			},
+		},
+	})
+
+	old := "room"
+	desired := []pipeline.IRObject{
+		&ir.Table{
+			Schema: "public",
+			Name:   "bookings",
+			Columns: []*ir.Column{
+				{Name: "chamber", Type: ir.TypeRef{Name: "integer"}, RenamedFrom: &old},
+			},
+			Constraints: []*ir.Constraint{
+				{Type: "CHECK", Expr: `CHECK (chamber > 0)`},
+			},
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, o := range ops {
+		sql := o.SQL()
+		if strings.Contains(sql, "WARNING") {
+			t.Errorf("did not expect a constraint WARNING after RENAMED FROM, got: %s", sql)
+		}
+		if strings.Contains(sql, "DROP CONSTRAINT") || strings.Contains(sql, "ADD") {
+			t.Errorf("did not expect the CHECK constraint to be dropped/re-added after RENAMED FROM, got: %s", sql)
+		}
+	}
+}
+
+// TestDiffColumnRenameKeepsExcludeConstraint guards translateConstraintExpr's
+// EXCLUDE case: an unnamed EXCLUDE constraint's structural-signature match
+// (the offline path for unnamed constraints) must translate a renamed
+// column's quoted element-list reference the same way CHECK's whole-string
+// translation already does. The WHERE clause here deliberately references a
+// column NOT being renamed — the WHERE-clause-specific case (an unquoted
+// reference, which is what the real pipeline actually renders) is covered
+// separately by TestDiffColumnRenameKeepsExcludeConstraintReferencedOnlyInWhere,
+// since the two exercise different text — quoted (element list, built via
+// quoteIdent) vs unquoted (WHERE/expression elements, built via
+// nodeToText/pg_query.Deparse, which only quotes an identifier that actually
+// needs it).
+func TestDiffColumnRenameKeepsExcludeConstraint(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.bookings", &snapshot.SnapObject{
+		Kind: "table",
+		Table: &snapshot.SnapTable{
+			Schema: "public",
+			Name:   "bookings",
+			Columns: []snapshot.SnapColumn{
+				{Name: "room", Type: "integer"},
+				{Name: "span", Type: "tsrange"},
+			},
+			Constraints: []snapshot.SnapConstraint{
+				{Name: "", Type: "EXCLUDE",
+					Expr: `EXCLUDE USING gist ("room" WITH =, "span" WITH &&) WHERE (room > 0)`},
+			},
+		},
+	})
+
+	old := "span"
+	desired := []pipeline.IRObject{
+		&ir.Table{
+			Schema: "public",
+			Name:   "bookings",
+			Columns: []*ir.Column{
+				{Name: "room", Type: ir.TypeRef{Name: "integer"}},
+				{Name: "during", Type: ir.TypeRef{Name: "tsrange"}, RenamedFrom: &old},
+			},
+			Constraints: []*ir.Constraint{
+				{Type: "EXCLUDE",
+					Expr: `EXCLUDE USING gist ("room" WITH =, "during" WITH &&) WHERE (room > 0)`},
+			},
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, o := range ops {
+		sql := o.SQL()
+		if strings.Contains(sql, "WARNING") {
+			t.Errorf("did not expect a constraint WARNING after RENAMED FROM, got: %s", sql)
+		}
+		if strings.Contains(sql, "DROP CONSTRAINT") || strings.Contains(sql, "ADD") {
+			t.Errorf("did not expect the EXCLUDE constraint to be dropped/re-added after RENAMED FROM, got: %s", sql)
+		}
+	}
+}
+
+// TestDiffColumnRenameKeepsExcludeConstraintReferencedOnlyInWhere is the
+// regression guard for a bug an independent verification pass found: a
+// renamed column referenced ONLY in an EXCLUDE's WHERE clause wasn't
+// translated, because replaceQuotedIdents originally matched only the
+// quoted "old" form — but nodeToText/pg_query.Deparse (which renders the
+// WHERE clause) leaves a plain lowercase identifier unquoted (confirmed
+// live: `SELECT room > 0` deparses to `room > 0`, not `"room" > 0`). The
+// element list's own reference to "room" (elsewhere in this same
+// constraint) IS quoted (built via quoteIdent) and would already have been
+// translated correctly — this test's fixture avoids that column entirely
+// (uses "during" for the element) so it isolates and proves the WHERE-only
+// case specifically.
+func TestDiffColumnRenameKeepsExcludeConstraintReferencedOnlyInWhere(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.bookings", &snapshot.SnapObject{
+		Kind: "table",
+		Table: &snapshot.SnapTable{
+			Schema: "public",
+			Name:   "bookings",
+			Columns: []snapshot.SnapColumn{
+				{Name: "room", Type: "integer"},
+				{Name: "during", Type: "tsrange"},
+			},
+			Constraints: []snapshot.SnapConstraint{
+				{Name: "", Type: "EXCLUDE",
+					Expr: `EXCLUDE USING gist ("during" WITH &&) WHERE (room > 0)`},
+			},
+		},
+	})
+
+	old := "room"
+	desired := []pipeline.IRObject{
+		&ir.Table{
+			Schema: "public",
+			Name:   "bookings",
+			Columns: []*ir.Column{
+				{Name: "chamber", Type: ir.TypeRef{Name: "integer"}, RenamedFrom: &old},
+				{Name: "during", Type: ir.TypeRef{Name: "tsrange"}},
+			},
+			Constraints: []*ir.Constraint{
+				{Type: "EXCLUDE",
+					Expr: `EXCLUDE USING gist ("during" WITH &&) WHERE (chamber > 0)`},
+			},
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, o := range ops {
+		sql := o.SQL()
+		if strings.Contains(sql, "WARNING") {
+			t.Errorf("did not expect a constraint WARNING after RENAMED FROM, got: %s", sql)
+		}
+		if strings.Contains(sql, "DROP CONSTRAINT") || strings.Contains(sql, "ADD") {
+			t.Errorf("did not expect the EXCLUDE constraint to be dropped/re-added after RENAMED FROM, got: %s", sql)
+		}
+	}
+}
+
+// TestDiffColumnRenameDoesNotMangleStringLiteral is the regression guard for
+// a bug an independent verification pass found in the bare-word substitution
+// added above: a string literal is delimited by a single quote, a
+// non-identifier character, so an unqualified \bold\b regex treats 'room'
+// (the STRING VALUE) exactly like the bare identifier room. Renaming an
+// unrelated column also named "room" elsewhere on the table must not mangle
+// this CHECK's literal 'room' into 'chamber' — that would make an
+// UNCHANGED constraint's snapshot-side key stop matching its (correctly
+// unchanged) desired-side key, producing a spurious destructive
+// drop+recreate for a constraint that never actually changed.
+func TestDiffColumnRenameDoesNotMangleStringLiteral(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.t", &snapshot.SnapObject{
+		Kind: "table",
+		Table: &snapshot.SnapTable{
+			Schema: "public",
+			Name:   "t",
+			Columns: []snapshot.SnapColumn{
+				{Name: "status", Type: "text"},
+				{Name: "room", Type: "integer"},
+			},
+			Constraints: []snapshot.SnapConstraint{
+				{Name: "", Type: "CHECK", Expr: `CHECK (status <> 'room')`},
+			},
+		},
+	})
+
+	old := "room"
+	desired := []pipeline.IRObject{
+		&ir.Table{
+			Schema: "public",
+			Name:   "t",
+			Columns: []*ir.Column{
+				{Name: "status", Type: ir.TypeRef{Name: "text"}},
+				{Name: "chamber", Type: ir.TypeRef{Name: "integer"}, RenamedFrom: &old},
+			},
+			Constraints: []*ir.Constraint{
+				// Genuinely unchanged: the literal 'room' is a string value,
+				// unrelated to the renamed "room" column.
+				{Type: "CHECK", Expr: `CHECK (status <> 'room')`},
+			},
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, o := range ops {
+		sql := o.SQL()
+		if strings.Contains(sql, "WARNING") {
+			t.Errorf("did not expect a constraint WARNING — the string literal 'room' must not be mistaken for the renamed column, got: %s", sql)
+		}
+		if strings.Contains(sql, "DROP CONSTRAINT") || (strings.Contains(sql, "ADD") && strings.Contains(sql, "CHECK")) {
+			t.Errorf("did not expect the unchanged CHECK constraint to be dropped/re-added, got: %s", sql)
+		}
+	}
+}
+
 // TestDiffColumnDropSuppressesCascadedConstraint verifies that when a column
 // is dropped (no RENAMED FROM), an unnamed constraint on that column doesn't
 // surface as a manual-drop warning — DROP COLUMN cascades to it in PG.
@@ -794,6 +1074,67 @@ func TestDiffColumnDropSuppressesCascadedConstraint(t *testing.T) {
 	}
 	if !sawDropCol {
 		t.Fatalf("expected DROP COLUMN locality_id, got: %v", sqlList(ops))
+	}
+}
+
+// ── SQL string-literal-aware rename translation ─────────────────────────────────
+
+// TestSplitSQLStringLiteralsBasic proves a plain literal is correctly
+// isolated from the surrounding code text.
+func TestSplitSQLStringLiteralsBasic(t *testing.T) {
+	segs := splitSQLStringLiterals(`status <> 'room'`)
+	if len(segs) != 2 {
+		t.Fatalf("got %d segments, want 2: %+v", len(segs), segs)
+	}
+	if segs[0].isLiteral || segs[0].text != "status <> " {
+		t.Errorf("segs[0] = %+v, want {\"status <> \", false}", segs[0])
+	}
+	if !segs[1].isLiteral || segs[1].text != "'room'" {
+		t.Errorf("segs[1] = %+v, want {\"'room'\", true}", segs[1])
+	}
+}
+
+// TestSplitSQLStringLiteralsEscapedQuote proves SQL's doubled-quote escape
+// (” inside a literal means a literal single quote, not end-of-string) is
+// handled — confirmed this is the real PostgreSQL rule, and that
+// pg_query.Deparse's own output uses it (e.g. rendering "it's" as 'it”s').
+// A naive split on every apostrophe would end the literal early here.
+func TestSplitSQLStringLiteralsEscapedQuote(t *testing.T) {
+	segs := splitSQLStringLiterals(`name = 'it''s room'`)
+	if len(segs) != 2 {
+		t.Fatalf("got %d segments, want 2: %+v", len(segs), segs)
+	}
+	if !segs[1].isLiteral || segs[1].text != `'it''s room'` {
+		t.Errorf("segs[1] = %+v, want the whole escaped literal as one segment", segs[1])
+	}
+}
+
+// TestSplitSQLStringLiteralsMultipleLiterals proves code text between two
+// literals is correctly re-isolated as its own non-literal segment.
+func TestSplitSQLStringLiteralsMultipleLiterals(t *testing.T) {
+	segs := splitSQLStringLiterals(`a = 'x' AND b = 'y'`)
+	var gotLiterals, gotCode []string
+	for _, seg := range segs {
+		if seg.isLiteral {
+			gotLiterals = append(gotLiterals, seg.text)
+		} else {
+			gotCode = append(gotCode, seg.text)
+		}
+	}
+	if len(gotLiterals) != 2 || gotLiterals[0] != "'x'" || gotLiterals[1] != "'y'" {
+		t.Errorf("literals: got %v, want ['x'] ['y']", gotLiterals)
+	}
+	if len(gotCode) != 2 || gotCode[0] != "a = " || gotCode[1] != " AND b = " {
+		t.Errorf("code segments: got %v", gotCode)
+	}
+}
+
+// TestSplitSQLStringLiteralsNoLiteral proves text with no literal at all
+// round-trips as a single non-literal segment.
+func TestSplitSQLStringLiteralsNoLiteral(t *testing.T) {
+	segs := splitSQLStringLiterals(`room > 0`)
+	if len(segs) != 1 || segs[0].isLiteral || segs[0].text != "room > 0" {
+		t.Errorf("got %+v, want a single non-literal segment", segs)
 	}
 }
 

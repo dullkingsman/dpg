@@ -552,3 +552,58 @@ func TestRenderIndexVariantsRoundtrip(t *testing.T) {
 		}
 	}
 }
+
+// TestRenderExcludeConstraintRoundtrip proves dump can reconstruct a real
+// EXCLUDE constraint into valid, recompilable DPG source. EXCLUDE isn't in
+// isInlineable, so it must render via the generic table-level constraint
+// path (CONSTRAINT name <Expr>) — this exercises that path with an Expr
+// that's genuinely populated (access method, two elements + operators, a
+// WHERE clause) rather than the old bare "EXCLUDE" placeholder, which would
+// have failed to even parse back.
+func TestRenderExcludeConstraintRoundtrip(t *testing.T) {
+	fmtOpts := format.Options{IndentSize: 4, KeywordCase: "upper"}
+	tbl := &ir.Table{
+		Schema: "public", Name: "bookings",
+		Columns: []*ir.Column{
+			{Name: "room", Type: ir.TypeRef{Name: "int4"}},
+			{Name: "during", Type: ir.TypeRef{Name: "tsrange"}},
+		},
+		Constraints: []*ir.Constraint{
+			{Name: "no_overlap", Type: "EXCLUDE", Columns: []string{"room", "during"},
+				Exclude: &ir.ExcludeSpec{
+					AccessMethod: "gist",
+					Elements: []ir.ExcludeElement{
+						{Column: "room", Operator: "="},
+						{Column: "during", Operator: "&&"},
+					},
+					Where: "room > 0",
+				},
+				Expr: `EXCLUDE USING gist ("room" WITH =, "during" WITH &&) WHERE (room > 0)`,
+			},
+		},
+	}
+	var b strings.Builder
+	renderObjectDPG(&b, tbl, fmtOpts)
+	rendered := b.String()
+
+	dir := t.TempDir()
+	f := filepath.Join(dir, "schema.dpg")
+	if err := os.WriteFile(f, []byte(rendered), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	compiled, err := compiler.Compile([]string{f}, dir, pipeline.Default)
+	if err != nil {
+		t.Fatalf("EXCLUDE constraint did not recompile: %v\n---\n%s", err, rendered)
+	}
+	ops, err := diff.New().Diff(compiled, &pipeline.Snapshot{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ops) == 0 {
+		t.Fatal("expected a CREATE TABLE op")
+	}
+	sql := ops[0].SQL()
+	if !strings.Contains(sql, `CONSTRAINT "no_overlap" EXCLUDE USING gist ("room" WITH =, "during" WITH &&) WHERE (room > 0)`) {
+		t.Errorf("expected the real EXCLUDE body to survive render+recompile, got: %s", sql)
+	}
+}

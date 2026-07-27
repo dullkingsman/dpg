@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"maps"
+	"regexp"
 	"sort"
 	"strings"
 	"unicode/utf8"
@@ -3040,7 +3041,16 @@ func translateConstraintExpr(expr string, renamedCols map[string]string) string 
 			return expr
 		}
 		return expr[:open] + replaceQuotedIdents(expr[open:close+1], renamedCols) + expr[close+1:]
-	case strings.HasPrefix(upper, "CHECK"):
+	case strings.HasPrefix(upper, "CHECK"), strings.HasPrefix(upper, "EXCLUDE"):
+		// Unlike PRIMARY KEY/UNIQUE/FOREIGN KEY (which restrict translation to
+		// the first paren group, to avoid touching FOREIGN KEY's unrelated
+		// "REFERENCES othertable (othercol)" group), EXCLUDE has no such
+		// second, different-table group to protect against: its element list
+		// AND its optional WHERE clause both reference only this table's own
+		// columns, same as CHECK. Translating the whole string catches a
+		// renamed column wherever it appears (element list, an
+		// expression-based element, or WHERE) — quoted column names always
+		// match the quoteIdent form renderExclude emits.
 		return replaceQuotedIdents(expr, renamedCols)
 	}
 	return expr
@@ -3125,14 +3135,104 @@ func firstParenGroup(s string) (int, int) {
 	return -1, -1
 }
 
-// replaceQuotedIdents substitutes "old" → "new" for every old name in the
-// rename map, matching only fully quoted identifiers so unquoted keywords
-// (e.g. ASC, DESC) aren't touched.
+// replaceQuotedIdents substitutes a renamed column's references in s, both
+// quoted ("old" → "new") and bare (old → new, at a word boundary — no
+// partial-identifier match, so renaming "a" never touches "cat"). The bare
+// form matters because nodeToText/pg_query.Deparse — used to render CHECK
+// expressions and EXCLUDE's WHERE clause/expression-based elements — only
+// quotes an identifier that actually needs it (confirmed live: Deparse
+// renders a plain lowercase column reference unquoted), unlike the
+// hand-built, always-quoted column lists PRIMARY KEY/UNIQUE/FOREIGN KEY's
+// Expr uses. Matching case-sensitively is protects against clobbering a SQL
+// keyword: PostgreSQL folds an unquoted identifier to lowercase at
+// declaration time, so a renamed column's key here is always lowercase,
+// while Deparse always renders keywords (AND, OR, ASC, DESC, NULL, ...) in
+// uppercase — confirmed live — so the two can never collide case-sensitively.
+//
+// Both substitutions are applied only OUTSIDE single-quoted SQL string
+// literals (splitSQLStringLiterals) — an independent verification pass
+// caught this as a real gap: a string literal's contents are delimited by
+// `'`, a non-word character, so an unqualified `\bold\b` regex would
+// otherwise treat 'old' *the string value* exactly like the bare identifier
+// old (e.g. CHECK (status <> 'room') with column "room" being renamed would
+// have mangled the unrelated literal 'room', producing a spurious
+// unchanged-constraint drop+recreate — the exact class of noise this whole
+// rename-translation feature exists to eliminate, reintroduced through a
+// different path). The same literal-skip is applied to the quoted-ident
+// substitution too, for the same reason, even though a real-world collision
+// there would need a double-quoted substring INSIDE a single-quoted
+// literal — pathological, but the fix is the same either way.
 func replaceQuotedIdents(s string, renamedCols map[string]string) string {
-	for old, newName := range renamedCols {
-		s = strings.ReplaceAll(s, `"`+old+`"`, `"`+newName+`"`)
+	segs := splitSQLStringLiterals(s)
+	for i, seg := range segs {
+		if seg.isLiteral {
+			continue
+		}
+		for old, newName := range renamedCols {
+			seg.text = strings.ReplaceAll(seg.text, `"`+old+`"`, `"`+newName+`"`)
+			seg.text = wordBoundaryRegexp(old).ReplaceAllString(seg.text, newName)
+		}
+		segs[i] = seg
 	}
-	return s
+	var b strings.Builder
+	for _, seg := range segs {
+		b.WriteString(seg.text)
+	}
+	return b.String()
+}
+
+// wordBoundaryRegexp returns a compiled regexp matching ident as a whole
+// word (bounded by non-identifier characters, including string start/end).
+func wordBoundaryRegexp(ident string) *regexp.Regexp {
+	return regexp.MustCompile(`\b` + regexp.QuoteMeta(ident) + `\b`)
+}
+
+// sqlSegment is one maximal run of text from splitSQLStringLiterals, tagged
+// as either inside or outside a single-quoted SQL string literal.
+type sqlSegment struct {
+	text      string
+	isLiteral bool
+}
+
+// splitSQLStringLiterals splits s into alternating literal/non-literal runs,
+// so a caller can transform identifiers in the code portions without ever
+// touching the contents of a string literal. Handles SQL's doubled-quote
+// escape (” inside a literal means a literal single quote, not the end of
+// the string) — confirmed this is the real PostgreSQL escaping rule, not
+// backslash-escaping, which pg_query.Deparse's own output also uses (e.g.
+// 'it”s'), so a naive "split on every apostrophe" would incorrectly end
+// the literal early on that case.
+func splitSQLStringLiterals(s string) []sqlSegment {
+	var segs []sqlSegment
+	i := 0
+	for i < len(s) {
+		start := i
+		for i < len(s) && s[i] != '\'' {
+			i++
+		}
+		if i > start {
+			segs = append(segs, sqlSegment{text: s[start:i]})
+		}
+		if i >= len(s) {
+			break
+		}
+		// s[i] == '\'': scan the literal, treating '' as an escaped quote.
+		litStart := i
+		i++
+		for i < len(s) {
+			if s[i] == '\'' {
+				if i+1 < len(s) && s[i+1] == '\'' {
+					i += 2
+					continue
+				}
+				i++
+				break
+			}
+			i++
+		}
+		segs = append(segs, sqlSegment{text: s[litStart:i], isLiteral: true})
+	}
+	return segs
 }
 
 // allDropped reports whether the given column names are non-empty and every

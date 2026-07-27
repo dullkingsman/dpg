@@ -1265,3 +1265,113 @@ func TestRoundtripOperatorBodyEditAppliesLive(t *testing.T) {
 		t.Errorf("live oprcode = %q, want int4mi (the edit)", fn)
 	}
 }
+
+// TestRoundtripExcludeConstraint proves EXCLUDE constraints — previously a
+// silent no-op source-side (buildConstraint discarded the entire body down
+// to a placeholder that would fail to apply) — now genuinely round-trip:
+// compile, apply, introspect, and re-diff at zero drift, against a real
+// PostgreSQL 17 catalog. Covers the canonical "no overlapping bookings"
+// shape (USING gist, two elements, a WHERE clause — btree_gist supplies the
+// integer "=" operator class GiST needs) and the no-USING (defaults to
+// btree) single-element form.
+func TestRoundtripExcludeConstraint(t *testing.T) {
+	connStr := testpg.Start(t)
+	ctx := context.Background()
+
+	differ := diff.New()
+	emitter := emit.New()
+	applyExec := executor.New()
+	ci := introspect.New()
+	store := newMemStore()
+
+	conn, err := executor.Connect(ctx, connStr)
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	defer conn.Close(ctx)
+
+	if _, err := conn.Exec(ctx, `CREATE EXTENSION IF NOT EXISTS btree_gist`); err != nil {
+		t.Fatalf("create btree_gist: %v", err)
+	}
+
+	dir := t.TempDir()
+	f := filepath.Join(dir, "schema.dpg")
+	fixture := `TABLE bookings (
+    room integer,
+    during tsrange,
+    CONSTRAINT no_overlap EXCLUDE USING gist (room WITH =, during WITH &&) WHERE (room > 0)
+);
+
+TABLE singles (
+    a integer,
+    CONSTRAINT one_a EXCLUDE (a WITH =)
+);`
+	if err := os.WriteFile(f, []byte(fixture), 0o644); err != nil {
+		t.Fatalf("write schema: %v", err)
+	}
+	applyFixture(t, ctx, conn, []string{f}, dir, differ, emitter, applyExec, store)
+
+	desired, err := compiler.Compile([]string{f}, dir, pipeline.Default)
+	if err != nil {
+		t.Fatalf("compile: %v", err)
+	}
+	appliedSnap := &pipeline.Snapshot{}
+	if err := snapshot.Populate(appliedSnap, desired); err != nil {
+		t.Fatalf("populate snapshot: %v", err)
+	}
+
+	liveObjects, err := ci.Introspect(ctx, conn)
+	if err != nil {
+		t.Fatalf("introspect: %v", err)
+	}
+	var managedLive []pipeline.IRObject
+	for _, obj := range liveObjects {
+		if _, ok := appliedSnap.Objects[obj.QualifiedName()]; ok {
+			managedLive = append(managedLive, obj)
+		}
+	}
+	liveSnap := &pipeline.Snapshot{}
+	if err := snapshot.Populate(liveSnap, managedLive); err != nil {
+		t.Fatalf("populate live snapshot: %v", err)
+	}
+
+	// Confirm both constraints actually applied and reference the right
+	// access method — a guard against the zero-drift check below passing
+	// for the wrong reason (e.g. both constraints silently missing).
+	rs, err := conn.QueryRows(ctx, `
+SELECT con.conname, am.amname
+FROM pg_constraint con
+JOIN pg_class idx ON idx.oid = con.conindid
+JOIN pg_am am ON am.oid = idx.relam
+WHERE con.contype = 'x'
+ORDER BY con.conname`)
+	if err != nil {
+		t.Fatalf("query pg_constraint: %v", err)
+	}
+	defer rs.Close()
+	gotAM := map[string]string{}
+	for rs.Next() {
+		var name, am string
+		if err := rs.Scan(&name, &am); err != nil {
+			t.Fatalf("scan: %v", err)
+		}
+		gotAM[name] = am
+	}
+	if gotAM["no_overlap"] != "gist" {
+		t.Errorf("no_overlap access method = %q, want gist", gotAM["no_overlap"])
+	}
+	if gotAM["one_a"] != "btree" {
+		t.Errorf("one_a access method = %q, want btree (PG's default)", gotAM["one_a"])
+	}
+
+	driftOps, err := differ.Diff(desired, liveSnap)
+	if err != nil {
+		t.Fatalf("drift diff: %v", err)
+	}
+	if len(driftOps) != 0 {
+		t.Errorf("expected zero drift for EXCLUDE constraints against a live catalog, got %d ops:", len(driftOps))
+		for _, op := range driftOps {
+			t.Errorf("  [%s] %s", op.Safety(), op.SQL())
+		}
+	}
+}

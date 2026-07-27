@@ -460,17 +460,48 @@ func buildConstraint(c *pg_query.Constraint, pos pipeline.SourcePos) *Constraint
 
 	case pg_query.ConstrType_CONSTR_EXCLUSION:
 		cst.Type = "EXCLUDE"
-		// c.Exclusions (per-element IndexElem + operator list), c.AccessMethod,
-		// and c.WhereClause are all dropped here — the real body is never
-		// parsed at all, not just missing a column extraction. This is a
-		// pre-existing, separate gap (EXCLUDE bodies aren't round-tripped by
-		// DPG in any capacity today): an unnamed EXCLUDE constraint can't be
-		// given a real predicted auto-generated name (pgConstraintNameLabel
-		// deliberately excludes "EXCLUDE") because there's no real desired-side
-		// definition to name in the first place — this placeholder Expr would
-		// already fail to apply ("ALTER TABLE t ADD EXCLUDE;" is invalid SQL)
-		// before naming ever mattered.
-		cst.Expr = "EXCLUDE" // full exclusion body is complex; preserve via rawSQL if needed
+		spec := &ExcludeSpec{AccessMethod: c.AccessMethod}
+		if c.WhereClause != nil {
+			spec.Where = nodeToText(c.WhereClause)
+		}
+		var cols []string
+		for _, ex := range c.Exclusions {
+			pair := ex.GetList()
+			if pair == nil || len(pair.Items) != 2 {
+				continue
+			}
+			el := ExcludeElement{}
+			if ie := pair.Items[0].GetIndexElem(); ie != nil {
+				switch {
+				case ie.Name != "":
+					el.Column = ie.Name
+					cols = append(cols, ie.Name)
+				case ie.Expr != nil:
+					el.Expr = nodeToText(ie.Expr)
+				}
+				el.Collation = qualifiedNameText(ie.Collation)
+				el.OpClass = qualifiedNameText(ie.Opclass)
+				switch ie.Ordering {
+				case pg_query.SortByDir_SORTBY_ASC:
+					el.SortOrder = "ASC"
+				case pg_query.SortByDir_SORTBY_DESC:
+					el.SortOrder = "DESC"
+				}
+				switch ie.NullsOrdering {
+				case pg_query.SortByNulls_SORTBY_NULLS_FIRST:
+					el.Nulls = "FIRST"
+				case pg_query.SortByNulls_SORTBY_NULLS_LAST:
+					el.Nulls = "LAST"
+				}
+			}
+			if opList := pair.Items[1].GetList(); opList != nil {
+				el.Operator = operatorNameText(opList.Items)
+			}
+			spec.Elements = append(spec.Elements, el)
+		}
+		cst.Columns = cols
+		cst.Exclude = spec
+		cst.Expr = renderExclude(spec)
 	default:
 		cst.Type = "UNKNOWN"
 	}
@@ -480,6 +511,76 @@ func buildConstraint(c *pg_query.Constraint, pos pipeline.SourcePos) *Constraint
 // quoteIdent double-quotes a SQL identifier, escaping embedded quotes.
 func quoteIdent(s string) string {
 	return `"` + strings.ReplaceAll(s, `"`, `""`) + `"`
+}
+
+// qualifiedNameText joins a (possibly schema-qualified) name-part list —
+// used for an EXCLUDE element's COLLATE target and operator class, both of
+// which pg_query represents the same way as an operator name — into "" (no
+// parts), "name", or "schema.name".
+func qualifiedNameText(nodes []*pg_query.Node) string {
+	return strings.Join(nodeListToNames(nodes), ".")
+}
+
+// operatorNameText renders an EXCLUDE element's WITH operator name. PG's
+// grammar allows a schema-qualified operator (OPERATOR(schema.=)); the
+// pg_catalog schema is stripped since it's the implicit default for a
+// built-in operator, mirroring pgCatalogName's treatment of built-in types.
+func operatorNameText(nodes []*pg_query.Node) string {
+	parts := nodeListToNames(nodes)
+	if len(parts) == 2 && parts[0] == "pg_catalog" {
+		return parts[1]
+	}
+	return strings.Join(parts, ".")
+}
+
+// renderExclude renders an ExcludeSpec as PostgreSQL's own EXCLUDE syntax:
+// EXCLUDE [USING access_method] (element [COLLATE collation] [opclass]
+// [ASC|DESC] [NULLS FIRST|LAST] WITH operator [, ...]) [WHERE (predicate)].
+func renderExclude(spec *ExcludeSpec) string {
+	var b strings.Builder
+	b.WriteString("EXCLUDE")
+	if spec.AccessMethod != "" {
+		b.WriteString(" USING ")
+		b.WriteString(spec.AccessMethod)
+	}
+	b.WriteString(" (")
+	for i, el := range spec.Elements {
+		if i > 0 {
+			b.WriteString(", ")
+		}
+		if el.Column != "" {
+			b.WriteString(quoteIdent(el.Column))
+		} else {
+			b.WriteString("(")
+			b.WriteString(el.Expr)
+			b.WriteString(")")
+		}
+		if el.Collation != "" {
+			b.WriteString(" COLLATE ")
+			b.WriteString(el.Collation)
+		}
+		if el.OpClass != "" {
+			b.WriteString(" ")
+			b.WriteString(el.OpClass)
+		}
+		if el.SortOrder != "" {
+			b.WriteString(" ")
+			b.WriteString(el.SortOrder)
+		}
+		if el.Nulls != "" {
+			b.WriteString(" NULLS ")
+			b.WriteString(el.Nulls)
+		}
+		b.WriteString(" WITH ")
+		b.WriteString(el.Operator)
+	}
+	b.WriteString(")")
+	if spec.Where != "" {
+		b.WriteString(" WHERE (")
+		b.WriteString(spec.Where)
+		b.WriteString(")")
+	}
+	return b.String()
 }
 
 // nodeListToNames extracts string values from a pg_query Node list (Keys, FkAttrs, etc.).

@@ -41,7 +41,95 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- **Removing an operator from source (or editing its body) produced an
+- **`EXCLUDE` constraints could not actually be declared in DPG source at
+  all.** `buildConstraint`'s `CONSTR_EXCLUSION` case discarded the entire
+  body — access method, per-element operators, `WHERE` clause — down to a
+  hardcoded `"EXCLUDE"` placeholder, which is invalid SQL on its own
+  (`ALTER TABLE t ADD CONSTRAINT c EXCLUDE;` is a syntax error), so any table
+  with an inline `EXCLUDE` constraint failed to apply. Introspection already
+  captured a real `EXCLUDE` definition correctly via `pg_get_constraintdef`
+  (used for `verify`/`plan --live`) — the gap was source-side parsing only.
+  Fixed by extracting the full body: `ir.Constraint` gained a structured
+  `Exclude *ExcludeSpec` (access method, an ordered element list — each a
+  column or expression with optional `COLLATE`/operator class/sort
+  direction/`NULLS` placement, mirroring the same `IndexElem` grammar
+  `CREATE INDEX` already uses — plus its `WITH` operator, with `pg_catalog.`
+  stripped from a schema-qualified built-in operator the same way built-in
+  type names already are), and a real WHERE predicate. `Expr` is rendered
+  from this struct in PostgreSQL's own syntax and flows through the same
+  generic constraint-emission and `dump`-rendering paths every other
+  constraint type already uses — no changes needed there. Verified live
+  that PostgreSQL fills in `USING btree` as the access method even when
+  `USING` is omitted from source (confirmed via `pg_get_constraintdef`
+  against a real server, not assumed), so an unqualified `EXCLUDE` renders
+  and round-trips correctly too, not just the explicit-`USING` form.
+  Also fixed a related, newly-reachable gap in the same change: the
+  column-rename translator (`translateConstraintExpr`, used so a plain
+  `RENAMED FROM` doesn't look like a drop+re-add of every constraint
+  touching that column) had no `EXCLUDE` case at all — harmless before,
+  since there was no real column reference in the placeholder to translate,
+  but a genuine gap now that `EXCLUDE` has one. Fixed by routing `EXCLUDE`
+  through the same whole-string rename translation `CHECK` already uses
+  (safe here since, unlike `FOREIGN KEY`, `EXCLUDE` has no second,
+  different-table column group to accidentally touch).
+  Scope: `WITH (storage_parameter)` and `USING INDEX TABLESPACE` are not
+  captured, matching `PRIMARY KEY`/`UNIQUE`'s existing inline-constraint
+  scope (neither of those support it today either — a pre-existing,
+  consistent limitation, not a new one introduced here); index opclass
+  options (`opclass (param = value)`) aren't modelled, a narrower and rarer
+  omission. `EXCLUDE`'s own auto-generated-name reconciliation (matching
+  the fix already shipped for unnamed `PRIMARY KEY`/`UNIQUE`/`FOREIGN
+  KEY`/`CHECK`) remains a separate, not-yet-implemented feature — this
+  change removes what was blocking it (there's now a real body to name),
+  but doesn't implement the naming itself.
+  **Correction (caught by an independent verification pass, same day):**
+  the `EXCLUDE`/`CHECK` rename-translation fix above was incomplete.
+  `replaceQuotedIdents` only substituted the fully quoted `"old"` form, but
+  `nodeToText`/`pg_query.Deparse` — which renders both a `CHECK` expression
+  and `EXCLUDE`'s `WHERE` clause/expression-based elements — only quotes an
+  identifier that actually needs it (confirmed live: `SELECT room > 0`
+  deparses to `room > 0`, unquoted), unlike `PRIMARY KEY`/`UNIQUE`/`FOREIGN
+  KEY`'s always-quoted, hand-built column lists. In practice this meant a
+  renamed column referenced only in a `CHECK`'s expression or an `EXCLUDE`'s
+  `WHERE` clause (the ordinary case — `CHECK (amount > 0)`, not
+  `CHECK ("amount" > 0)`) was silently NOT translated, producing the exact
+  self-inconsistent manual-warning-then-re-add sequence the original fix
+  exists to prevent. This bug was **pre-existing for `CHECK`** (reproduced
+  independently against a `CHECK` constraint with no `EXCLUDE` involved at
+  all) — not introduced by this session's `EXCLUDE` work, just newly
+  exercised by it and caught in the same review pass. The shipped
+  regression test's fixture had hand-written a quoted `WHERE ("room" > 0)`,
+  a shape the real pipeline never actually produces, so it passed without
+  exercising the bug. Fixed by having `replaceQuotedIdents` also substitute
+  a bare, word-boundary-matched occurrence of the old name (case-sensitive,
+  so a lowercase column name can never collide with an uppercase-rendered
+  keyword like `AND`/`NULL`/`ASC` — confirmed live that `Deparse` always
+  renders keywords uppercase while a declared-unquoted column name is
+  always lowercase). New tests use realistic unquoted expression text and
+  cover a rename touching only a `WHERE` clause and only a bare `CHECK`
+  expression, for both constraint types.
+  **Second correction (caught by an independent verification pass, same
+  day):** the bare-word substitution above was itself incomplete — it had
+  no awareness of SQL string-literal boundaries. A single-quoted string
+  literal is delimited by `'`, a non-word character, so the unqualified
+  `\bold\b` regex treated a literal VALUE that happened to equal a renamed
+  column's old name (e.g. `CHECK (status <> 'room')`, with an unrelated
+  column also named `room` being renamed elsewhere on the same table)
+  exactly like a real identifier reference — mangling the literal into
+  `'chamber'`, which made an **unchanged** constraint's snapshot-side text
+  stop matching its (correctly unchanged) desired-side text, producing a
+  spurious destructive drop+recreate for a constraint that never actually
+  changed. Reproduced end-to-end through the real diff pipeline before
+  fixing. Fixed by having `replaceQuotedIdents` skip both substitutions
+  (quoted and bare-word) inside any single-quoted string literal span, via
+  a new `splitSQLStringLiterals` helper that also correctly handles SQL's
+  doubled-quote escape (`''` inside a literal is a literal quote character,
+  not the end of the string — confirmed this is `pg_query.Deparse`'s own
+  escaping convention too, e.g. rendering `it's` as `'it''s'`, so a naive
+  split on every apostrophe would have ended a literal early on that case).
+  New tests cover the literal-collision scenario directly, plus the
+  `splitSQLStringLiterals` helper in isolation (plain literal, escaped
+  quote, multiple literals, no literal at all).
   invalid `DROP OPERATOR` statement, a PostgreSQL syntax error.**
   PostgreSQL requires a mandatory `(lefttype, righttype)` operand clause on
   `DROP OPERATOR`, which `ir.Operator` never captured — `dropObject` emitted

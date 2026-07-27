@@ -117,11 +117,42 @@ type Constraint struct {
 	// (see pgAutoConstraintName in internal/diff) — unrelated to Columns,
 	// which createTable uses for a different purpose (inline-rendering
 	// promotion signal).
-	CheckColumn       *string
+	CheckColumn *string
+	// Exclude holds the structured EXCLUDE definition when Type == "EXCLUDE"
+	// (nil otherwise). Expr still carries the fully rendered SQL text (built
+	// from this struct — see renderExclude) for CREATE/ALTER TABLE emission
+	// and dump rendering, the same way every other constraint type's Expr
+	// works; Exclude exists alongside it because the exclusion elements and
+	// operators can't be losslessly recovered by re-parsing Expr's text, and
+	// a future EXCLUDE-naming feature (deferred — see pgConstraintNameLabel)
+	// will need the element list directly, not a re-parse of rendered SQL.
+	Exclude           *ExcludeSpec
 	NotValid          bool
 	Deferrable        bool
 	InitiallyDeferred bool
 	Pos               pipeline.SourcePos
+}
+
+// ExcludeSpec is the structured body of an EXCLUDE constraint: PostgreSQL's
+// `EXCLUDE [USING access_method] (element WITH operator [, ...]) [WHERE (predicate)]`.
+type ExcludeSpec struct {
+	AccessMethod string           // index access method, e.g. "gist"; "" means PG's default (btree)
+	Elements     []ExcludeElement // one per "element WITH operator" pair, in source order
+	Where        string           // raw WHERE predicate text (no surrounding parens); "" if absent
+}
+
+// ExcludeElement is one column-or-expression + operator pair inside an
+// EXCLUDE constraint's element list. Mirrors PostgreSQL's IndexElem grammar
+// (the same production CREATE INDEX uses), plus the WITH operator EXCLUDE
+// adds on top.
+type ExcludeElement struct {
+	Column    string // plain column name; "" if Expr is set instead
+	Expr      string // parenthesization-free expression text; "" if Column is set instead
+	Collation string // optional COLLATE target; "" if unspecified
+	OpClass   string // optional operator class; "" if unspecified (uses the type's default)
+	SortOrder string // "ASC", "DESC", or "" (unspecified)
+	Nulls     string // "FIRST", "LAST", or "" (unspecified)
+	Operator  string // the WITH operator, e.g. "=", "&&"
 }
 
 // Policy is a row-security policy.
