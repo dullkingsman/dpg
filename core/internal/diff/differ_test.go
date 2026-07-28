@@ -5643,6 +5643,200 @@ func TestDiffPublicationOfflineDetectsEdit(t *testing.T) {
 	}
 }
 
+// TestDiffSubscriptionConnectionSecretOnlyChangeDetected guards
+// snapshot.SubscriptionBodyHash's whole reason for existing: ConnectionSecret
+// (the { CONNECTION '...'; } block value, RFC §13.2) lives entirely outside
+// the native SQL text, so it's never part of Body. Without folding it into
+// the hash basis, editing only the block value — Body byte-identical on both
+// sides — would go completely undetected.
+func TestDiffSubscriptionConnectionSecretOnlyChangeDetected(t *testing.T) {
+	d := New()
+	body := "CREATE SUBSCRIPTION sub CONNECTION '-' PUBLICATION pub"
+	snap := &pipeline.Snapshot{}
+	if err := snapshot.Populate(snap, []pipeline.IRObject{
+		&ir.Subscription{Name: "sub", ConnInfo: "-", ConnectionSecret: "{{vault:secret/db#old}}", Body: body},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	desired := []pipeline.IRObject{
+		&ir.Subscription{Name: "sub", ConnInfo: "-", ConnectionSecret: "{{vault:secret/db#new}}", Body: body},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ops) == 0 {
+		t.Fatal("offline: a ConnectionSecret-only change (Body unchanged) must be detected, got 0 ops")
+	}
+}
+
+func TestDiffSubscriptionUnchangedIsNoop(t *testing.T) {
+	d := New()
+	body := "CREATE SUBSCRIPTION sub CONNECTION '-' PUBLICATION pub"
+	sub := &ir.Subscription{Name: "sub", ConnInfo: "-", ConnectionSecret: "{{vault:secret/db#pw}}", Body: body}
+	snap := &pipeline.Snapshot{}
+	if err := snapshot.Populate(snap, []pipeline.IRObject{sub}); err != nil {
+		t.Fatal(err)
+	}
+	ops, err := d.Diff([]pipeline.IRObject{sub}, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ops) != 0 {
+		t.Errorf("expected no ops for an unchanged subscription (Body and ConnectionSecret both identical), got %d", len(ops))
+	}
+}
+
+// ── createSubscription / subscriptionCreateOp ───────────────────────────────────
+
+type fakeDiffResolver struct{ values map[string]string }
+
+func (f *fakeDiffResolver) Resolve(uri string) (string, error) {
+	v, ok := f.values[uri]
+	if !ok {
+		return "", fmt.Errorf("no such secret: %s", uri)
+	}
+	return v, nil
+}
+
+func TestCreateSubscriptionSQLIsAlwaysThePlaceholderForm(t *testing.T) {
+	o := &ir.Subscription{
+		Name:     "sub",
+		ConnInfo: "-",
+		Body:     "CREATE SUBSCRIPTION sub CONNECTION '-' PUBLICATION pub",
+	}
+	ops, err := createSubscription(o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ops) != 1 {
+		t.Fatalf("expected 1 op, got %d", len(ops))
+	}
+	if got := ops[0].SQL(); got != "CREATE SUBSCRIPTION sub CONNECTION '-' PUBLICATION pub;" {
+		t.Errorf("SQL(): got %q, want the unresolved placeholder form", got)
+	}
+	if _, ok := ops[0].(pipeline.SecretBearingOp); !ok {
+		t.Fatalf("expected %T to implement pipeline.SecretBearingOp", ops[0])
+	}
+}
+
+func TestCreateSubscriptionExecSQLResolvesBlockForm(t *testing.T) {
+	o := &ir.Subscription{
+		Name:             "sub",
+		ConnInfo:         "-",
+		ConnectionSecret: "{{vault:secret/db#conninfo}}",
+		Body:             "CREATE SUBSCRIPTION sub CONNECTION '-' PUBLICATION pub",
+	}
+	ops, _ := createSubscription(o)
+	sb := ops[0].(pipeline.SecretBearingOp)
+	resolver := &fakeDiffResolver{values: map[string]string{
+		"vault:secret/db#conninfo": "host=real dbname=real user=repl password=s3cr3t",
+	}}
+	got, err := sb.ExecSQL(resolver)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "CREATE SUBSCRIPTION sub CONNECTION 'host=real dbname=real user=repl password=s3cr3t' PUBLICATION pub;"
+	if got != want {
+		t.Errorf("ExecSQL: got %q, want %q", got, want)
+	}
+	// SQL() must be completely unaffected by the ExecSQL call above.
+	if got := ops[0].SQL(); got != "CREATE SUBSCRIPTION sub CONNECTION '-' PUBLICATION pub;" {
+		t.Errorf("SQL() changed after ExecSQL was called: got %q", got)
+	}
+}
+
+func TestCreateSubscriptionExecSQLResolvesPartialTemplateInNativeLiteral(t *testing.T) {
+	o := &ir.Subscription{
+		Name:     "sub",
+		ConnInfo: "host=x user=y password={{env:DB_PASS}}",
+		Body:     "CREATE SUBSCRIPTION sub CONNECTION 'host=x user=y password={{env:DB_PASS}}' PUBLICATION pub",
+	}
+	ops, _ := createSubscription(o)
+	sb := ops[0].(pipeline.SecretBearingOp)
+	resolver := &fakeDiffResolver{values: map[string]string{"env:DB_PASS": "s3cr3t"}}
+	got, err := sb.ExecSQL(resolver)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "CREATE SUBSCRIPTION sub CONNECTION 'host=x user=y password=s3cr3t' PUBLICATION pub;"
+	if got != want {
+		t.Errorf("ExecSQL: got %q, want %q", got, want)
+	}
+}
+
+func TestCreateSubscriptionExecSQLPlainLiteralNeverCallsResolver(t *testing.T) {
+	o := &ir.Subscription{
+		Name:     "sub",
+		ConnInfo: "host=x user=y password=hunter2",
+		Body:     "CREATE SUBSCRIPTION sub CONNECTION 'host=x user=y password=hunter2' PUBLICATION pub",
+	}
+	ops, _ := createSubscription(o)
+	sb := ops[0].(pipeline.SecretBearingOp)
+	// A resolver with no entries: if it's called at all for a plain literal
+	// with no {{...}}, this must fail loudly rather than silently succeed
+	// with an empty value.
+	got, err := sb.ExecSQL(&fakeDiffResolver{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != o.Body+";" {
+		t.Errorf("ExecSQL: got %q, want the literal returned unchanged", got)
+	}
+}
+
+// TestCreateSubscriptionIsNonTransactional and
+// TestDropSubscriptionIsNonTransactional guard two pre-existing bugs found
+// live-testing Phase 3 (predating secret-reference support entirely — the
+// generic createOpaque/destructiveOp paths every other opaque kind still
+// correctly uses were never live-tested for Subscription specifically):
+// both CREATE SUBSCRIPTION (WITH (create_slot = true), the default) and
+// DROP SUBSCRIPTION error "cannot run inside a transaction block" in real
+// PostgreSQL — confirmed live against a real postgres:17 pair. Destructive
+// safety must survive the fix for DROP (still gated by --allow-destructive
+// in cmd/dpg/apply.go), which is why destructiveManualOp exists rather than
+// reusing manualOp (Safety=Manual) for it.
+func TestCreateSubscriptionIsNonTransactional(t *testing.T) {
+	ops, err := createSubscription(&ir.Subscription{
+		Name: "sub", ConnInfo: "-", Body: "CREATE SUBSCRIPTION sub CONNECTION '-' PUBLICATION pub",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ops[0].Transactional() {
+		t.Error("CREATE SUBSCRIPTION must be non-transactional (PostgreSQL rejects create_slot=true inside a transaction block)")
+	}
+}
+
+func TestDropSubscriptionIsNonTransactional(t *testing.T) {
+	ops := dropObject(&snapshot.SnapObject{
+		Kind: "subscription", Opaque: &snapshot.SnapOpaque{Kind: "subscription", Name: "sub"},
+	})
+	if len(ops) != 1 {
+		t.Fatalf("expected 1 op, got %d", len(ops))
+	}
+	if ops[0].Transactional() {
+		t.Error("DROP SUBSCRIPTION must be non-transactional (PostgreSQL rejects it inside a transaction block)")
+	}
+	if ops[0].Safety() != pipeline.Destructive {
+		t.Errorf("Safety() = %v, want Destructive (must still require --allow-destructive)", ops[0].Safety())
+	}
+}
+
+func TestCreateSubscriptionExecSQLResolveErrorPropagates(t *testing.T) {
+	o := &ir.Subscription{
+		Name:             "sub",
+		ConnInfo:         "-",
+		ConnectionSecret: "{{vault:secret/missing}}",
+		Body:             "CREATE SUBSCRIPTION sub CONNECTION '-' PUBLICATION pub",
+	}
+	ops, _ := createSubscription(o)
+	sb := ops[0].(pipeline.SecretBearingOp)
+	if _, err := sb.ExecSQL(&fakeDiffResolver{}); err == nil {
+		t.Fatal("expected an error when the referenced secret doesn't resolve")
+	}
+}
+
 // TestDiffOpaqueOfflineEditEmitsStructuredDropRecreate is the regression guard
 // for #3 (real update path for opaque objects): a genuine offline body edit
 // must emit a structured DROP (matching what dropObject emits when the object
@@ -5655,10 +5849,11 @@ func TestDiffPublicationOfflineDetectsEdit(t *testing.T) {
 func TestDiffOpaqueOfflineEditEmitsStructuredDropRecreate(t *testing.T) {
 	intType := ir.TypeRef{Name: "integer"}
 	cases := []struct {
-		name           string
-		oldObj, newObj pipeline.IRObject
-		wantDropSubstr string
-		wantNewInBody  string
+		name             string
+		oldObj, newObj   pipeline.IRObject
+		wantDropSubstr   string
+		wantNewInBody    string
+		wantCreateSafety pipeline.Safety // zero value (Safe) unless overridden
 	}{
 		{
 			name:           "tablespace",
@@ -5697,10 +5892,16 @@ func TestDiffOpaqueOfflineEditEmitsStructuredDropRecreate(t *testing.T) {
 		},
 		{
 			name:           "subscription",
-			oldObj:         &ir.Subscription{Name: "sub", Body: "CREATE SUBSCRIPTION sub CONNECTION 'x' PUBLICATION p1"},
-			newObj:         &ir.Subscription{Name: "sub", Body: "CREATE SUBSCRIPTION sub CONNECTION 'x' PUBLICATION p2"},
+			oldObj:         &ir.Subscription{Name: "sub", ConnInfo: "x", Body: "CREATE SUBSCRIPTION sub CONNECTION 'x' PUBLICATION p1"},
+			newObj:         &ir.Subscription{Name: "sub", ConnInfo: "x", Body: "CREATE SUBSCRIPTION sub CONNECTION 'x' PUBLICATION p2"},
 			wantDropSubstr: `DROP SUBSCRIPTION IF EXISTS "sub";`,
 			wantNewInBody:  "p2",
+			// Manual (non-transactional), not Safe like every other opaque
+			// kind: PostgreSQL's CREATE SUBSCRIPTION defaults to WITH
+			// (create_slot = true), which errors "cannot run inside a
+			// transaction block" — confirmed live, see createSubscription's
+			// doc comment.
+			wantCreateSafety: pipeline.Manual,
 		},
 		{
 			name:           "event_trigger",
@@ -5808,8 +6009,8 @@ func TestDiffOpaqueOfflineEditEmitsStructuredDropRecreate(t *testing.T) {
 			if ops[0].Safety() != pipeline.Destructive {
 				t.Errorf("DROP op safety = %v, want Destructive", ops[0].Safety())
 			}
-			if ops[1].Safety() != pipeline.Safe {
-				t.Errorf("CREATE op safety = %v, want Safe", ops[1].Safety())
+			if ops[1].Safety() != tc.wantCreateSafety {
+				t.Errorf("CREATE op safety = %v, want %v", ops[1].Safety(), tc.wantCreateSafety)
 			}
 			for _, op := range ops {
 				if strings.Contains(op.SQL(), "manual DROP + recreate required") {

@@ -23,6 +23,26 @@ func New() *PgxExecutor { return &PgxExecutor{} }
 // Apply executes a Migration. Transactional ops run inside BEGIN/COMMIT;
 // non-transactional ops run individually outside any transaction.
 func (e *PgxExecutor) Apply(ctx context.Context, m pipeline.Migration, conn pipeline.Conn) error {
+	// Lazily resolved on first use: most migrations have no
+	// pipeline.SecretBearingOp at all, and a plain registry lookup is cheap
+	// but pointless to do unconditionally.
+	var resolver pipeline.SecretResolver
+	var resolverLoaded bool
+	execText := func(op pipeline.DiffOp) (string, error) {
+		sb, ok := op.(pipeline.SecretBearingOp)
+		if !ok {
+			return op.SQL(), nil
+		}
+		if !resolverLoaded {
+			resolver, _ = pipeline.Resolve[pipeline.SecretResolver](pipeline.Default, pipeline.KeySecretResolver)
+			resolverLoaded = true
+		}
+		if resolver == nil {
+			return "", fmt.Errorf("no SecretResolver registered to resolve this statement's secret reference")
+		}
+		return sb.ExecSQL(resolver)
+	}
+
 	// Transactional block.
 	if len(m.Transactional) > 0 {
 		tx, err := conn.Begin(ctx)
@@ -30,8 +50,16 @@ func (e *PgxExecutor) Apply(ctx context.Context, m pipeline.Migration, conn pipe
 			return fmt.Errorf("executor: begin transaction: %w", err)
 		}
 		for _, op := range m.Transactional {
-			if _, err := tx.Exec(ctx, op.SQL()); err != nil {
+			text, err := execText(op)
+			if err != nil {
 				_ = tx.Rollback(ctx)
+				return fmt.Errorf("executor: %s: %w", op.SQL(), err)
+			}
+			if _, err := tx.Exec(ctx, text); err != nil {
+				_ = tx.Rollback(ctx)
+				// Always op.SQL() (the placeholder/reference form), never
+				// text (which may hold a resolved secret) — see
+				// pipeline.SecretBearingOp's doc comment.
 				return fmt.Errorf("executor: %s: %w", op.SQL(), err)
 			}
 		}
@@ -42,7 +70,11 @@ func (e *PgxExecutor) Apply(ctx context.Context, m pipeline.Migration, conn pipe
 
 	// Non-transactional steps (e.g. CREATE INDEX CONCURRENTLY).
 	for _, op := range m.NonTransactional {
-		if _, err := conn.Exec(ctx, op.SQL()); err != nil {
+		text, err := execText(op)
+		if err != nil {
+			return fmt.Errorf("executor: %s: %w", op.SQL(), err)
+		}
+		if _, err := conn.Exec(ctx, text); err != nil {
 			return fmt.Errorf("executor: %s: %w", op.SQL(), err)
 		}
 	}

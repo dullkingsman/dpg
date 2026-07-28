@@ -210,4 +210,5 @@ type BlockAST struct {
 	Mappings            []TSMappingDef
 	PreferredJsonFormat string // "json" or "jsonb"; empty = not set (default jsonb)
 	NameMaps            []NameMapEntry
+	ConnectionSecret    *StringLit // SUBSCRIPTION only: CONNECTION '<secret-uri>'; see RFC §13.2
 }

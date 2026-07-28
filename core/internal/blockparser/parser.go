@@ -410,6 +410,15 @@ func (b *blockParser) parseBlock(pos pipeline.SourcePos) (pipeline.BlockAST, err
 			err = b.expectSemi()
 		case "DEPRECATED":
 			ast.Deprecated, err = b.parseStringDirective(dirPos)
+		case "CONNECTION":
+			// SUBSCRIPTION-only: CONNECTION '<secret-uri>'; supplies the
+			// resolved-at-apply-time value when the native CONNECTION clause
+			// is the literal placeholder "-" (RFC §13.2). Reuses
+			// parseStringDirective's "name '...';" shape exactly, like
+			// COMMENT/DEPRECATED above — meaningless for any other object
+			// kind, which simply never reads this field, same convention as
+			// e.g. Partitions/Mappings below.
+			ast.ConnectionSecret, err = b.parseStringDirective(dirPos)
 		case "DROP":
 			err = b.parseDrop(&ast)
 		case "ENABLE":

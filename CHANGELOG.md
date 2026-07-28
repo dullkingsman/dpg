@@ -78,8 +78,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   treat `#field` as optional JSON-key extraction over an otherwise-opaque
   string secret. See RFC §D.5 for the full URI grammar and rationale for
   each choice.
+- SUBSCRIPTION `CONNECTION` may now hold a secret reference (Secret
+  resolution, Phase 3; RFC §13.2, §D.5): embed `{{<secret-uri>}}`
+  placeholders inside an otherwise-literal conninfo string (e.g. just the
+  password), or set `CONNECTION '-'` natively and supply the value via a
+  new `{ CONNECTION '<secret-uri>'; }` block directive — the native form is
+  required by real `CREATE SUBSCRIPTION` grammar (`CONNECTION` is
+  mandatory), so the block form needs a syntactically valid placeholder,
+  not a DPG relaxation of PostgreSQL's own syntax. The new
+  `pipeline.ResolveTemplate` helper backing this is a general mechanism
+  (not SUBSCRIPTION-specific) for future fields with the same
+  "mostly-literal, one part sensitive" shape (Role passwords,
+  FDW/UserMapping options). Resolution happens once, immediately before
+  `CREATE SUBSCRIPTION` executes — the snapshot, an archived migration
+  file, and any error message all show the placeholder/reference text,
+  never a resolved value; a new `pipeline.SecretBearingOp` interface keeps
+  this true by construction (`DiffOp.SQL()` never changes meaning; only
+  `PgxExecutor.Apply`'s inner exec loop ever calls the resolving method,
+  and only for that one execution call).
 
 ### Fixed
+
+- **`CREATE SUBSCRIPTION` and `DROP SUBSCRIPTION` were both emitted as
+  transactional operations, but PostgreSQL rejects both inside a
+  transaction block** (`CREATE SUBSCRIPTION`'s default `WITH (create_slot =
+  true)`, and `DROP SUBSCRIPTION` unconditionally) — confirmed live against
+  a real PostgreSQL 17 instance. This predates Phase 3 entirely: every
+  opaque-tier kind's CREATE went through the same generic, transactional
+  `createOpaque` path, and Subscription's DROP used the same transactional
+  `destructiveOp` every other kind correctly uses — nothing had ever
+  live-tested a fresh `CREATE SUBSCRIPTION`/`DROP SUBSCRIPTION` before this
+  round, so the failure went unnoticed. `apply` against a real cluster
+  would have failed on the very first subscription create or removal.
+  Fixed by giving Subscription's CREATE and DROP their own non-transactional
+  ops (`MANUAL` and `DESTRUCTIVE` safety respectively — `DESTRUCTIVE` is
+  preserved for DROP specifically so it still requires
+  `--allow-destructive`, unlike reusing the existing `MANUAL`-safety
+  non-transactional helper, which would have silently dropped that gate).
 
 - **A `link` value with an unrecognized secret scheme was silently treated as
   a literal connection string instead of erroring** — `EnvResolver.Resolve`'s

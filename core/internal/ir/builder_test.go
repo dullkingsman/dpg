@@ -1585,3 +1585,84 @@ func TestBuildOperatorOverloadDistinctQualifiedNames(t *testing.T) {
 		t.Errorf("expected distinct QualifiedName for overloaded operators, both got %q", intOp.QualifiedName())
 	}
 }
+
+// ── Subscription CONNECTION (RFC §13.2) ─────────────────────────────────────────
+
+// buildObjectExpectError mirrors buildObject but returns the Build error
+// instead of failing the test on one — for the two invalid-combination cases
+// buildSubscription is specifically responsible for rejecting.
+func buildObjectExpectError(t *testing.T, kind pipeline.ObjectKind, part1, part2 string) error {
+	t.Helper()
+	p := pgparser.New()
+	pgResult, err := p.Parse(kind, part1, zeroPos)
+	if err != nil {
+		t.Fatalf("pg parse error: %v", err)
+	}
+	bp := blockparser.New()
+	blockAST, err := bp.Parse(kind, part2, zeroPos)
+	if err != nil {
+		t.Fatalf("block parse error: %v", err)
+	}
+	builder := ir.NewBuilder()
+	_, err = builder.Build(pgResult, blockAST)
+	return err
+}
+
+func TestBuildSubscriptionPlainLiteralNoBlock(t *testing.T) {
+	obj := buildObject(t, pipeline.KindSubscription,
+		`sub CONNECTION 'host=primary.internal dbname=myapp user=replicator' PUBLICATION pub`, ``)
+	sub, ok := obj.(*ir.Subscription)
+	if !ok {
+		t.Fatalf("expected *ir.Subscription, got %T", obj)
+	}
+	if sub.ConnInfo != "host=primary.internal dbname=myapp user=replicator" {
+		t.Errorf("ConnInfo: got %q", sub.ConnInfo)
+	}
+	if sub.ConnectionSecret != "" {
+		t.Errorf("ConnectionSecret: got %q, want empty (no block used)", sub.ConnectionSecret)
+	}
+}
+
+func TestBuildSubscriptionTemplatedLiteralNoBlock(t *testing.T) {
+	obj := buildObject(t, pipeline.KindSubscription,
+		`sub CONNECTION 'host=x user=y password={{vault:secret/db#pw}}' PUBLICATION pub`, ``)
+	sub := obj.(*ir.Subscription)
+	if sub.ConnInfo != "host=x user=y password={{vault:secret/db#pw}}" {
+		t.Errorf("ConnInfo: got %q, want the raw literal with {{...}} left unresolved at build time", sub.ConnInfo)
+	}
+}
+
+func TestBuildSubscriptionBlockFormWithDashSentinel(t *testing.T) {
+	obj := buildObject(t, pipeline.KindSubscription,
+		`sub CONNECTION '-' PUBLICATION pub`,
+		`CONNECTION '{{vault:secret/repl/db#conninfo}}';`,
+	)
+	sub, ok := obj.(*ir.Subscription)
+	if !ok {
+		t.Fatalf("expected *ir.Subscription, got %T", obj)
+	}
+	if sub.ConnInfo != "-" {
+		t.Errorf("ConnInfo: got %q, want the \"-\" sentinel preserved", sub.ConnInfo)
+	}
+	if sub.ConnectionSecret != "{{vault:secret/repl/db#conninfo}}" {
+		t.Errorf("ConnectionSecret: got %q", sub.ConnectionSecret)
+	}
+}
+
+func TestBuildSubscriptionDashWithoutBlockErrors(t *testing.T) {
+	err := buildObjectExpectError(t, pipeline.KindSubscription,
+		`sub CONNECTION '-' PUBLICATION pub`, ``)
+	if err == nil {
+		t.Fatal("expected an error: CONNECTION '-' with no { CONNECTION '...'; } block has nothing to resolve to")
+	}
+}
+
+func TestBuildSubscriptionBlockAndNativeBothSetErrors(t *testing.T) {
+	err := buildObjectExpectError(t, pipeline.KindSubscription,
+		`sub CONNECTION 'host=x user=y' PUBLICATION pub`,
+		`CONNECTION '{{vault:secret/repl/db#conninfo}}';`,
+	)
+	if err == nil {
+		t.Fatal("expected an error: ambiguous when both native CONNECTION and the { } block are set")
+	}
+}

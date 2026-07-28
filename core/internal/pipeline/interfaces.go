@@ -104,11 +104,27 @@ type PortabilityAnalyzer interface {
 }
 
 // SecretResolver resolves secret URIs to plaintext values at connection time.
-//   - "env:VAR_NAME"        → os.Getenv("VAR_NAME")
-//   - "link:vault://..."    → vault lookup (stub until vault support is added)
+//   - "env:VAR_NAME" → os.Getenv("VAR_NAME")
+//   - "vault:<mount>/<path>#<field>", "aws-sm:...", "gcp-sm:...", "azure-kv:..."
 //
-// Default implementation: internal/secrets.EnvResolver.
-// Compose resolvers with ChainResolver (tries each in order, first non-error wins).
+// Default implementation: internal/secrets.ChainResolver, with all of the
+// above registered. ChainResolver dispatches a URI to whichever resolver is
+// registered for its scheme (the substring before the first ':') — not a
+// fallback chain that tries each resolver in turn; an unrecognized scheme
+// errors immediately rather than being silently treated as a literal value.
 type SecretResolver interface {
 	Resolve(uri string) (string, error)
+}
+
+// SecretBearingOp is optionally implemented by a DiffOp whose SQL() text
+// contains an unresolved secret reference (e.g. a SUBSCRIPTION's CONNECTION
+// clause). SQL() always returns the placeholder/reference form — used for
+// plan output, migration-file archival, snapshot hashing, and error
+// messages, so a resolved secret is never persisted or logged. ExecSQL
+// resolves the reference via resolver and returns the actual statement to
+// execute; callers MUST use the result only for the immediate execution
+// call and MUST NOT log, print, wrap into an error, or otherwise persist it.
+type SecretBearingOp interface {
+	DiffOp
+	ExecSQL(resolver SecretResolver) (string, error)
 }

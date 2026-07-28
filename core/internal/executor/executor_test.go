@@ -3,6 +3,7 @@ package executor
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/dullkingsman/dpg/internal/pipeline"
@@ -158,3 +159,119 @@ func (t *errExecTx) Exec(_ context.Context, _ string, _ ...any) (int64, error) {
 }
 func (t *errExecTx) Commit(_ context.Context) error   { return nil }
 func (t *errExecTx) Rollback(_ context.Context) error { t.rollback = true; return nil }
+
+// ── pipeline.SecretBearingOp handling ───────────────────────────────────────────
+
+type fakeSecretResolver struct{ err error }
+
+func (f *fakeSecretResolver) Resolve(uri string) (string, error) {
+	if f.err != nil {
+		return "", f.err
+	}
+	return "resolved:" + uri, nil
+}
+
+// secretOp implements pipeline.SecretBearingOp on top of testOp. SQL() (from
+// the embedded testOp) always stays the placeholder/redacted form; execSQL
+// is what ExecSQL returns — standing in for a real resolved statement.
+type secretOp struct {
+	testOp
+	execSQL string
+	execErr error
+}
+
+func (o secretOp) ExecSQL(_ pipeline.SecretResolver) (string, error) {
+	if o.execErr != nil {
+		return "", o.execErr
+	}
+	return o.execSQL, nil
+}
+
+var _ pipeline.SecretBearingOp = secretOp{}
+
+// withSecretResolver registers r under pipeline.KeySecretResolver for the
+// duration of t, restoring whatever was registered before (if anything).
+func withSecretResolver(t *testing.T, r any) {
+	t.Helper()
+	prev, hadPrev := pipeline.Resolve[pipeline.SecretResolver](pipeline.Default, pipeline.KeySecretResolver)
+	pipeline.Default.Register(pipeline.KeySecretResolver, r)
+	t.Cleanup(func() {
+		if hadPrev {
+			pipeline.Default.Register(pipeline.KeySecretResolver, prev)
+		}
+	})
+}
+
+func TestApplyUsesExecSQLForSecretBearingOp(t *testing.T) {
+	withSecretResolver(t, &fakeSecretResolver{})
+	conn := &mockConn{}
+	e := New()
+	op := secretOp{
+		testOp:  testOp{sql: "CREATE SUBSCRIPTION s CONNECTION '-' PUBLICATION p;", txn: true},
+		execSQL: "CREATE SUBSCRIPTION s CONNECTION 'host=real password=s3cr3t' PUBLICATION p;",
+	}
+	m := pipeline.Migration{Transactional: []pipeline.DiffOp{op}}
+	if err := e.Apply(context.Background(), m, conn); err != nil {
+		t.Fatal(err)
+	}
+	if len(conn.txn.executed) != 1 || conn.txn.executed[0] != op.execSQL {
+		t.Errorf("expected the resolved ExecSQL text to be executed, got: %v", conn.txn.executed)
+	}
+}
+
+// TestApplySecretBearingOpFailureNeverLeaksResolvedText is the redaction
+// guard: if the resolved statement fails to execute, the returned error
+// must describe the failure using SQL()'s placeholder form, never the
+// resolved text ExecSQL produced — otherwise a real secret would leak into
+// a log line or terminal on every failed apply of a secret-bearing op.
+func TestApplySecretBearingOpFailureNeverLeaksResolvedText(t *testing.T) {
+	withSecretResolver(t, &fakeSecretResolver{})
+	errConn := &errExecConn{}
+	e := New()
+	op := secretOp{
+		testOp:  testOp{sql: "CREATE SUBSCRIPTION s CONNECTION '-' PUBLICATION p;", txn: true},
+		execSQL: "CREATE SUBSCRIPTION s CONNECTION 'host=real password=TOP-SECRET-VALUE' PUBLICATION p;",
+	}
+	m := pipeline.Migration{Transactional: []pipeline.DiffOp{op}}
+	err := e.Apply(context.Background(), m, errConn)
+	if err == nil {
+		t.Fatal("expected an error from exec failure")
+	}
+	if strings.Contains(err.Error(), "TOP-SECRET-VALUE") {
+		t.Fatalf("error message leaked the resolved secret value: %v", err)
+	}
+	if !strings.Contains(err.Error(), "CONNECTION '-'") {
+		t.Errorf("expected error to contain the redacted placeholder form (op.SQL()), got: %v", err)
+	}
+}
+
+func TestApplySecretBearingOpResolveErrorNeverExecutes(t *testing.T) {
+	withSecretResolver(t, &fakeSecretResolver{})
+	conn := &mockConn{}
+	e := New()
+	op := secretOp{
+		testOp:  testOp{sql: "CREATE SUBSCRIPTION s CONNECTION '-' PUBLICATION p;", txn: true},
+		execErr: errors.New("vault unreachable"),
+	}
+	m := pipeline.Migration{Transactional: []pipeline.DiffOp{op}}
+	if err := e.Apply(context.Background(), m, conn); err == nil {
+		t.Fatal("expected an error when ExecSQL itself fails to resolve")
+	}
+	if conn.txn != nil && len(conn.txn.executed) != 0 {
+		t.Errorf("expected nothing to be executed when resolution fails, got: %v", conn.txn.executed)
+	}
+}
+
+func TestApplyNoResolverRegisteredErrorsClearly(t *testing.T) {
+	withSecretResolver(t, "not-a-resolver") // simulates "nothing valid registered"
+	conn := &mockConn{}
+	e := New()
+	op := secretOp{
+		testOp:  testOp{sql: "CREATE SUBSCRIPTION s CONNECTION '-' PUBLICATION p;", txn: true},
+		execSQL: "unused",
+	}
+	m := pipeline.Migration{Transactional: []pipeline.DiffOp{op}}
+	if err := e.Apply(context.Background(), m, conn); err == nil {
+		t.Fatal("expected an error when no SecretResolver is registered")
+	}
+}

@@ -18,11 +18,22 @@ import (
 // when Start returns.
 func Start(t *testing.T) string {
 	t.Helper()
-	return startContainer(t)
+	return startContainer(t, nil)
 }
 
-// startContainer starts a fresh postgres:17-alpine testcontainer.
-func startContainer(t *testing.T) string {
+// StartLogical is Start with wal_level=logical set — the prerequisite for a
+// publisher database used with CREATE PUBLICATION/SUBSCRIPTION. Postgres's
+// default wal_level (replica) rejects a subscriber's initial sync outright,
+// so a real CREATE SUBSCRIPTION round trip needs its publisher started this
+// way specifically (the subscriber side has no such requirement).
+func StartLogical(t *testing.T) string {
+	t.Helper()
+	return startContainer(t, []string{"postgres", "-c", "wal_level=logical"})
+}
+
+// startContainer starts a fresh postgres:17 testcontainer. cmd overrides the
+// container's default command when non-nil (e.g. to set wal_level).
+func startContainer(t *testing.T, cmd []string) string {
 	t.Helper()
 	ctx := context.Background()
 
@@ -35,6 +46,9 @@ func startContainer(t *testing.T) string {
 			"POSTGRES_DB":       "dpgtest",
 		},
 		WaitingFor: wait.ForLog("database system is ready to accept connections").WithOccurrence(2),
+	}
+	if cmd != nil {
+		req.Cmd = cmd
 	}
 
 	container, err := testcontainers.GenericContainer(ctx, testcontainers.GenericContainerRequest{

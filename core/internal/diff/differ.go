@@ -50,6 +50,18 @@ func manualOp(sql string, pos pipeline.SourcePos) *op {
 	return &op{sql: sql, safety: pipeline.Manual, pos: pos, txn: false}
 }
 
+// destructiveManualOp is destructiveOp's non-transactional counterpart —
+// Safety() and Transactional() are independent fields on op (Emit buckets
+// purely on Transactional(); apply's --allow-destructive gate checks purely
+// on Safety()), so this combination is safe to construct directly rather
+// than needing a new interface. Used for DROP SUBSCRIPTION, which errors
+// "cannot run inside a transaction block" (confirmed live) — reusing
+// manualOp here would have silently dropped the --allow-destructive gate,
+// since apply.go's gate checks Safety() == Destructive specifically.
+func destructiveManualOp(sql string, pos pipeline.SourcePos) *op {
+	return &op{sql: sql, safety: pipeline.Destructive, pos: pos, txn: false}
+}
+
 // Differ implements pipeline.Differ.
 type Differ struct{}
 
@@ -553,7 +565,11 @@ func dropObject(so *snapshot.SnapObject) []pipeline.DiffOp {
 		}
 	case "subscription":
 		if so.Opaque != nil {
-			return []pipeline.DiffOp{destructiveOp(fmt.Sprintf("DROP SUBSCRIPTION IF EXISTS %s;", quoteIdent(so.Opaque.Name)), zero)}
+			// destructiveManualOp, not destructiveOp: DROP SUBSCRIPTION
+			// errors "cannot run inside a transaction block" (confirmed
+			// live) — the same non-transactional constraint CREATE
+			// SUBSCRIPTION has, see createSubscription's doc comment.
+			return []pipeline.DiffOp{destructiveManualOp(fmt.Sprintf("DROP SUBSCRIPTION IF EXISTS %s;", quoteIdent(so.Opaque.Name)), zero)}
 		}
 	case "event_trigger":
 		if so.Opaque != nil {
@@ -659,7 +675,7 @@ func createObject(obj pipeline.IRObject, vtypes map[string]string) ([]pipeline.D
 	case *ir.Publication:
 		return createOpaque(o.Name, o.Body, "PUBLICATION", o.SrcPos)
 	case *ir.Subscription:
-		return createOpaque(o.Name, o.Body, "SUBSCRIPTION", o.SrcPos)
+		return createSubscription(o)
 	case *ir.EventTrigger:
 		return createOpaque(o.Name, o.Body, "EVENT TRIGGER", o.SrcPos)
 	case *ir.Collation:
@@ -700,6 +716,108 @@ func createOpaque(name, body, kind string, pos pipeline.SourcePos) ([]pipeline.D
 		return []pipeline.DiffOp{safeOp(body+";", pos)}, nil
 	}
 	return nil, fmt.Errorf("%s %s: body not captured; define it explicitly in a .dpg source file", kind, name)
+}
+
+// subscriptionConnectionLit matches CREATE SUBSCRIPTION's CONNECTION clause
+// literal in pg_query's deparsed output — verified empirically:
+// "CONNECTION '<connstr>'", connstr single-quote-escaped by doubling,
+// exactly once per statement, since CONNECTION is a required, unique clause
+// in this grammar (never appears elsewhere in a CREATE SUBSCRIPTION).
+var subscriptionConnectionLit = regexp.MustCompile(`(?s)\bCONNECTION\s+'(?:[^']|'')*'`)
+
+// substituteConnection replaces body's CONNECTION '...' clause with a
+// freshly quoted resolved value. Returns an error if the clause can't be
+// found — would mean pg_query's deparse output changed shape; safer to fail
+// loudly than silently execute a statement with the wrong, unresolved
+// CONNECTION value.
+func substituteConnection(body, resolved string) (string, error) {
+	loc := subscriptionConnectionLit.FindStringIndex(body)
+	if loc == nil {
+		return "", fmt.Errorf("could not locate CONNECTION clause in deparsed SUBSCRIPTION SQL")
+	}
+	return body[:loc[0]] + "CONNECTION " + quoteLit(resolved) + body[loc[1]:], nil
+}
+
+// subscriptionCreateOp is the DiffOp for a CREATE SUBSCRIPTION statement
+// whose CONNECTION clause may hold an unresolved secret reference (RFC
+// §13.2). SQL() always returns the placeholder/reference form (embedded
+// op.sql, unchanged) — used for plan output, migration-file archival, and
+// error messages, so a resolved secret is never persisted or logged.
+// ExecSQL resolves the effective value (connectionSecret if the { } block
+// form was used, else the native literal) via pipeline.ResolveTemplate and
+// substitutes it into a fresh copy of the SQL, used only for the immediate
+// execution call — never for anything that gets displayed, hashed, or
+// wrapped into an error.
+type subscriptionCreateOp struct {
+	*op
+	connInfo         string
+	connectionSecret string
+}
+
+func (o *subscriptionCreateOp) ExecSQL(resolver pipeline.SecretResolver) (string, error) {
+	effective := o.connInfo
+	if o.connectionSecret != "" {
+		effective = o.connectionSecret
+	}
+	resolved, err := pipeline.ResolveTemplate(effective, resolver)
+	if err != nil {
+		return "", err
+	}
+	return substituteConnection(o.sql, resolved)
+}
+
+var _ pipeline.SecretBearingOp = (*subscriptionCreateOp)(nil)
+
+// createSubscription emits a CREATE SUBSCRIPTION statement as a
+// subscriptionCreateOp rather than the generic createOpaque path — every
+// other opaque kind has nothing secret-bearing in its Body, but a
+// Subscription's CONNECTION clause may reference or embed a secret that
+// must only ever be resolved immediately before execution (see
+// subscriptionCreateOp's doc comment).
+//
+// Built via manualOp, the same non-transactional precedent already used for
+// CREATE INDEX CONCURRENTLY: PostgreSQL's CREATE SUBSCRIPTION defaults to
+// WITH (create_slot = true), which errors "cannot run inside a transaction
+// block" — confirmed live (this was a real, pre-existing bug predating
+// secret-reference support entirely; createOpaque's generic path used
+// safeOp, transactional, for every opaque kind including this one, and
+// nothing had ever live-tested a fresh CREATE SUBSCRIPTION before). Always
+// non-transactional regardless of whether a given declaration happens to
+// set create_slot = false — Subscription's WITH-options aren't structurally
+// parsed (still fully opaque beyond CONNECTION), and running outside a
+// transaction is always safe even when not strictly required, unlike the
+// reverse.
+func createSubscription(o *ir.Subscription) ([]pipeline.DiffOp, error) {
+	if o.Body == "" {
+		return nil, fmt.Errorf("SUBSCRIPTION %s: body not captured; define it explicitly in a .dpg source file", o.Name)
+	}
+	return []pipeline.DiffOp{&subscriptionCreateOp{
+		op:               manualOp(o.Body+";", o.SrcPos),
+		connInfo:         o.ConnInfo,
+		connectionSecret: o.ConnectionSecret,
+	}}, nil
+}
+
+// diffSubscription mirrors diffOpaqueIR's shape (offline body-hash compare,
+// structured DROP+CREATE on a real change) but can't reuse it directly:
+// diffOpaqueIR hashes only the passed body string, while a Subscription's
+// drift-relevant state also includes ConnectionSecret (see
+// snapshot.SubscriptionBodyHash's doc comment for why), and its CREATE side
+// must produce a subscriptionCreateOp, not a generic createOpaque op.
+func diffSubscription(o *ir.Subscription, snap *snapshot.SnapOpaque) ([]pipeline.DiffOp, error) {
+	if o.Body == "" {
+		return nil, nil
+	}
+	newHash := snapshot.SubscriptionBodyHash(o.Body, o.ConnectionSecret)
+	if snap.BodyHash == "" || newHash == snap.BodyHash {
+		return nil, nil
+	}
+	ops := dropObject(&snapshot.SnapObject{Kind: snap.Kind, Opaque: snap})
+	createOps, err := createSubscription(o)
+	if err != nil {
+		return nil, err
+	}
+	return append(ops, createOps...), nil
 }
 
 func buildProcedureSignature(o *ir.Procedure) string {
@@ -1816,7 +1934,7 @@ func diffObject(desired pipeline.IRObject, snap *snapshot.SnapObject, fullSnap *
 		if snap.Opaque == nil {
 			return nil, nil
 		}
-		return diffOpaqueIR(o.Name, o.Body, false, snap.Opaque, o.SrcPos)
+		return diffSubscription(o, snap.Opaque)
 	case *ir.EventTrigger:
 		if snap.Opaque == nil {
 			return nil, nil

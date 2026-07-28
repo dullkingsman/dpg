@@ -1616,13 +1616,48 @@ func rawSQL(node *pg_query.Node) string {
 	return sql
 }
 
-func (b *Builder) buildOpaque(node *pg_query.Node, _ pipeline.BlockAST, pos pipeline.SourcePos, kind string) (pipeline.IRObject, error) {
+// buildSubscription validates and constructs a Subscription from its native
+// CONNECTION literal and the optional { CONNECTION '...'; } block directive
+// (RFC §13.2). Only structural: which of the two forms holds the effective
+// value, not whether any {{...}} placeholders inside it are well-formed or
+// resolvable — that's apply-time only (pipeline.ResolveTemplate), since
+// validating it here would mean reaching a live secret backend during an
+// offline plan/diff.
+func (b *Builder) buildSubscription(stmt *pg_query.CreateSubscriptionStmt, block pipeline.BlockAST, pos pipeline.SourcePos, sql string) (pipeline.IRObject, error) {
+	native := stmt.Conninfo
+	var blockRef string
+	blockSet := block.ConnectionSecret != nil
+	if blockSet {
+		blockRef = block.ConnectionSecret.Value
+	}
+
+	switch {
+	case native == "-" && !blockSet:
+		return nil, pipeline.Errorf(pos,
+			"SUBSCRIPTION %q: CONNECTION '-' requires a { CONNECTION '<uri>'; } block to supply the actual value",
+			stmt.Subname)
+	case native != "-" && blockSet:
+		return nil, pipeline.Errorf(pos,
+			"SUBSCRIPTION %q: ambiguous CONNECTION — both a native CONNECTION value and a { CONNECTION '...'; } block are set; use CONNECTION '-' natively when the block supplies the value",
+			stmt.Subname)
+	}
+
+	return &Subscription{
+		Name:             stmt.Subname,
+		ConnInfo:         native,
+		ConnectionSecret: blockRef,
+		Body:             sql,
+		SrcPos:           pos,
+	}, nil
+}
+
+func (b *Builder) buildOpaque(node *pg_query.Node, block pipeline.BlockAST, pos pipeline.SourcePos, kind string) (pipeline.IRObject, error) {
 	sql := rawSQL(node)
 	switch n := node.Node.(type) {
 	case *pg_query.Node_CreatePublicationStmt:
 		return &Publication{Name: n.CreatePublicationStmt.Pubname, Body: sql, SrcPos: pos}, nil
 	case *pg_query.Node_CreateSubscriptionStmt:
-		return &Subscription{Name: n.CreateSubscriptionStmt.Subname, Body: sql, SrcPos: pos}, nil
+		return b.buildSubscription(n.CreateSubscriptionStmt, block, pos, sql)
 	case *pg_query.Node_CreateEventTrigStmt:
 		return &EventTrigger{Name: n.CreateEventTrigStmt.Trigname, Body: sql, SrcPos: pos}, nil
 	case *pg_query.Node_CreateOpClassStmt:
