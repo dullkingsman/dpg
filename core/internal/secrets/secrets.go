@@ -1,9 +1,20 @@
 // Package secrets implements pipeline.SecretResolver. It resolves secret URIs
-// to plaintext values at connection time.
+// to plaintext values at connection time — used for `dpg.toml`'s cluster
+// `link` field ("a secrets-provider URI resolved at connection time", RFC
+// §3.3), and, as of the operator-family-era secret-resolution work, for
+// structured secret-reference fields elsewhere in the IR.
+//
+// The package default (registered under pipeline.KeySecretResolver) is a
+// ChainResolver (see chain.go) with EnvResolver registered for the "env"
+// scheme. Additional schemes (vault, aws-sm, gcp-sm, azure-kv) register
+// themselves into the same ChainResolver from their own subpackages.
 //
 // Supported URI schemes:
-//   - env:VAR_NAME   → os.Getenv("VAR_NAME")
-//   - link:...       → stub; returns an error until vault support is added
+//   - env:VAR_NAME → os.Getenv("VAR_NAME")
+//
+// `link` is a TOML *key* name, never a URI *scheme* — a value like
+// `link:env:VAR` is not meaningful and is rejected the same as any other
+// unrecognized scheme (see ChainResolver).
 package secrets
 
 import (
@@ -15,37 +26,35 @@ import (
 )
 
 func init() {
-	pipeline.Default.Register(pipeline.KeySecretResolver, New())
+	chain := NewChain()
+	chain.Register("env", New())
+	pipeline.Default.Register(pipeline.KeySecretResolver, chain)
 }
 
-// EnvResolver implements pipeline.SecretResolver.
+// EnvResolver implements pipeline.SecretResolver for the "env" scheme.
 type EnvResolver struct{}
 
 // New returns an EnvResolver.
 func New() *EnvResolver { return &EnvResolver{} }
 
-// Resolve resolves a secret URI to its plaintext value.
+// Resolve resolves an "env:VAR_NAME" URI to os.Getenv("VAR_NAME"). Any other
+// input is an error — EnvResolver only ever handles its own scheme; routing
+// unrecognized schemes to the right resolver (or a clear error) is
+// ChainResolver's job, not something each individual resolver should guess
+// at by falling back to "treat it as a literal."
 func (r *EnvResolver) Resolve(uri string) (string, error) {
-	switch {
-	case strings.HasPrefix(uri, "env:"):
-		varName := strings.TrimPrefix(uri, "env:")
-		if varName == "" {
-			return "", fmt.Errorf("secrets: env: URI missing variable name")
-		}
-		val, ok := os.LookupEnv(varName)
-		if !ok {
-			return "", fmt.Errorf("secrets: environment variable %q is not set", varName)
-		}
-		return val, nil
-
-	case strings.HasPrefix(uri, "link:"):
-		// Recursively resolve the target URI (allows chaining env: or plain values).
-		return r.Resolve(strings.TrimPrefix(uri, "link:"))
-
-	default:
-		// Plain value: return as-is (not a URI).
-		return uri, nil
+	varName, ok := strings.CutPrefix(uri, "env:")
+	if !ok {
+		return "", fmt.Errorf("secrets: %q is not an env: URI", uri)
 	}
+	if varName == "" {
+		return "", fmt.Errorf("secrets: env: URI missing variable name")
+	}
+	val, ok := os.LookupEnv(varName)
+	if !ok {
+		return "", fmt.Errorf("secrets: environment variable %q is not set", varName)
+	}
+	return val, nil
 }
 
 var _ pipeline.SecretResolver = (*EnvResolver)(nil)

@@ -47,9 +47,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`op.Pos`, `ptrStr`, `int64PtrEq`, `compositeAttrsChanged` — all trivial
   helpers with no prior gap in correctness) now have unit tests, bringing the
   package to 80.8%.
+- `internal/secrets.ChainResolver` (Secret resolution, Phase 1) — the
+  `ChainResolver` the RFC (D.5) has described as "planned" since it was
+  first written is now implemented and is the default registered
+  `pipeline.SecretResolver`, with `env:` wired in. It dispatches a secret
+  URI to whichever resolver is registered for its scheme (a plain map
+  lookup keyed on the substring before the first `:`) — deliberately not a
+  fallback chain that tries multiple resolvers per URI, since a secret
+  URI's scheme unambiguously names the one resolver responsible for it;
+  see the Fixed entry below for why "try each until one doesn't error" is
+  the wrong shape for this. `Register(scheme, resolver)` is the extension
+  point additional backends (Vault, AWS/GCP/Azure secret managers, or a
+  user's own) plug into, matching the same `pipeline.Default.Register`
+  pattern already used for Differ/Emitter/Linter.
 
 ### Fixed
 
+- **A `link` value with an unrecognized secret scheme was silently treated as
+  a literal connection string instead of erroring** — `EnvResolver.Resolve`'s
+  `default:` case returned any unrecognized input as-is ("not a URI, return
+  as-is"), the opposite of the RFC's own stated contract ("`link` URIs with
+  an unimplemented scheme return an error at resolution time"). Concretely: a
+  project configured with `link = "vault:secret/db"` before Vault support
+  existed didn't fail with a clear "vault: isn't implemented" error — it
+  silently tried to open a PostgreSQL connection to the literal string
+  `"vault:secret/db"`, producing a confusing low-level `pgx` parse error
+  instead. A separate, undocumented `link:` URI-*prefix* branch (recursing
+  into whatever followed it) also existed in the same function despite
+  matching nothing in the RFC — `link` is a `dpg.toml` *key* name, never a
+  URI *scheme*, so `link:env:VAR` as a value was never a meaningful
+  construct. Fixed by replacing the single `EnvResolver`-does-everything
+  design with `ChainResolver` (see Added above): every URI must now match a
+  registered scheme or the resolver errors immediately, naming the
+  unrecognized scheme and listing every scheme actually registered, before
+  ever reaching a connection attempt.
 - **Introspection silently dropped `OUT` columns and lost `INOUT`/`VARIADIC`
   mode keywords for any function using them** — `introspectFunctions` built
   `Args` purely from `oidvectortypes(proargtypes)`, which — like

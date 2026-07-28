@@ -4541,14 +4541,28 @@ serial_sequence_declared      = "off"
    **Secret handling:** DPG MUST NOT store plaintext secret values in
    any persisted file.  This includes:
 
-   -   Role passwords: the snapshot stores only a boolean `has_password`.
-   -   FDW / user mapping passwords: the snapshot stores the `env:` URI,
-       not the resolved value.
    -   Connection strings in `dpg.toml`: if `link = "env:VAR"` is used,
-       the resolved value is never written to disk.  If `url =` is used,
-       the connection string may contain embedded credentials and SHOULD
-       NOT be committed to a public repository; this is the operator's
+       the resolved value is never written to disk (via
+       `pipeline.SecretResolver`/`ChainResolver`, §D.5).  If `url =` is
+       used, the connection string may contain embedded credentials and
+       SHOULD NOT be committed to a public repository; this is the operator's
        responsibility.
+
+   **Planned, not yet implemented** (secret resolution today only covers
+   the cluster connection string above; these three currently have no
+   structured secret-reference field at all, so a password written in
+   `.dpg` source is opaque literal text, same as any other DDL clause):
+
+   -   Role passwords: intended end state is the snapshot storing only a
+       boolean `has_password` (or the declared reference URI, TBD),
+       never the resolved value or a hash the tool computed itself.
+   -   FDW / user mapping passwords: intended end state is the snapshot
+       storing the secret URI (`env:...`, `vault:...`, ...), not the
+       resolved value.
+   -   Subscription `CONNECTION` strings: same intent, resolved as a
+       whole value (PostgreSQL's own `conninfo` is one flat string with
+       no internal structure DPG can safely substitute into), not
+       parsed apart and partially substituted.
 
    **SQL injection in generated DDL:** All identifier names read from
    source files are validated against PostgreSQL's identifier rules
@@ -5560,16 +5574,25 @@ type SecretResolver interface {
    from the process environment (which may have been populated from the
    `.env` file per §D.2.3).
 
-   **Future schemes (planned, not yet implemented):**
+   **Future schemes (planned, backends not yet implemented):**
 
    -   `vault:<path>` — HashiCorp Vault secret read.
    -   `aws-sm:<secret-id>` — AWS Secrets Manager lookup.
    -   `gcp-sm:<resource-name>` — GCP Secret Manager lookup.
+   -   `azure-kv:<vault-name>/<secret-name>` — Azure Key Vault lookup.
 
-   No other scheme is recognised today; `link` URIs with an unimplemented
-   scheme return an error at resolution time. A `ChainResolver` that tries
-   multiple resolvers in order is planned alongside these future schemes
-   but not yet implemented.
+   No other scheme is recognised today; `link` URIs with an unrecognized
+   scheme return an error at resolution time naming the scheme and listing
+   every scheme currently registered.
+
+   `ChainResolver` (`internal/secrets.ChainResolver`) IS implemented and is
+   the default registered resolver, with `env:` wired in. It is a
+   scheme-keyed dispatch table, not a fallback chain that tries multiple
+   resolvers per URI in sequence: a secret URI's scheme unambiguously names
+   the one resolver responsible for it, so there is never a genuine
+   "which one applies" question for a chain to resolve by trial. `Register`
+   is the extension point new schemes (including the backends above) plug
+   into.
 
 ---
 
