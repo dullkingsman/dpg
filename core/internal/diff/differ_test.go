@@ -5643,37 +5643,11 @@ func TestDiffPublicationOfflineDetectsEdit(t *testing.T) {
 	}
 }
 
-// TestDiffSubscriptionConnectionSecretOnlyChangeDetected guards
-// snapshot.SubscriptionBodyHash's whole reason for existing: ConnectionSecret
-// (the { CONNECTION '...'; } block value, RFC §13.2) lives entirely outside
-// the native SQL text, so it's never part of Body. Without folding it into
-// the hash basis, editing only the block value — Body byte-identical on both
-// sides — would go completely undetected.
-func TestDiffSubscriptionConnectionSecretOnlyChangeDetected(t *testing.T) {
-	d := New()
-	body := "CREATE SUBSCRIPTION sub CONNECTION '-' PUBLICATION pub"
-	snap := &pipeline.Snapshot{}
-	if err := snapshot.Populate(snap, []pipeline.IRObject{
-		&ir.Subscription{Name: "sub", ConnInfo: "-", ConnectionSecret: "{{vault:secret/db#old}}", Body: body},
-	}); err != nil {
-		t.Fatal(err)
-	}
-	desired := []pipeline.IRObject{
-		&ir.Subscription{Name: "sub", ConnInfo: "-", ConnectionSecret: "{{vault:secret/db#new}}", Body: body},
-	}
-	ops, err := d.Diff(desired, snap)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(ops) == 0 {
-		t.Fatal("offline: a ConnectionSecret-only change (Body unchanged) must be detected, got 0 ops")
-	}
-}
-
 func TestDiffSubscriptionUnchangedIsNoop(t *testing.T) {
 	d := New()
-	body := "CREATE SUBSCRIPTION sub CONNECTION '-' PUBLICATION pub"
-	sub := &ir.Subscription{Name: "sub", ConnInfo: "-", ConnectionSecret: "{{vault:secret/db#pw}}", Body: body}
+	body := "CREATE SUBSCRIPTION sub CONNECTION '{{vault:secret/db#pw}}' PUBLICATION pub"
+	comment := "replication for orders"
+	sub := &ir.Subscription{Name: "sub", ConnInfo: "{{vault:secret/db#pw}}", Body: body, Comment: &comment}
 	snap := &pipeline.Snapshot{}
 	if err := snapshot.Populate(snap, []pipeline.IRObject{sub}); err != nil {
 		t.Fatal(err)
@@ -5683,7 +5657,40 @@ func TestDiffSubscriptionUnchangedIsNoop(t *testing.T) {
 		t.Fatal(err)
 	}
 	if len(ops) != 0 {
-		t.Errorf("expected no ops for an unchanged subscription (Body and ConnectionSecret both identical), got %d", len(ops))
+		t.Errorf("expected no ops for an unchanged subscription, got %d: %v", len(ops), ops)
+	}
+}
+
+// TestDiffSubscriptionCommentOnlyChangeIsFieldLevel guards Comment being
+// diffed separately from Body: a comment-only edit must emit a plain
+// COMMENT ON SUBSCRIPTION, not a structured DROP+CREATE (which would
+// needlessly interrupt a working, already-syncing subscription).
+func TestDiffSubscriptionCommentOnlyChangeIsFieldLevel(t *testing.T) {
+	d := New()
+	body := "CREATE SUBSCRIPTION sub CONNECTION 'host=x user=y' PUBLICATION pub"
+	oldComment := "old comment"
+	newComment := "new comment"
+	snap := &pipeline.Snapshot{}
+	if err := snapshot.Populate(snap, []pipeline.IRObject{
+		&ir.Subscription{Name: "sub", ConnInfo: "host=x user=y", Body: body, Comment: &oldComment},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	desired := []pipeline.IRObject{
+		&ir.Subscription{Name: "sub", ConnInfo: "host=x user=y", Body: body, Comment: &newComment},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ops) != 1 {
+		t.Fatalf("expected exactly 1 op (COMMENT ON SUBSCRIPTION), got %d: %v", len(ops), ops)
+	}
+	if !strings.Contains(ops[0].SQL(), "COMMENT ON SUBSCRIPTION") || !strings.Contains(ops[0].SQL(), "new comment") {
+		t.Errorf("expected a COMMENT ON SUBSCRIPTION op, got: %s", ops[0].SQL())
+	}
+	if strings.Contains(ops[0].SQL(), "DROP SUBSCRIPTION") {
+		t.Error("comment-only change must not drop and recreate the subscription")
 	}
 }
 
@@ -5720,12 +5727,11 @@ func TestCreateSubscriptionSQLIsAlwaysThePlaceholderForm(t *testing.T) {
 	}
 }
 
-func TestCreateSubscriptionExecSQLResolvesBlockForm(t *testing.T) {
+func TestCreateSubscriptionExecSQLResolvesWholeValueTemplate(t *testing.T) {
 	o := &ir.Subscription{
-		Name:             "sub",
-		ConnInfo:         "-",
-		ConnectionSecret: "{{vault:secret/db#conninfo}}",
-		Body:             "CREATE SUBSCRIPTION sub CONNECTION '-' PUBLICATION pub",
+		Name:     "sub",
+		ConnInfo: "{{vault:secret/db#conninfo}}",
+		Body:     "CREATE SUBSCRIPTION sub CONNECTION '{{vault:secret/db#conninfo}}' PUBLICATION pub",
 	}
 	ops, _ := createSubscription(o)
 	sb := ops[0].(pipeline.SecretBearingOp)
@@ -5741,7 +5747,7 @@ func TestCreateSubscriptionExecSQLResolvesBlockForm(t *testing.T) {
 		t.Errorf("ExecSQL: got %q, want %q", got, want)
 	}
 	// SQL() must be completely unaffected by the ExecSQL call above.
-	if got := ops[0].SQL(); got != "CREATE SUBSCRIPTION sub CONNECTION '-' PUBLICATION pub;" {
+	if got := ops[0].SQL(); got != o.Body+";" {
 		t.Errorf("SQL() changed after ExecSQL was called: got %q", got)
 	}
 }
@@ -5808,6 +5814,32 @@ func TestCreateSubscriptionIsNonTransactional(t *testing.T) {
 	}
 }
 
+// TestCreateSubscriptionCommentIsAlsoNonTransactional guards a real ordering
+// bug found live-testing: emit.Emit buckets ops purely by Transactional()
+// into two separate lists, and the executor runs the whole transactional
+// block before any non-transactional op. A transactional create-time COMMENT
+// paired with the (necessarily non-transactional) CREATE above would run
+// BEFORE it, erroring "subscription does not exist" against a real
+// PostgreSQL server — confirmed live before this fix.
+func TestCreateSubscriptionCommentIsAlsoNonTransactional(t *testing.T) {
+	comment := "replication for orders"
+	ops, err := createSubscription(&ir.Subscription{
+		Name: "sub", ConnInfo: "-", Body: "CREATE SUBSCRIPTION sub CONNECTION '-' PUBLICATION pub", Comment: &comment,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ops) != 2 {
+		t.Fatalf("expected 2 ops (CREATE + COMMENT), got %d", len(ops))
+	}
+	if ops[1].Transactional() {
+		t.Error("create-time COMMENT ON SUBSCRIPTION must be non-transactional, matching CREATE's own bucket, or it runs before the subscription exists")
+	}
+	if !strings.Contains(ops[1].SQL(), "COMMENT ON SUBSCRIPTION") || !strings.Contains(ops[1].SQL(), comment) {
+		t.Errorf("unexpected COMMENT op: %s", ops[1].SQL())
+	}
+}
+
 func TestDropSubscriptionIsNonTransactional(t *testing.T) {
 	ops := dropObject(&snapshot.SnapObject{
 		Kind: "subscription", Opaque: &snapshot.SnapOpaque{Kind: "subscription", Name: "sub"},
@@ -5825,10 +5857,9 @@ func TestDropSubscriptionIsNonTransactional(t *testing.T) {
 
 func TestCreateSubscriptionExecSQLResolveErrorPropagates(t *testing.T) {
 	o := &ir.Subscription{
-		Name:             "sub",
-		ConnInfo:         "-",
-		ConnectionSecret: "{{vault:secret/missing}}",
-		Body:             "CREATE SUBSCRIPTION sub CONNECTION '-' PUBLICATION pub",
+		Name:     "sub",
+		ConnInfo: "{{vault:secret/missing}}",
+		Body:     "CREATE SUBSCRIPTION sub CONNECTION '{{vault:secret/missing}}' PUBLICATION pub",
 	}
 	ops, _ := createSubscription(o)
 	sb := ops[0].(pipeline.SecretBearingOp)

@@ -743,23 +743,17 @@ func substituteConnection(body, resolved string) (string, error) {
 // §13.2). SQL() always returns the placeholder/reference form (embedded
 // op.sql, unchanged) — used for plan output, migration-file archival, and
 // error messages, so a resolved secret is never persisted or logged.
-// ExecSQL resolves the effective value (connectionSecret if the { } block
-// form was used, else the native literal) via pipeline.ResolveTemplate and
-// substitutes it into a fresh copy of the SQL, used only for the immediate
-// execution call — never for anything that gets displayed, hashed, or
-// wrapped into an error.
+// ExecSQL resolves the native CONNECTION literal via pipeline.ResolveTemplate
+// (a no-op if it contains no {{...}} at all) and substitutes it into a fresh
+// copy of the SQL, used only for the immediate execution call — never for
+// anything that gets displayed, hashed, or wrapped into an error.
 type subscriptionCreateOp struct {
 	*op
-	connInfo         string
-	connectionSecret string
+	connInfo string
 }
 
 func (o *subscriptionCreateOp) ExecSQL(resolver pipeline.SecretResolver) (string, error) {
-	effective := o.connInfo
-	if o.connectionSecret != "" {
-		effective = o.connectionSecret
-	}
-	resolved, err := pipeline.ResolveTemplate(effective, resolver)
+	resolved, err := pipeline.ResolveTemplate(o.connInfo, resolver)
 	if err != nil {
 		return "", err
 	}
@@ -771,9 +765,11 @@ var _ pipeline.SecretBearingOp = (*subscriptionCreateOp)(nil)
 // createSubscription emits a CREATE SUBSCRIPTION statement as a
 // subscriptionCreateOp rather than the generic createOpaque path — every
 // other opaque kind has nothing secret-bearing in its Body, but a
-// Subscription's CONNECTION clause may reference or embed a secret that
-// must only ever be resolved immediately before execution (see
-// subscriptionCreateOp's doc comment).
+// Subscription's CONNECTION clause may embed a secret reference that must
+// only ever be resolved immediately before execution (see
+// subscriptionCreateOp's doc comment). Also emits COMMENT ON SUBSCRIPTION
+// when set — Comment isn't part of Body (it lives in the { } block), so it
+// needs its own statement, same shape as every other Comment-bearing kind.
 //
 // Built via manualOp, the same non-transactional precedent already used for
 // CREATE INDEX CONCURRENTLY: PostgreSQL's CREATE SUBSCRIPTION defaults to
@@ -791,33 +787,57 @@ func createSubscription(o *ir.Subscription) ([]pipeline.DiffOp, error) {
 	if o.Body == "" {
 		return nil, fmt.Errorf("SUBSCRIPTION %s: body not captured; define it explicitly in a .dpg source file", o.Name)
 	}
-	return []pipeline.DiffOp{&subscriptionCreateOp{
-		op:               manualOp(o.Body+";", o.SrcPos),
-		connInfo:         o.ConnInfo,
-		connectionSecret: o.ConnectionSecret,
-	}}, nil
+	ops := []pipeline.DiffOp{&subscriptionCreateOp{
+		op:       manualOp(o.Body+";", o.SrcPos),
+		connInfo: o.ConnInfo,
+	}}
+	if o.Comment != nil {
+		// manualOp (non-transactional), not safeOp: emit buckets ops purely
+		// by Transactional() into two separate lists, and the executor runs
+		// the WHOLE transactional block before any non-transactional op —
+		// confirmed live. A transactional COMMENT here would run BEFORE the
+		// non-transactional CREATE above, erroring "subscription does not
+		// exist" (the subscription doesn't exist yet). Non-transactional
+		// keeps it in CREATE's own bucket, in the correct relative order.
+		// diffSubscription's standalone comment-only-change path has no such
+		// ordering hazard (the subscription already exists there) and stays
+		// transactional.
+		ops = append(ops, manualOp(
+			fmt.Sprintf("COMMENT ON SUBSCRIPTION %s IS %s;", quoteIdent(o.Name), quoteLit(*o.Comment)),
+			o.SrcPos,
+		))
+	}
+	return ops, nil
 }
 
 // diffSubscription mirrors diffOpaqueIR's shape (offline body-hash compare,
-// structured DROP+CREATE on a real change) but can't reuse it directly:
-// diffOpaqueIR hashes only the passed body string, while a Subscription's
-// drift-relevant state also includes ConnectionSecret (see
-// snapshot.SubscriptionBodyHash's doc comment for why), and its CREATE side
-// must produce a subscriptionCreateOp, not a generic createOpaque op.
+// structured DROP+CREATE on a real change) but can't reuse it directly: its
+// CREATE side must produce a subscriptionCreateOp, not a generic createOpaque
+// op, and Comment is diffed at the field level (like every other
+// Comment-bearing kind) rather than folded into the body hash — a
+// comment-only edit doesn't need the subscription dropped and recreated.
 func diffSubscription(o *ir.Subscription, snap *snapshot.SnapOpaque) ([]pipeline.DiffOp, error) {
-	if o.Body == "" {
-		return nil, nil
+	if o.Body != "" {
+		sum := sha256.Sum256([]byte(strings.TrimSpace(o.Body)))
+		newHash := fmt.Sprintf("%x", sum)
+		if snap.BodyHash != "" && newHash != snap.BodyHash {
+			ops := dropObject(&snapshot.SnapObject{Kind: snap.Kind, Opaque: snap})
+			createOps, err := createSubscription(o)
+			if err != nil {
+				return nil, err
+			}
+			return append(ops, createOps...), nil
+		}
 	}
-	newHash := snapshot.SubscriptionBodyHash(o.Body, o.ConnectionSecret)
-	if snap.BodyHash == "" || newHash == snap.BodyHash {
-		return nil, nil
+	var ops []pipeline.DiffOp
+	if !ptrEq(o.Comment, snap.Comment) {
+		if o.Comment != nil {
+			ops = append(ops, safeOp(fmt.Sprintf("COMMENT ON SUBSCRIPTION %s IS %s;", quoteIdent(o.Name), quoteLit(*o.Comment)), o.SrcPos))
+		} else {
+			ops = append(ops, safeOp(fmt.Sprintf("COMMENT ON SUBSCRIPTION %s IS NULL;", quoteIdent(o.Name)), o.SrcPos))
+		}
 	}
-	ops := dropObject(&snapshot.SnapObject{Kind: snap.Kind, Opaque: snap})
-	createOps, err := createSubscription(o)
-	if err != nil {
-		return nil, err
-	}
-	return append(ops, createOps...), nil
+	return ops, nil
 }
 
 func buildProcedureSignature(o *ir.Procedure) string {

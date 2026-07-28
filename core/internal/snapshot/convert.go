@@ -35,17 +35,6 @@ func hashBodyStr(s string) string {
 	return fmt.Sprintf("%x", sum)
 }
 
-// SubscriptionBodyHash hashes the parts of a Subscription that affect drift
-// detection. Body alone isn't enough: connectionSecret (the { CONNECTION
-// '<uri>'; } block value, RFC §13.2) lives entirely outside the native SQL
-// text, so a change there wouldn't otherwise touch Body at all. Exported so
-// internal/diff's drift comparison uses the exact same formula as this
-// package's own snapshot-write side, rather than two independently
-// maintained copies that could silently drift apart.
-func SubscriptionBodyHash(body, connectionSecret string) string {
-	return hashBodyStr(body + "\x00" + connectionSecret)
-}
-
 // sourceBodyHash hashes a body for change detection, but only when the body was
 // derived from source (parsed and deparsed by the compiler). A reconstructed
 // body — rebuilt from the live catalog by the introspector — is canonical but
@@ -141,7 +130,7 @@ func toSnapObject(obj pipeline.IRObject) *SnapObject {
 		}}
 	case *ir.Subscription:
 		return &SnapObject{Kind: "subscription", Opaque: &SnapOpaque{
-			Kind: "subscription", Name: o.Name, BodyHash: SubscriptionBodyHash(o.Body, o.ConnectionSecret),
+			Kind: "subscription", Name: o.Name, BodyHash: hashBodyStr(o.Body), Comment: o.Comment,
 		}}
 	case *ir.EventTrigger:
 		return &SnapObject{Kind: "event_trigger", Opaque: &SnapOpaque{

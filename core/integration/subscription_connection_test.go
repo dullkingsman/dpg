@@ -163,14 +163,14 @@ func TestSubscriptionConnectionSecretRoundtrip(t *testing.T) {
 	}
 	defer subConn.Close(ctx)
 
-	// ── DPG source: CONNECTION '-' natively, the real value templated
-	// inside the { } block's CONNECTION directive (RFC §13.2).
+	// ── DPG source: the secret reference embedded directly in the native
+	// CONNECTION literal (RFC §13.2) — no separate block form.
 	fixture := "SUBSCRIPTION my_sub\n" +
-		"    CONNECTION '-'\n" +
+		"    CONNECTION '{{vault:secret/repl/pub#conninfo}}'\n" +
 		"    PUBLICATION my_pub\n" +
 		"    WITH (enabled = true, copy_data = false)\n" +
 		"{\n" +
-		"    CONNECTION '{{vault:secret/repl/pub#conninfo}}';\n" +
+		"    COMMENT 'replication for orders';\n" +
 		"}\n"
 	dir := t.TempDir()
 	f := filepath.Join(dir, "sub.dpg")
@@ -187,8 +187,8 @@ func TestSubscriptionConnectionSecretRoundtrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("diff: %v", err)
 	}
-	if len(ops) != 1 {
-		t.Fatalf("expected 1 op (CREATE SUBSCRIPTION), got %d", len(ops))
+	if len(ops) != 2 {
+		t.Fatalf("expected 2 ops (CREATE SUBSCRIPTION + COMMENT ON SUBSCRIPTION), got %d: %v", len(ops), ops)
 	}
 
 	// ── Redaction guard: the op's displayed/archived SQL — exactly what
@@ -196,8 +196,8 @@ func TestSubscriptionConnectionSecretRoundtrip(t *testing.T) {
 	// operator before executing — must hold the placeholder, never the
 	// resolved secret.
 	sql := ops[0].SQL()
-	if !strings.Contains(sql, "CONNECTION '-'") {
-		t.Errorf("expected the archived/displayed SQL to keep the CONNECTION '-' placeholder, got: %s", sql)
+	if !strings.Contains(sql, "{{vault:secret/repl/pub#conninfo}}") {
+		t.Errorf("expected the archived/displayed SQL to keep the {{...}} placeholder, got: %s", sql)
 	}
 	if strings.Contains(sql, "host.docker.internal") || strings.Contains(sql, "password=dpg") {
 		t.Fatalf("archived/displayed SQL leaked the resolved connection info: %s", sql)
@@ -222,7 +222,6 @@ func TestSubscriptionConnectionSecretRoundtrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("query pg_subscription: %v", err)
 	}
-	defer rows.Close()
 	if !rows.Next() {
 		t.Fatal("pg_subscription has no row for my_sub — CREATE SUBSCRIPTION did not take effect")
 	}
@@ -232,5 +231,26 @@ func TestSubscriptionConnectionSecretRoundtrip(t *testing.T) {
 	}
 	if !enabled {
 		t.Error("expected subenabled = true (WITH (enabled = true))")
+	}
+	rows.Close() // must close before issuing another query on the same conn
+
+	// ── Confirms the { } block still works for genuinely DPG-only things
+	// (COMMENT) after the CONNECTION-block-form removal — Comment isn't
+	// part of Body, so this exercises a code path the redaction/CREATE
+	// assertions above don't.
+	crows, err := subConn.QueryRows(ctx, "SELECT obj_description(oid, 'pg_subscription') FROM pg_subscription WHERE subname = 'my_sub'")
+	if err != nil {
+		t.Fatalf("query subscription comment: %v", err)
+	}
+	defer crows.Close()
+	if !crows.Next() {
+		t.Fatal("pg_subscription has no row for my_sub")
+	}
+	var comment *string
+	if err := crows.Scan(&comment); err != nil {
+		t.Fatalf("scan comment: %v", err)
+	}
+	if comment == nil || *comment != "replication for orders" {
+		t.Errorf("expected subscription comment %q, got %v", "replication for orders", comment)
 	}
 }

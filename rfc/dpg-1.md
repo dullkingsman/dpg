@@ -3067,9 +3067,11 @@ PUBLICATION filtered_orders
    as an opaque body (byte-for-byte source text, not per-field) — the same
    tier as Tablespace/FDW/Server/Publication/etc. `CONNECTION` is the one
    part of that body DPG treats specially, to support a secret reference
-   instead of a literal credential (see below and §D.5). No live
-   introspection of subscriptions exists yet (`dump`/`verify`/`plan --live`
-   don't see them — Declared/Diffed, not yet Dumped, §25).
+   instead of a literal credential (see below and §D.5); `COMMENT` (in the
+   `{ }` block) is diffed and applied like every other Comment-bearing
+   object. No live introspection of subscriptions exists yet
+   (`dump`/`verify`/`plan --live` don't see them — Declared/Diffed, not yet
+   Dumped, §25).
 
    **PG equivalent:**
    `CREATE SUBSCRIPTION name CONNECTION 'connstr' PUBLICATION pub [, ...] [WITH (options)]`
@@ -3080,48 +3082,29 @@ subscription-decl = "SUBSCRIPTION" WSP identifier
                     WSP "PUBLICATION" WSP identifier-list
                     [ WSP "WITH" WSP "(" sub-options ")" ]
                     ";"
-                    [ "{" sub-block "}" ]
-
-sub-block         = *( connection-secret-dir ";" )
-connection-secret-dir = "CONNECTION" WSP SQUOTE secret-uri SQUOTE
+                    [ "{" comment-dir ";" "}" ]
 ```
 
-   `conn-literal` is one of:
-   - an ordinary libpq conninfo string, used exactly as written (unchanged
-     from before this section existed);
-   - the same, with one or more `{{<secret-uri>}}` placeholders embedded in
-     it, each resolved independently at apply time and substituted in place
-     (e.g. only the password comes from a secret, the rest stays literal);
-   - the literal sentinel `-`, meaning the effective value comes from the
-     `{ }` block's `CONNECTION '<secret-uri>';` directive instead — the
-     block form exists because `CONNECTION` is a mandatory clause in real
-     PostgreSQL grammar (this is native syntax, parsed by the real PG
-     parser, not a DPG-invented relaxation), so a value that lives entirely
-     in the block still needs *something* syntactically valid in the
-     native slot. Exactly one of "native literal is `-`" or "the block is
-     used" must hold — both, or neither, is a compile-time error.
-
-   A `{ }` block's `CONNECTION` value is resolved the same way as the
-   native literal (including `{{...}}` support, though there every
-   character present is typically the placeholder) — there is no separate
-   "the whole block value is implicitly a reference" form. `{{...}}` is the
-   only mechanism that ever triggers resolution, anywhere. This is
-   deliberate: a real conninfo string may itself contain a `:` (a
-   `postgresql://user:pass@host/db` URI is valid libpq syntax), so treating
-   an unwrapped whole-string prefix match as "this must be a secret
-   reference" would risk misreading a literal — `{{ }}` never collides with
-   real conninfo syntax, which has no legitimate use for curly braces.
+   `conn-literal` is an ordinary libpq conninfo string, used exactly as
+   written, optionally with one or more `{{<secret-uri>}}` placeholders
+   embedded in it — each resolved independently at apply time and
+   substituted in place (e.g. only the password comes from a secret, the
+   rest stays literal; or the whole value is one placeholder). `{{...}}` is
+   the *only* mechanism that ever triggers resolution: a real conninfo
+   string may itself contain a `:` (a `postgresql://user:pass@host/db` URI
+   is valid libpq syntax), so nothing else is ever read as a candidate
+   reference — a literal with no `{{...}}` at all never touches the
+   resolver.
 
    Resolution happens once, immediately before executing the `CREATE
    SUBSCRIPTION` statement — never during `plan`/`diff` (offline-first is
-   unaffected: a `{{...}}` reference or the block form is compared as
-   literal text, same as any other body change) and never written anywhere
-   after that: the snapshot, an archived migration file, and any error
-   message all show the placeholder/reference form, not the resolved
-   value. See §D.5 for the underlying `SecretResolver`/`ResolveTemplate`
-   mechanism, shared with any future object needing the same capability
-   (Role passwords, FDW/UserMapping options — currently still fully
-   opaque, §24).
+   unaffected: a `{{...}}` reference is compared as literal text, same as
+   any other body change) and never written anywhere after that: the
+   snapshot, an archived migration file, and any error message all show the
+   placeholder/reference form, not the resolved value. See §D.5 for the
+   underlying `SecretResolver`/`ResolveTemplate` mechanism, shared with any
+   future object needing the same capability (Role passwords, §11.1;
+   FDW/UserMapping options — currently still fully opaque, §24).
 
    Examples:
 
@@ -3136,28 +3119,37 @@ SUBSCRIPTION replica_orders
     PUBLICATION order_data;
 
 SUBSCRIPTION replica_billing
-    CONNECTION '-'
+    CONNECTION '{{vault:secret/repl/billing#conninfo}}'
     PUBLICATION billing_data
 {
-    CONNECTION '{{vault:secret/repl/billing#conninfo}}';
+    COMMENT 'Billing replica, syncs nightly';
 }
 ```
 
    **Diffing semantics:**
 
-   Subscriptions are diffed as an opaque body: any change (to `CONNECTION`,
-   `PUBLICATION`, `WITH` options, or the block's `CONNECTION` directive) is
-   a full `DROP SUBSCRIPTION` + `CREATE SUBSCRIPTION`, not a targeted
-   `ALTER SUBSCRIPTION`, matching every other opaque-tier object kind
-   (§25). Both `CREATE SUBSCRIPTION` (with its default `WITH (create_slot =
+   The Part 1 body (`CONNECTION`, `PUBLICATION`, `WITH` options) is diffed
+   as an opaque whole: any change is a full `DROP SUBSCRIPTION` +
+   `CREATE SUBSCRIPTION`, not a targeted `ALTER SUBSCRIPTION`, matching
+   every other opaque-tier object kind (§25). `COMMENT` is diffed
+   separately at the field level — a comment-only edit emits a plain
+   `COMMENT ON SUBSCRIPTION`, not a drop-and-recreate, so it never
+   interrupts an already-syncing subscription.
+
+   Both `CREATE SUBSCRIPTION` (with its default `WITH (create_slot =
    true)`) and `DROP SUBSCRIPTION` error "cannot run inside a transaction
    block" in real PostgreSQL — confirmed live — so both run outside DPG's
-   normal transactional migration block, unlike most DDL.
+   normal transactional migration block, unlike most DDL. A create-time
+   `COMMENT ON SUBSCRIPTION` (paired with a fresh `CREATE`) is likewise
+   emitted non-transactionally, so it executes strictly after the `CREATE`
+   it depends on rather than being reordered ahead of it by the
+   transactional/non-transactional split — also confirmed live.
 
    | Change | DDL emitted | Safety |
    |--------|-------------|--------|
-   | New subscription | `CREATE SUBSCRIPTION ...` | `MANUAL` (non-transactional; still auto-executed, not an operator instruction) |
-   | Any body change (`CONNECTION`, `PUBLICATION`, `WITH`, or the block's `CONNECTION` directive) | `DROP SUBSCRIPTION ...` + `CREATE SUBSCRIPTION ...` | `DESTRUCTIVE` then `MANUAL` |
+   | New subscription | `CREATE SUBSCRIPTION ...` [+ `COMMENT ON SUBSCRIPTION ...` if set] | `MANUAL` (non-transactional; still auto-executed, not an operator instruction) |
+   | Body change (`CONNECTION`, `PUBLICATION`, or `WITH`) | `DROP SUBSCRIPTION ...` + `CREATE SUBSCRIPTION ...` [+ `COMMENT ...`] | `DESTRUCTIVE` then `MANUAL` |
+   | Comment-only change | `COMMENT ON SUBSCRIPTION ... IS ...` (or `IS NULL`) | `SAFE` |
    | Subscription removed | `DROP SUBSCRIPTION name` | `DESTRUCTIVE` (non-transactional) |
 
 ---
@@ -4611,9 +4603,9 @@ serial_sequence_declared      = "off"
        used, the connection string may contain embedded credentials and
        SHOULD NOT be committed to a public repository; this is the operator's
        responsibility.
-   -   Subscription `CONNECTION` strings (§13.2): MAY hold a `{{secret-uri}}`
-       reference (embedded in an otherwise-literal conninfo, or the whole
-       value via the `{ }` block form) resolved via `pipeline.ResolveTemplate`
+   -   Subscription `CONNECTION` strings (§13.2): MAY hold one or more
+       `{{secret-uri}}` placeholders embedded in an otherwise-literal
+       conninfo (or the whole value), resolved via `pipeline.ResolveTemplate`
        (§D.5) immediately before `CREATE SUBSCRIPTION` executes — never
        during `plan`/`diff`, never written to the snapshot, an archived
        migration file, or any error message. A `CONNECTION` value with no

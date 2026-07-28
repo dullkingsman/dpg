@@ -1616,39 +1616,15 @@ func rawSQL(node *pg_query.Node) string {
 	return sql
 }
 
-// buildSubscription validates and constructs a Subscription from its native
-// CONNECTION literal and the optional { CONNECTION '...'; } block directive
-// (RFC §13.2). Only structural: which of the two forms holds the effective
-// value, not whether any {{...}} placeholders inside it are well-formed or
-// resolvable — that's apply-time only (pipeline.ResolveTemplate), since
-// validating it here would mean reaching a live secret backend during an
-// offline plan/diff.
+// buildSubscription constructs a Subscription from its native CONNECTION
+// literal (may contain {{secret-uri}} placeholders, resolved only at apply
+// time — see pipeline.ResolveTemplate) and the { } block's COMMENT, if any.
 func (b *Builder) buildSubscription(stmt *pg_query.CreateSubscriptionStmt, block pipeline.BlockAST, pos pipeline.SourcePos, sql string) (pipeline.IRObject, error) {
-	native := stmt.Conninfo
-	var blockRef string
-	blockSet := block.ConnectionSecret != nil
-	if blockSet {
-		blockRef = block.ConnectionSecret.Value
+	sub := &Subscription{Name: stmt.Subname, ConnInfo: stmt.Conninfo, Body: sql, SrcPos: pos}
+	if block.Comment != nil {
+		sub.Comment = &block.Comment.Value
 	}
-
-	switch {
-	case native == "-" && !blockSet:
-		return nil, pipeline.Errorf(pos,
-			"SUBSCRIPTION %q: CONNECTION '-' requires a { CONNECTION '<uri>'; } block to supply the actual value",
-			stmt.Subname)
-	case native != "-" && blockSet:
-		return nil, pipeline.Errorf(pos,
-			"SUBSCRIPTION %q: ambiguous CONNECTION — both a native CONNECTION value and a { CONNECTION '...'; } block are set; use CONNECTION '-' natively when the block supplies the value",
-			stmt.Subname)
-	}
-
-	return &Subscription{
-		Name:             stmt.Subname,
-		ConnInfo:         native,
-		ConnectionSecret: blockRef,
-		Body:             sql,
-		SrcPos:           pos,
-	}, nil
+	return sub, nil
 }
 
 func (b *Builder) buildOpaque(node *pg_query.Node, block pipeline.BlockAST, pos pipeline.SourcePos, kind string) (pipeline.IRObject, error) {

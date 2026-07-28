@@ -79,16 +79,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   string secret. See RFC §D.5 for the full URI grammar and rationale for
   each choice.
 - SUBSCRIPTION `CONNECTION` may now hold a secret reference (Secret
-  resolution, Phase 3; RFC §13.2, §D.5): embed `{{<secret-uri>}}`
-  placeholders inside an otherwise-literal conninfo string (e.g. just the
-  password), or set `CONNECTION '-'` natively and supply the value via a
-  new `{ CONNECTION '<secret-uri>'; }` block directive — the native form is
-  required by real `CREATE SUBSCRIPTION` grammar (`CONNECTION` is
-  mandatory), so the block form needs a syntactically valid placeholder,
-  not a DPG relaxation of PostgreSQL's own syntax. The new
-  `pipeline.ResolveTemplate` helper backing this is a general mechanism
-  (not SUBSCRIPTION-specific) for future fields with the same
-  "mostly-literal, one part sensitive" shape (Role passwords,
+  resolution, Phase 3; RFC §13.2, §D.5): embed one or more
+  `{{<secret-uri>}}` placeholders inside an otherwise-literal conninfo
+  string (e.g. just the password, or the whole value) — `{{...}}` is the
+  only thing that ever triggers resolution, so a literal conninfo/DSN
+  string (which may itself contain a `:`) is never misread as a reference.
+  The new `pipeline.ResolveTemplate` helper backing this is a general
+  mechanism (not SUBSCRIPTION-specific) for future fields with the same
+  "mostly-literal, one part sensitive" shape (Role passwords, §11.1;
   FDW/UserMapping options). Resolution happens once, immediately before
   `CREATE SUBSCRIPTION` executes — the snapshot, an archived migration
   file, and any error message all show the placeholder/reference text,
@@ -96,6 +94,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   this true by construction (`DiffOp.SQL()` never changes meaning; only
   `PgxExecutor.Apply`'s inner exec loop ever calls the resolving method,
   and only for that one execution call).
+- SUBSCRIPTION now supports `COMMENT` in its `{ }` block (RFC §13.2) —
+  previously parsed but silently discarded for Subscription (and
+  Publication), a pre-existing gap spanning the opaque tier generally.
+  Diffed at the field level (`COMMENT ON SUBSCRIPTION`), independent of
+  the body-hash-based `CONNECTION`/`PUBLICATION`/`WITH` diffing, so a
+  comment-only edit doesn't drop and recreate an already-syncing
+  subscription.
 
 ### Fixed
 
@@ -115,6 +120,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   preserved for DROP specifically so it still requires
   `--allow-destructive`, unlike reusing the existing `MANUAL`-safety
   non-transactional helper, which would have silently dropped that gate).
+- **A create-time `COMMENT ON SUBSCRIPTION` could run before the
+  `CREATE SUBSCRIPTION` it depends on, erroring "subscription does not
+  exist"** — confirmed live. `emit.Emit` buckets ops purely by
+  `Transactional()` into two separate lists, and the executor runs the
+  entire transactional block before any non-transactional op; since
+  `CREATE SUBSCRIPTION` is (correctly) non-transactional per the fix
+  above, a transactional `COMMENT` paired with it ran first instead of
+  after. Fixed by emitting the create-time `COMMENT` non-transactionally
+  too, keeping it in the same bucket and correct relative order as its
+  `CREATE`. A standalone comment-only update (no accompanying `CREATE`)
+  has no such ordering hazard and stays transactional.
 
 - **A `link` value with an unrecognized secret scheme was silently treated as
   a literal connection string instead of erroring** — `EnvResolver.Resolve`'s

@@ -527,27 +527,19 @@ func (p *Publication) irObject()               {}
 
 // Subscription is a CREATE SUBSCRIPTION declaration.
 //
-// ConnInfo is the native CONNECTION '...' literal, verbatim, or the literal
-// sentinel "-" meaning the effective value comes from ConnectionSecret
-// instead (RFC §13.2). ConnectionSecret is set from the { CONNECTION '...'; }
-// block directive, empty if the block form isn't used. Exactly one of
-// "ConnInfo == '-'" or "ConnectionSecret == \"\"" must hold; see
-// ir.Builder's validation.
-//
-// Whichever of the two is effective is resolved at apply time via
-// pipeline.ResolveTemplate: plain text is used as-is, and any {{<secret-uri>}}
-// placeholders within it are substituted. There is no separate "the whole
-// value is implicitly a reference" form — {{...}} is the only way either
-// field ever triggers resolution, in both the native literal and the block,
-// uniformly. That keeps a real conninfo/DSN literal (which may itself
-// contain a ':', e.g. a postgresql:// URI) from ever being misread as a
-// secret reference.
+// ConnInfo is the native CONNECTION '...' literal, verbatim — an ordinary
+// libpq conninfo string, resolved at apply time via pipeline.ResolveTemplate:
+// plain text is used as-is, and any {{<secret-uri>}} placeholders within it
+// (the whole value, or just a fragment like the password) are substituted.
+// {{...}} is the only way a secret reference is ever recognized — a real
+// conninfo/DSN literal may itself contain a ':' (e.g. a postgresql:// URI),
+// so nothing else triggers resolution.
 type Subscription struct {
-	Name             string
-	ConnInfo         string
-	ConnectionSecret string
-	Body             string
-	SrcPos           pipeline.SourcePos
+	Name     string
+	ConnInfo string
+	Body     string
+	Comment  *string
+	SrcPos   pipeline.SourcePos
 }
 
 func (s *Subscription) QualifiedName() string   { return s.Name }

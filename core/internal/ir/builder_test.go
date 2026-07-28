@@ -1588,27 +1588,7 @@ func TestBuildOperatorOverloadDistinctQualifiedNames(t *testing.T) {
 
 // ── Subscription CONNECTION (RFC §13.2) ─────────────────────────────────────────
 
-// buildObjectExpectError mirrors buildObject but returns the Build error
-// instead of failing the test on one — for the two invalid-combination cases
-// buildSubscription is specifically responsible for rejecting.
-func buildObjectExpectError(t *testing.T, kind pipeline.ObjectKind, part1, part2 string) error {
-	t.Helper()
-	p := pgparser.New()
-	pgResult, err := p.Parse(kind, part1, zeroPos)
-	if err != nil {
-		t.Fatalf("pg parse error: %v", err)
-	}
-	bp := blockparser.New()
-	blockAST, err := bp.Parse(kind, part2, zeroPos)
-	if err != nil {
-		t.Fatalf("block parse error: %v", err)
-	}
-	builder := ir.NewBuilder()
-	_, err = builder.Build(pgResult, blockAST)
-	return err
-}
-
-func TestBuildSubscriptionPlainLiteralNoBlock(t *testing.T) {
+func TestBuildSubscriptionPlainLiteral(t *testing.T) {
 	obj := buildObject(t, pipeline.KindSubscription,
 		`sub CONNECTION 'host=primary.internal dbname=myapp user=replicator' PUBLICATION pub`, ``)
 	sub, ok := obj.(*ir.Subscription)
@@ -1618,12 +1598,9 @@ func TestBuildSubscriptionPlainLiteralNoBlock(t *testing.T) {
 	if sub.ConnInfo != "host=primary.internal dbname=myapp user=replicator" {
 		t.Errorf("ConnInfo: got %q", sub.ConnInfo)
 	}
-	if sub.ConnectionSecret != "" {
-		t.Errorf("ConnectionSecret: got %q, want empty (no block used)", sub.ConnectionSecret)
-	}
 }
 
-func TestBuildSubscriptionTemplatedLiteralNoBlock(t *testing.T) {
+func TestBuildSubscriptionTemplatedLiteral(t *testing.T) {
 	obj := buildObject(t, pipeline.KindSubscription,
 		`sub CONNECTION 'host=x user=y password={{vault:secret/db#pw}}' PUBLICATION pub`, ``)
 	sub := obj.(*ir.Subscription)
@@ -1632,37 +1609,25 @@ func TestBuildSubscriptionTemplatedLiteralNoBlock(t *testing.T) {
 	}
 }
 
-func TestBuildSubscriptionBlockFormWithDashSentinel(t *testing.T) {
+func TestBuildSubscriptionWholeValueTemplatedLiteral(t *testing.T) {
 	obj := buildObject(t, pipeline.KindSubscription,
-		`sub CONNECTION '-' PUBLICATION pub`,
-		`CONNECTION '{{vault:secret/repl/db#conninfo}}';`,
+		`sub CONNECTION '{{vault:secret/repl/db#conninfo}}' PUBLICATION pub`, ``)
+	sub := obj.(*ir.Subscription)
+	if sub.ConnInfo != "{{vault:secret/repl/db#conninfo}}" {
+		t.Errorf("ConnInfo: got %q", sub.ConnInfo)
+	}
+}
+
+func TestBuildSubscriptionComment(t *testing.T) {
+	obj := buildObject(t, pipeline.KindSubscription,
+		`sub CONNECTION 'host=x user=y' PUBLICATION pub`,
+		`COMMENT 'replication for orders';`,
 	)
 	sub, ok := obj.(*ir.Subscription)
 	if !ok {
 		t.Fatalf("expected *ir.Subscription, got %T", obj)
 	}
-	if sub.ConnInfo != "-" {
-		t.Errorf("ConnInfo: got %q, want the \"-\" sentinel preserved", sub.ConnInfo)
-	}
-	if sub.ConnectionSecret != "{{vault:secret/repl/db#conninfo}}" {
-		t.Errorf("ConnectionSecret: got %q", sub.ConnectionSecret)
-	}
-}
-
-func TestBuildSubscriptionDashWithoutBlockErrors(t *testing.T) {
-	err := buildObjectExpectError(t, pipeline.KindSubscription,
-		`sub CONNECTION '-' PUBLICATION pub`, ``)
-	if err == nil {
-		t.Fatal("expected an error: CONNECTION '-' with no { CONNECTION '...'; } block has nothing to resolve to")
-	}
-}
-
-func TestBuildSubscriptionBlockAndNativeBothSetErrors(t *testing.T) {
-	err := buildObjectExpectError(t, pipeline.KindSubscription,
-		`sub CONNECTION 'host=x user=y' PUBLICATION pub`,
-		`CONNECTION '{{vault:secret/repl/db#conninfo}}';`,
-	)
-	if err == nil {
-		t.Fatal("expected an error: ambiguous when both native CONNECTION and the { } block are set")
+	if sub.Comment == nil || *sub.Comment != "replication for orders" {
+		t.Errorf("Comment: got %v", sub.Comment)
 	}
 }
