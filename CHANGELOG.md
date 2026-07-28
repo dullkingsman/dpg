@@ -60,6 +60,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   point additional backends (Vault, AWS/GCP/Azure secret managers, or a
   user's own) plug into, matching the same `pipeline.Default.Register`
   pattern already used for Differ/Emitter/Linter.
+- Four first-party secret backends (Secret resolution, Phase 2), each in its
+  own `internal/secrets/<backend>` subpackage that self-registers into
+  `ChainResolver` from `init()` (blank-imported by `cmd/dpg/main.go`):
+  `vault:<mount>/<path>#<field>` (HashiCorp Vault KV v2), `aws-sm:<secret-id>
+  [#<json-field>]` (AWS Secrets Manager), `gcp-sm:<project>/<secret-id>
+  [/<version>][#<json-field>]` (GCP Secret Manager), and `azure-kv:<vault-
+  name>/<secret-name>[/<version>][#<json-field>]` (Azure Key Vault). All four
+  authenticate ambiently via that provider's own standard credential chain
+  (env vars, config files, instance/managed identity, CLI-cached login) —
+  none reimplements or wraps provider auth. Constructing any of these
+  resolvers never dials out or fails just because that backend isn't
+  configured, matching `EnvResolver`'s existing "safe to register
+  unconditionally" contract; only resolving a URI for that scheme can fail.
+  Vault's `#field` is required (a Vault secret is always a key-value map, so
+  there's no unambiguous "whole value" reading to default to); AWS/GCP/Azure
+  treat `#field` as optional JSON-key extraction over an otherwise-opaque
+  string secret. See RFC §D.5 for the full URI grammar and rationale for
+  each choice.
 
 ### Fixed
 

@@ -546,10 +546,9 @@ cluster_objects_dir = "cluster"   # default
 # format). Mutually exclusive with `link`. OPTIONAL for offline use.
 url = "postgresql://user@host:5432/postgres"
 
-# Secrets-provider URI resolved at connection time. The reference
-# implementation supports the following URI schemes:
-#   env:<VAR>  — resolves to os.Getenv(<VAR>)
-# Future schemes (vault, aws-secrets-manager) MAY be added.
+# Secrets-provider URI resolved at connection time. Supported schemes
+# (see §D.5): env:<VAR>, vault:<mount>/<path>#<field>, aws-sm:<secret-id>,
+# gcp-sm:<project>/<secret-id>, azure-kv:<vault-name>/<secret-name>.
 # Mutually exclusive with `url`. OPTIONAL.
 # link = "env:PRIMARY_DB_URL"
 
@@ -5538,7 +5537,7 @@ APP_SERVICE_PW="s3cr3t"
    | `pipeline.KeyIntrospector` | `pipeline.Introspector` | `internal/introspect.CatalogIntrospector` |
    | `pipeline.KeyLinter` | `pipeline.Linter` | `internal/linter.BuiltinLinter` |
    | `pipeline.KeyPortabilityAnalyzer` | `pipeline.PortabilityAnalyzer` | `internal/portability.Analyzer` |
-   | `pipeline.KeySecretResolver` | `pipeline.SecretResolver` | `internal/secrets.EnvResolver` |
+   | `pipeline.KeySecretResolver` | `pipeline.SecretResolver` | `internal/secrets.ChainResolver` (with `env:` wired in) |
 
    Each default implementation registers itself in its package's `init()`
    function.  Alternative implementations MAY be registered using
@@ -5561,10 +5560,27 @@ type SecretResolver interface {
 }
 ```
 
-   The reference implementation (`internal/secrets.EnvResolver`) supports
-   the following URI schemes:
+   `ChainResolver` (`internal/secrets.ChainResolver`) is the default
+   registered resolver. It is a scheme-keyed dispatch table, not a
+   fallback chain that tries multiple resolvers per URI in sequence: a
+   secret URI's scheme unambiguously names the one resolver responsible
+   for it, so there is never a genuine "which one applies" question for a
+   chain to resolve by trial. `Register(scheme, resolver)` is the
+   extension point the backends below plug into (each self-registers from
+   its own subpackage's `init()`; the subpackage must be imported,
+   typically via a blank import in `cmd/dpg/main.go`, for its scheme to be
+   available). No other scheme is recognised; `link` URIs with an
+   unrecognized scheme return an error at resolution time naming the
+   scheme and listing every scheme currently registered.
 
-   **`env:<VAR_NAME>`**
+   Authentication for every backend below is entirely ambient — each
+   resolver defers to that provider's own standard credential chain (env
+   vars, config files, instance/managed identity, CLI-cached login, ...)
+   and never reimplements or wraps it. Constructing a resolver never makes
+   a network call and never fails just because that backend isn't
+   configured; only actually resolving a URI for that scheme can fail.
+
+   **`env:<VAR_NAME>`** (`internal/secrets.EnvResolver`)
 
    Resolves to `os.Getenv(VAR_NAME)`.  If the variable is not set
    (empty string), the resolver returns an error.  The variable name
@@ -5574,25 +5590,42 @@ type SecretResolver interface {
    from the process environment (which may have been populated from the
    `.env` file per §D.2.3).
 
-   **Future schemes (planned, backends not yet implemented):**
+   **`vault:<mount>/<path>#<field>`** (`internal/secrets/vault.Resolver`)
 
-   -   `vault:<path>` — HashiCorp Vault secret read.
-   -   `aws-sm:<secret-id>` — AWS Secrets Manager lookup.
-   -   `gcp-sm:<resource-name>` — GCP Secret Manager lookup.
-   -   `azure-kv:<vault-name>/<secret-name>` — Azure Key Vault lookup.
+   Reads a HashiCorp Vault KV version 2 secret (`VAULT_ADDR`/`VAULT_TOKEN`
+   ambient auth, the same convention the `vault` CLI uses). `mount` is the
+   KV v2 engine's mount path, `path` is the secret's path within it. The
+   `#field` suffix is REQUIRED — a Vault secret is always a key-value map,
+   never a bare string, so there is no unambiguous "whole value" reading
+   to fall back to. Example: `vault:secret/myapp/db#password`.
 
-   No other scheme is recognised today; `link` URIs with an unrecognized
-   scheme return an error at resolution time naming the scheme and listing
-   every scheme currently registered.
+   **`aws-sm:<secret-id>[#<json-field>]`** (`internal/secrets/awssm.Resolver`)
 
-   `ChainResolver` (`internal/secrets.ChainResolver`) IS implemented and is
-   the default registered resolver, with `env:` wired in. It is a
-   scheme-keyed dispatch table, not a fallback chain that tries multiple
-   resolvers per URI in sequence: a secret URI's scheme unambiguously names
-   the one resolver responsible for it, so there is never a genuine
-   "which one applies" question for a chain to resolve by trial. `Register`
-   is the extension point new schemes (including the backends above) plug
-   into.
+   Reads an AWS Secrets Manager secret via the AWS SDK's default
+   credential chain. `secret-id` is the secret's ARN or name (may contain
+   `/`). Without `#json-field`, resolves to the secret's raw
+   `SecretString`. With it, `SecretString` is parsed as JSON and that key
+   extracted. Examples: `aws-sm:myapp/prod/db-password`,
+   `aws-sm:myapp/prod/db#password`.
+
+   **`gcp-sm:<project>/<secret-id>[/<version>][#<json-field>]`**
+   (`internal/secrets/gcpsm.Resolver`)
+
+   Reads a GCP Secret Manager secret via Application Default Credentials.
+   `version` defaults to `"latest"` if omitted. Without `#json-field`,
+   resolves to the raw payload as UTF-8 text; with it, the payload is
+   parsed as JSON and that key extracted. Example:
+   `gcp-sm:my-project/db-password`.
+
+   **`azure-kv:<vault-name>/<secret-name>[/<version>][#<json-field>]`**
+   (`internal/secrets/azurekv.Resolver`)
+
+   Reads an Azure Key Vault secret via `DefaultAzureCredential`.
+   `vault-name` resolves to `https://<vault-name>.vault.azure.net/`.
+   `version` omitted (or empty) means the latest version. Without
+   `#json-field`, resolves to the raw secret value; with it, the value is
+   parsed as JSON and that key extracted. Example:
+   `azure-kv:my-vault/db-password`.
 
 ---
 

@@ -25,11 +25,28 @@ import (
 	"github.com/dullkingsman/dpg/internal/pipeline"
 )
 
+// defaultChain is the single ChainResolver registered under
+// pipeline.KeySecretResolver. Backend subpackages (vault, awssm, gcpsm,
+// azurekv) each blank-import as a side effect of cmd/dpg/main.go and
+// self-register into this exact instance via Default() — never construct
+// their own separate ChainResolver, or they'd only ever be reachable by
+// callers that happen to hold that specific instance instead of the one
+// actually wired into pipeline.Default.
+var defaultChain = func() *ChainResolver {
+	c := NewChain()
+	c.Register("env", New())
+	return c
+}()
+
 func init() {
-	chain := NewChain()
-	chain.Register("env", New())
-	pipeline.Default.Register(pipeline.KeySecretResolver, chain)
+	pipeline.Default.Register(pipeline.KeySecretResolver, defaultChain)
 }
+
+// Default returns the package's singleton ChainResolver — the same instance
+// registered under pipeline.KeySecretResolver. Backend subpackages call
+// Default().Register(scheme, resolver) from their own init() to add
+// themselves.
+func Default() *ChainResolver { return defaultChain }
 
 // EnvResolver implements pipeline.SecretResolver for the "env" scheme.
 type EnvResolver struct{}

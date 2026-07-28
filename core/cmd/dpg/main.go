@@ -28,6 +28,10 @@ import (
 	_ "github.com/dullkingsman/dpg/internal/portability"
 	_ "github.com/dullkingsman/dpg/internal/scanner"
 	_ "github.com/dullkingsman/dpg/internal/secrets"
+	_ "github.com/dullkingsman/dpg/internal/secrets/awssm"
+	_ "github.com/dullkingsman/dpg/internal/secrets/azurekv"
+	_ "github.com/dullkingsman/dpg/internal/secrets/gcpsm"
+	_ "github.com/dullkingsman/dpg/internal/secrets/vault"
 	_ "github.com/dullkingsman/dpg/internal/snapshot"
 )
 

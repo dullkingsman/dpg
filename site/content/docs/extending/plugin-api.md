@@ -181,37 +181,53 @@ func (e *auditExecutor) Apply(ctx context.Context, m dpg.Migration, conn dpg.Con
 
 ## Custom Secret Resolver
 
-Implement `dpg.SecretResolver` to add a custom secret provider (Vault, AWS Secrets Manager, etc.).
+`env:`, `vault:`, `aws-sm:`, `gcp-sm:`, and `azure-kv:` ship built in (see
+the DPG RFC, §D.5, for the full URI grammar of each).
+The default `SecretResolver` is a `ChainResolver` — a scheme-keyed dispatch
+table, not a fallback chain that tries each resolver in turn. To add a
+scheme it doesn't already know, implement `dpg.SecretResolver` for just
+that scheme, then wrap it with the existing resolver so both are reachable:
 
 ```go
-type vaultResolver struct {
-    client *vault.Client
+type onePasswordResolver struct {
+    client *onepassword.Client
 }
 
-func (r *vaultResolver) Resolve(uri string) (string, error) {
-    if !strings.HasPrefix(uri, "vault://") {
+func (r *onePasswordResolver) Resolve(uri string) (string, error) {
+    path, ok := strings.CutPrefix(uri, "op://")
+    if !ok {
         return "", fmt.Errorf("unsupported URI: %s", uri)
     }
-    path := strings.TrimPrefix(uri, "vault://")
-    secret, err := r.client.Logical().Read(path)
-    if err != nil {
-        return "", err
-    }
-    value, ok := secret.Data["value"].(string)
-    if !ok {
-        return "", fmt.Errorf("vault: no 'value' key at %s", path)
-    }
-    return value, nil
+    return r.client.ReadSecret(path)
 }
 ```
 
-Chain the built-in `env:` resolver with your Vault resolver so both URI schemes work:
+The concrete `ChainResolver` type lives in an internal package and isn't
+part of the public `pkg/dpg` surface, so a plugin composes with the
+existing resolver by scheme, the same dispatch-by-prefix contract
+`ChainResolver` itself uses internally, rather than trying the existing
+resolver and falling back on error (that shape masks a wrong scheme name
+as "not found" instead of erroring clearly):
 
 ```go
+type withOnePassword struct {
+    existing dpg.SecretResolver // env:/vault:/aws-sm:/gcp-sm:/azure-kv:
+    custom   dpg.SecretResolver
+}
+
+func (m *withOnePassword) Resolve(uri string) (string, error) {
+    if strings.HasPrefix(uri, "op:") {
+        return m.custom.Resolve(uri)
+    }
+    return m.existing.Resolve(uri)
+}
+
 func init() {
     existing, _ := dpg.ResolveSecretResolver(dpg.Default)
-    chained := &chainResolver{first: existing, second: &vaultResolver{client: vc}}
-    dpg.Default.Register(dpg.KeySecretResolver, chained)
+    dpg.Default.Register(dpg.KeySecretResolver, &withOnePassword{
+        existing: existing,
+        custom:   &onePasswordResolver{client: opClient},
+    })
 }
 ```
 

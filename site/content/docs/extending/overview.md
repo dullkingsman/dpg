@@ -90,7 +90,7 @@ dpg.Default.Register(dpg.KeyLinter, myLinter)
 | `KeyIntrospector` | `Introspector` | `internal/introspect.CatalogIntrospector` |
 | `KeyLinter` | `Linter` | `internal/linter.BuiltinLinter` |
 | `KeyPortabilityAnalyzer` | `PortabilityAnalyzer` | `internal/portability.Analyzer` |
-| `KeySecretResolver` | `SecretResolver` | `internal/secrets.EnvResolver` |
+| `KeySecretResolver` | `SecretResolver` | `internal/secrets.ChainResolver` (`env:`, `vault:`, `aws-sm:`, `gcp-sm:`, `azure-kv:` built in) |
 
 ### Isolated Registries
 
