@@ -20,8 +20,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   coverage for the opaque tier. Previously `plan --live` proposed a spurious
   `CREATE` for each of these because introspection returned nothing. Operator
   class/family members are scoped by their internal `pg_depend` link to the
-  class, so family-level members added later by `ALTER` are not mis-attributed;
-  operator families auto-created for a class are skipped.
+  class, so family-level members added later by `ALTER` are not mis-attributed.
+  (A same-named family PostgreSQL auto-creates for a class was originally
+  skipped here; superseded later in this file — see the operator-family
+  general fix below.)
 - `dump` now writes database-scoped schemaless objects to `<db>/objects.dpg`
   (previously misfiled under the cluster roles file) and can emit these object
   types as DPG declarations.
@@ -708,10 +710,52 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   family in a `FAMILY` clause. The previous discriminator relied on a `pg_depend`
   deptype that is identical for auto-created and explicitly-attached families; the
   reliable signal is the family's matching name, mirroring PostgreSQL's own rule.
-  Known limitation: an *explicit* operator family that happens to share a class's
-  name (rare, but legal) is treated as the implicit auto-created one and omitted
-  from the dump; operator-family members added via `ALTER OPERATOR FAMILY … ADD`
-  are not modeled in either case.
+  Known limitation (RESOLVED — see the operator-family general fix below): an
+  *explicit* operator family that happens to share a class's name (rare, but
+  legal) is treated as the implicit auto-created one and omitted from the
+  dump; operator-family members added via `ALTER OPERATOR FAMILY … ADD`
+  are not modeled in either case (this second part is still a limitation —
+  unrelated to what the general fix addresses).
+- **Operator-family general fix: every operator family is now introspected as
+  a standalone object, and every operator class is given an explicit `FAMILY`
+  clause, unconditionally** — adopting `pg_dump`'s own model exactly
+  (confirmed live via `pg_dump -s` before writing this fix: it always dumps a
+  separate `CREATE OPERATOR FAMILY`, even for a family PostgreSQL
+  auto-created, and always attaches the class to it by name). This replaces
+  the same-name-as-class heuristic entirely rather than patching its edge
+  case: confirmed live that the `pg_opclass`→`pg_opfamily` `pg_depend` row is
+  `deptype = 'a'` (`DEPENDENCY_AUTO`) whether the family was genuinely
+  auto-created OR explicitly created and then attached via an explicit
+  `FAMILY` clause of the same name — there is no catalog signal that
+  distinguishes the two, so name-matching necessarily misclassified the
+  second, legal case (an explicit family — possibly enriched via
+  `ALTER OPERATOR FAMILY … ADD`, or shared by several classes — silently
+  dropped from the dump, the bug described just above). Once every class
+  names its family explicitly, PostgreSQL itself never needs to guess, so the
+  ambiguity is gone rather than merely narrowed.
+  Also adds a `class → family` dependency edge to the topological sort
+  (`internal/graph`), plus the same shape of edge for `config → parser`
+  (`CREATE TEXT SEARCH CONFIGURATION ... PARSER = x`) and
+  `dict → template` (`CREATE TEXT SEARCH DICTIONARY ... TEMPLATE = x`) — all
+  three are opaque objects that reference another opaque object by name, and
+  none of `CREATE OPERATOR FAMILY`/`CREATE TEXT SEARCH PARSER`/
+  `CREATE TEXT SEARCH TEMPLATE` support `IF NOT EXISTS`, so a wrong `CREATE`
+  order is a hard, non-self-healing PostgreSQL error, not just noise.
+  Confirmed live (and via a dedicated `graph_test.go` regression suite) that
+  this is a real, reachable bug, not theoretical: a fixture declaring the
+  class before its family — the reverse of natural reading order, which the
+  topological sort must correct regardless of source declaration order —
+  failed to apply with a real `operator family "..." does not exist for
+  access method "..."` error before this fix, and applies cleanly after.
+  `ir.OperatorClass` gained `FamilySchema`/`FamilyName`, `ir.TSConfig` gained
+  `ParserSchema`/`ParserName`, and `ir.TSDict` gained
+  `TemplateSchema`/`TemplateName` — parsed identically from hand-written
+  source (via `pg_query`'s already-structural `Opfamilyname`/`PARSER`/
+  `TEMPLATE` fields, previously discarded) and from introspection, purely to
+  drive the new dependency edges; the actual `FAMILY`/`PARSER`/`TEMPLATE`
+  clause text still lives in each object's opaque `Body` as before. See
+  upgrade notes for a caveat on re-`dump`ing an existing project with
+  DPG-managed operator classes.
 - Introspection now excludes extension-owned functions, procedures, aggregates,
   types, tables, views, and sequences (e.g. `hstore`'s ~60 functions), so they
   are not dumped or proposed for dropping.
@@ -789,6 +833,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   succeeds as a no-op in PostgreSQL, it does not error. The one thing that
   does error is revoking from a role that no longer exists; if you have a
   stale `REVOCATION` naming a dropped role, fix or remove it before applying.
+- **Operator family dump output gained a standalone `CREATE OPERATOR FAMILY`
+  declaration for every operator class.** If you have an existing project
+  with DPG-managed operator classes and re-run `dpg dump` after upgrading
+  (regenerating your `.dpg` source to the new form, which now always includes
+  an explicit `FAMILY` clause and a separate `OPERATOR FAMILY` declaration —
+  see Fixed above), do **not** `plan`/`apply` the regenerated source against a
+  snapshot that predates this change without reconciling first: the family is
+  new to that snapshot but already exists live (it was auto-created
+  originally), and `CREATE OPERATOR FAMILY` has no `IF NOT EXISTS` in
+  PostgreSQL's grammar, so the apply would fail outright with "operator
+  family already exists" rather than silently corrupting anything. Projects
+  that don't use operator classes, or that don't re-`dump` after upgrading,
+  are unaffected — this is a real but narrow risk window, not a default-path
+  regression.
 
 ## [idea-v0.5.2-alpha.13] — 2026-05-22
 

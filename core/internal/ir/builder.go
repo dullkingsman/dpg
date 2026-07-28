@@ -1233,6 +1233,27 @@ func extractTypeName(names []*pg_query.Node) (schema, name string) {
 	return
 }
 
+// defElemQualifiedName finds a DefElem by name in a DefineStmt's Definition
+// list and extracts its TypeName argument's qualified name — the shape
+// PostgreSQL's grammar uses for CREATE TEXT SEARCH CONFIGURATION's PARSER
+// and CREATE TEXT SEARCH DICTIONARY's TEMPLATE clauses (confirmed live via
+// pg_query: both parse as a DefElem whose Arg is a TypeName, not a plain
+// String, even though neither is really a type). Returns empty/empty if the
+// DefElem isn't present (shouldn't happen for these two — both are mandatory
+// in the grammar — but callers treat empty as simply "no dependency edge").
+func defElemQualifiedName(definition []*pg_query.Node, defname string) (schema, name string) {
+	for _, de := range definition {
+		elem := de.GetDefElem()
+		if elem == nil || elem.Defname != defname {
+			continue
+		}
+		if tn := elem.Arg.GetTypeName(); tn != nil {
+			return extractTypeName(tn.Names)
+		}
+	}
+	return "", ""
+}
+
 // ── Schema ────────────────────────────────────────────────────────────────────
 
 func (b *Builder) buildSchema(cs *pg_query.CreateSchemaStmt, block pipeline.BlockAST, pos pipeline.SourcePos) (pipeline.IRObject, error) {
@@ -1521,6 +1542,7 @@ func (b *Builder) buildDefineStmt(ds *pg_query.DefineStmt, block pipeline.BlockA
 
 	case pg_query.ObjectType_OBJECT_TSCONFIGURATION:
 		tc := &TSConfig{Schema: schema, Name: name, Body: rawBody, SrcPos: pos}
+		tc.ParserSchema, tc.ParserName = defElemQualifiedName(ds.Definition, "parser")
 		tc.Mappings = append(tc.Mappings, block.Mappings...)
 		if block.Comment != nil {
 			tc.Comment = &block.Comment.Value
@@ -1528,7 +1550,9 @@ func (b *Builder) buildDefineStmt(ds *pg_query.DefineStmt, block pipeline.BlockA
 		return tc, nil
 
 	case pg_query.ObjectType_OBJECT_TSDICTIONARY:
-		return &TSDict{Schema: schema, Name: name, Body: rawBody, SrcPos: pos}, nil
+		td := &TSDict{Schema: schema, Name: name, Body: rawBody, SrcPos: pos}
+		td.TemplateSchema, td.TemplateName = defElemQualifiedName(ds.Definition, "template")
+		return td, nil
 
 	case pg_query.ObjectType_OBJECT_TSPARSER:
 		return &TSParser{Schema: schema, Name: name, Body: rawBody, SrcPos: pos}, nil
@@ -1603,7 +1627,12 @@ func (b *Builder) buildOpaque(node *pg_query.Node, _ pipeline.BlockAST, pos pipe
 		return &EventTrigger{Name: n.CreateEventTrigStmt.Trigname, Body: sql, SrcPos: pos}, nil
 	case *pg_query.Node_CreateOpClassStmt:
 		schema, name := extractTypeName(n.CreateOpClassStmt.Opclassname)
-		return &OperatorClass{Schema: schema, Name: name, AccessMethod: n.CreateOpClassStmt.Amname, Body: sql, SrcPos: pos}, nil
+		famSchema, famName := extractTypeName(n.CreateOpClassStmt.Opfamilyname)
+		return &OperatorClass{
+			Schema: schema, Name: name, AccessMethod: n.CreateOpClassStmt.Amname,
+			FamilySchema: famSchema, FamilyName: famName,
+			Body: sql, SrcPos: pos,
+		}, nil
 	case *pg_query.Node_CreateOpFamilyStmt:
 		schema, name := extractTypeName(n.CreateOpFamilyStmt.Opfamilyname)
 		return &OperatorFamily{Schema: schema, Name: name, AccessMethod: n.CreateOpFamilyStmt.Amname, Body: sql, SrcPos: pos}, nil

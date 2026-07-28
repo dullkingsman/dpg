@@ -238,49 +238,41 @@ OPERATOR CLASS public.rt_opc FOR TYPE integer USING btree AS
     FUNCTION 1 btint4cmp(integer, integer);`)
 }
 
-// TestIntrospectOperatorClassNoSpuriousFamily guards the auto-created-family
-// handling. CREATE OPERATOR CLASS without a FAMILY clause makes PostgreSQL
-// auto-create a same-named operator family. That family must NOT be introspected
-// as a standalone object (it would emit a redundant CREATE OPERATOR FAMILY that
-// conflicts with the auto-creation on re-apply), and the class's reconstructed
-// body must NOT carry a FAMILY clause naming it. The deptype-based discriminator
-// this originally used was dead (auto and explicit families share deptype 'a'),
-// so this asserts the name-based signal that replaced it, against a live catalog.
-func TestIntrospectOperatorClassNoSpuriousFamily(t *testing.T) {
-	connStr := testpg.Start(t)
-	ctx := context.Background()
+// TestRoundtripOperatorClassDeclaredBeforeFamily is the full-pipeline guard
+// for the operator-family general fix's dependency-edge half (graph.go):
+// applies a fixture that deliberately declares the CLASS textually BEFORE its
+// explicit FAMILY — the reverse of natural reading order, and NOT
+// self-healing the way most PostgreSQL CREATE statements are (CREATE OPERATOR
+// FAMILY has no IF NOT EXISTS, confirmed live, so the family must genuinely
+// exist before the class's FAMILY clause can reference it). Without the
+// class→family dependency edge added to the resolver, this fixture would
+// apply the CREATE OPERATOR CLASS statement first and fail with a real
+// PostgreSQL "operator family ... does not exist" error — this test proves
+// the resolver reorders it correctly regardless of source declaration order,
+// then confirms zero drift on re-introspection (the class's FamilySchema/
+// FamilyName fields captured on both the source-parse and introspection sides
+// must agree).
+func TestRoundtripOperatorClassDeclaredBeforeFamily(t *testing.T) {
+	assertOpaqueRoundtrip(t, `OPERATOR CLASS public.rt_ordered_opc FOR TYPE integer USING btree FAMILY rt_ordered_fam AS
+    OPERATOR 3 =, FUNCTION 1 btint4cmp(integer, integer);
+OPERATOR FAMILY public.rt_ordered_fam USING btree;`)
+}
 
-	conn, err := executor.Connect(ctx, connStr)
-	if err != nil {
-		t.Fatalf("connect: %v", err)
-	}
-	defer conn.Close(ctx)
-
-	if _, err := conn.Exec(ctx, `CREATE OPERATOR CLASS rt_auto_opc FOR TYPE integer USING btree AS
-        OPERATOR 3 =, FUNCTION 1 btint4cmp(integer, integer)`); err != nil {
-		t.Fatalf("create opclass: %v", err)
-	}
-
-	objs, err := introspect.New().Introspect(ctx, conn)
-	if err != nil {
-		t.Fatalf("introspect: %v", err)
-	}
-
-	var classBody string
-	for _, o := range objs {
-		if fam, ok := o.(*ir.OperatorFamily); ok && fam.Name == "rt_auto_opc" {
-			t.Errorf("auto-created family rt_auto_opc was introspected as a standalone object: %q", fam.Body)
-		}
-		if cls, ok := o.(*ir.OperatorClass); ok && cls.Name == "rt_auto_opc" {
-			classBody = cls.Body
-		}
-	}
-	if classBody == "" {
-		t.Fatal("operator class rt_auto_opc was not introspected")
-	}
-	if strings.Contains(strings.ToUpper(classBody), "FAMILY") {
-		t.Errorf("class body names its implicit auto-created family (should be omitted): %q", classBody)
-	}
+// TestIntrospectOperatorFamilySharingClassNameRoundtrips is the full-pipeline
+// guard for the operator-family general fix's introspection half: an
+// EXPLICIT family sharing its attached class's name (the original
+// misclassification bug this fix closes — confirmed live that PostgreSQL's
+// opclass→opfamily pg_depend row is deptype 'a' for this case too, identical
+// to a genuinely auto-created family, so no catalog signal alone could ever
+// distinguish them) now round-trips with zero drift, the same as any other
+// operator class/family pair. A direct, narrower guard for the introspection
+// fields themselves lives in internal/introspect
+// (TestIntrospectOperatorFamilyExplicitSharingClassName); this proves the
+// full apply → introspect → diff pipeline is drift-free for it too.
+func TestIntrospectOperatorFamilySharingClassNameRoundtrips(t *testing.T) {
+	assertOpaqueRoundtrip(t, `OPERATOR FAMILY public.rt_same_name USING btree;
+OPERATOR CLASS public.rt_same_name FOR TYPE integer USING btree FAMILY rt_same_name AS
+    OPERATOR 3 =, FUNCTION 1 btint4cmp(integer, integer);`)
 }
 
 func TestRoundtripIndexVariants(t *testing.T) {

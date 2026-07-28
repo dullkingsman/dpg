@@ -76,6 +76,30 @@ func (r *Resolver) Sort(objects []pipeline.IRObject) ([]pipeline.IRObject, error
 		}
 	}
 
+	// refEdge adds a dependency from objIdx to whatever object is keyed by
+	// qualifiedKey, if one exists in the object set. Like the unqualified
+	// custom-type case in the *ir.Table branch below, this never errors when
+	// the reference isn't found in source — the referenced object (an
+	// operator family, TS parser, or TS template) is very commonly a
+	// pg_catalog built-in that legitimately isn't part of the managed set,
+	// unlike an FK target, which DOES error when unresolved.
+	refEdge := func(objIdx int, qualifiedKey string) {
+		if refIdx, ok := idx[qualifiedKey]; ok {
+			dependsOn(objIdx, refIdx)
+		}
+	}
+
+	// defaultSchema returns schema if non-empty, else fallback — mirroring how
+	// an unqualified reference (FAMILY name, PARSER name, TEMPLATE name)
+	// resolves to the referencing object's own schema, the same convention
+	// already used for unqualified column type references below.
+	defaultSchema := func(schema, fallback string) string {
+		if schema != "" {
+			return schema
+		}
+		return fallback
+	}
+
 	// Circular FK edges that can be deferred.
 	type deferredFK struct {
 		table *ir.Table
@@ -186,6 +210,16 @@ func (r *Resolver) Sort(objects []pipeline.IRObject) ([]pipeline.IRObject, error
 
 		case *ir.OperatorClass:
 			schemaEdge(i, o.Schema)
+			// Class depends on its FAMILY (must be CREATEd first — PostgreSQL's
+			// CREATE OPERATOR FAMILY has no IF NOT EXISTS, so ordering isn't
+			// self-healing the way, say, a redundant CREATE SCHEMA IF NOT EXISTS
+			// would be). o.FamilyName is empty only for hand-written source that
+			// omits FAMILY (relying on PG's own same-name auto-creation) — every
+			// introspected class always has one now (see introspectOperatorClasses).
+			if o.FamilyName != "" {
+				famSchema := defaultSchema(o.FamilySchema, o.Schema)
+				refEdge(i, famSchema+"."+o.FamilyName+" USING "+o.AccessMethod+" FAMILY")
+			}
 
 		case *ir.OperatorFamily:
 			schemaEdge(i, o.Schema)
@@ -195,9 +229,20 @@ func (r *Resolver) Sort(objects []pipeline.IRObject) ([]pipeline.IRObject, error
 
 		case *ir.TSConfig:
 			schemaEdge(i, o.Schema)
+			// Config depends on its PARSER (see refEdge: only an edge if the
+			// parser is itself part of the managed object set — most commonly
+			// it's a pg_catalog built-in like "default", which correctly gets no
+			// edge at all).
+			if o.ParserName != "" {
+				refEdge(i, defaultSchema(o.ParserSchema, o.Schema)+"."+o.ParserName)
+			}
 
 		case *ir.TSDict:
 			schemaEdge(i, o.Schema)
+			// Dict depends on its TEMPLATE, same reasoning as TSConfig's PARSER.
+			if o.TemplateName != "" {
+				refEdge(i, defaultSchema(o.TemplateSchema, o.Schema)+"."+o.TemplateName)
+			}
 
 		case *ir.TSParser:
 			schemaEdge(i, o.Schema)

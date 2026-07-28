@@ -37,6 +37,123 @@ func setupOpaque(t *testing.T, ddl ...string) []pipeline.IRObject {
 	return objects
 }
 
+// TestIntrospectOperatorClassAlwaysHasExplicitFamily guards the operator-family
+// general fix: a class created WITHOUT an explicit FAMILY clause (the common
+// case — PostgreSQL auto-creates a same-named family) must now be introspected
+// with the family as its own standalone *ir.OperatorFamily object AND the
+// class's reconstructed body must carry an explicit FAMILY clause naming it —
+// mirroring pg_dump's own model exactly (confirmed live via `pg_dump -s`
+// before writing this fix: it always dumps a separate CREATE OPERATOR FAMILY,
+// even for an auto-created one, and always gives the class an explicit
+// FAMILY). This is the inverse of the old, removed behavior (which skipped
+// same-name families and omitted the class's FAMILY clause) — see CHANGELOG
+// for why that old heuristic was unreliable by construction, not just wrong
+// in a rare case.
+func TestIntrospectOperatorClassAlwaysHasExplicitFamily(t *testing.T) {
+	objects := setupOpaque(t, `CREATE OPERATOR CLASS rt_auto_opc FOR TYPE integer USING btree AS
+        OPERATOR 3 =, FUNCTION 1 btint4cmp(integer, integer)`)
+
+	var fam *ir.OperatorFamily
+	var cls *ir.OperatorClass
+	for _, o := range objects {
+		if f, ok := o.(*ir.OperatorFamily); ok && f.Name == "rt_auto_opc" {
+			fam = f
+		}
+		if c, ok := o.(*ir.OperatorClass); ok && c.Name == "rt_auto_opc" {
+			cls = c
+		}
+	}
+	if fam == nil {
+		t.Fatal("auto-created family rt_auto_opc was NOT introspected as a standalone object (expected it to be, now)")
+	}
+	if fam.AccessMethod != "btree" {
+		t.Errorf("family AccessMethod: got %q, want btree", fam.AccessMethod)
+	}
+	if cls == nil {
+		t.Fatal("operator class rt_auto_opc was not introspected")
+	}
+	if !strings.Contains(strings.ToUpper(cls.Body), "FAMILY") {
+		t.Errorf("class body does not name its family explicitly: %q", cls.Body)
+	}
+	if cls.FamilySchema != "public" || cls.FamilyName != "rt_auto_opc" {
+		t.Errorf("class Family fields: got schema=%q name=%q, want schema=public name=rt_auto_opc", cls.FamilySchema, cls.FamilyName)
+	}
+}
+
+// TestIntrospectOperatorFamilyExplicitSharingClassName is the direct
+// regression guard for the ORIGINAL misclassification bug this fix closes: an
+// EXPLICIT, separately-created family that happens to share its attached
+// class's name (confirmed live that PostgreSQL's opclass→opfamily pg_depend
+// row is deptype 'a' — DEPENDENCY_AUTO — for this case too, identical to a
+// genuinely auto-created family, so no catalog signal alone could ever
+// distinguish them). Before this fix, the old same-name heuristic silently
+// dropped this family from the dump. Now, since every family is introspected
+// unconditionally, this case needs no special handling at all — it "just
+// works" the same as any other family.
+func TestIntrospectOperatorFamilyExplicitSharingClassName(t *testing.T) {
+	objects := setupOpaque(t,
+		`CREATE OPERATOR FAMILY same_name_ops USING btree`,
+		`CREATE OPERATOR CLASS same_name_ops FOR TYPE integer USING btree FAMILY same_name_ops AS
+            OPERATOR 3 =, FUNCTION 1 btint4cmp(integer, integer)`,
+	)
+
+	var fam *ir.OperatorFamily
+	var cls *ir.OperatorClass
+	for _, o := range objects {
+		if f, ok := o.(*ir.OperatorFamily); ok && f.Name == "same_name_ops" {
+			fam = f
+		}
+		if c, ok := o.(*ir.OperatorClass); ok && c.Name == "same_name_ops" {
+			cls = c
+		}
+	}
+	if fam == nil {
+		t.Fatal("explicit family same_name_ops (sharing its class's name) was not introspected — the exact bug this fix closes")
+	}
+	if cls == nil {
+		t.Fatal("operator class same_name_ops was not introspected")
+	}
+	if cls.FamilySchema != "public" || cls.FamilyName != "same_name_ops" {
+		t.Errorf("class Family fields: got schema=%q name=%q, want schema=public name=same_name_ops", cls.FamilySchema, cls.FamilyName)
+	}
+}
+
+// TestIntrospectTSConfigParserFields guards ParserSchema/ParserName wiring —
+// needed for the new config→parser dependency edge in graph.go.
+func TestIntrospectTSConfigParserFields(t *testing.T) {
+	objects := setupOpaque(t, `CREATE TEXT SEARCH CONFIGURATION public.rt_cfg (PARSER = pg_catalog."default")`)
+	var found *ir.TSConfig
+	for _, o := range objects {
+		if c, ok := o.(*ir.TSConfig); ok && c.Name == "rt_cfg" {
+			found = c
+		}
+	}
+	if found == nil {
+		t.Fatal("TS config public.rt_cfg not found")
+	}
+	if found.ParserSchema != "pg_catalog" || found.ParserName != "default" {
+		t.Errorf("Parser fields: got schema=%q name=%q, want schema=pg_catalog name=default", found.ParserSchema, found.ParserName)
+	}
+}
+
+// TestIntrospectTSDictTemplateFields guards TemplateSchema/TemplateName
+// wiring — needed for the new dict→template dependency edge in graph.go.
+func TestIntrospectTSDictTemplateFields(t *testing.T) {
+	objects := setupOpaque(t, `CREATE TEXT SEARCH DICTIONARY public.rt_dict (TEMPLATE = pg_catalog.simple)`)
+	var found *ir.TSDict
+	for _, o := range objects {
+		if d, ok := o.(*ir.TSDict); ok && d.Name == "rt_dict" {
+			found = d
+		}
+	}
+	if found == nil {
+		t.Fatal("TS dictionary public.rt_dict not found")
+	}
+	if found.TemplateSchema != "pg_catalog" || found.TemplateName != "simple" {
+		t.Errorf("Template fields: got schema=%q name=%q, want schema=pg_catalog name=simple", found.TemplateSchema, found.TemplateName)
+	}
+}
+
 func TestIntrospectCollation(t *testing.T) {
 	objects := setupOpaque(t, `CREATE COLLATION public.mycoll (LOCALE = 'C')`)
 	var found *ir.Collation

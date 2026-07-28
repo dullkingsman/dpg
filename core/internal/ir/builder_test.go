@@ -1449,6 +1449,82 @@ func TestBuildOperatorFamilyAccessMethod(t *testing.T) {
 	}
 }
 
+// ── Operator class FAMILY / TS config PARSER / TS dict TEMPLATE extraction ─────
+//
+// These three back the class→family/config→parser/dict→template dependency
+// edges added to graph.go (the operator-family general fix): pg_query already
+// parses each of these structurally (CreateOpClassStmt.Opfamilyname, and a
+// "parser"/"template" DefElem whose Arg is a TypeName, confirmed live via a
+// throwaway probe before writing this code), the builder just previously
+// discarded them.
+
+func TestBuildOperatorClassFamilyExplicitUnqualified(t *testing.T) {
+	obj := buildObject(t, pipeline.KindOperatorClass,
+		`my_ops FOR TYPE int4 USING gin FAMILY my_family AS STORAGE int4`, ``)
+	oc := obj.(*ir.OperatorClass)
+	if oc.FamilySchema != "" || oc.FamilyName != "my_family" {
+		t.Errorf("Family: got schema=%q name=%q, want schema=\"\" name=\"my_family\"", oc.FamilySchema, oc.FamilyName)
+	}
+}
+
+func TestBuildOperatorClassFamilyExplicitQualified(t *testing.T) {
+	obj := buildObject(t, pipeline.KindOperatorClass,
+		`my_ops FOR TYPE int4 USING gin FAMILY myschema.my_family AS STORAGE int4`, ``)
+	oc := obj.(*ir.OperatorClass)
+	if oc.FamilySchema != "myschema" || oc.FamilyName != "my_family" {
+		t.Errorf("Family: got schema=%q name=%q, want schema=\"myschema\" name=\"my_family\"", oc.FamilySchema, oc.FamilyName)
+	}
+}
+
+// TestBuildOperatorClassFamilyOmitted is the negative control: hand-written
+// source that omits FAMILY (relying on PostgreSQL's own same-name
+// auto-creation) must leave FamilyName empty, not default it to the class's
+// own name — that defaulting is a graph.go dependency-edge-lookup concern
+// (see defaultSchema there), not something the builder should fabricate,
+// since introspection is what always supplies an explicit FAMILY going
+// forward (see introspectOperatorClasses); hand-written source keeps
+// whatever the user actually wrote.
+func TestBuildOperatorClassFamilyOmitted(t *testing.T) {
+	obj := buildObject(t, pipeline.KindOperatorClass,
+		`my_ops FOR TYPE int4 USING gin AS STORAGE int4`, ``)
+	oc := obj.(*ir.OperatorClass)
+	if oc.FamilyName != "" {
+		t.Errorf("FamilyName: got %q, want empty (FAMILY omitted from source)", oc.FamilyName)
+	}
+}
+
+func TestBuildTSConfigParserUnqualified(t *testing.T) {
+	obj := buildObject(t, pipeline.KindTSConfig, `my_cfg (PARSER = my_parser)`, ``)
+	tc := obj.(*ir.TSConfig)
+	if tc.ParserSchema != "" || tc.ParserName != "my_parser" {
+		t.Errorf("Parser: got schema=%q name=%q, want schema=\"\" name=\"my_parser\"", tc.ParserSchema, tc.ParserName)
+	}
+}
+
+func TestBuildTSConfigParserQualified(t *testing.T) {
+	obj := buildObject(t, pipeline.KindTSConfig, `my_cfg (PARSER = pg_catalog."default")`, ``)
+	tc := obj.(*ir.TSConfig)
+	if tc.ParserSchema != "pg_catalog" || tc.ParserName != "default" {
+		t.Errorf("Parser: got schema=%q name=%q, want schema=\"pg_catalog\" name=\"default\"", tc.ParserSchema, tc.ParserName)
+	}
+}
+
+func TestBuildTSDictTemplateUnqualified(t *testing.T) {
+	obj := buildObject(t, pipeline.KindTSDict, `my_dict (TEMPLATE = simple)`, ``)
+	td := obj.(*ir.TSDict)
+	if td.TemplateSchema != "" || td.TemplateName != "simple" {
+		t.Errorf("Template: got schema=%q name=%q, want schema=\"\" name=\"simple\"", td.TemplateSchema, td.TemplateName)
+	}
+}
+
+func TestBuildTSDictTemplateQualified(t *testing.T) {
+	obj := buildObject(t, pipeline.KindTSDict, `my_dict (TEMPLATE = pg_catalog.simple)`, ``)
+	td := obj.(*ir.TSDict)
+	if td.TemplateSchema != "pg_catalog" || td.TemplateName != "simple" {
+		t.Errorf("Template: got schema=%q name=%q, want schema=\"pg_catalog\" name=\"simple\"", td.TemplateSchema, td.TemplateName)
+	}
+}
+
 // ── Operator LEFTARG/RIGHTARG extraction ────────────────────────────────────────
 
 // TestBuildOperatorBinaryOperandTypes proves a binary operator's LEFTARG/

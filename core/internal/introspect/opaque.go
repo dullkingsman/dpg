@@ -817,7 +817,11 @@ ORDER  BY n.nspname, dict.dictname`
 			parts = append(parts, strings.TrimSpace(*initOption))
 		}
 		body := fmt.Sprintf("CREATE TEXT SEARCH DICTIONARY %s (%s)", qualIdentQ(schema, name), strings.Join(parts, ", "))
-		out = append(out, &ir.TSDict{Schema: schema, Name: name, Body: canonicalDDL(body), Reconstructed: true})
+		out = append(out, &ir.TSDict{
+			Schema: schema, Name: name,
+			TemplateSchema: tmplSchema, TemplateName: tmplName,
+			Body: canonicalDDL(body), Reconstructed: true,
+		})
 	}
 	return out, rs.Err()
 }
@@ -854,7 +858,11 @@ ORDER  BY n.nspname, c.cfgname`
 		}
 		body := fmt.Sprintf("CREATE TEXT SEARCH CONFIGURATION %s (PARSER = %s)",
 			qualIdentQ(schema, name), qualIdentQ(parserSchema, parserName))
-		out = append(out, &ir.TSConfig{Schema: schema, Name: name, Body: canonicalDDL(body), Reconstructed: true})
+		out = append(out, &ir.TSConfig{
+			Schema: schema, Name: name,
+			ParserSchema: parserSchema, ParserName: parserName,
+			Body: canonicalDDL(body), Reconstructed: true,
+		})
 	}
 	return out, rs.Err()
 }
@@ -862,21 +870,29 @@ ORDER  BY n.nspname, c.cfgname`
 // ── operator families ─────────────────────────────────────────────────────────
 
 func introspectOperatorFamilies(ctx context.Context, conn pipeline.Querier) ([]pipeline.IRObject, error) {
-	// A CREATE OPERATOR CLASS without an explicit FAMILY auto-creates a family of
-	// the SAME name in the same schema and access method. (The opclass→opfamily
-	// pg_depend row is deptype 'a' whether the family was auto-created or
-	// explicitly attached, so it cannot discriminate the two — the name match is
-	// the reliable signal, mirroring PostgreSQL's own same-name reuse rule.) Such
-	// a family is not a standalone object: introspecting it would emit a spurious
-	// CREATE OPERATOR FAMILY that the class's own reconstruction already implies,
-	// and that would conflict with the auto-creation on re-apply.
+	// Every operator family is introspected as a standalone object — including
+	// one PostgreSQL auto-created for an unqualified CREATE OPERATOR CLASS —
+	// mirroring pg_dump's own model exactly (confirmed live against postgres:17:
+	// `pg_dump -s` always emits a separate CREATE OPERATOR FAMILY for every
+	// family, auto-created or not, and always gives every class an explicit
+	// FAMILY clause; see introspectOperatorClasses).
 	//
-	// ASSUMPTION (mirrored in introspectOperatorClasses): a same-name+schema
-	// family is the auto-created one and is skipped. The rare, legal case of an
-	// EXPLICIT family that happens to share a class's name — especially one
-	// enriched via ALTER OPERATOR FAMILY ADD, or shared by several classes — is
-	// misclassified and dropped from the dump. See the longer note there for why
-	// no deptype signal separates the cases and what the general fix would be.
+	// A prior version of this function tried to skip families it inferred were
+	// auto-created (matching a class's own name+schema), to avoid a spurious
+	// CREATE OPERATOR FAMILY that would conflict with PG's auto-creation on
+	// apply. That heuristic was unreliable BY DESIGN, not just in a rare edge
+	// case: confirmed live that the opclass→opfamily pg_depend row is deptype
+	// 'a' (DEPENDENCY_AUTO) whether the family was truly auto-created OR
+	// explicitly created and then attached via an explicit FAMILY clause of the
+	// same name — there is no pg_depend signal that distinguishes the two, so
+	// name-matching necessarily misclassified the second, legal case (an
+	// explicit family — possibly enriched via ALTER OPERATOR FAMILY ADD, or
+	// shared by several classes — silently dropped from the dump). Once every
+	// class is given an explicit FAMILY clause unconditionally (see
+	// introspectOperatorClasses) and every family is introspected
+	// unconditionally, the ambiguity is moot: PostgreSQL itself no longer needs
+	// to guess, since the class always names its family explicitly, matching
+	// exactly how pg_dump avoids the same ambiguity.
 	q := `
 SELECT n.nspname, f.opfname, am.amname
 FROM   pg_opfamily f
@@ -885,12 +901,6 @@ JOIN   pg_am am       ON am.oid = f.opfmethod
 WHERE  f.oid >= $1
 AND    n.nspname NOT IN ('pg_catalog', 'information_schema', 'pg_toast')
 AND    ` + notExtensionOwned("pg_opfamily", "f.oid") + `
-AND    NOT EXISTS (
-           SELECT 1 FROM pg_opclass c
-           WHERE  c.opcfamily = f.oid
-           AND    c.opcname = f.opfname
-           AND    c.opcnamespace = f.opfnamespace
-       )
 ORDER  BY n.nspname, f.opfname`
 
 	rs, err := conn.QueryRows(ctx, q, firstNormalObjectID)
@@ -980,29 +990,23 @@ ORDER  BY n.nspname, c.opcname`
 			sb.WriteString(" DEFAULT")
 		}
 		fmt.Fprintf(&sb, " FOR TYPE %s USING %s", r.intype, quoteIdent(r.am))
-		// Only name the family when it is an explicit, separately-declared family.
-		// A family sharing the class's name and schema is the one PostgreSQL
-		// auto-creates (or reuses) for an unqualified CREATE OPERATOR CLASS, so the
-		// FAMILY clause is omitted — emitting it would reference a family that the
-		// introspector deliberately does not dump as a standalone object.
-		//
-		// ASSUMPTION (see introspectOperatorFamilies): "same name+schema as the
-		// class" is treated as implicit/auto-created. This is exact for the common
-		// case but wrong for the rare, legal shape where a user creates an explicit
-		// CREATE OPERATOR FAMILY that happens to share a name with a class attached
-		// to it — the standalone family (and any members added to it via ALTER,
-		// which DPG does not model regardless) is then omitted. There is no
-		// pg_depend-only signal that distinguishes the two (auto and explicit both
-		// use deptype 'a'). The fully general fix is pg_dump's model: introspect
-		// every family and give every class an explicit FAMILY clause, with a
-		// class→family dependency edge added to the resolver for ordering.
-		implicitFamily := r.famName != nil && *r.famName == r.name && deref(r.famSchema) == r.schema
-		if !implicitFamily && r.famName != nil {
-			fmt.Fprintf(&sb, " FAMILY %s", qualIdentQ(deref(r.famSchema), *r.famName))
-		}
+		// Always name the family explicitly, matching pg_dump's own model exactly
+		// (confirmed live: pg_dump -s does this even for a family PostgreSQL
+		// auto-created via an unqualified CREATE OPERATOR CLASS). r.famName/
+		// r.famSchema come from an INNER JOIN on pg_opclass.opcfamily, a NOT NULL
+		// column — every class belongs to exactly one family, so these are always
+		// populated; the pointer type only mirrors storageType's genuinely-nullable
+		// shape. This removes the prior same-name-as-class "implicit" special case
+		// entirely: see introspectOperatorFamilies for why that heuristic was
+		// unreliable by construction (deptype 'a' cannot distinguish an
+		// auto-created family from an explicit one sharing the class's name), not
+		// merely wrong in a rare case.
+		famSchema, famName := deref(r.famSchema), deref(r.famName)
+		fmt.Fprintf(&sb, " FAMILY %s", qualIdentQ(famSchema, famName))
 		fmt.Fprintf(&sb, " AS %s", strings.Join(members, ", "))
 		out = append(out, &ir.OperatorClass{
 			Schema: r.schema, Name: r.name, AccessMethod: r.am,
+			FamilySchema: famSchema, FamilyName: famName,
 			Body: canonicalDDL(sb.String()), Reconstructed: true,
 		})
 	}

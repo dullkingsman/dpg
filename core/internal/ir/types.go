@@ -608,9 +608,20 @@ func OperandsKey(left, right *TypeRef) string {
 
 // OperatorClass is a CREATE OPERATOR CLASS declaration.
 type OperatorClass struct {
-	Schema        string
-	Name          string
-	AccessMethod  string // the index access method (btree/gin/gist/...); needed for DROP
+	Schema       string
+	Name         string
+	AccessMethod string // the index access method (btree/gin/gist/...); needed for DROP
+	// FamilyName, when non-empty, is the class's explicit FAMILY clause target
+	// (FamilySchema empty means unqualified, i.e. the class's own schema) —
+	// parsed identically from hand-written source (CreateOpClassStmt.Opfamilyname)
+	// and introspection. Populated purely for dependency-edge ordering (see
+	// graph.go): the FAMILY clause text itself always lives in Body, since
+	// introspection now always emits it explicitly (pg_dump's model — no
+	// "implicit same-name family" special case). Empty FamilyName is only
+	// possible for hand-written source that omits FAMILY, relying on
+	// PostgreSQL's own same-name auto-creation.
+	FamilySchema  string
+	FamilyName    string
 	Body          string
 	Reconstructed bool // Body rebuilt from the catalog; see Tablespace.Reconstructed
 	SrcPos        pipeline.SourcePos
@@ -675,8 +686,16 @@ func (s *StatisticsObject) irObject()               {}
 
 // TSConfig is a CREATE TEXT SEARCH CONFIGURATION declaration.
 type TSConfig struct {
-	Schema        string
-	Name          string
+	Schema string
+	Name   string
+	// ParserName is always non-empty for valid source/introspection — PARSER
+	// is mandatory in CREATE TEXT SEARCH CONFIGURATION's grammar, unlike
+	// OperatorClass's optional FAMILY. Populated purely for dependency-edge
+	// ordering (see graph.go); the PARSER clause text itself always lives in
+	// Body already. ParserSchema empty means unqualified (the config's own
+	// schema).
+	ParserSchema  string
+	ParserName    string
 	Body          string
 	Mappings      []pipeline.TSMappingDef
 	Comment       *string
@@ -690,12 +709,19 @@ func (t *TSConfig) irObject()               {}
 
 // TSDict is a CREATE TEXT SEARCH DICTIONARY declaration.
 type TSDict struct {
-	Schema        string
-	Name          string
-	Body          string
-	Comment       *string
-	Reconstructed bool // Body rebuilt from the catalog; see Tablespace.Reconstructed
-	SrcPos        pipeline.SourcePos
+	Schema string
+	Name   string
+	// TemplateName is always non-empty for valid source/introspection —
+	// TEMPLATE is mandatory in CREATE TEXT SEARCH DICTIONARY's grammar.
+	// Populated purely for dependency-edge ordering (see graph.go); the
+	// TEMPLATE clause text itself always lives in Body already.
+	// TemplateSchema empty means unqualified (the dict's own schema).
+	TemplateSchema string
+	TemplateName   string
+	Body           string
+	Comment        *string
+	Reconstructed  bool // Body rebuilt from the catalog; see Tablespace.Reconstructed
+	SrcPos         pipeline.SourcePos
 }
 
 func (t *TSDict) QualifiedName() string   { return qualName(t.Schema, t.Name) }

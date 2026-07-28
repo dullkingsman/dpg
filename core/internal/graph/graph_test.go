@@ -237,3 +237,110 @@ func TestSort_UnqualifiedBuiltinTypeNoError(t *testing.T) {
 		t.Fatalf("unqualified built-in type must not error: %v", err)
 	}
 }
+
+// ── Operator class → family, TS config → parser, TS dict → template ────────────
+//
+// These three mirror the same shape: an opaque object that names another
+// opaque object by qualified reference, needing a real dependency edge so
+// CREATE order is correct regardless of declaration order — unlike a table's
+// column type or FK reference, PostgreSQL's CREATE OPERATOR FAMILY/TEXT
+// SEARCH PARSER/TEXT SEARCH TEMPLATE have no IF NOT EXISTS to self-heal a
+// wrong order, and CREATE OPERATOR CLASS ... FAMILY x / CREATE TEXT SEARCH
+// CONFIGURATION ... (PARSER = x) / CREATE TEXT SEARCH DICTIONARY ... (TEMPLATE
+// = x) all hard-error if x doesn't exist yet. Each test deliberately declares
+// the referencing object BEFORE its reference in the input slice, so a
+// passing assertBefore proves the edge actually reorders things rather than
+// coincidentally matching input order.
+
+func opClass(schema, name, am, famSchema, famName string) *ir.OperatorClass {
+	return &ir.OperatorClass{
+		Schema: schema, Name: name, AccessMethod: am,
+		FamilySchema: famSchema, FamilyName: famName, SrcPos: pos,
+	}
+}
+
+func opFamily(schema, name, am string) *ir.OperatorFamily {
+	return &ir.OperatorFamily{Schema: schema, Name: name, AccessMethod: am, SrcPos: pos}
+}
+
+func TestSort_OperatorClassBeforeFamily_QualifiedRef(t *testing.T) {
+	objects := []pipeline.IRObject{
+		opClass("app", "my_ops", "btree", "app", "my_fam"),
+		opFamily("app", "my_fam", "btree"),
+	}
+	sorted := sortObjects(t, objects)
+	assertBefore(t, sorted, "app.my_fam USING btree FAMILY", "app.my_ops USING btree")
+}
+
+// Unqualified FAMILY name (FamilySchema empty) resolves against the class's
+// own schema — same convention as an unqualified column type reference.
+func TestSort_OperatorClassBeforeFamily_UnqualifiedRef(t *testing.T) {
+	objects := []pipeline.IRObject{
+		opClass("app", "my_ops", "btree", "", "my_fam"),
+		opFamily("app", "my_fam", "btree"),
+	}
+	sorted := sortObjects(t, objects)
+	assertBefore(t, sorted, "app.my_fam USING btree FAMILY", "app.my_ops USING btree")
+}
+
+// A class whose FAMILY isn't part of the managed object set (e.g. a built-in
+// pg_catalog family, or simply omitted in hand-written source relying on
+// PostgreSQL's own auto-creation) must not error — mirrors the unqualified
+// built-in type case above.
+func TestSort_OperatorClassNoFamilyReferenceNoError(t *testing.T) {
+	objects := []pipeline.IRObject{opClass("app", "my_ops", "btree", "", "")}
+	if _, err := graph.New().Sort(objects); err != nil {
+		t.Fatalf("operator class with no FAMILY reference must not error: %v", err)
+	}
+}
+
+func tsConfig(schema, name, parserSchema, parserName string) *ir.TSConfig {
+	return &ir.TSConfig{Schema: schema, Name: name, ParserSchema: parserSchema, ParserName: parserName, SrcPos: pos}
+}
+
+func tsParser(schema, name string) *ir.TSParser {
+	return &ir.TSParser{Schema: schema, Name: name, SrcPos: pos}
+}
+
+func TestSort_TSConfigBeforeParser(t *testing.T) {
+	objects := []pipeline.IRObject{
+		tsConfig("app", "my_cfg", "app", "my_parser"),
+		tsParser("app", "my_parser"),
+	}
+	sorted := sortObjects(t, objects)
+	assertBefore(t, sorted, "app.my_parser", "app.my_cfg")
+}
+
+// The overwhelmingly common case: PARSER references a pg_catalog built-in
+// (e.g. "default"), which is never part of the managed object set — must not
+// error.
+func TestSort_TSConfigBuiltinParserNoError(t *testing.T) {
+	objects := []pipeline.IRObject{tsConfig("app", "my_cfg", "pg_catalog", "default")}
+	if _, err := graph.New().Sort(objects); err != nil {
+		t.Fatalf("TS config referencing a built-in parser must not error: %v", err)
+	}
+}
+
+func tsDict(schema, name, tmplSchema, tmplName string) *ir.TSDict {
+	return &ir.TSDict{Schema: schema, Name: name, TemplateSchema: tmplSchema, TemplateName: tmplName, SrcPos: pos}
+}
+
+func tsTemplate(schema, name string) *ir.TSTemplate {
+	return &ir.TSTemplate{Schema: schema, Name: name, SrcPos: pos}
+}
+
+func TestSort_TSDictBeforeTemplate(t *testing.T) {
+	objects := []pipeline.IRObject{
+		tsDict("app", "my_dict", "app", "my_tmpl"),
+		tsTemplate("app", "my_tmpl"),
+	}
+	sorted := sortObjects(t, objects)
+	assertBefore(t, sorted, "app.my_tmpl", "app.my_dict")
+}
+
+func TestSort_TSDictBuiltinTemplateNoError(t *testing.T) {
+	objects := []pipeline.IRObject{tsDict("app", "my_dict", "pg_catalog", "simple")}
+	if _, err := graph.New().Sort(objects); err != nil {
+		t.Fatalf("TS dict referencing a built-in template must not error: %v", err)
+	}
+}
