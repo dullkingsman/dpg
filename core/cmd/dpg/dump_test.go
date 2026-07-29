@@ -127,6 +127,131 @@ func TestRenderOpaqueObjectsCompile(t *testing.T) {
 	}
 }
 
+// TestRenderRoleAttributesCompile guards dump's Role rendering (RFC §11.1):
+// every attribute except PASSWORD (never introspected, see the renderer's
+// own doc comment) must round-trip through dump -> recompile with matching
+// values — a bare "ROLE name;" would silently drop LOGIN/SUPERUSER/
+// membership/etc. from dumped source, defeating dump's actual purpose of
+// capturing a live role's real configuration (harmless for plan --live
+// specifically, since "undeclared means unmanaged", but still a real
+// fidelity gap for anyone reading or version-controlling the dumped file).
+func TestRenderRoleAttributesCompile(t *testing.T) {
+	fmtOpts := format.Options{IndentSize: 4, KeywordCase: "upper"}
+	boolp := func(v bool) *bool { return &v }
+	intp := func(v int) *int { return &v }
+	strp := func(v string) *string { return &v }
+	comment := "application service account"
+
+	role := &ir.Role{
+		Name: "app_service", CanLogin: boolp(true), Superuser: boolp(false),
+		CreateDB: boolp(false), CreateRole: boolp(false), Inherit: boolp(true),
+		IsReplication: boolp(false), BypassRLS: boolp(false), ConnectionLimit: intp(20),
+		ValidUntil: strp("2030-01-01"),
+		InRole:     []string{"reader_group"}, RoleMembers: []string{"member_role"}, AdminRoles: []string{"admin_role"},
+		Comment: &comment,
+		// Password deliberately unset — never introspected, must never be
+		// rendered (there's nothing to render: dump only ever sees
+		// introspected Role objects, which never populate Password).
+	}
+
+	var b strings.Builder
+	renderObjectDPG(&b, role, fmtOpts)
+	rendered := b.String()
+
+	if strings.Contains(rendered, "PASSWORD") {
+		t.Errorf("rendered Role must never mention PASSWORD (never introspected): %s", rendered)
+	}
+	for line := range strings.SplitSeq(rendered, "\n") {
+		if strings.HasPrefix(strings.TrimSpace(line), "CREATE ") {
+			t.Errorf("rendered declaration begins with CREATE (violates no-verb mandate): %q", line)
+		}
+	}
+
+	dir := t.TempDir()
+	f := filepath.Join(dir, "roles.dpg")
+	if err := os.WriteFile(f, []byte(rendered), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	compiled, err := compiler.Compile([]string{f}, dir, pipeline.Default)
+	if err != nil {
+		t.Fatalf("dumped Role failed to recompile: %v\n---\n%s", err, rendered)
+	}
+	if len(compiled) != 1 {
+		t.Fatalf("expected 1 compiled object, got %d", len(compiled))
+	}
+	got, ok := compiled[0].(*ir.Role)
+	if !ok {
+		t.Fatalf("expected *ir.Role, got %T", compiled[0])
+	}
+
+	check := func(name string, got, want any) {
+		t.Helper()
+		gv, wv := reflect.ValueOf(got), reflect.ValueOf(want)
+		if gv.Kind() == reflect.Pointer && wv.Kind() == reflect.Pointer {
+			if gv.IsNil() != wv.IsNil() {
+				t.Errorf("%s: got nil=%v, want nil=%v", name, gv.IsNil(), wv.IsNil())
+				return
+			}
+			if !gv.IsNil() && gv.Elem().Interface() != wv.Elem().Interface() {
+				t.Errorf("%s: got %v, want %v", name, gv.Elem(), wv.Elem())
+			}
+			return
+		}
+		if !reflect.DeepEqual(got, want) {
+			t.Errorf("%s: got %v, want %v", name, got, want)
+		}
+	}
+	check("CanLogin", got.CanLogin, role.CanLogin)
+	check("Superuser", got.Superuser, role.Superuser)
+	check("CreateDB", got.CreateDB, role.CreateDB)
+	check("CreateRole", got.CreateRole, role.CreateRole)
+	check("Inherit", got.Inherit, role.Inherit)
+	check("IsReplication", got.IsReplication, role.IsReplication)
+	check("BypassRLS", got.BypassRLS, role.BypassRLS)
+	check("ConnectionLimit", got.ConnectionLimit, role.ConnectionLimit)
+	check("ValidUntil", got.ValidUntil, role.ValidUntil)
+	check("Comment", got.Comment, role.Comment)
+	if !reflect.DeepEqual(got.InRole, role.InRole) {
+		t.Errorf("InRole: got %v, want %v", got.InRole, role.InRole)
+	}
+	if !reflect.DeepEqual(got.RoleMembers, role.RoleMembers) {
+		t.Errorf("RoleMembers: got %v, want %v", got.RoleMembers, role.RoleMembers)
+	}
+	if !reflect.DeepEqual(got.AdminRoles, role.AdminRoles) {
+		t.Errorf("AdminRoles: got %v, want %v", got.AdminRoles, role.AdminRoles)
+	}
+	if got.Password != nil {
+		t.Errorf("Password: got %v, want nil", got.Password)
+	}
+}
+
+// TestRenderBareRoleCompile guards the minimal case: a role with no
+// attributes set at all (every pointer/slice nil) must still render valid,
+// recompilable source — the pre-existing "ROLE name;" behavior, unchanged.
+func TestRenderBareRoleCompile(t *testing.T) {
+	fmtOpts := format.Options{IndentSize: 4, KeywordCase: "upper"}
+	var b strings.Builder
+	renderObjectDPG(&b, &ir.Role{Name: "plain_role"}, fmtOpts)
+	rendered := b.String()
+
+	dir := t.TempDir()
+	f := filepath.Join(dir, "roles.dpg")
+	if err := os.WriteFile(f, []byte(rendered), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	compiled, err := compiler.Compile([]string{f}, dir, pipeline.Default)
+	if err != nil {
+		t.Fatalf("dumped bare Role failed to recompile: %v\n---\n%s", err, rendered)
+	}
+	got, ok := compiled[0].(*ir.Role)
+	if !ok || got.Name != "plain_role" {
+		t.Fatalf("expected *ir.Role named plain_role, got %+v", compiled[0])
+	}
+	if got.CanLogin != nil || got.Superuser != nil || got.ConnectionLimit != nil {
+		t.Errorf("expected all attributes nil for a bare role, got: %+v", got)
+	}
+}
+
 func TestIsClusterScoped(t *testing.T) {
 	cluster := []pipeline.IRObject{&ir.Role{Name: "r"}, &ir.Tablespace{Name: "ts"}}
 	database := []pipeline.IRObject{

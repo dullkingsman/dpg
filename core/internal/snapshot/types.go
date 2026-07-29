@@ -219,10 +219,28 @@ type SnapSequence struct {
 	NameMaps    []SnapNameMapEntry `json:"name_maps,omitempty"`
 }
 
+// SnapRole is a Role's stored state (RFC §11.1). PasswordHash is a hash of
+// the *declared* PASSWORD text (literal or {{secret-uri}} reference,
+// verbatim) — never the resolved value; see ir.Role's doc comment and RFC
+// §11.1's "Password drift detection" for why hashing the declared text
+// (not just a boolean has_password) is safe and enables rotation detection.
 type SnapRole struct {
-	Name     string             `json:"name"`
-	Comment  *string            `json:"comment,omitempty"`
-	NameMaps []SnapNameMapEntry `json:"name_maps,omitempty"`
+	Name            string             `json:"name"`
+	CanLogin        *bool              `json:"can_login,omitempty"`
+	Superuser       *bool              `json:"superuser,omitempty"`
+	CreateDB        *bool              `json:"create_db,omitempty"`
+	CreateRole      *bool              `json:"create_role,omitempty"`
+	Inherit         *bool              `json:"inherit,omitempty"`
+	IsReplication   *bool              `json:"is_replication,omitempty"`
+	BypassRLS       *bool              `json:"bypass_rls,omitempty"`
+	ConnectionLimit *int               `json:"connection_limit,omitempty"`
+	PasswordHash    string             `json:"password_hash,omitempty"`
+	ValidUntil      *string            `json:"valid_until,omitempty"`
+	InRole          []string           `json:"in_role,omitempty"`
+	RoleMembers     []string           `json:"role_members,omitempty"`
+	AdminRoles      []string           `json:"admin_roles,omitempty"`
+	Comment         *string            `json:"comment,omitempty"`
+	NameMaps        []SnapNameMapEntry `json:"name_maps,omitempty"`
 }
 
 // SnapVtypeBody is the serialised form of an ir.VtypeBody discriminated union.

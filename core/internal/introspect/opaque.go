@@ -95,7 +95,7 @@ func introspectTablespaces(ctx context.Context, conn pipeline.Querier) ([]pipeli
 	const q = `
 SELECT spcname,
        pg_tablespace_location(oid)               AS location,
-       obj_description(oid, 'pg_tablespace')      AS comment
+       shobj_description(oid, 'pg_tablespace')    AS comment
 FROM   pg_tablespace
 WHERE  spcname NOT IN ('pg_default', 'pg_global')
 ORDER  BY spcname`

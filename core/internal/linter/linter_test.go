@@ -120,6 +120,58 @@ func TestLintHardcodedPassword(t *testing.T) {
 	}
 }
 
+func TestLintHardcodedRolePassword(t *testing.T) {
+	l := New()
+	pw := "hunter2"
+	objects := []pipeline.IRObject{&ir.Role{Name: "app_service", Password: &pw}}
+	diags, err := l.Lint(objects, pipeline.LinterConfig{ForbidHardcodedPasswords: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, d := range diags {
+		if d.Rule == "hardcoded-password" {
+			found = true
+			if !d.IsError {
+				t.Error("expected hardcoded ROLE PASSWORD to be an error, not a warning (RFC §11.1 MUST)")
+			}
+		}
+	}
+	if !found {
+		t.Fatal("expected hardcoded-password error for a literal ROLE PASSWORD")
+	}
+}
+
+func TestLintRolePasswordWithSecretReferenceOK(t *testing.T) {
+	l := New()
+	pw := "{{vault:secret/roles/app_service#pw}}"
+	objects := []pipeline.IRObject{&ir.Role{Name: "app_service", Password: &pw}}
+	diags, err := l.Lint(objects, pipeline.LinterConfig{ForbidHardcodedPasswords: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, d := range diags {
+		if d.Rule == "hardcoded-password" {
+			t.Errorf("did not expect hardcoded-password for a {{...}} secret reference, got: %v", d)
+		}
+	}
+}
+
+func TestLintRolePasswordRuleDisabled(t *testing.T) {
+	l := New()
+	pw := "hunter2"
+	objects := []pipeline.IRObject{&ir.Role{Name: "app_service", Password: &pw}}
+	diags, err := l.Lint(objects, pipeline.LinterConfig{ForbidHardcodedPasswords: false})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, d := range diags {
+		if d.Rule == "hardcoded-password" {
+			t.Errorf("did not expect hardcoded-password with the rule disabled, got: %v", d)
+		}
+	}
+}
+
 func TestLintSecurityDefiner(t *testing.T) {
 	l := New()
 	objects := []pipeline.IRObject{

@@ -295,6 +295,16 @@ func quoteLit(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", "''") + "'"
 }
 
+// hashText returns a SHA-256 hex digest of s (trimmed) — used wherever a
+// declared-but-never-persisted-verbatim value (a secret reference or
+// literal) needs offline drift detection without ever storing the value
+// itself in the snapshot. Mirrors snapshot.hashBodyStr's exact formula,
+// duplicated here since that one is unexported in a different package.
+func hashText(s string) string {
+	sum := sha256.Sum256([]byte(strings.TrimSpace(s)))
+	return fmt.Sprintf("%x", sum)
+}
+
 func ptrEq(a, b *string) bool {
 	if a == nil && b == nil {
 		return true
@@ -818,8 +828,7 @@ func createSubscription(o *ir.Subscription) ([]pipeline.DiffOp, error) {
 // comment-only edit doesn't need the subscription dropped and recreated.
 func diffSubscription(o *ir.Subscription, snap *snapshot.SnapOpaque) ([]pipeline.DiffOp, error) {
 	if o.Body != "" {
-		sum := sha256.Sum256([]byte(strings.TrimSpace(o.Body)))
-		newHash := fmt.Sprintf("%x", sum)
+		newHash := hashText(o.Body)
 		if snap.BodyHash != "" && newHash != snap.BodyHash {
 			ops := dropObject(&snapshot.SnapObject{Kind: snap.Kind, Opaque: snap})
 			createOps, err := createSubscription(o)
@@ -1858,9 +1867,105 @@ func writeSeqParams(b *strings.Builder, o *ir.Sequence) {
 	}
 }
 
+// writeRoleBoolOpt writes " ON" or " OFF" (PostgreSQL's toggle-pair keywords)
+// to b if v is non-nil, nothing otherwise — mirrors RFC §11.1's "any option
+// a declaration omits is simply not managed by DPG" rule at the SQL-building
+// level.
+func writeRoleBoolOpt(b *strings.Builder, v *bool, on, off string) {
+	if v == nil {
+		return
+	}
+	if *v {
+		b.WriteString(" " + on)
+	} else {
+		b.WriteString(" " + off)
+	}
+}
+
+// roleAttrClause builds the "<opt1> <opt2> ..." portion of a CREATE
+// ROLE/ALTER ROLE statement for every non-PASSWORD, non-membership
+// attribute the declaration sets (RFC §11.1) — valid in both statement
+// forms, unlike IN ROLE/ROLE/ADMIN (create-time only) and unlike PASSWORD
+// (kept separate so callers can pass either the raw declared text or an
+// apply-time-resolved value; nil password omits the clause entirely).
+func roleAttrClause(o *ir.Role, password *string) string {
+	var b strings.Builder
+	writeRoleBoolOpt(&b, o.CanLogin, "LOGIN", "NOLOGIN")
+	writeRoleBoolOpt(&b, o.Superuser, "SUPERUSER", "NOSUPERUSER")
+	writeRoleBoolOpt(&b, o.CreateDB, "CREATEDB", "NOCREATEDB")
+	writeRoleBoolOpt(&b, o.CreateRole, "CREATEROLE", "NOCREATEROLE")
+	writeRoleBoolOpt(&b, o.Inherit, "INHERIT", "NOINHERIT")
+	writeRoleBoolOpt(&b, o.IsReplication, "REPLICATION", "NOREPLICATION")
+	writeRoleBoolOpt(&b, o.BypassRLS, "BYPASSRLS", "NOBYPASSRLS")
+	if o.ConnectionLimit != nil {
+		fmt.Fprintf(&b, " CONNECTION LIMIT %d", *o.ConnectionLimit)
+	}
+	if password != nil {
+		b.WriteString(" PASSWORD " + quoteLit(*password))
+	}
+	if o.ValidUntil != nil {
+		b.WriteString(" VALID UNTIL " + quoteLit(*o.ValidUntil))
+	}
+	return b.String()
+}
+
+// buildCreateRoleSQL builds a full CREATE ROLE statement, including the
+// create-time-only IN ROLE/ROLE/ADMIN membership clauses (RFC §11.1) —
+// PostgreSQL's ALTER ROLE has no membership clause at all, so this shape
+// (attrs + membership in one CREATE) is only ever used at creation time;
+// later membership changes are diffed as GRANT/REVOKE (see
+// diffRoleMembership). password is passed separately from o.Password so
+// callers can build either the display form (raw declared text, may
+// contain {{...}}) or the apply-time exec form (resolved value).
+func buildCreateRoleSQL(o *ir.Role, password *string) string {
+	var b strings.Builder
+	b.WriteString("CREATE ROLE ")
+	b.WriteString(quoteIdent(o.Name))
+	b.WriteString(roleAttrClause(o, password))
+	if len(o.InRole) > 0 {
+		b.WriteString(" IN ROLE " + roleList(o.InRole))
+	}
+	if len(o.RoleMembers) > 0 {
+		b.WriteString(" ROLE " + roleList(o.RoleMembers))
+	}
+	if len(o.AdminRoles) > 0 {
+		b.WriteString(" ADMIN " + roleList(o.AdminRoles))
+	}
+	b.WriteString(";")
+	return b.String()
+}
+
+// roleCreateOp is the DiffOp for a CREATE ROLE statement whose PASSWORD
+// option may hold an unresolved secret reference (RFC §11.1). SQL() always
+// returns the placeholder/declared form — used for plan output,
+// migration-file archival, and error messages, so a resolved password is
+// never persisted or logged. ExecSQL rebuilds the statement with PASSWORD's
+// resolved value; unlike Subscription's subscriptionCreateOp, this doesn't
+// need regex substitution into deparsed text — Role is built from
+// structured fields on both the display and exec paths, so ExecSQL just
+// calls the same builder with a different password string.
+type roleCreateOp struct {
+	*op
+	role *ir.Role
+}
+
+func (o *roleCreateOp) ExecSQL(resolver pipeline.SecretResolver) (string, error) {
+	resolved, err := pipeline.ResolveTemplate(*o.role.Password, resolver)
+	if err != nil {
+		return "", err
+	}
+	return buildCreateRoleSQL(o.role, &resolved), nil
+}
+
+var _ pipeline.SecretBearingOp = (*roleCreateOp)(nil)
+
 func createRole(o *ir.Role) []pipeline.DiffOp {
-	ops := []pipeline.DiffOp{
-		safeOp(fmt.Sprintf("CREATE ROLE %s;", quoteIdent(o.Name)), o.SrcPos),
+	var ops []pipeline.DiffOp
+	displaySQL := buildCreateRoleSQL(o, o.Password)
+	if o.Password != nil {
+		ops = append(ops, &roleCreateOp{op: safeOp(displaySQL, o.SrcPos), role: o})
+	} else {
+		ops = append(ops, safeOp(displaySQL, o.SrcPos))
 	}
 	if o.Comment != nil {
 		ops = append(ops, safeOp(
@@ -2163,16 +2268,153 @@ func parallelChanged(desired, snap string) bool {
 	return desired != snap
 }
 
+func boolPtrEq(a, b *bool) bool {
+	if a == nil && b == nil {
+		return true
+	}
+	if a == nil || b == nil {
+		return false
+	}
+	return *a == *b
+}
+
+func intPtrEq(a, b *int) bool {
+	if a == nil && b == nil {
+		return true
+	}
+	if a == nil || b == nil {
+		return false
+	}
+	return *a == *b
+}
+
+// roleAlterPasswordOp is the DiffOp for a standalone ALTER ROLE ... PASSWORD
+// statement (an existing role's password changed, RFC §11.1) — same
+// SecretBearingOp contract as roleCreateOp/subscriptionCreateOp: SQL() is
+// always the placeholder/declared form, ExecSQL resolves it fresh for the
+// one execution call only.
+type roleAlterPasswordOp struct {
+	*op
+	name     string
+	password string
+}
+
+func (o *roleAlterPasswordOp) ExecSQL(resolver pipeline.SecretResolver) (string, error) {
+	resolved, err := pipeline.ResolveTemplate(o.password, resolver)
+	if err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("ALTER ROLE %s PASSWORD %s;", quoteIdent(o.name), quoteLit(resolved)), nil
+}
+
+var _ pipeline.SecretBearingOp = (*roleAlterPasswordOp)(nil)
+
+// stringSetDiff returns the elements present in desired but not current
+// (added) and present in current but not desired (removed).
+func stringSetDiff(desired, current []string) (added, removed []string) {
+	curSet := make(map[string]bool, len(current))
+	for _, s := range current {
+		curSet[s] = true
+	}
+	desSet := make(map[string]bool, len(desired))
+	for _, s := range desired {
+		desSet[s] = true
+		if !curSet[s] {
+			added = append(added, s)
+		}
+	}
+	for _, s := range current {
+		if !desSet[s] {
+			removed = append(removed, s)
+		}
+	}
+	return added, removed
+}
+
+// diffRoleMembership diffs IN ROLE/ROLE/ADMIN (RFC §11.1) as GRANT/REVOKE —
+// PostgreSQL's ALTER ROLE has no membership clause at all (confirmed via
+// pg_query: addroleto/rolemembers/adminmembers are CreateRoleStmt-only
+// options), so an existing role's membership can only ever change via
+// GRANT/REVOKE, the same mechanism PostgreSQL itself uses post-creation.
+// Each of the three fields is only compared when declared (non-nil) —
+// undeclared means "not managed by DPG for this role", same convention as
+// every other optional Role field.
+func diffRoleMembership(o *ir.Role, snap *snapshot.SnapRole, pos pipeline.SourcePos) []pipeline.DiffOp {
+	var ops []pipeline.DiffOp
+	ident := quoteIdent(o.Name)
+
+	if o.InRole != nil {
+		added, removed := stringSetDiff(o.InRole, snap.InRole)
+		for _, r := range added {
+			ops = append(ops, safeOp(fmt.Sprintf("GRANT %s TO %s;", quoteIdent(r), ident), pos))
+		}
+		for _, r := range removed {
+			ops = append(ops, cautionOp(fmt.Sprintf("REVOKE %s FROM %s;", quoteIdent(r), ident), pos))
+		}
+	}
+	if o.RoleMembers != nil {
+		added, removed := stringSetDiff(o.RoleMembers, snap.RoleMembers)
+		for _, m := range added {
+			ops = append(ops, safeOp(fmt.Sprintf("GRANT %s TO %s;", ident, quoteIdent(m)), pos))
+		}
+		for _, m := range removed {
+			ops = append(ops, cautionOp(fmt.Sprintf("REVOKE %s FROM %s;", ident, quoteIdent(m)), pos))
+		}
+	}
+	if o.AdminRoles != nil {
+		added, removed := stringSetDiff(o.AdminRoles, snap.AdminRoles)
+		for _, m := range added {
+			ops = append(ops, safeOp(fmt.Sprintf("GRANT %s TO %s WITH ADMIN OPTION;", ident, quoteIdent(m)), pos))
+		}
+		for _, m := range removed {
+			ops = append(ops, cautionOp(fmt.Sprintf("REVOKE %s FROM %s;", ident, quoteIdent(m)), pos))
+		}
+	}
+	return ops
+}
+
 func diffRole(o *ir.Role, snap *snapshot.SnapRole) []pipeline.DiffOp {
 	var ops []pipeline.DiffOp
 	pos := o.SrcPos
+	ident := quoteIdent(o.Name)
+
+	// Every non-PASSWORD, non-membership attribute the declaration manages,
+	// batched into one ALTER ROLE (mirrors diffSequence's identical
+	// batching of its own optional params into one ALTER SEQUENCE).
+	attrsChanged := (o.CanLogin != nil && !boolPtrEq(o.CanLogin, snap.CanLogin)) ||
+		(o.Superuser != nil && !boolPtrEq(o.Superuser, snap.Superuser)) ||
+		(o.CreateDB != nil && !boolPtrEq(o.CreateDB, snap.CreateDB)) ||
+		(o.CreateRole != nil && !boolPtrEq(o.CreateRole, snap.CreateRole)) ||
+		(o.Inherit != nil && !boolPtrEq(o.Inherit, snap.Inherit)) ||
+		(o.IsReplication != nil && !boolPtrEq(o.IsReplication, snap.IsReplication)) ||
+		(o.BypassRLS != nil && !boolPtrEq(o.BypassRLS, snap.BypassRLS)) ||
+		(o.ConnectionLimit != nil && !intPtrEq(o.ConnectionLimit, snap.ConnectionLimit)) ||
+		(o.ValidUntil != nil && !ptrEq(o.ValidUntil, snap.ValidUntil))
+	if attrsChanged {
+		ops = append(ops, safeOp(fmt.Sprintf("ALTER ROLE %s%s;", ident, roleAttrClause(o, nil)), pos))
+	}
+
+	// PASSWORD is never compared as raw text — only its hash (of the
+	// declared text, never the resolved value) is ever stored, so this is
+	// the only way to detect a change offline (RFC §11.1's "Password drift
+	// detection").
+	if o.Password != nil && hashText(*o.Password) != snap.PasswordHash {
+		ops = append(ops, &roleAlterPasswordOp{
+			op:       cautionOp(fmt.Sprintf("ALTER ROLE %s PASSWORD %s;", ident, quoteLit(*o.Password)), pos),
+			name:     o.Name,
+			password: *o.Password,
+		})
+	}
+
 	if !ptrEq(o.Comment, snap.Comment) {
 		if o.Comment != nil {
-			ops = append(ops, safeOp(fmt.Sprintf("COMMENT ON ROLE %s IS %s;", quoteIdent(o.Name), quoteLit(*o.Comment)), pos))
+			ops = append(ops, safeOp(fmt.Sprintf("COMMENT ON ROLE %s IS %s;", ident, quoteLit(*o.Comment)), pos))
 		} else {
-			ops = append(ops, safeOp(fmt.Sprintf("COMMENT ON ROLE %s IS NULL;", quoteIdent(o.Name)), pos))
+			ops = append(ops, safeOp(fmt.Sprintf("COMMENT ON ROLE %s IS NULL;", ident), pos))
 		}
 	}
+
+	ops = append(ops, diffRoleMembership(o, snap, pos)...)
 	return ops
 }
 

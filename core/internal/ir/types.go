@@ -444,13 +444,37 @@ func (s *Sequence) QualifiedName() string   { return qualName(s.Schema, s.Name) 
 func (s *Sequence) Pos() pipeline.SourcePos { return s.SrcPos }
 func (s *Sequence) irObject()               {}
 
-// Role is a CREATE ROLE declaration.
+// Role is a CREATE ROLE declaration (RFC §11.1). Every attribute is native
+// PostgreSQL CREATE ROLE/ALTER ROLE grammar, extracted from
+// CreateRoleStmt.Options — not a DPG-invented block directive.
+//
+// Every pointer/nil-slice field means "not declared, not managed by DPG for
+// this role" — offline diffing only ever compares what source explicitly
+// sets, never PostgreSQL's own default for an omitted option (mirrors
+// Sequence's optional-param convention).
+//
+// Password is the raw declared PASSWORD text, verbatim — a literal, or one
+// containing {{<secret-uri>}} placeholders resolved only at apply time (see
+// pipeline.ResolveTemplate), same mechanism as Subscription.ConnInfo (§13.2).
+// Never the resolved value.
 type Role struct {
-	Name     string
-	Body     string // raw Part1 options text
-	Comment  *string
-	NameMaps []pipeline.NameMapEntry
-	SrcPos   pipeline.SourcePos
+	Name            string
+	CanLogin        *bool
+	Superuser       *bool
+	CreateDB        *bool
+	CreateRole      *bool
+	Inherit         *bool
+	IsReplication   *bool
+	BypassRLS       *bool
+	ConnectionLimit *int
+	Password        *string
+	ValidUntil      *string
+	InRole          []string // IN ROLE role-list: this role becomes a member of these
+	RoleMembers     []string // ROLE role-list: these become members of this role
+	AdminRoles      []string // ADMIN role-list: these become members of this role, WITH ADMIN OPTION
+	Comment         *string
+	NameMaps        []pipeline.NameMapEntry
+	SrcPos          pipeline.SourcePos
 }
 
 func (r *Role) QualifiedName() string   { return r.Name }

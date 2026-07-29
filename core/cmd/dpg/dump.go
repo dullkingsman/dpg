@@ -598,7 +598,55 @@ func renderObjectDPG(b *strings.Builder, obj pipeline.IRObject, fmtOpts format.O
 		}
 
 	case *ir.Role:
-		fmt.Fprintf(b, "\n%s %s;\n", kw("ROLE"), quoteIdentIfNeeded(o.Name))
+		// Every attribute except PASSWORD (never introspected — RFC §11.1,
+		// confirmed live that pg_authid/pg_roles.rolpassword are
+		// superuser-only, no reliable non-superuser proxy exists even for
+		// "has a password", so there is nothing to render or manage from a
+		// live dump). Rendering the rest is required, not optional: a bare
+		// "ROLE name;" would silently drop LOGIN/SUPERUSER/membership/etc.
+		// from dumped source, which — thanks to "undeclared means
+		// unmanaged" (RFC §11.1) — wouldn't cause spurious plan --live
+		// drift, but would make dump fail its actual purpose of capturing
+		// a live role's real configuration.
+		name := quoteIdentIfNeeded(o.Name)
+		var opts strings.Builder
+		writeRoleBool := func(v *bool, on, off string) {
+			if v == nil {
+				return
+			}
+			if *v {
+				fmt.Fprintf(&opts, " %s", kw(on))
+			} else {
+				fmt.Fprintf(&opts, " %s", kw(off))
+			}
+		}
+		writeRoleBool(o.CanLogin, "LOGIN", "NOLOGIN")
+		writeRoleBool(o.Superuser, "SUPERUSER", "NOSUPERUSER")
+		writeRoleBool(o.CreateDB, "CREATEDB", "NOCREATEDB")
+		writeRoleBool(o.CreateRole, "CREATEROLE", "NOCREATEROLE")
+		writeRoleBool(o.Inherit, "INHERIT", "NOINHERIT")
+		writeRoleBool(o.IsReplication, "REPLICATION", "NOREPLICATION")
+		writeRoleBool(o.BypassRLS, "BYPASSRLS", "NOBYPASSRLS")
+		if o.ConnectionLimit != nil {
+			fmt.Fprintf(&opts, " %s %s %d", kw("CONNECTION"), kw("LIMIT"), *o.ConnectionLimit)
+		}
+		if o.ValidUntil != nil {
+			fmt.Fprintf(&opts, " %s %s %s", kw("VALID"), kw("UNTIL"), sqlStringLit(*o.ValidUntil))
+		}
+		if len(o.InRole) > 0 {
+			fmt.Fprintf(&opts, " %s %s %s", kw("IN"), kw("ROLE"), joinIdentsIfNeeded(o.InRole))
+		}
+		if len(o.RoleMembers) > 0 {
+			fmt.Fprintf(&opts, " %s %s", kw("ROLE"), joinIdentsIfNeeded(o.RoleMembers))
+		}
+		if len(o.AdminRoles) > 0 {
+			fmt.Fprintf(&opts, " %s %s", kw("ADMIN"), joinIdentsIfNeeded(o.AdminRoles))
+		}
+		if o.Comment != nil {
+			fmt.Fprintf(b, "\n%s %s%s\n{\n%s%s %s;\n}\n", kw("ROLE"), name, opts.String(), ind, kw("COMMENT"), sqlStringLit(*o.Comment))
+		} else {
+			fmt.Fprintf(b, "\n%s %s%s;\n", kw("ROLE"), name, opts.String())
+		}
 
 	case *ir.Schema:
 		// Owner/comment are rendered when present so plan --live doesn't
@@ -771,6 +819,16 @@ func quoteIdentIfNeeded(s string) string {
 		return s
 	}
 	return `"` + strings.ReplaceAll(s, `"`, `""`) + `"`
+}
+
+// joinIdentsIfNeeded quotes-if-needed and comma-joins a list of identifiers
+// (e.g. a Role's IN ROLE/ROLE/ADMIN membership lists).
+func joinIdentsIfNeeded(names []string) string {
+	quoted := make([]string, len(names))
+	for i, n := range names {
+		quoted[i] = quoteIdentIfNeeded(n)
+	}
+	return strings.Join(quoted, ", ")
 }
 
 // dumpReservedKeywords is the set of PostgreSQL RESERVED and TYPE_FUNC_NAME

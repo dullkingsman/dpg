@@ -3,6 +3,7 @@ package diff
 import (
 	"crypto/sha256"
 	"fmt"
+	"slices"
 	"strings"
 	"testing"
 	"unicode/utf8"
@@ -5865,6 +5866,187 @@ func TestCreateSubscriptionExecSQLResolveErrorPropagates(t *testing.T) {
 	sb := ops[0].(pipeline.SecretBearingOp)
 	if _, err := sb.ExecSQL(&fakeDiffResolver{}); err == nil {
 		t.Fatal("expected an error when the referenced secret doesn't resolve")
+	}
+}
+
+// ── Role attributes (RFC §11.1) ──────────────────────────────────────────────
+
+func boolp(v bool) *bool { return &v }
+func intp(v int) *int    { return &v }
+func strp(v string) *string {
+	return &v
+}
+
+func TestCreateRoleAllAttributes(t *testing.T) {
+	o := &ir.Role{
+		Name: "app_service", CanLogin: boolp(true), Superuser: boolp(false),
+		CreateDB: boolp(false), CreateRole: boolp(false), Inherit: boolp(true),
+		IsReplication: boolp(false), BypassRLS: boolp(false), ConnectionLimit: intp(20),
+		Password: strp("hunter2"), ValidUntil: strp("2030-01-01"),
+		InRole: []string{"role_a"}, RoleMembers: []string{"role_b"}, AdminRoles: []string{"role_c"},
+	}
+	ops := createRole(o)
+	if len(ops) != 1 {
+		t.Fatalf("expected 1 op (no comment set), got %d: %v", len(ops), ops)
+	}
+	want := `CREATE ROLE "app_service" LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE INHERIT NOREPLICATION NOBYPASSRLS CONNECTION LIMIT 20 PASSWORD 'hunter2' VALID UNTIL '2030-01-01' IN ROLE "role_a" ROLE "role_b" ADMIN "role_c";`
+	if got := ops[0].SQL(); got != want {
+		t.Errorf("SQL():\n got  %q\n want %q", got, want)
+	}
+}
+
+func TestCreateRoleWithPasswordIsSecretBearingOp(t *testing.T) {
+	o := &ir.Role{Name: "svc", Password: strp("{{vault:secret/roles/svc#pw}}")}
+	ops := createRole(o)
+	sb, ok := ops[0].(pipeline.SecretBearingOp)
+	if !ok {
+		t.Fatalf("expected %T to implement pipeline.SecretBearingOp", ops[0])
+	}
+	if got := ops[0].SQL(); got != `CREATE ROLE "svc" PASSWORD '{{vault:secret/roles/svc#pw}}';` {
+		t.Errorf("SQL(): got %q, want the unresolved placeholder form", got)
+	}
+	resolver := &fakeDiffResolver{values: map[string]string{"vault:secret/roles/svc#pw": "s3cr3t"}}
+	got, err := sb.ExecSQL(resolver)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := `CREATE ROLE "svc" PASSWORD 's3cr3t';`; got != want {
+		t.Errorf("ExecSQL(): got %q, want %q", got, want)
+	}
+	// SQL() must be unaffected by the ExecSQL call above.
+	if got := ops[0].SQL(); got != `CREATE ROLE "svc" PASSWORD '{{vault:secret/roles/svc#pw}}';` {
+		t.Errorf("SQL() changed after ExecSQL was called: got %q", got)
+	}
+}
+
+func TestCreateRoleNoPasswordIsPlainOp(t *testing.T) {
+	o := &ir.Role{Name: "plain_role", CanLogin: boolp(false)}
+	ops := createRole(o)
+	if _, ok := ops[0].(pipeline.SecretBearingOp); ok {
+		t.Error("a role with no PASSWORD must not implement SecretBearingOp")
+	}
+	if got := ops[0].SQL(); got != `CREATE ROLE "plain_role" NOLOGIN;` {
+		t.Errorf("SQL(): got %q", got)
+	}
+}
+
+func TestCreateRoleWithComment(t *testing.T) {
+	o := &ir.Role{Name: "app_readonly", CanLogin: boolp(false), Comment: strp("Read-only access")}
+	ops := createRole(o)
+	if len(ops) != 2 {
+		t.Fatalf("expected 2 ops (CREATE + COMMENT), got %d", len(ops))
+	}
+	if got := ops[1].SQL(); got != `COMMENT ON ROLE "app_readonly" IS 'Read-only access';` {
+		t.Errorf("COMMENT op: got %q", got)
+	}
+}
+
+func TestDiffRoleAttrChangesBatchedIntoOneAlter(t *testing.T) {
+	o := &ir.Role{Name: "svc", CanLogin: boolp(true), ConnectionLimit: intp(5)}
+	snap := &snapshot.SnapRole{Name: "svc", CanLogin: boolp(false), ConnectionLimit: intp(1)}
+	ops := diffRole(o, snap)
+	if len(ops) != 1 {
+		t.Fatalf("expected 1 batched ALTER ROLE op, got %d: %v", len(ops), ops)
+	}
+	want := `ALTER ROLE "svc" LOGIN CONNECTION LIMIT 5;`
+	if got := ops[0].SQL(); got != want {
+		t.Errorf("got %q, want %q", got, want)
+	}
+}
+
+func TestDiffRoleUndeclaredFieldsNeverCompared(t *testing.T) {
+	// o declares nothing; snap has a totally different state. Since nothing
+	// is declared, nothing should be diffed — undeclared means "not managed
+	// by DPG for this role", not "reset to PostgreSQL's default".
+	o := &ir.Role{Name: "svc"}
+	snap := &snapshot.SnapRole{
+		Name: "svc", CanLogin: boolp(true), Superuser: boolp(true),
+		ConnectionLimit: intp(99), ValidUntil: strp("2020-01-01"),
+	}
+	ops := diffRole(o, snap)
+	if len(ops) != 0 {
+		t.Errorf("expected no ops for an undeclared-everything role, got %d: %v", len(ops), ops)
+	}
+}
+
+func TestDiffRolePasswordChangeDetectedViaHash(t *testing.T) {
+	o := &ir.Role{Name: "svc", Password: strp("{{vault:secret/svc#new}}")}
+	snap := &snapshot.SnapRole{Name: "svc", PasswordHash: hashText("{{vault:secret/svc#old}}")}
+	ops := diffRole(o, snap)
+	if len(ops) != 1 {
+		t.Fatalf("expected 1 op (ALTER ROLE PASSWORD), got %d: %v", len(ops), ops)
+	}
+	sb, ok := ops[0].(pipeline.SecretBearingOp)
+	if !ok {
+		t.Fatalf("expected %T to implement pipeline.SecretBearingOp", ops[0])
+	}
+	if got := ops[0].SQL(); got != `ALTER ROLE "svc" PASSWORD '{{vault:secret/svc#new}}';` {
+		t.Errorf("SQL(): got %q", got)
+	}
+	if ops[0].Safety() != pipeline.Caution {
+		t.Errorf("Safety() = %v, want Caution (invalidates existing sessions using the old password)", ops[0].Safety())
+	}
+	resolver := &fakeDiffResolver{values: map[string]string{"vault:secret/svc#new": "s3cr3t"}}
+	got, err := sb.ExecSQL(resolver)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := `ALTER ROLE "svc" PASSWORD 's3cr3t';`; got != want {
+		t.Errorf("ExecSQL(): got %q, want %q", got, want)
+	}
+}
+
+func TestDiffRolePasswordUnchangedIsNoop(t *testing.T) {
+	o := &ir.Role{Name: "svc", Password: strp("{{vault:secret/svc#pw}}")}
+	snap := &snapshot.SnapRole{Name: "svc", PasswordHash: hashText("{{vault:secret/svc#pw}}")}
+	ops := diffRole(o, snap)
+	if len(ops) != 0 {
+		t.Errorf("expected no ops for an unchanged password, got %d: %v", len(ops), ops)
+	}
+}
+
+func TestDiffRoleMembershipAddedAndRemoved(t *testing.T) {
+	o := &ir.Role{
+		Name:        "svc",
+		InRole:      []string{"reader", "new_role"},
+		RoleMembers: []string{"member_new"},
+		AdminRoles:  []string{"admin_new"},
+	}
+	snap := &snapshot.SnapRole{
+		Name:        "svc",
+		InRole:      []string{"reader", "old_role"},
+		RoleMembers: []string{"member_old"},
+		AdminRoles:  []string{"admin_old"},
+	}
+	ops := diffRole(o, snap)
+	var sqls []string
+	for _, op := range ops {
+		sqls = append(sqls, op.SQL())
+	}
+	wantContains := []string{
+		`GRANT "new_role" TO "svc";`,
+		`REVOKE "old_role" FROM "svc";`,
+		`GRANT "svc" TO "member_new";`,
+		`REVOKE "svc" FROM "member_old";`,
+		`GRANT "svc" TO "admin_new" WITH ADMIN OPTION;`,
+		`REVOKE "svc" FROM "admin_old";`,
+	}
+	for _, want := range wantContains {
+		if !slices.Contains(sqls, want) {
+			t.Errorf("expected an op with SQL %q, got: %v", want, sqls)
+		}
+	}
+	if len(ops) != len(wantContains) {
+		t.Errorf("expected exactly %d ops, got %d: %v", len(wantContains), len(ops), sqls)
+	}
+}
+
+func TestDiffRoleMembershipUndeclaredNeverDiffed(t *testing.T) {
+	o := &ir.Role{Name: "svc"} // InRole/RoleMembers/AdminRoles all nil
+	snap := &snapshot.SnapRole{Name: "svc", InRole: []string{"reader"}, RoleMembers: []string{"m"}, AdminRoles: []string{"a"}}
+	ops := diffRole(o, snap)
+	if len(ops) != 0 {
+		t.Errorf("expected no membership ops when membership fields are undeclared, got %d: %v", len(ops), ops)
 	}
 }
 

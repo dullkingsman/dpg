@@ -1631,3 +1631,87 @@ func TestBuildSubscriptionComment(t *testing.T) {
 		t.Errorf("Comment: got %v", sub.Comment)
 	}
 }
+
+// ── Role attributes (RFC §11.1) ──────────────────────────────────────────────
+
+func TestBuildRoleAllAttributes(t *testing.T) {
+	obj := buildObject(t, pipeline.KindRole,
+		`app_service LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE INHERIT NOREPLICATION NOBYPASSRLS CONNECTION LIMIT 20 PASSWORD '{{vault:secret/roles/app_service#pw}}' VALID UNTIL '2030-01-01' IN ROLE role_a, role_b ROLE role_c ADMIN role_d`,
+		``,
+	)
+	r, ok := obj.(*ir.Role)
+	if !ok {
+		t.Fatalf("expected *ir.Role, got %T", obj)
+	}
+	if r.CanLogin == nil || !*r.CanLogin {
+		t.Errorf("CanLogin: got %v, want true", r.CanLogin)
+	}
+	if r.Superuser == nil || *r.Superuser {
+		t.Errorf("Superuser: got %v, want false", r.Superuser)
+	}
+	if r.CreateDB == nil || *r.CreateDB {
+		t.Errorf("CreateDB: got %v, want false", r.CreateDB)
+	}
+	if r.CreateRole == nil || *r.CreateRole {
+		t.Errorf("CreateRole: got %v, want false", r.CreateRole)
+	}
+	if r.Inherit == nil || !*r.Inherit {
+		t.Errorf("Inherit: got %v, want true", r.Inherit)
+	}
+	if r.IsReplication == nil || *r.IsReplication {
+		t.Errorf("IsReplication: got %v, want false", r.IsReplication)
+	}
+	if r.BypassRLS == nil || *r.BypassRLS {
+		t.Errorf("BypassRLS: got %v, want false", r.BypassRLS)
+	}
+	if r.ConnectionLimit == nil || *r.ConnectionLimit != 20 {
+		t.Errorf("ConnectionLimit: got %v, want 20", r.ConnectionLimit)
+	}
+	if r.Password == nil || *r.Password != "{{vault:secret/roles/app_service#pw}}" {
+		t.Errorf("Password: got %v", r.Password)
+	}
+	if r.ValidUntil == nil || *r.ValidUntil != "2030-01-01" {
+		t.Errorf("ValidUntil: got %v", r.ValidUntil)
+	}
+	if len(r.InRole) != 2 || r.InRole[0] != "role_a" || r.InRole[1] != "role_b" {
+		t.Errorf("InRole: got %v", r.InRole)
+	}
+	if len(r.RoleMembers) != 1 || r.RoleMembers[0] != "role_c" {
+		t.Errorf("RoleMembers: got %v", r.RoleMembers)
+	}
+	if len(r.AdminRoles) != 1 || r.AdminRoles[0] != "role_d" {
+		t.Errorf("AdminRoles: got %v", r.AdminRoles)
+	}
+}
+
+func TestBuildRoleUnsetAttributesAreNil(t *testing.T) {
+	obj := buildObject(t, pipeline.KindRole, `plain_role`, ``)
+	r := obj.(*ir.Role)
+	if r.CanLogin != nil || r.Superuser != nil || r.CreateDB != nil || r.CreateRole != nil ||
+		r.Inherit != nil || r.IsReplication != nil || r.BypassRLS != nil ||
+		r.ConnectionLimit != nil || r.Password != nil || r.ValidUntil != nil {
+		t.Errorf("expected all optional attributes nil for a bare ROLE decl, got: %+v", r)
+	}
+	if r.InRole != nil || r.RoleMembers != nil || r.AdminRoles != nil {
+		t.Errorf("expected nil membership lists, got InRole=%v RoleMembers=%v AdminRoles=%v", r.InRole, r.RoleMembers, r.AdminRoles)
+	}
+}
+
+func TestBuildRolePlainLiteralPassword(t *testing.T) {
+	obj := buildObject(t, pipeline.KindRole, `svc PASSWORD 'hunter2'`, ``)
+	r := obj.(*ir.Role)
+	if r.Password == nil || *r.Password != "hunter2" {
+		t.Errorf("Password: got %v", r.Password)
+	}
+}
+
+func TestBuildRoleComment(t *testing.T) {
+	obj := buildObject(t, pipeline.KindRole, `app_readonly NOLOGIN`, `COMMENT 'Read-only access';`)
+	r := obj.(*ir.Role)
+	if r.Comment == nil || *r.Comment != "Read-only access" {
+		t.Errorf("Comment: got %v", r.Comment)
+	}
+	if r.CanLogin == nil || *r.CanLogin {
+		t.Errorf("CanLogin: got %v, want false (NOLOGIN)", r.CanLogin)
+	}
+}

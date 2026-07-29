@@ -1372,10 +1372,43 @@ ORDER  BY n.nspname, c.relname`
 	return out, rs.Err()
 }
 
+// introspectRoles reads every Role attribute (RFC §11.1) except PASSWORD:
+// PostgreSQL restricts pg_authid (where a role's password, hashed, actually
+// lives) to superuser, and pg_roles.rolpassword itself returns the fixed
+// placeholder string '********' for any non-superuser caller regardless of
+// whether a password is even set — confirmed live — so there's no reliable
+// non-superuser proxy for "has a password" at all, let alone its value.
+// PASSWORD stays source-side-only (never introspected, never live-diffed),
+// same boundary as Subscription CONNECTION (§6z/§13.2).
+//
+// rolvaliduntil is cast to text as introspected; PostgreSQL's own timestamp
+// formatting may not byte-match a hand-written VALID UNTIL literal in every
+// case (e.g. timezone/precision representation) — a known, not yet solved,
+// residual spurious-drift risk for that one field specifically, same class
+// of gap as several other live-vs-declared text-format mismatches already
+// flagged elsewhere in this codebase.
 func introspectRoles(ctx context.Context, conn pipeline.Querier) ([]pipeline.IRObject, error) {
 	const q = `
 SELECT r.rolname,
-       obj_description(r.oid, 'pg_authid') AS comment
+       shobj_description(r.oid, 'pg_authid') AS comment,
+       r.rolcanlogin,
+       r.rolsuper,
+       r.rolcreatedb,
+       r.rolcreaterole,
+       r.rolinherit,
+       r.rolreplication,
+       r.rolbypassrls,
+       r.rolconnlimit,
+       r.rolvaliduntil::text,
+       (SELECT array_agg(pr.rolname ORDER BY pr.rolname)
+          FROM pg_auth_members am JOIN pg_roles pr ON pr.oid = am.roleid
+         WHERE am.member = r.oid) AS in_role,
+       (SELECT array_agg(pr.rolname ORDER BY pr.rolname)
+          FROM pg_auth_members am JOIN pg_roles pr ON pr.oid = am.member
+         WHERE am.roleid = r.oid AND NOT am.admin_option) AS role_members,
+       (SELECT array_agg(pr.rolname ORDER BY pr.rolname)
+          FROM pg_auth_members am JOIN pg_roles pr ON pr.oid = am.member
+         WHERE am.roleid = r.oid AND am.admin_option) AS admin_roles
 FROM   pg_roles r
 WHERE  r.rolname NOT LIKE 'pg_%'
 AND    r.rolname <> 'postgres'
@@ -1389,12 +1422,15 @@ ORDER  BY r.rolname`
 
 	var out []pipeline.IRObject
 	for rs.Next() {
-		var name string
-		var comment *string
-		if err := rs.Scan(&name, &comment); err != nil {
+		r := &ir.Role{}
+		if err := rs.Scan(
+			&r.Name, &r.Comment, &r.CanLogin, &r.Superuser, &r.CreateDB, &r.CreateRole,
+			&r.Inherit, &r.IsReplication, &r.BypassRLS, &r.ConnectionLimit, &r.ValidUntil,
+			&r.InRole, &r.RoleMembers, &r.AdminRoles,
+		); err != nil {
 			return nil, err
 		}
-		out = append(out, &ir.Role{Name: name, Comment: comment})
+		out = append(out, r)
 	}
 	return out, rs.Err()
 }

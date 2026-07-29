@@ -516,9 +516,26 @@ func toSnapSequence(o *ir.Sequence) *SnapSequence {
 }
 
 func toSnapRole(o *ir.Role) *SnapRole {
+	var pwHash string
+	if o.Password != nil {
+		pwHash = hashBodyStr(*o.Password)
+	}
 	return &SnapRole{
-		Name:     o.Name,
-		Comment:  o.Comment,
-		NameMaps: toSnapNameMaps(o.NameMaps),
+		Name:            o.Name,
+		CanLogin:        o.CanLogin,
+		Superuser:       o.Superuser,
+		CreateDB:        o.CreateDB,
+		CreateRole:      o.CreateRole,
+		Inherit:         o.Inherit,
+		IsReplication:   o.IsReplication,
+		BypassRLS:       o.BypassRLS,
+		ConnectionLimit: o.ConnectionLimit,
+		PasswordHash:    pwHash,
+		ValidUntil:      o.ValidUntil,
+		InRole:          o.InRole,
+		RoleMembers:     o.RoleMembers,
+		AdminRoles:      o.AdminRoles,
+		Comment:         o.Comment,
+		NameMaps:        toSnapNameMaps(o.NameMaps),
 	}
 }

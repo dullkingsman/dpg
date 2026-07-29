@@ -101,6 +101,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the body-hash-based `CONNECTION`/`PUBLICATION`/`WITH` diffing, so a
   comment-only edit doesn't drop and recreate an already-syncing
   subscription.
+- ROLE now supports every `CREATE ROLE`/`ALTER ROLE` attribute (Secret
+  resolution, Phase 4; RFC §11.1 — previously bare `CREATE ROLE name;` plus
+  an optional comment, everything else silently discarded):
+  `LOGIN`/`SUPERUSER`/`CREATEDB`/`CREATEROLE`/`INHERIT`/`REPLICATION`/
+  `BYPASSRLS`/`CONNECTION LIMIT`/`PASSWORD`/`VALID UNTIL`/`IN ROLE`/`ROLE`/
+  `ADMIN`, all native PostgreSQL grammar (not a DPG `{ }` block directive —
+  an earlier draft of the RFC section wrapped everything in a block, and
+  incorrectly showed `SUPERUSER`/`CREATEDB`/`CREATEROLE`/`REPLICATION`/
+  `BYPASSRLS` taking a boolean argument, which isn't real PG syntax; both
+  corrected). Attribute changes batch into one `ALTER ROLE`, matching
+  `ALTER SEQUENCE`'s existing param-batching pattern; `IN ROLE`/`ROLE`/
+  `ADMIN` diff as `GRANT`/`REVOKE` for an existing role (PostgreSQL's
+  `ALTER ROLE` has no membership clause at all — membership can only be set
+  at `CREATE` time or changed via `GRANT`/`REVOKE` afterward). `PASSWORD`
+  uses the same `{{<secret-uri>}}`/`pipeline.ResolveTemplate`/
+  `SecretBearingOp` mechanism as SUBSCRIPTION `CONNECTION`; the snapshot
+  hashes the *declared* text (never the resolved value), enabling real
+  rotation detection — an earlier draft of this RFC section specified
+  storing only a boolean `has_password`, under which a rotated reference
+  could never be detected as a change at all. A new linter rule
+  (`hardcoded-password`) errors on a literal `PASSWORD` with no
+  `{{...}}` placeholder when `forbid_hardcoded_passwords` is enabled
+  (default true) — the RFC has mandated this since before Secret
+  resolution existed, but nothing implemented it since Role attributes as
+  a whole didn't exist to check. `PASSWORD` is never introspected
+  (confirmed live: PostgreSQL restricts `pg_authid` to superuser, and
+  `pg_roles.rolpassword` itself returns the fixed placeholder string
+  `'********'` to any other caller regardless of whether a password is
+  even set, so there's no reliable non-superuser proxy even for
+  "has a password") — every other attribute introspects and dumps
+  normally.
 
 ### Fixed
 
@@ -131,6 +162,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   too, keeping it in the same bucket and correct relative order as its
   `CREATE`. A standalone comment-only update (no accompanying `CREATE`)
   has no such ordering hazard and stays transactional.
+- **Role and Tablespace comments were never actually introspected** —
+  confirmed live: both queried `obj_description(oid, '<catalog>')`, which
+  reads `pg_description` (per-database object comments), but roles and
+  tablespaces are cluster-wide (shared across every database), so their
+  comments live in `pg_shdescription` instead — `obj_description` silently
+  returned `NULL` for both regardless of whether a comment was actually
+  set. Every other `obj_description` call site in introspection is a
+  genuinely per-database object (functions, schemas, tables/views/
+  sequences, types) and was already correct. Fixed by switching both to
+  `shobj_description`, PostgreSQL's own function for shared-catalog
+  comments. Found live-testing Role's new `COMMENT` round-trip (this
+  session's actual target); Tablespace has the identical bug and was
+  fixed alongside since it's the only other shared-catalog object kind
+  DPG introspects a comment for.
 
 - **A `link` value with an unrecognized secret scheme was silently treated as
   a literal connection string instead of erroring** — `EnvResolver.Resolve`'s

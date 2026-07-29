@@ -1369,8 +1369,73 @@ func seqOptionInt(de *pg_query.DefElem) *int64 {
 
 // ── Role ──────────────────────────────────────────────────────────────────────
 
+// roleSpecNames extracts role names from a pg_query List of RoleSpec nodes
+// (IN ROLE / ROLE / ADMIN role-lists).
+func roleSpecNames(list *pg_query.List) []string {
+	if list == nil {
+		return nil
+	}
+	names := make([]string, 0, len(list.Items))
+	for _, item := range list.Items {
+		if rs := item.GetRoleSpec(); rs != nil {
+			names = append(names, rs.Rolename)
+		}
+	}
+	return names
+}
+
+// buildRole extracts every CREATE ROLE option (RFC §11.1) directly from
+// CreateRoleStmt.Options — native PostgreSQL grammar (LOGIN/SUPERUSER/
+// CREATEDB/CREATEROLE/INHERIT/REPLICATION/BYPASSRLS/CONNECTION LIMIT/
+// PASSWORD/VALID UNTIL/IN ROLE/ROLE/ADMIN), not a DPG block directive.
+// PASSWORD's raw text (may contain {{secret-uri}} placeholders) is copied
+// verbatim; resolving it happens only at apply time, never here.
 func (b *Builder) buildRole(cs *pg_query.CreateRoleStmt, block pipeline.BlockAST, pos pipeline.SourcePos) (pipeline.IRObject, error) {
 	r := &Role{Name: cs.Role, SrcPos: pos}
+	for _, opt := range cs.Options {
+		de := opt.GetDefElem()
+		if de == nil {
+			continue
+		}
+		switch de.Defname {
+		case "canlogin":
+			v := de.Arg.GetBoolean().Boolval
+			r.CanLogin = &v
+		case "superuser":
+			v := de.Arg.GetBoolean().Boolval
+			r.Superuser = &v
+		case "createdb":
+			v := de.Arg.GetBoolean().Boolval
+			r.CreateDB = &v
+		case "createrole":
+			v := de.Arg.GetBoolean().Boolval
+			r.CreateRole = &v
+		case "inherit":
+			v := de.Arg.GetBoolean().Boolval
+			r.Inherit = &v
+		case "isreplication":
+			v := de.Arg.GetBoolean().Boolval
+			r.IsReplication = &v
+		case "bypassrls":
+			v := de.Arg.GetBoolean().Boolval
+			r.BypassRLS = &v
+		case "connectionlimit":
+			v := int(de.Arg.GetInteger().Ival)
+			r.ConnectionLimit = &v
+		case "password":
+			v := de.Arg.GetString_().Sval
+			r.Password = &v
+		case "validUntil":
+			v := de.Arg.GetString_().Sval
+			r.ValidUntil = &v
+		case "addroleto":
+			r.InRole = roleSpecNames(de.Arg.GetList())
+		case "rolemembers":
+			r.RoleMembers = roleSpecNames(de.Arg.GetList())
+		case "adminmembers":
+			r.AdminRoles = roleSpecNames(de.Arg.GetList())
+		}
+	}
 	if block.Comment != nil {
 		r.Comment = &block.Comment.Value
 	}

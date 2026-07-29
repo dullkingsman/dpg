@@ -2722,70 +2722,127 @@ SCHEMA public {
 ### 11.1. Roles
 
    Roles are cluster-level objects declared in `.dpg` files inside the
-   cluster objects directory.
+   cluster objects directory. Every attribute below is native PostgreSQL
+   `CREATE ROLE`/`ALTER ROLE` grammar, parsed directly by the real PG
+   parser (`CreateRoleStmt.Options`) — not a DPG-invented reformulation.
+   This corrects an earlier draft of this section, which wrapped every
+   attribute in a DPG-only `{ }` block (with `SUPERUSER`/`CREATEDB`/
+   `CREATEROLE`/`REPLICATION`/`BYPASSRLS` incorrectly shown taking a
+   boolean argument — real PG has no such form; they're toggle-pairs, e.g.
+   `SUPERUSER`/`NOSUPERUSER`, no argument at all). The `{ }` block is
+   reserved for genuinely DPG-only additions — currently just `COMMENT`.
 
    **PG equivalent:**
-   `CREATE ROLE name [WITH options]`
+   `CREATE ROLE name [option [...]]`
 
 ```abnf
-role-decl  = "ROLE" WSP identifier WSP "{" role-block "}"
+role-decl   = "ROLE" WSP identifier
+             *( WSP role-option )
+             ";"
+             [ "{" role-block "}" ]
 
-role-block = *( role-directive ";" )
+role-option = "LOGIN" / "NOLOGIN"
+            / "SUPERUSER" / "NOSUPERUSER"
+            / "CREATEDB" / "NOCREATEDB"
+            / "CREATEROLE" / "NOCREATEROLE"
+            / "INHERIT" / "NOINHERIT"
+            / "REPLICATION" / "NOREPLICATION"
+            / "BYPASSRLS" / "NOBYPASSRLS"
+            / "CONNECTION" WSP "LIMIT" WSP integer
+            / "PASSWORD" WSP SQUOTE password-literal SQUOTE
+            / "VALID" WSP "UNTIL" WSP SQUOTE timestamp SQUOTE
+            / "IN" WSP "ROLE" WSP role-list
+            / "ROLE" WSP role-list
+            / "ADMIN" WSP role-list
 
-role-directive = "LOGIN" / "NOLOGIN"
-               / "SUPERUSER" [ WSP boolean ] / "NOSUPERUSER"
-               / "CREATEDB" [ WSP boolean ] / "NOCREATEDB"
-               / "CREATEROLE" [ WSP boolean ] / "NOCREATEROLE"
-               / "INHERIT" / "NOINHERIT"
-               / "REPLICATION" / "NOREPLICATION"
-               / "BYPASSRLS" / "NOBYPASSRLS"
-               / "CONNECTION LIMIT" WSP integer
-               / "PASSWORD" WSP ( SQUOTE text SQUOTE / env-uri )
-               / "VALID UNTIL" WSP SQUOTE timestamp SQUOTE
-               / "IN ROLE" WSP role-list
-               / "ROLE" WSP role-list
-               / "ADMIN" WSP role-list
-               / comment-dir
-
-env-uri    = SQUOTE "env:" identifier SQUOTE
+role-block  = *( comment-dir ";" )
 ```
 
-   **Hardcoded passwords:** The linter MUST emit an error (not a
-   warning) when `PASSWORD 'literal'` is used and `forbid_hardcoded_passwords`
-   is enabled (default: `true`).  Passwords MUST use the `env:VAR_NAME`
-   syntax.  The compiler MUST NOT store plaintext password values in
-   the snapshot; it stores a boolean `has_password` only.
+   Any option a declaration omits is simply not managed by DPG for that
+   role — offline diffing only ever compares options the source explicitly
+   sets (the same "declared, so managed" convention already used elsewhere,
+   e.g. Sequence's optional params), never PostgreSQL's own defaults for
+   whatever was left unstated.
+
+   `password-literal` is an ordinary string, optionally containing one or
+   more `{{<secret-uri>}}` placeholders — the exact same mechanism as
+   SUBSCRIPTION `CONNECTION` (§13.2, §D.5): each placeholder is resolved
+   independently at apply time via `pipeline.ResolveTemplate` and
+   substituted in place (the whole value, or just a fragment); a literal
+   with no `{{...}}` at all never touches the resolver. Resolution happens
+   once, immediately before the `CREATE ROLE`/`ALTER ROLE ... PASSWORD`
+   statement executes — never during `plan`/`diff`.
+
+   **Hardcoded passwords:** The linter MUST emit an error (not a warning)
+   when `PASSWORD` is set to a value with no `{{...}}` placeholder at all
+   and `forbid_hardcoded_passwords` is enabled (default: `true`). This
+   supersedes an earlier draft of this rule, which named `env:VAR_NAME`
+   specifically — the check is scheme-agnostic now that five backends
+   exist (§D.5), not tied to one.
+
+   **Password drift detection:** the snapshot stores a hash of the
+   *declared* `PASSWORD` text (the literal or `{{...}}` reference exactly
+   as written, trimmed, hashed — never the resolved value), the same
+   pattern SUBSCRIPTION `CONNECTION`'s body-hash diffing already uses. This
+   supersedes an earlier draft of this section, which specified storing
+   only a boolean `has_password` — under that design DPG could never
+   detect a rotated secret reference or changed literal, only whether a
+   password existed at all. Hashing the declared text instead is no less
+   safe (a literal password, if used despite the lint warning above, is
+   already sitting in cleartext in the `.dpg` source file itself — hashing
+   it into the snapshot exposes nothing the source didn't already) and
+   enables real rotation detection: editing the `{{...}}` reference (or a
+   literal) re-diffs as a genuine change.
+
+   `PASSWORD` cannot be live-introspected at all: PostgreSQL restricts
+   `pg_authid` (where role passwords, hashed, actually live) to superuser
+   — confirmed live, `pg_roles.rolpassword` itself returns the fixed
+   placeholder string `'********'` for any non-superuser caller regardless
+   of whether a password is actually set, so `rolpassword IS NOT NULL` is
+   unusable as a proxy. Every other attribute below introspects normally
+   (plain, unrestricted `pg_roles`/`pg_auth_members` columns).
 
    Example:
 
 ```sql
 -- production/cluster/roles.dpg
 
-ROLE app_readonly {
-    NOLOGIN;
+ROLE app_readonly NOLOGIN
+{
     COMMENT 'Read-only access for reporting tools';
 }
 
-ROLE app_service {
-    LOGIN;
-    PASSWORD 'env:APP_SERVICE_PW';
-    CONNECTION LIMIT 20;
+ROLE app_service
+    LOGIN
+    PASSWORD '{{vault:secret/roles/app_service#pw}}'
+    CONNECTION LIMIT 20
     VALID UNTIL '2030-01-01';
-}
 
-ROLE app_admin {
-    LOGIN;
-    SUPERUSER  false;
-    CREATEDB   false;
-    CREATEROLE false;
-    INHERIT;
+ROLE app_admin
+    LOGIN
+    NOSUPERUSER
+    NOCREATEDB
+    NOCREATEROLE
+    INHERIT
     IN ROLE pg_read_all_stats;
-}
 ```
 
-   **Diffing semantics:** Role changes emit `ALTER ROLE name ...`
-   with the changed options.  Role removal emits `DROP ROLE name`
-   (Safety: `DESTRUCTIVE`).
+   **Diffing semantics:**
+
+   | Change | DDL emitted | Safety |
+   |--------|-------------|--------|
+   | New role | `CREATE ROLE name <options>` | `SAFE` |
+   | `LOGIN`/`SUPERUSER`/`CREATEDB`/`CREATEROLE`/`INHERIT`/`REPLICATION`/`BYPASSRLS`/`CONNECTION LIMIT`/`VALID UNTIL` changed | `ALTER ROLE name <changed-options>` | `SAFE` |
+   | `PASSWORD` changed | `ALTER ROLE name PASSWORD '<resolved>'` | `CAUTION` (invalidates existing sessions/connections relying on the old password) |
+   | `IN ROLE`/`ROLE`/`ADMIN` membership added | `GRANT role TO member [WITH ADMIN OPTION]` | `SAFE` |
+   | `IN ROLE`/`ROLE`/`ADMIN` membership removed | `REVOKE role FROM member` | `CAUTION` (may remove access something else depends on) |
+   | Role removed | `DROP ROLE name` | `DESTRUCTIVE` |
+
+   `IN ROLE`/`ROLE`/`ADMIN` are create-time-only PostgreSQL grammar — a
+   later membership change has no `ALTER ROLE` equivalent, so it's diffed
+   as `GRANT`/`REVOKE` (PostgreSQL's own mechanism for changing membership
+   after creation), matching how DPG already diffs object-level privilege
+   grants (§11.2) rather than inventing new DDL shape for this.
 
 ### 11.2. Grants — The Additive Model
 
@@ -4611,22 +4668,24 @@ serial_sequence_declared      = "off"
        migration file, or any error message. A `CONNECTION` value with no
        `{{...}}` at all is opaque literal text, same as before this
        existed — the same operator responsibility as `url =` above.
+   -   Role `PASSWORD` (§11.1): same `{{secret-uri}}` mechanism as
+       Subscription `CONNECTION` above. The snapshot stores a hash of the
+       declared text (never the resolved value), enabling rotation
+       detection — not just a boolean `has_password`, an earlier, less
+       capable design this section once specified (see §11.1's own note).
 
-   **Planned, not yet implemented** (Role and FDW/UserMapping passwords
-   currently have no structured secret-reference field at all, so a
-   password written in `.dpg` source is opaque literal text, same as any
-   other DDL clause — unlike Subscription `CONNECTION` above, which is now
+   **Planned, not yet implemented** (FDW/UserMapping passwords currently
+   have no structured secret-reference field at all, so a password written
+   in `.dpg` source is opaque literal text, same as any other DDL clause —
+   unlike Subscription `CONNECTION` and Role `PASSWORD` above, both now
    implemented):
 
-   -   Role passwords: intended end state is the snapshot storing only a
-       boolean `has_password` (or the declared reference URI, TBD),
-       never the resolved value or a hash the tool computed itself.
    -   FDW / user mapping passwords: intended end state is the snapshot
        storing the secret URI (`env:...`, `vault:...`, ...), not the
        resolved value. Likely the same `{{...}}`-in-a-literal mechanism
-       Subscription CONNECTION now uses, given FDW/user-mapping `OPTIONS`
-       have the identical shape (a mix of sensitive and non-sensitive
-       key/value pairs) — not yet decided.
+       Subscription CONNECTION and Role PASSWORD now use, given FDW/
+       user-mapping `OPTIONS` have the identical shape (a mix of
+       sensitive and non-sensitive key/value pairs) — not yet decided.
 
    **SQL injection in generated DDL:** All identifier names read from
    source files are validated against PostgreSQL's identifier rules
@@ -4716,7 +4775,7 @@ serial_sequence_declared      = "off"
    | Sequences | Declared, Diffed | |
    | Schemas | Declared, Diffed | |
    | Extensions | Declared, Diffed | |
-   | Roles | Declared, Diffed | Cluster-level |
+   | Roles | Declared, Diffed | Cluster-level; `PASSWORD` (§11.1) never live-introspected (superuser-only in PG), diffed offline via a hash of the declared text |
    | Table-level grants | Declared, Diffed | Additive model |
    | Column-level grants | Declared, Diffed | Additive model |
    | Explicit revocations | Declared, Diffed | |

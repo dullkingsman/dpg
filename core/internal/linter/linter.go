@@ -41,6 +41,8 @@ func checkObject(obj pipeline.IRObject, cfg pipeline.LinterConfig) []pipeline.Li
 		diags = append(diags, checkFunction(o, cfg)...)
 	case *ir.View:
 		diags = append(diags, checkView(o, cfg)...)
+	case *ir.Role:
+		diags = append(diags, checkRole(o, cfg)...)
 	default:
 		_ = o
 	}
@@ -140,6 +142,32 @@ func checkView(v *ir.View, cfg pipeline.LinterConfig) []pipeline.LintDiagnostic 
 			Pos:     v.SrcPos,
 			Rule:    "deprecated",
 			Message: fmt.Sprintf("view %s is deprecated: %s", v.QualifiedName(), *v.Deprecated),
+		})
+	}
+
+	return diags
+}
+
+// ── Role rules ────────────────────────────────────────────────────────────────
+
+// checkRole implements RFC §11.1's "Hardcoded passwords" rule: a ROLE
+// PASSWORD with no {{secret-uri}} placeholder at all is a literal
+// credential sitting in plaintext in the .dpg source file. IsError (not a
+// warning) when cfg.ForbidHardcodedPasswords is enabled (default true),
+// matching the RFC's "MUST emit an error" wording — the same severity the
+// table-column "hardcoded-password" rule above uses for the analogous
+// table-column-default case. Scheme-agnostic: checks for any {{...}}
+// placeholder, not one specific scheme (an earlier RFC draft named
+// env:VAR_NAME specifically, before four more backends existed).
+func checkRole(r *ir.Role, cfg pipeline.LinterConfig) []pipeline.LintDiagnostic {
+	var diags []pipeline.LintDiagnostic
+
+	if cfg.ForbidHardcodedPasswords && r.Password != nil && !strings.Contains(*r.Password, "{{") {
+		diags = append(diags, pipeline.LintDiagnostic{
+			Pos:     r.SrcPos,
+			Rule:    "hardcoded-password",
+			Message: fmt.Sprintf("role %s: PASSWORD is a literal value; use a {{secret-uri}} reference instead (e.g. {{vault:secret/roles/%s#password}})", r.Name, r.Name),
+			IsError: true,
 		})
 	}
 
