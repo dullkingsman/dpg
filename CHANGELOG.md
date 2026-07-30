@@ -121,7 +121,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   rotation detection — an earlier draft of this RFC section specified
   storing only a boolean `has_password`, under which a rotated reference
   could never be detected as a change at all. A new linter rule
-  (`hardcoded-password`) errors on a literal `PASSWORD` with no
+  (`hardcoded-role-password`) errors on a literal `PASSWORD` with no
   `{{...}}` placeholder when `forbid_hardcoded_passwords` is enabled
   (default true) — the RFC has mandated this since before Secret
   resolution existed, but nothing implemented it since Role attributes as
@@ -132,6 +132,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   even set, so there's no reliable non-superuser proxy even for
   "has a password") — every other attribute introspects and dumps
   normally.
+- USER MAPPING `OPTIONS` may now hold a secret reference (Secret
+  resolution, Phase 5; RFC §14.10): embed one or more `{{<secret-uri>}}`
+  placeholders anywhere in the `OPTIONS (...)` clause — e.g.
+  `OPTIONS (user 'app', password '{{vault:secret/fdw/db#pw}}')`. Unlike
+  SUBSCRIPTION `CONNECTION`/Role `PASSWORD`, there's no single option key
+  to target (FDW `OPTIONS` keys are provider-specific, not fixed by DPG),
+  so resolution runs `pipeline.ResolveTemplate` over the entire deparsed
+  statement, substituting whichever placeholders it finds regardless of
+  key — same `SecretBearingOp` redaction contract, no regex/positional
+  parsing needed. A new `hardcoded-fdw-password` linter rule (RFC §19.1's
+  long-documented but never-implemented `hardcoded_fdw_password`) errors
+  on a literal `password` option with no `{{...}}` reference. Also fixes
+  a rule-ID collision the Role work above introduced: Role's own
+  hardcoded-password rule shared its identifier with the pre-existing
+  table-column-default rule (both were `"hardcoded-password"`), making
+  the two indistinguishable in diagnostics; Role's is now
+  `hardcoded-role-password`.
 
 ### Fixed
 

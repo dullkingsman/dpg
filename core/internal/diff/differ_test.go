@@ -6050,6 +6050,122 @@ func TestDiffRoleMembershipUndeclaredNeverDiffed(t *testing.T) {
 	}
 }
 
+// ── UserMapping OPTIONS secret references (Secret resolution, Phase 5) ──────────
+
+func TestCreateUserMappingSQLIsAlwaysThePlaceholderForm(t *testing.T) {
+	o := &ir.UserMapping{
+		User: "app", Server: "srv",
+		Body: "CREATE USER MAPPING FOR app SERVER srv OPTIONS (user 'app', password '{{vault:secret/fdw/db#pw}}')",
+	}
+	ops, err := createUserMapping(o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ops) != 1 {
+		t.Fatalf("expected 1 op, got %d", len(ops))
+	}
+	want := o.Body + ";"
+	if got := ops[0].SQL(); got != want {
+		t.Errorf("SQL(): got %q, want %q", got, want)
+	}
+	if _, ok := ops[0].(pipeline.SecretBearingOp); !ok {
+		t.Fatalf("expected %T to implement pipeline.SecretBearingOp", ops[0])
+	}
+}
+
+func TestCreateUserMappingExecSQLResolvesWithinOptions(t *testing.T) {
+	o := &ir.UserMapping{
+		User: "app", Server: "srv",
+		Body: "CREATE USER MAPPING FOR app SERVER srv OPTIONS (user 'app', password '{{vault:secret/fdw/db#pw}}')",
+	}
+	ops, _ := createUserMapping(o)
+	sb := ops[0].(pipeline.SecretBearingOp)
+	resolver := &fakeDiffResolver{values: map[string]string{"vault:secret/fdw/db#pw": "s3cr3t"}}
+	got, err := sb.ExecSQL(resolver)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "CREATE USER MAPPING FOR app SERVER srv OPTIONS (user 'app', password 's3cr3t');"
+	if got != want {
+		t.Errorf("ExecSQL(): got %q, want %q", got, want)
+	}
+	// SQL() must be unaffected by the ExecSQL call above.
+	if got := ops[0].SQL(); got != o.Body+";" {
+		t.Errorf("SQL() changed after ExecSQL was called: got %q", got)
+	}
+}
+
+func TestCreateUserMappingExecSQLPlainLiteralNeverCallsResolver(t *testing.T) {
+	o := &ir.UserMapping{
+		User: "app", Server: "srv",
+		Body: "CREATE USER MAPPING FOR app SERVER srv OPTIONS (user 'app', password 'hunter2')",
+	}
+	ops, _ := createUserMapping(o)
+	sb := ops[0].(pipeline.SecretBearingOp)
+	got, err := sb.ExecSQL(&fakeDiffResolver{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != o.Body+";" {
+		t.Errorf("ExecSQL(): got %q, want the literal returned unchanged", got)
+	}
+}
+
+func TestCreateUserMappingExecSQLResolveErrorPropagates(t *testing.T) {
+	o := &ir.UserMapping{
+		User: "app", Server: "srv",
+		Body: "CREATE USER MAPPING FOR app SERVER srv OPTIONS (password '{{vault:secret/missing}}')",
+	}
+	ops, _ := createUserMapping(o)
+	sb := ops[0].(pipeline.SecretBearingOp)
+	if _, err := sb.ExecSQL(&fakeDiffResolver{}); err == nil {
+		t.Fatal("expected an error when the referenced secret doesn't resolve")
+	}
+}
+
+func TestDiffUserMappingOfflineDetectsEdit(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	if err := snapshot.Populate(snap, []pipeline.IRObject{
+		&ir.UserMapping{User: "app", Server: "srv", Body: "CREATE USER MAPPING FOR app SERVER srv OPTIONS (password '{{vault:secret/db#old}}')"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	desired := []pipeline.IRObject{
+		&ir.UserMapping{User: "app", Server: "srv", Body: "CREATE USER MAPPING FOR app SERVER srv OPTIONS (password '{{vault:secret/db#new}}')"},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ops) != 2 {
+		t.Fatalf("expected 2 ops (DROP + CREATE), got %d: %v", len(ops), ops)
+	}
+	if !strings.Contains(ops[0].SQL(), "DROP USER MAPPING") {
+		t.Errorf("op[0] = %q, want DROP USER MAPPING", ops[0].SQL())
+	}
+	if _, ok := ops[1].(pipeline.SecretBearingOp); !ok {
+		t.Errorf("expected the CREATE op (%T) to implement pipeline.SecretBearingOp", ops[1])
+	}
+}
+
+func TestDiffUserMappingUnchangedIsNoop(t *testing.T) {
+	d := New()
+	body := "CREATE USER MAPPING FOR app SERVER srv OPTIONS (password '{{vault:secret/db#pw}}')"
+	um := &ir.UserMapping{User: "app", Server: "srv", Body: body}
+	snap := &pipeline.Snapshot{}
+	if err := snapshot.Populate(snap, []pipeline.IRObject{um}); err != nil {
+		t.Fatal(err)
+	}
+	ops, err := d.Diff([]pipeline.IRObject{um}, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ops) != 0 {
+		t.Errorf("expected no ops for an unchanged user mapping, got %d: %v", len(ops), ops)
+	}
+}
+
 // TestDiffOpaqueOfflineEditEmitsStructuredDropRecreate is the regression guard
 // for #3 (real update path for opaque objects): a genuine offline body edit
 // must emit a structured DROP (matching what dropObject emits when the object

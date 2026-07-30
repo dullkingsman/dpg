@@ -3159,9 +3159,8 @@ subscription-decl = "SUBSCRIPTION" WSP identifier
    any other body change) and never written anywhere after that: the
    snapshot, an archived migration file, and any error message all show the
    placeholder/reference form, not the resolved value. See §D.5 for the
-   underlying `SecretResolver`/`ResolveTemplate` mechanism, shared with any
-   future object needing the same capability (Role passwords, §11.1;
-   FDW/UserMapping options — currently still fully opaque, §24).
+   underlying `SecretResolver`/`ResolveTemplate` mechanism, shared with
+   Role `PASSWORD` (§11.1) and User Mapping `OPTIONS` (§14.10, §24).
 
    Examples:
 
@@ -3430,7 +3429,9 @@ SERVER analytics_warehouse
 ### 14.10. User Mappings
 
    User mappings associate a local PostgreSQL role with credentials for
-   a foreign server.
+   a foreign server. Declared and diffed as an opaque body (byte-for-byte
+   source text, not per-field) — the same tier as Tablespace/FDW/Server/
+   Publication/etc.
 
    **PG equivalent:**
    `CREATE USER MAPPING [IF NOT EXISTS] FOR user SERVER server [OPTIONS (...)]`
@@ -3438,23 +3439,47 @@ SERVER analytics_warehouse
 ```sql
 USER MAPPING FOR app_service
     SERVER analytics_warehouse
-    OPTIONS (user 'fdw_user', password 'env:FDW_PASSWORD');
+    OPTIONS (user 'fdw_user', password '{{vault:secret/fdw/analytics#password}}');
 ```
 
-   The password value in `OPTIONS` MUST use `env:VAR_NAME` syntax.
-   Hardcoded passwords are rejected by the linter (rule:
-   `hardcoded_fdw_password`).
+   Any `OPTIONS` value MAY hold one or more `{{<secret-uri>}}` placeholders
+   (§D.5) — the same mechanism as SUBSCRIPTION `CONNECTION` (§13.2) and
+   Role `PASSWORD` (§11.1), and, like both of those, the only thing that
+   ever triggers resolution: a literal option value with no `{{...}}` at
+   all never touches the resolver. Unlike `CONNECTION`/`PASSWORD`, DPG
+   doesn't isolate one specific option key to resolve — `OPTIONS` keys are
+   foreign-data-wrapper-specific, not fixed by DPG, so resolution runs over
+   the entire statement text, substituting whichever placeholders it finds
+   regardless of which key they're under. Resolution happens once,
+   immediately before `CREATE USER MAPPING` executes — never during
+   `plan`/`diff`; the snapshot, an archived migration file, and any error
+   message all show the placeholder/reference form, not the resolved
+   value. This supersedes an earlier draft of this section, which required
+   `env:VAR_NAME` specifically — scheme-agnostic now that five backends
+   exist (§D.5), matching the same correction already made to Role
+   `PASSWORD`'s hardcoded-password rule.
 
-   The compiler MUST NOT store the resolved password value in the
-   snapshot; it stores only the env-URI key.
+   Hardcoded passwords (an `OPTIONS` `password` value with no `{{...}}`
+   placeholder at all) are rejected by the linter when
+   `forbid_hardcoded_passwords` is enabled (default `true`) — implemented
+   as `hardcoded-fdw-password` in the reference linter (§19.1 names this
+   `hardcoded_fdw_password`; the actual rule identifiers in code use
+   kebab-case throughout, not this document's snake_case, a pre-existing
+   naming mismatch spanning every built-in rule, not specific to this one).
 
-   **Diffing semantics:**
+   **Diffing semantics:** any change to the mapping is a full
+   `DROP USER MAPPING` + `CREATE USER MAPPING`, not a targeted
+   `ALTER USER MAPPING`, matching every other opaque-tier object kind
+   (§25) — this corrects an earlier draft of this table, which described a
+   targeted `ALTER` that was never actually implemented (User Mappings
+   have always been diffed via the generic opaque body-hash mechanism, the
+   same one Subscription used before its own §13.2 secret-reference work).
 
    | Change | DDL emitted | Safety |
    |--------|-------------|--------|
    | New mapping | `CREATE USER MAPPING ...` | `SAFE` |
-   | OPTIONS changed | `ALTER USER MAPPING FOR user SERVER server OPTIONS (...)` | `SAFE` |
-   | Mapping removed | `DROP USER MAPPING FOR user SERVER server` | `SAFE` |
+   | OPTIONS changed | `DROP USER MAPPING ...` + `CREATE USER MAPPING ...` | `DESTRUCTIVE` then `SAFE` |
+   | Mapping removed | `DROP USER MAPPING FOR user SERVER server` | `DESTRUCTIVE` |
 
 ---
 
@@ -4673,19 +4698,18 @@ serial_sequence_declared      = "off"
        declared text (never the resolved value), enabling rotation
        detection — not just a boolean `has_password`, an earlier, less
        capable design this section once specified (see §11.1's own note).
+   -   User Mapping `OPTIONS` (§14.10): same `{{secret-uri}}` mechanism,
+       applied to the entire opaque statement text rather than one
+       isolated field — `OPTIONS` keys are foreign-data-wrapper-specific,
+       not fixed by DPG, so there's no single clause to target the way
+       `CONNECTION`/`PASSWORD` are. The snapshot stores a hash of the
+       whole declared body (never the resolved value), same as every
+       other opaque-tier kind's existing diffing.
 
-   **Planned, not yet implemented** (FDW/UserMapping passwords currently
-   have no structured secret-reference field at all, so a password written
-   in `.dpg` source is opaque literal text, same as any other DDL clause —
-   unlike Subscription `CONNECTION` and Role `PASSWORD` above, both now
-   implemented):
-
-   -   FDW / user mapping passwords: intended end state is the snapshot
-       storing the secret URI (`env:...`, `vault:...`, ...), not the
-       resolved value. Likely the same `{{...}}`-in-a-literal mechanism
-       Subscription CONNECTION and Role PASSWORD now use, given FDW/
-       user-mapping `OPTIONS` have the identical shape (a mix of
-       sensitive and non-sensitive key/value pairs) — not yet decided.
+   FDW-level `OPTIONS` (as opposed to User Mapping's) are not covered —
+   FDW connection details are typically non-sensitive (host, port,
+   dbname), with the credential living in the User Mapping specifically;
+   no case for a secret-bearing FDW-level option has come up.
 
    **SQL injection in generated DDL:** All identifier names read from
    source files are validated against PostgreSQL's identifier rules
@@ -4783,7 +4807,7 @@ serial_sequence_declared      = "off"
    | Tablespaces | Declared, Passthrough | Cluster-level; reconstructed from catalog, hash-diffed |
    | Foreign Data Wrappers | Declared, Passthrough | Cluster-level; reconstructed from catalog, hash-diffed |
    | Foreign Servers | Declared, Passthrough | Reconstructed from catalog; hash-diffed |
-   | User Mappings | Declared, Passthrough | Reconstructed from catalog; hash-diffed |
+   | User Mappings | Declared, Passthrough | Reconstructed from catalog; hash-diffed. `OPTIONS` may hold a `{{secret-uri}}` reference (§14.10, §D.5), resolved only immediately before `CREATE USER MAPPING` executes |
    | Foreign Tables | Declared, Diffed | |
    | Partitioned Tables | Declared, Diffed | |
    | Sub-partitioning | Declared, Diffed | |
@@ -5767,8 +5791,8 @@ type SecretResolver interface {
    leaving everything else untouched; `s` with no `{{...}}` at all never
    touches the resolver, so a plain literal has zero behavioral change and
    zero performance cost. This is a general mechanism, not
-   SUBSCRIPTION-specific — intended for any future field with the same
-   shape (Role passwords, FDW/UserMapping options, §24).
+   SUBSCRIPTION-specific — also used by Role `PASSWORD` (§11.1) and User
+   Mapping `OPTIONS` (§14.10).
    `{{...}}` is deliberately the *only* trigger for resolution in such a
    field: unlike `link`, a real literal in one of these fields may itself
    contain a `:` (a conninfo string can be a `postgresql://user:pass@host/db`

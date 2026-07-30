@@ -681,7 +681,7 @@ func createObject(obj pipeline.IRObject, vtypes map[string]string) ([]pipeline.D
 	case *ir.ForeignServer:
 		return createOpaque(o.Name, o.Body, "SERVER", o.SrcPos)
 	case *ir.UserMapping:
-		return createOpaque(o.QualifiedName(), o.Body, "USER MAPPING", o.SrcPos)
+		return createUserMapping(o)
 	case *ir.Publication:
 		return createOpaque(o.Name, o.Body, "PUBLICATION", o.SrcPos)
 	case *ir.Subscription:
@@ -726,6 +726,60 @@ func createOpaque(name, body, kind string, pos pipeline.SourcePos) ([]pipeline.D
 		return []pipeline.DiffOp{safeOp(body+";", pos)}, nil
 	}
 	return nil, fmt.Errorf("%s %s: body not captured; define it explicitly in a .dpg source file", kind, name)
+}
+
+// userMappingCreateOp is the DiffOp for a CREATE USER MAPPING statement
+// whose OPTIONS clause may embed a secret reference (Secret resolution,
+// Phase 5) — e.g. OPTIONS (user 'app', password '{{vault:secret/fdw/db#pw}}').
+// Unlike SUBSCRIPTION CONNECTION (§13.2/§6bb-§6dd) there's no single known
+// clause to isolate: FDW OPTIONS keys are provider-specific, not fixed by
+// DPG, so ExecSQL runs pipeline.ResolveTemplate over the ENTIRE deparsed
+// body — a no-op everywhere there's no {{...}}, and it substitutes each
+// placeholder in place regardless of which OPTIONS key it's under, with no
+// regex/positional parsing needed at all. Same redaction contract as
+// subscriptionCreateOp/roleCreateOp: SQL() never changes meaning, only
+// ExecSQL (called only inside the executor's exec loop) resolves.
+type userMappingCreateOp struct {
+	*op
+	body string
+}
+
+func (o *userMappingCreateOp) ExecSQL(resolver pipeline.SecretResolver) (string, error) {
+	resolved, err := pipeline.ResolveTemplate(o.body, resolver)
+	if err != nil {
+		return "", err
+	}
+	return resolved + ";", nil
+}
+
+var _ pipeline.SecretBearingOp = (*userMappingCreateOp)(nil)
+
+func createUserMapping(o *ir.UserMapping) ([]pipeline.DiffOp, error) {
+	if o.Body == "" {
+		return nil, fmt.Errorf("USER MAPPING %s: body not captured; define it explicitly in a .dpg source file", o.QualifiedName())
+	}
+	return []pipeline.DiffOp{&userMappingCreateOp{op: safeOp(o.Body+";", o.SrcPos), body: o.Body}}, nil
+}
+
+// diffUserMapping mirrors diffOpaqueIR's shape (offline body-hash compare,
+// structured DROP+CREATE on a real change) but can't reuse it directly: its
+// CREATE side must produce a userMappingCreateOp, not a generic createOpaque
+// op, so any {{...}} reference in OPTIONS is resolved only immediately
+// before execution, never during diff.
+func diffUserMapping(o *ir.UserMapping, snap *snapshot.SnapOpaque) ([]pipeline.DiffOp, error) {
+	if o.Body == "" || o.Reconstructed {
+		return nil, nil
+	}
+	newHash := hashText(o.Body)
+	if snap.BodyHash == "" || newHash == snap.BodyHash {
+		return nil, nil
+	}
+	ops := dropObject(&snapshot.SnapObject{Kind: snap.Kind, Opaque: snap})
+	createOps, err := createUserMapping(o)
+	if err != nil {
+		return nil, err
+	}
+	return append(ops, createOps...), nil
 }
 
 // subscriptionConnectionLit matches CREATE SUBSCRIPTION's CONNECTION clause
@@ -2049,7 +2103,7 @@ func diffObject(desired pipeline.IRObject, snap *snapshot.SnapObject, fullSnap *
 		if snap.Opaque == nil {
 			return nil, nil
 		}
-		return diffOpaqueIR(o.QualifiedName(), o.Body, o.Reconstructed, snap.Opaque, o.SrcPos)
+		return diffUserMapping(o, snap.Opaque)
 	case *ir.Publication:
 		if snap.Opaque == nil {
 			return nil, nil

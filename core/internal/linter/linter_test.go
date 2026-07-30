@@ -130,7 +130,7 @@ func TestLintHardcodedRolePassword(t *testing.T) {
 	}
 	found := false
 	for _, d := range diags {
-		if d.Rule == "hardcoded-password" {
+		if d.Rule == "hardcoded-role-password" {
 			found = true
 			if !d.IsError {
 				t.Error("expected hardcoded ROLE PASSWORD to be an error, not a warning (RFC §11.1 MUST)")
@@ -138,7 +138,7 @@ func TestLintHardcodedRolePassword(t *testing.T) {
 		}
 	}
 	if !found {
-		t.Fatal("expected hardcoded-password error for a literal ROLE PASSWORD")
+		t.Fatal("expected hardcoded-role-password error for a literal ROLE PASSWORD")
 	}
 }
 
@@ -151,8 +151,8 @@ func TestLintRolePasswordWithSecretReferenceOK(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, d := range diags {
-		if d.Rule == "hardcoded-password" {
-			t.Errorf("did not expect hardcoded-password for a {{...}} secret reference, got: %v", d)
+		if d.Rule == "hardcoded-role-password" {
+			t.Errorf("did not expect hardcoded-role-password for a {{...}} secret reference, got: %v", d)
 		}
 	}
 }
@@ -166,8 +166,83 @@ func TestLintRolePasswordRuleDisabled(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, d := range diags {
-		if d.Rule == "hardcoded-password" {
-			t.Errorf("did not expect hardcoded-password with the rule disabled, got: %v", d)
+		if d.Rule == "hardcoded-role-password" {
+			t.Errorf("did not expect hardcoded-role-password with the rule disabled, got: %v", d)
+		}
+	}
+}
+
+func TestLintHardcodedFDWPassword(t *testing.T) {
+	l := New()
+	objects := []pipeline.IRObject{&ir.UserMapping{
+		User: "app", Server: "srv",
+		Body: "CREATE USER MAPPING FOR app SERVER srv OPTIONS (user 'app', password 'hunter2')",
+	}}
+	diags, err := l.Lint(objects, pipeline.LinterConfig{ForbidHardcodedPasswords: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, d := range diags {
+		if d.Rule == "hardcoded-fdw-password" {
+			found = true
+			if !d.IsError {
+				t.Error("expected hardcoded FDW password to be an error (RFC §19.1 hardcoded_fdw_password)")
+			}
+		}
+	}
+	if !found {
+		t.Fatal("expected hardcoded-fdw-password error for a literal OPTIONS password")
+	}
+}
+
+func TestLintFDWPasswordWithSecretReferenceOK(t *testing.T) {
+	l := New()
+	objects := []pipeline.IRObject{&ir.UserMapping{
+		User: "app", Server: "srv",
+		Body: "CREATE USER MAPPING FOR app SERVER srv OPTIONS (user 'app', password '{{vault:secret/fdw/srv#pw}}')",
+	}}
+	diags, err := l.Lint(objects, pipeline.LinterConfig{ForbidHardcodedPasswords: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, d := range diags {
+		if d.Rule == "hardcoded-fdw-password" {
+			t.Errorf("did not expect hardcoded-fdw-password for a {{...}} secret reference, got: %v", d)
+		}
+	}
+}
+
+func TestLintFDWPasswordRuleDisabled(t *testing.T) {
+	l := New()
+	objects := []pipeline.IRObject{&ir.UserMapping{
+		User: "app", Server: "srv",
+		Body: "CREATE USER MAPPING FOR app SERVER srv OPTIONS (password 'hunter2')",
+	}}
+	diags, err := l.Lint(objects, pipeline.LinterConfig{ForbidHardcodedPasswords: false})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, d := range diags {
+		if d.Rule == "hardcoded-fdw-password" {
+			t.Errorf("did not expect hardcoded-fdw-password with the rule disabled, got: %v", d)
+		}
+	}
+}
+
+func TestLintUserMappingNoPasswordOptionOK(t *testing.T) {
+	l := New()
+	objects := []pipeline.IRObject{&ir.UserMapping{
+		User: "app", Server: "srv",
+		Body: "CREATE USER MAPPING FOR app SERVER srv OPTIONS (user 'app')",
+	}}
+	diags, err := l.Lint(objects, pipeline.LinterConfig{ForbidHardcodedPasswords: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, d := range diags {
+		if d.Rule == "hardcoded-fdw-password" {
+			t.Errorf("did not expect hardcoded-fdw-password for a mapping with no password option, got: %v", d)
 		}
 	}
 }

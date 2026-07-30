@@ -4,6 +4,7 @@ package linter
 
 import (
 	"fmt"
+	"regexp"
 	"strings"
 
 	"github.com/dullkingsman/dpg/internal/ir"
@@ -43,6 +44,8 @@ func checkObject(obj pipeline.IRObject, cfg pipeline.LinterConfig) []pipeline.Li
 		diags = append(diags, checkView(o, cfg)...)
 	case *ir.Role:
 		diags = append(diags, checkRole(o, cfg)...)
+	case *ir.UserMapping:
+		diags = append(diags, checkUserMapping(o, cfg)...)
 	default:
 		_ = o
 	}
@@ -159,14 +162,57 @@ func checkView(v *ir.View, cfg pipeline.LinterConfig) []pipeline.LintDiagnostic 
 // table-column-default case. Scheme-agnostic: checks for any {{...}}
 // placeholder, not one specific scheme (an earlier RFC draft named
 // env:VAR_NAME specifically, before four more backends existed).
+// Rule ID is "hardcoded-role-password", not "hardcoded-password" (which
+// would collide with the pre-existing table-column-default rule below,
+// name-identical despite checking a completely different thing) — RFC
+// §19.1's own rules table separately names this `hardcoded_password` and
+// the table-column one is unlisted there at all, so neither the RFC's
+// snake_case naming nor a shared name were adopted; kept kebab-case to
+// match every other rule ID actually in code, and disambiguated the two
+// checks now that both concretely exist under the same linter flag.
 func checkRole(r *ir.Role, cfg pipeline.LinterConfig) []pipeline.LintDiagnostic {
 	var diags []pipeline.LintDiagnostic
 
 	if cfg.ForbidHardcodedPasswords && r.Password != nil && !strings.Contains(*r.Password, "{{") {
 		diags = append(diags, pipeline.LintDiagnostic{
 			Pos:     r.SrcPos,
-			Rule:    "hardcoded-password",
+			Rule:    "hardcoded-role-password",
 			Message: fmt.Sprintf("role %s: PASSWORD is a literal value; use a {{secret-uri}} reference instead (e.g. {{vault:secret/roles/%s#password}})", r.Name, r.Name),
+			IsError: true,
+		})
+	}
+
+	return diags
+}
+
+// ── UserMapping rules ────────────────────────────────────────────────────────
+
+// fdwPasswordLit matches a password OPTIONS entry inside a USER MAPPING's
+// opaque Body text: password 'value' (PostgreSQL's own OPTIONS syntax,
+// case-insensitive keyword, ” escaping supported like any SQL string
+// literal). UserMapping stays fully opaque (no structured OPTIONS field
+// exists to check directly, unlike Role.Password) — see
+// internal/diff.userMappingCreateOp's doc comment for why OPTIONS keys
+// aren't parsed out structurally at all (they're FDW-provider-specific,
+// not fixed by DPG).
+var fdwPasswordLit = regexp.MustCompile(`(?i)\bpassword\s+'((?:[^']|'')*)'`)
+
+// checkUserMapping implements RFC §19.1's hardcoded_fdw_password rule: a
+// literal `password 'value'` in a USER MAPPING's OPTIONS, with no
+// {{secret-uri}} placeholder anywhere in it, when forbid_hardcoded_passwords
+// is enabled — same severity and intent as checkRole, applied via a text
+// match instead of a structured field since UserMapping has none.
+func checkUserMapping(u *ir.UserMapping, cfg pipeline.LinterConfig) []pipeline.LintDiagnostic {
+	var diags []pipeline.LintDiagnostic
+
+	if !cfg.ForbidHardcodedPasswords {
+		return diags
+	}
+	if m := fdwPasswordLit.FindStringSubmatch(u.Body); m != nil && !strings.Contains(m[1], "{{") {
+		diags = append(diags, pipeline.LintDiagnostic{
+			Pos:     u.SrcPos,
+			Rule:    "hardcoded-fdw-password",
+			Message: fmt.Sprintf("user mapping %s: OPTIONS password is a literal value; use a {{secret-uri}} reference instead (e.g. {{vault:secret/fdw/%s#password}})", u.QualifiedName(), u.Server),
 			IsError: true,
 		})
 	}
