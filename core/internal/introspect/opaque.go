@@ -407,6 +407,181 @@ ORDER  BY p.pubname`
 	return out, rs.Err()
 }
 
+// ── subscriptions ────────────────────────────────────────────────────────────
+
+// subscriptionConnInfoPlaceholder replaces the live CONNECTION string on
+// introspection: pg_subscription.subconninfo has no default grant to PUBLIC
+// (confirmed live — every other pg_subscription column keeps its default
+// grant), and even a privileged caller who CAN read it would have no way to
+// map the resolved value back to whatever {{secret-uri}} the original
+// CONNECTION clause held, if any — same inherent limitation already
+// documented for UserMapping OPTIONS (§14.10/§6ff). subconninfo is never
+// selected at all, by design, not merely omitted on error.
+//
+// Must be syntactically valid libpq keyword/value conninfo syntax, not just
+// any string: PostgreSQL parses CONNECTION's value as conninfo at CREATE
+// SUBSCRIPTION time even with WITH (connect = false) — confirmed live, a
+// bare comment-text placeholder errors "invalid connection string syntax"
+// outright, connect = false only skips the network dial, not parsing. The
+// warning itself lives inside the (quoted, libpq-legal) password field's
+// value so it still reads clearly in a dump.
+const subscriptionConnInfoPlaceholder = "host=REDACTED port=0 dbname=REDACTED user=REDACTED " +
+	"password='live value redacted -- re-declare CONNECTION manually before enabling'"
+
+// introspectSubscriptions reads every Subscription attribute except
+// subconninfo (see subscriptionConnInfoPlaceholder). Reconstructed: true
+// excludes Body from the drift comparison entirely (sourceBodyHash returns ""
+// for a reconstructed body), so the always-different placeholder CONNECTION
+// never causes a spurious DROP+CREATE loop; introspecting at all is what
+// closes the actual bug this fixes — without it, plan --live has no entry
+// for an already-applied subscription and proposes a spurious re-CREATE that
+// then errors on apply (§6z).
+//
+// The reconstructed WITH clause always forces connect = false, create_slot =
+// false, and enabled = false, regardless of the live subscription's actual
+// state: subscriptionConnInfoPlaceholder is never a real conninfo, and
+// PostgreSQL's own default (connect = true) would have CREATE SUBSCRIPTION
+// try to dial that literal placeholder string and error outright — confirmed
+// live, not assumed. Forcing all three keeps the reconstructed body valid,
+// re-executable SQL (the same guarantee every other reliable-tier kind's
+// Body already carries, proven by TestRenderOpaqueObjectsCompile), at the
+// cost of the reconstruction never reflecting a currently-enabled live
+// subscription's true state — acceptable, since the placeholder's own text
+// already tells the reader this is an inert skeleton to hand-edit, not a
+// live clone.
+//
+// pg_subscription is a shared, cluster-wide catalog (tablespace pg_global) —
+// querying it from any database returns EVERY database's subscriptions, not
+// just the current one (confirmed live), so subdbid must be filtered
+// explicitly against the connected database's own oid; nothing else in this
+// file needs that pattern, since every other reliable-tier catalog is
+// already database-local.
+//
+// Column availability varies by PostgreSQL version (confirmed against the
+// 14/15/16/17 pg_subscription catalog docs, not assumed from memory):
+// subtwophasestate/subdisableonerr (15+), subpasswordrequired/subrunasowner
+// (16+), subfailover (17+) don't exist on older servers. Each is
+// select-guarded by serverVersionNum, substituting that option's own
+// documented default (confirmed live against a fresh subscription, not the
+// docs alone — the current docs page's prose default for `streaming` does
+// not match live PG17 behavior) so it's simply omitted from the
+// reconstructed WITH clause on an older server, identical to an unset
+// option. subskiplsn is deliberately not read at all: it's one-shot admin
+// state (ALTER SUBSCRIPTION ... SKIP), not part of a subscription's
+// declarative definition, with no WITH-option equivalent.
+func introspectSubscriptions(ctx context.Context, conn pipeline.Querier) ([]pipeline.IRObject, error) {
+	v := serverVersionNum(ctx, conn)
+	twoPhaseCol, disableOnErrCol := `'d'::"char"`, "false"
+	if v >= 150000 {
+		twoPhaseCol, disableOnErrCol = "s.subtwophasestate", "s.subdisableonerr"
+	}
+	pwReqCol, runAsOwnerCol, originCol := "true", "false", "'any'::text"
+	if v >= 160000 {
+		pwReqCol, runAsOwnerCol, originCol = "s.subpasswordrequired", "s.subrunasowner", "COALESCE(s.suborigin, 'any')"
+	}
+	failoverCol := "false"
+	if v >= 170000 {
+		failoverCol = "s.subfailover"
+	}
+
+	// subenabled itself is never selected: the reconstructed body always
+	// forces enabled = false (see the withOpts comment below), so the live
+	// enabled/disabled state has nothing to feed into.
+	q := fmt.Sprintf(`
+SELECT s.subname, s.subbinary, s.substream, %s, %s,
+       %s, %s, %s, s.subslotname, s.subsynccommit, s.subpublications, %s,
+       obj_description(s.oid, 'pg_subscription') AS comment
+FROM   pg_subscription s
+WHERE  s.subdbid = (SELECT oid FROM pg_database WHERE datname = current_database())
+ORDER  BY s.subname`, twoPhaseCol, disableOnErrCol, pwReqCol, runAsOwnerCol, failoverCol, originCol)
+
+	rs, err := conn.QueryRows(ctx, q)
+	if err != nil {
+		return nil, fmt.Errorf("introspect subscriptions: %w", err)
+	}
+	defer rs.Close()
+
+	var out []pipeline.IRObject
+	for rs.Next() {
+		var name string
+		var binary, disableOnErr, pwReq, runAsOwner, failover bool
+		var stream, twoPhase byte
+		var slotName *string
+		var syncCommit, origin string
+		var publications []string
+		var comment *string
+		if err := rs.Scan(&name, &binary, &stream, &twoPhase,
+			&disableOnErr, &pwReq, &runAsOwner, &failover, &slotName, &syncCommit,
+			&publications, &origin, &comment); err != nil {
+			return nil, err
+		}
+
+		quotedPubs := make([]string, len(publications))
+		for i, p := range publications {
+			quotedPubs[i] = quoteIdent(p)
+		}
+		var sb strings.Builder
+		fmt.Fprintf(&sb, "CREATE SUBSCRIPTION %s CONNECTION %s PUBLICATION %s",
+			quoteIdent(name), quoteLit(subscriptionConnInfoPlaceholder), strings.Join(quotedPubs, ", "))
+
+		// connect/create_slot/enabled are always forced false, regardless of
+		// the live subscription's actual state: subscriptionConnInfoPlaceholder
+		// is never a real conninfo, so the PostgreSQL default (connect = true)
+		// would have CREATE SUBSCRIPTION try to dial that literal placeholder
+		// string and fail outright — confirmed live. This keeps the
+		// reconstructed body valid, re-executable SQL (same guarantee every
+		// other reliable-tier kind's Body already has), at the cost of never
+		// reflecting the live enabled state; the placeholder's own text
+		// ("re-declare manually") already tells the reader this is an inert
+		// skeleton, not a live clone.
+		withOpts := []string{"connect = false", "create_slot = false", "enabled = false"}
+		if binary {
+			withOpts = append(withOpts, "binary = true")
+		}
+		switch stream {
+		case 't':
+			withOpts = append(withOpts, "streaming = on")
+		case 'p':
+			withOpts = append(withOpts, "streaming = parallel")
+		}
+		if twoPhase != 'd' {
+			withOpts = append(withOpts, "two_phase = true")
+		}
+		if disableOnErr {
+			withOpts = append(withOpts, "disable_on_error = true")
+		}
+		if !pwReq {
+			withOpts = append(withOpts, "password_required = false")
+		}
+		if runAsOwner {
+			withOpts = append(withOpts, "run_as_owner = true")
+		}
+		if failover {
+			withOpts = append(withOpts, "failover = true")
+		}
+		if origin != "any" {
+			withOpts = append(withOpts, "origin = "+quoteLit(origin))
+		}
+		if slotName == nil {
+			withOpts = append(withOpts, "slot_name = NONE")
+		} else if *slotName != name {
+			withOpts = append(withOpts, "slot_name = "+quoteLit(*slotName))
+		}
+		if syncCommit != "off" {
+			withOpts = append(withOpts, "synchronous_commit = "+quoteLit(syncCommit))
+		}
+		if len(withOpts) > 0 {
+			fmt.Fprintf(&sb, " WITH (%s)", strings.Join(withOpts, ", "))
+		}
+
+		out = append(out, &ir.Subscription{
+			Name: name, ConnInfo: subscriptionConnInfoPlaceholder,
+			Body: canonicalDDL(sb.String()), Comment: comment, Reconstructed: true,
+		})
+	}
+	return out, rs.Err()
+}
+
 // publicationTargets builds the FOR TABLE / FOR TABLES IN SCHEMA clauses for a
 // non-FOR-ALL-TABLES publication.
 func publicationTargets(ctx context.Context, conn pipeline.Querier, pubid uint32) (string, error) {

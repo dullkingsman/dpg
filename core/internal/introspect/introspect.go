@@ -94,6 +94,7 @@ func (ci *CatalogIntrospector) Introspect(ctx context.Context, conn pipeline.Que
 		introspectForeignServers,
 		introspectUserMappings,
 		introspectPublications,
+		introspectSubscriptions,
 		introspectTablespaces,
 		introspectOperators,
 		introspectTSParsers,

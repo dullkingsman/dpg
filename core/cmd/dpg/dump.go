@@ -684,6 +684,8 @@ func renderObjectDPG(b *strings.Builder, obj pipeline.IRObject, fmtOpts format.O
 		renderOpaqueBody(b, o.Body)
 	case *ir.Publication:
 		renderOpaqueBody(b, o.Body)
+	case *ir.Subscription:
+		renderOpaqueBody(b, o.Body)
 	case *ir.Tablespace:
 		renderOpaqueBody(b, o.Body)
 	case *ir.Operator:

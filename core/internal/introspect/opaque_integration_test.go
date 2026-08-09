@@ -341,3 +341,139 @@ func TestIntrospectCollationFiltersSystem(t *testing.T) {
 		}
 	}
 }
+
+// TestIntrospectSubscription guards §6z/§6ff's closing piece: introspection
+// must reconstruct every Subscription attribute except subconninfo (never
+// selected — see subscriptionConnInfoPlaceholder's doc comment), non-default
+// WITH options included, while never leaking the real connection string
+// (which, unlike every other reliable-tier kind's Body, holds a real
+// credential in the live catalog) anywhere into the reconstructed Body.
+// connect = false avoids needing a real reachable publisher: this test
+// proves introspection reads the row correctly, not that replication works
+// (TestSubscriptionConnectionSecretRoundtrip in integration/ already proves
+// a real replication connection separately).
+func TestIntrospectSubscription(t *testing.T) {
+	ctx := context.Background()
+	connStr := testpg.StartLogical(t)
+	conn, err := executor.Connect(ctx, connStr)
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	defer conn.Close(ctx)
+
+	for _, stmt := range []string{
+		`CREATE PUBLICATION pub_a FOR ALL TABLES`,
+		`CREATE SUBSCRIPTION my_sub CONNECTION ` +
+			`'host=127.0.0.1 port=5432 dbname=dpgtest user=dpg password=supersecret' ` +
+			`PUBLICATION pub_a WITH (connect = false, create_slot = false, ` +
+			`binary = true, streaming = parallel, disable_on_error = true, ` +
+			`password_required = false, synchronous_commit = remote_apply, ` +
+			`slot_name = my_custom_slot)`,
+		`COMMENT ON SUBSCRIPTION my_sub IS 'covers §6ff'`,
+	} {
+		if _, err := conn.Exec(ctx, stmt); err != nil {
+			t.Fatalf("exec %q: %v", stmt, err)
+		}
+	}
+
+	objects, err := introspect.New().Introspect(ctx, conn)
+	if err != nil {
+		t.Fatalf("introspect: %v", err)
+	}
+	var found *ir.Subscription
+	for _, obj := range objects {
+		if s, ok := obj.(*ir.Subscription); ok && s.Name == "my_sub" {
+			found = s
+			break
+		}
+	}
+	if found == nil {
+		t.Fatal("subscription my_sub not found")
+	}
+	if !found.Reconstructed {
+		t.Error("expected Reconstructed = true")
+	}
+	if strings.Contains(found.Body, "supersecret") || strings.Contains(found.Body, "127.0.0.1") {
+		t.Fatalf("introspected Body leaked the live connection string: %q", found.Body)
+	}
+	if found.ConnInfo != "" && strings.Contains(found.ConnInfo, "supersecret") {
+		t.Fatalf("ConnInfo leaked the live connection string: %q", found.ConnInfo)
+	}
+	for _, want := range []string{
+		// connect/create_slot/enabled are always forced false — the placeholder
+		// CONNECTION is never dialable, see introspectSubscriptions' doc comment.
+		"connect = false", "create_slot = false", "enabled = false",
+		// canonicalDDL quotes "binary" (reserved word in this grammar context) —
+		// not a bug, just how pg_query's own deparse renders it.
+		`"binary" = true`, "streaming = parallel", "disable_on_error = true",
+		"password_required = false", "synchronous_commit = 'remote_apply'",
+		"slot_name = 'my_custom_slot'",
+	} {
+		if !strings.Contains(found.Body, want) {
+			t.Errorf("expected Body to contain %q, got: %s", want, found.Body)
+		}
+	}
+	if found.Comment == nil || *found.Comment != "covers §6ff" {
+		t.Errorf("expected comment %q, got %v", "covers §6ff", found.Comment)
+	}
+
+	// The reconstructed body must be valid, re-executable SQL. Detach the
+	// slot first: create_slot = false above means no physical replication
+	// slot actually exists on a (nonexistent, connect = false) publisher for
+	// PostgreSQL to drop, and a bare DROP SUBSCRIPTION always tries.
+	if _, err := conn.Exec(ctx, `ALTER SUBSCRIPTION my_sub SET (slot_name = NONE)`); err != nil {
+		t.Fatalf("detach slot before drop: %v", err)
+	}
+	if _, err := conn.Exec(ctx, `DROP SUBSCRIPTION my_sub`); err != nil {
+		t.Fatalf("drop: %v", err)
+	}
+	if _, err := conn.Exec(ctx, found.Body); err != nil {
+		t.Fatalf("reconstructed subscription body is invalid SQL: %v\nbody: %s", err, found.Body)
+	}
+}
+
+// TestIntrospectSubscriptionCrossDatabaseIsolation guards the pg_subscription
+// shared-catalog filter: pg_subscription lives in pg_global (confirmed
+// live — every row from every database in the cluster is visible from any
+// single database's connection, unlike every other reliable-tier catalog
+// here, which is already database-local), so introspectSubscriptions MUST
+// filter by subdbid explicitly. Without that filter, introspecting database
+// A would leak database B's subscriptions into A's dump/plan --live.
+func TestIntrospectSubscriptionCrossDatabaseIsolation(t *testing.T) {
+	ctx := context.Background()
+	connStr := testpg.StartLogical(t)
+	conn, err := executor.Connect(ctx, connStr)
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	defer conn.Close(ctx)
+
+	if _, err := conn.Exec(ctx, `CREATE DATABASE other_db`); err != nil {
+		t.Fatalf("create other_db: %v", err)
+	}
+	otherConnStr := strings.Replace(connStr, "/dpgtest", "/other_db", 1)
+	otherConn, err := executor.Connect(ctx, otherConnStr)
+	if err != nil {
+		t.Fatalf("connect other_db: %v", err)
+	}
+	defer otherConn.Close(ctx)
+	for _, stmt := range []string{
+		`CREATE PUBLICATION pub_other FOR ALL TABLES`,
+		`CREATE SUBSCRIPTION other_sub CONNECTION 'host=127.0.0.1 port=5432 dbname=other_db user=dpg password=x' ` +
+			`PUBLICATION pub_other WITH (connect = false, create_slot = false)`,
+	} {
+		if _, err := otherConn.Exec(ctx, stmt); err != nil {
+			t.Fatalf("exec %q against other_db: %v", stmt, err)
+		}
+	}
+
+	objects, err := introspect.New().Introspect(ctx, conn)
+	if err != nil {
+		t.Fatalf("introspect dpgtest: %v", err)
+	}
+	for _, obj := range objects {
+		if s, ok := obj.(*ir.Subscription); ok {
+			t.Errorf("other_db's subscription %q leaked into dpgtest's introspection", s.Name)
+		}
+	}
+}

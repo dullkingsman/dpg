@@ -559,11 +559,12 @@ func (p *Publication) irObject()               {}
 // conninfo/DSN literal may itself contain a ':' (e.g. a postgresql:// URI),
 // so nothing else triggers resolution.
 type Subscription struct {
-	Name     string
-	ConnInfo string
-	Body     string
-	Comment  *string
-	SrcPos   pipeline.SourcePos
+	Name          string
+	ConnInfo      string
+	Body          string
+	Comment       *string
+	Reconstructed bool // Body rebuilt from the catalog; see Tablespace.Reconstructed
+	SrcPos        pipeline.SourcePos
 }
 
 func (s *Subscription) QualifiedName() string   { return s.Name }

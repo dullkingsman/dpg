@@ -130,7 +130,7 @@ func toSnapObject(obj pipeline.IRObject) *SnapObject {
 		}}
 	case *ir.Subscription:
 		return &SnapObject{Kind: "subscription", Opaque: &SnapOpaque{
-			Kind: "subscription", Name: o.Name, BodyHash: hashBodyStr(o.Body), Comment: o.Comment,
+			Kind: "subscription", Name: o.Name, BodyHash: sourceBodyHash(o.Body, o.Reconstructed), Comment: o.Comment,
 		}}
 	case *ir.EventTrigger:
 		return &SnapObject{Kind: "event_trigger", Opaque: &SnapOpaque{

@@ -52,6 +52,7 @@ func TestRenderOpaqueObjectsCompile(t *testing.T) {
 		&ir.ForeignServer{Name: "dummy_srv", Body: "CREATE SERVER dummy_srv FOREIGN DATA WRAPPER dummy_fdw"},
 		&ir.UserMapping{Server: "dummy_srv", Body: "CREATE USER MAPPING FOR PUBLIC SERVER dummy_srv"},
 		&ir.Publication{Name: "my_pub", Body: "CREATE PUBLICATION my_pub FOR ALL TABLES"},
+		&ir.Subscription{Name: "my_sub", Body: "CREATE SUBSCRIPTION my_sub CONNECTION 'host=x' PUBLICATION my_pub"},
 		&ir.EventTrigger{Name: "et", Body: "CREATE EVENT TRIGGER et ON ddl_command_start EXECUTE FUNCTION f()"},
 		&ir.Collation{Schema: "public", Name: "my_coll", Body: "CREATE COLLATION public.my_coll (locale = 'C')"},
 		&ir.Cast{SourceType: ir.TypeRef{Name: "int4"}, TargetType: ir.TypeRef{Name: "bool"},
@@ -101,7 +102,7 @@ func TestRenderOpaqueObjectsCompile(t *testing.T) {
 	// Every opaque object must survive the round-trip.
 	wantKinds := map[string]bool{
 		"*ir.ForeignDataWrapper": false, "*ir.ForeignServer": false, "*ir.UserMapping": false,
-		"*ir.Publication": false, "*ir.EventTrigger": false, "*ir.Collation": false,
+		"*ir.Publication": false, "*ir.Subscription": false, "*ir.EventTrigger": false, "*ir.Collation": false,
 		"*ir.Cast": false, "*ir.StatisticsObject": false, "*ir.Tablespace": false,
 		"*ir.Operator": false, "*ir.OperatorClass": false, "*ir.OperatorFamily": false,
 		"*ir.TSConfig": false, "*ir.TSDict": false, "*ir.TSParser": false, "*ir.TSTemplate": false,
@@ -257,6 +258,7 @@ func TestIsClusterScoped(t *testing.T) {
 	database := []pipeline.IRObject{
 		&ir.ForeignDataWrapper{Name: "f"}, &ir.ForeignServer{Name: "s"},
 		&ir.UserMapping{Server: "s"}, &ir.Publication{Name: "p"},
+		&ir.Subscription{Name: "sub"},
 		&ir.EventTrigger{Name: "e"}, &ir.Cast{}, &ir.Collation{Name: "c"},
 		&ir.Table{Schema: "public", Name: "t"},
 	}

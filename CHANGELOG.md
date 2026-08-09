@@ -149,6 +149,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   table-column-default rule (both were `"hardcoded-password"`), making
   the two indistinguishable in diagnostics; Role's is now
   `hardcoded-role-password`.
+- Introspect Subscriptions (RFC §13.2): `dump`/`verify`/`plan --live` now
+  see every Subscription attribute except `CONNECTION` itself —
+  `pg_subscription.subconninfo` has no default grant to PUBLIC, and even a
+  privileged caller who can read it has no way to recover the original
+  `{{secret-uri}}`, if any, from an already-resolved value (same limitation
+  as User Mapping `OPTIONS`). `CONNECTION` is reconstructed as a fixed,
+  syntactically-valid placeholder conninfo instead, with `connect = false`,
+  `create_slot = false`, and `enabled = false` always forced in the
+  reconstructed `WITH` clause (the placeholder can never actually be
+  dialed; PostgreSQL validates conninfo syntax even with `connect = false`,
+  confirmed live). This closes a real, active bug, not just a missing
+  feature: without introspection, an already-applied subscription was
+  invisible to `plan --live`'s live-comparison snapshot, so it proposed a
+  spurious `CREATE SUBSCRIPTION` for one that already existed — which then
+  errored on `apply`. Also fixes `pg_subscription` cross-database leakage:
+  it's a shared, `pg_global`-tablespace catalog, and querying it from any
+  database returns every database's subscriptions unless explicitly
+  filtered by `subdbid` (confirmed live — every other reliable-tier
+  catalog here is already database-local, so nothing else in this codebase
+  needed this filter before).
 
 ### Fixed
 

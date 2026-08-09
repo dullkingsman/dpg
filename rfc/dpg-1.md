@@ -3120,15 +3120,33 @@ PUBLICATION filtered_orders
 
 ### 13.2. Subscriptions
 
-   Subscriptions are database-level objects, currently declared and diffed
-   as an opaque body (byte-for-byte source text, not per-field) — the same
-   tier as Tablespace/FDW/Server/Publication/etc. `CONNECTION` is the one
-   part of that body DPG treats specially, to support a secret reference
+   Subscriptions are database-level objects, declared and diffed as an
+   opaque body (byte-for-byte source text, not per-field) — the same tier
+   as Tablespace/FDW/Server/Publication/etc. `CONNECTION` is the one part
+   of that body DPG treats specially, to support a secret reference
    instead of a literal credential (see below and §D.5); `COMMENT` (in the
    `{ }` block) is diffed and applied like every other Comment-bearing
-   object. No live introspection of subscriptions exists yet
-   (`dump`/`verify`/`plan --live` don't see them — Declared/Diffed, not yet
-   Dumped, §25).
+   object.
+
+   `dump`/`verify`/`plan --live` see every Subscription attribute except
+   `CONNECTION` itself: `pg_subscription.subconninfo` has no default grant
+   to PUBLIC (PostgreSQL revokes it from a normal caller outright), and
+   even a privileged caller who *can* read it has no way to recover
+   whatever `{{secret-uri}}` the original `CONNECTION` clause held, if
+   any — same inherent limitation as User Mapping `OPTIONS` (§14.10). An
+   introspected Subscription's `CONNECTION` is rendered as a fixed,
+   syntactically-valid-but-inert placeholder conninfo instead (with
+   `connect = false`, `create_slot = false`, and `enabled = false` always
+   forced in its `WITH` clause, since the placeholder can never actually
+   be dialed); a `dump`'d Subscription must have its `CONNECTION`
+   hand-edited back to a real value before it does anything. Because the
+   reconstructed body's `BodyHash` is never stored (same as every other
+   reconstructed opaque kind, §25), this placeholder never causes a
+   spurious `DROP SUBSCRIPTION` + `CREATE SUBSCRIPTION` loop on
+   `verify`/`plan --live` — introspecting at all is what makes an
+   already-applied Subscription visible as existing, rather than
+   `plan --live` proposing a spurious re-`CREATE` for one that's already
+   there (which would then error on `apply`).
 
    **PG equivalent:**
    `CREATE SUBSCRIPTION name CONNECTION 'connstr' PUBLICATION pub [, ...] [WITH (options)]`
@@ -4447,6 +4465,7 @@ serial_sequence_declared      = "off"
    | `pg_namespace` | Schemas |
    | `pg_extension` | Installed extensions |
    | `pg_publication` | Publications |
+   | `pg_subscription` | Subscriptions (all attributes except `subconninfo`, §13.2) |
    | `pg_foreign_table` | Foreign tables |
    | `pg_foreign_server` | Foreign servers |
    | `pg_user_mapping` | User mappings |
@@ -4711,6 +4730,21 @@ serial_sequence_declared      = "off"
    dbname), with the credential living in the User Mapping specifically;
    no case for a secret-bearing FDW-level option has come up.
 
+   **Introspection-side redaction:** `dump`/`verify`/`plan --live` read
+   the live catalog, not source, so the concern above (a resolved value
+   escaping into a persisted file) applies there too. Subscription
+   `CONNECTION` is handled fully: `pg_subscription.subconninfo` is never
+   selected at all (§13.2), so a resolved credential can never reach a
+   dumped `.dpg` file this way. User Mapping `OPTIONS` is NOT: PostgreSQL
+   itself redacts `pg_user_mappings.umoptions` to `NULL` for a
+   non-owner/non-superuser caller, but shows the real, already-resolved
+   value to a privileged one (the owner or a superuser) — and `dump`
+   writes whatever it's shown straight into source. There's no
+   `{{secret-uri}}` to recover in either case (PostgreSQL itself only
+   ever stores the resolved value, never the reference), so this isn't a
+   missing redaction step so much as an inherent limitation of reading a
+   secret back out of a system that only remembers its resolved form.
+
    **SQL injection in generated DDL:** All identifier names read from
    source files are validated against PostgreSQL's identifier rules
    before being interpolated into generated SQL.  The compiler MUST
@@ -4812,7 +4846,7 @@ serial_sequence_declared      = "off"
    | Partitioned Tables | Declared, Diffed | |
    | Sub-partitioning | Declared, Diffed | |
    | Publications | Declared, Passthrough | Reconstructed from catalog; hash-diffed |
-   | Subscriptions | Declared, Passthrough | Hash-diffed source-to-source (§13.2); NOT reconstructed from the catalog — no live introspection exists, so `dump`/`verify`/`plan --live` don't see subscriptions at all. `CONNECTION` may hold a `{{secret-uri}}` reference (§13.2, §D.5), resolved only immediately before `CREATE SUBSCRIPTION` executes |
+   | Subscriptions | Declared, Passthrough | Reconstructed from the catalog; hash-diffed. `CONNECTION` alone is never introspected (`subconninfo` has no PUBLIC grant, and even a privileged read can't recover the original `{{secret-uri}}`) — reconstructed as a fixed placeholder instead, excluded from the drift comparison like every other reconstructed body (§13.2). `CONNECTION` may hold a `{{secret-uri}}` reference in source (§13.2, §D.5), resolved only immediately before `CREATE SUBSCRIPTION` executes |
    | Collations | Declared, Passthrough | Reconstructed from catalog, hash-diffed; any change = DESTRUCTIVE |
    | Operators | Declared, Passthrough | Reconstructed from catalog, hash-diffed; any change = DESTRUCTIVE |
    | Operator Classes / Families | Declared, Passthrough | Reconstructed from catalog, hash-diffed |
