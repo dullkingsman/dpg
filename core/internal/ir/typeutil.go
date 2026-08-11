@@ -88,28 +88,69 @@ func pgCatalogName(internal string) string {
 	}
 }
 
+// typmodInt extracts an int64 value from a typmod list element. Confirmed
+// live (probed directly against pg_query.Parse): a TypeName's Typmods list
+// element is an A_Const-wrapped Integer (e.g. "numeric(10,2)"'s "10" and
+// "2"), never a bare Integer node — the same A_Const-vs-bare-Integer split
+// already documented and handled for sequence DefElem options in
+// seqOptionInt (builder.go). The bare-Integer branch is kept as a fallback
+// only, matching seqOptionInt's own defensive shape, not because it's been
+// observed for typmods specifically.
+func typmodInt(n *pg_query.Node) (int64, bool) {
+	if ic := n.GetInteger(); ic != nil {
+		return int64(ic.Ival), true
+	}
+	if ac := n.GetAConst(); ac != nil {
+		if ic := ac.GetIval(); ic != nil {
+			return int64(ic.Ival), true
+		}
+	}
+	return 0, false
+}
+
 // typmodString reconstructs the typemod display string from pg_query Typmods nodes.
 func typmodString(typeName string, mods []*pg_query.Node) string {
 	if len(mods) == 0 {
 		return ""
 	}
 	// For most types, the first typemod is an integer constant.
-	if ic := mods[0].GetInteger(); ic != nil {
-		val := ic.Ival
+	if val, ok := typmodInt(mods[0]); ok {
 		switch typeName {
 		case "character", "character varying", "bpchar", "varchar":
-			// PG stores length+4 in typmod
-			if val > 4 {
-				return fmt.Sprintf("(%d)", val-4)
+			// Confirmed live (pg_query.Parse probe): unlike a live catalog's
+			// atttypmod (which PostgreSQL internally offsets by VARHDRSZ, i.e.
+			// length+4), the parse tree's Typmods literal for a source-declared
+			// varchar(n)/char(n) is the plain, unencoded length exactly as
+			// written — this function is only ever fed from typeNameToRef,
+			// which is only ever called on source-parsed TypeName nodes
+			// (columns, function args/return types, casts), never against a
+			// live-introspected atttypmod (introspection renders its own type
+			// string directly via format_type(), a separate path entirely).
+			// A prior version of this case subtracted 4, silently producing a
+			// wrong-by-4 length whenever it ran — masked until now because a
+			// separate bug (GetInteger() on an A_Const-wrapped node, see
+			// typmodInt) meant this whole function always returned "" before.
+			if val > 0 {
+				return fmt.Sprintf("(%d)", val)
 			}
 		case "numeric":
 			if len(mods) >= 2 {
-				if ic2 := mods[1].GetInteger(); ic2 != nil {
-					return fmt.Sprintf("(%d,%d)", val, ic2.Ival)
+				if val2, ok2 := typmodInt(mods[1]); ok2 {
+					return fmt.Sprintf("(%d,%d)", val, val2)
 				}
 			}
 			return fmt.Sprintf("(%d)", val)
-		case "time", "timetz", "timestamp", "timestamptz", "interval":
+		case "time", "timetz", "time with time zone",
+			"timestamp", "timestamptz", "timestamp with time zone", "interval":
+			// timetz/timestamptz never actually reach this switch under their
+			// short internal name: typeNameToRef runs ref.Name through
+			// pgCatalogName first, which maps both to their long canonical
+			// form ("time with time zone" / "timestamp with time zone")
+			// before typmodString ever sees it — confirmed live via the same
+			// pg_query.Parse probe used for the A_Const fix above. Both forms
+			// are kept here (matching the varchar/bpchar case's existing
+			// belt-and-suspenders style) rather than relying solely on
+			// pgCatalogName's current behavior.
 			if val >= 0 {
 				return fmt.Sprintf("(%d)", val)
 			}

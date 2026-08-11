@@ -675,39 +675,39 @@ func createObject(obj pipeline.IRObject, vtypes map[string]string) ([]pipeline.D
 	case *ir.Aggregate:
 		return createAggregate(o)
 	case *ir.Tablespace:
-		return createOpaque(o.Name, o.Body, "TABLESPACE", o.SrcPos)
+		return createOpaque(o.Name, o.Body, "TABLESPACE", "", o.SrcPos)
 	case *ir.ForeignDataWrapper:
-		return createOpaque(o.Name, o.Body, "FOREIGN DATA WRAPPER", o.SrcPos)
+		return createOpaque(o.Name, o.Body, "FOREIGN DATA WRAPPER", "", o.SrcPos)
 	case *ir.ForeignServer:
-		return createOpaque(o.Name, o.Body, "SERVER", o.SrcPos)
+		return createOpaque(o.Name, o.Body, "SERVER", "", o.SrcPos)
 	case *ir.UserMapping:
 		return createUserMapping(o)
 	case *ir.Publication:
-		return createOpaque(o.Name, o.Body, "PUBLICATION", o.SrcPos)
+		return createOpaque(o.Name, o.Body, "PUBLICATION", "", o.SrcPos)
 	case *ir.Subscription:
 		return createSubscription(o)
 	case *ir.EventTrigger:
-		return createOpaque(o.Name, o.Body, "EVENT TRIGGER", o.SrcPos)
+		return createOpaque(o.Name, o.Body, "EVENT TRIGGER", "", o.SrcPos)
 	case *ir.Collation:
-		return createOpaque(o.QualifiedName(), o.Body, "COLLATION", o.SrcPos)
+		return createOpaque(o.QualifiedName(), o.Body, "COLLATION", o.Schema, o.SrcPos)
 	case *ir.Operator:
-		return createOpaque(o.QualifiedName(), o.Body, "OPERATOR", o.SrcPos)
+		return createOpaque(o.QualifiedName(), o.Body, "OPERATOR", o.Schema, o.SrcPos)
 	case *ir.OperatorClass:
-		return createOpaque(o.QualifiedName(), o.Body, "OPERATOR CLASS", o.SrcPos)
+		return createOpaque(o.QualifiedName(), o.Body, "OPERATOR CLASS", o.Schema, o.SrcPos)
 	case *ir.OperatorFamily:
-		return createOpaque(o.QualifiedName(), o.Body, "OPERATOR FAMILY", o.SrcPos)
+		return createOpaque(o.QualifiedName(), o.Body, "OPERATOR FAMILY", o.Schema, o.SrcPos)
 	case *ir.Cast:
-		return createOpaque(o.QualifiedName(), o.Body, "CAST", o.SrcPos)
+		return createOpaque(o.QualifiedName(), o.Body, "CAST", "", o.SrcPos)
 	case *ir.StatisticsObject:
-		return createOpaque(o.QualifiedName(), o.Body, "STATISTICS", o.SrcPos)
+		return createOpaque(o.QualifiedName(), o.Body, "STATISTICS", o.Schema, o.SrcPos)
 	case *ir.TSConfig:
-		return createOpaque(o.QualifiedName(), o.Body, "TEXT SEARCH CONFIGURATION", o.SrcPos)
+		return createOpaque(o.QualifiedName(), o.Body, "TEXT SEARCH CONFIGURATION", o.Schema, o.SrcPos)
 	case *ir.TSDict:
-		return createOpaque(o.QualifiedName(), o.Body, "TEXT SEARCH DICTIONARY", o.SrcPos)
+		return createOpaque(o.QualifiedName(), o.Body, "TEXT SEARCH DICTIONARY", o.Schema, o.SrcPos)
 	case *ir.TSParser:
-		return createOpaque(o.QualifiedName(), o.Body, "TEXT SEARCH PARSER", o.SrcPos)
+		return createOpaque(o.QualifiedName(), o.Body, "TEXT SEARCH PARSER", o.Schema, o.SrcPos)
 	case *ir.TSTemplate:
-		return createOpaque(o.QualifiedName(), o.Body, "TEXT SEARCH TEMPLATE", o.SrcPos)
+		return createOpaque(o.QualifiedName(), o.Body, "TEXT SEARCH TEMPLATE", o.Schema, o.SrcPos)
 	case *ir.DefaultPrivileges:
 		return createDefaultPrivileges(o), nil
 	case *ir.VirtualType:
@@ -721,11 +721,40 @@ func createObject(obj pipeline.IRObject, vtypes map[string]string) ([]pipeline.D
 // createOpaque emits a CREATE statement from a pre-built Body SQL string.
 // Returns an error if Body is empty — the builder failed to capture the source SQL,
 // which would otherwise produce a silent no-op migration.
-func createOpaque(name, body, kind string, pos pipeline.SourcePos) ([]pipeline.DiffOp, error) {
-	if body != "" {
-		return []pipeline.DiffOp{safeOp(body+";", pos)}, nil
+//
+// schema is the object's own declared/inferred schema for kinds that are
+// genuinely schema-scoped in PostgreSQL (COLLATION, OPERATOR, OPERATOR
+// CLASS/FAMILY, STATISTICS, the 4 TEXT SEARCH kinds) — pass "" for kinds
+// that aren't (TABLESPACE, FOREIGN DATA WRAPPER, SERVER, PUBLICATION, EVENT
+// TRIGGER are cluster/database-level; CAST has no schema concept at all,
+// identified purely by its source/target type pair).
+//
+// Body is Part1 deparsed as written in source — it only carries a
+// schema-qualified object name if the user happened to write one
+// explicitly; DPG's normal schema inference (directory placement, an
+// enclosing SCHEMA { } block) is never baked into this raw text the way
+// createTable/createView etc. explicitly qualify their own identifiers.
+// Confirmed live: a STATISTICS object declared under a non-public schema
+// context landed in `public` instead — PostgreSQL resolves an unqualified
+// CREATE target through search_path, and the opaque Body's own unqualified
+// name says nothing about DPG's tracked Schema. Fixed the same way pg_dump
+// itself handles this (SET search_path before each unqualified opaque
+// statement) rather than attempting to string-rewrite 9 differently-shaped
+// CREATE statements to inject a qualified name — safe because these ops
+// already run inside the migration's single transaction, and SET LOCAL's
+// scope ends at that transaction's COMMIT, so it can never leak into a
+// later, unrelated migration. ", public" is appended as a fallback so an
+// unqualified reference elsewhere in the same body (e.g. STATISTICS' FROM
+// table) still resolves normally when that referent lives in public.
+func createOpaque(name, body, kind, schema string, pos pipeline.SourcePos) ([]pipeline.DiffOp, error) {
+	if body == "" {
+		return nil, fmt.Errorf("%s %s: body not captured; define it explicitly in a .dpg source file", kind, name)
 	}
-	return nil, fmt.Errorf("%s %s: body not captured; define it explicitly in a .dpg source file", kind, name)
+	sql := body + ";"
+	if schema != "" && schema != "public" {
+		sql = fmt.Sprintf("SET LOCAL search_path = %s, public;\n%s", quoteIdent(schema), sql)
+	}
+	return []pipeline.DiffOp{safeOp(sql, pos)}, nil
 }
 
 // userMappingCreateOp is the DiffOp for a CREATE USER MAPPING statement
@@ -2210,7 +2239,7 @@ func diffOpaqueIR(name, body string, reconstructed bool, snap *snapshot.SnapOpaq
 		return nil, nil
 	}
 	ops := dropObject(&snapshot.SnapObject{Kind: snap.Kind, Opaque: snap})
-	createOps, err := createOpaque(name, body, snap.Kind, pos)
+	createOps, err := createOpaque(name, body, snap.Kind, snap.Schema, pos)
 	if err != nil {
 		return nil, err
 	}
@@ -3061,10 +3090,15 @@ func diffColumns(tbl string, o *ir.Table, snap *snapshot.SnapTable, vtypes map[s
 					b.WriteString(" GENERATED BY DEFAULT AS IDENTITY")
 				}
 			}
+			if col.Generated != nil {
+				b.WriteString(" GENERATED ALWAYS AS (")
+				b.WriteString(col.Generated.Expr)
+				b.WriteString(") STORED")
+			}
 			b.WriteString(";")
 			// NOT NULL without a volatile default risks failing on existing rows.
 			safety := pipeline.Safe
-			if col.NotNull && col.Default == nil && col.Identity == nil {
+			if col.NotNull && col.Default == nil && col.Identity == nil && col.Generated == nil {
 				safety = pipeline.Caution
 			}
 			ops = append(ops, &op{sql: b.String(), safety: safety, pos: col.SrcPos, txn: true})

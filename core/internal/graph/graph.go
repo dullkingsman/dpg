@@ -100,6 +100,56 @@ func (r *Resolver) Sort(objects []pipeline.IRObject) ([]pipeline.IRObject, error
 		return fallback
 	}
 
+	// funcRefKey builds the desired-object index key for a trigger or event
+	// trigger's EXECUTE FUNCTION reference, which arrives as a single,
+	// possibly schema-qualified plain string (Trigger.Function is parsed by
+	// the DPG blockparser, EventTrigger.Function by pg_query's Funcname list
+	// — neither is a structured Schema+Name pair the way a column type or FK
+	// target is) — mirroring how Function.QualifiedName() always includes
+	// an arg-type suffix, empty for the zero-argument functions a trigger or
+	// event trigger can call.
+	funcRefKey := func(ref, fallbackSchema string) string {
+		if ref == "" {
+			return ""
+		}
+		schema, name := fallbackSchema, ref
+		if i := strings.LastIndex(ref, "."); i >= 0 {
+			schema, name = ref[:i], ref[i+1:]
+		}
+		if schema == "" {
+			return name + "()"
+		}
+		return schema + "." + name + "()"
+	}
+
+	// funcPrefixEdge adds a dependency from objIdx to every Function object
+	// whose "schema.name(" prefix matches ref — used for CAST's WITH
+	// FUNCTION reference, which (unlike a trigger's always-zero-argument
+	// function) takes the cast's source type as a real argument, so an
+	// exact funcRefKey "()" match would never hit. Matching by prefix
+	// rather than resolving the exact overload avoids needing to convert
+	// CreateCastStmt's argument TypeName into the identical ArgsKey format
+	// Function.QualifiedName() uses; over-matching a same-named overload
+	// only adds a harmless extra ordering constraint, never a wrong result.
+	funcPrefixEdge := func(objIdx int, ref, fallbackSchema string) {
+		if ref == "" {
+			return
+		}
+		schema, name := fallbackSchema, ref
+		if i := strings.LastIndex(ref, "."); i >= 0 {
+			schema, name = ref[:i], ref[i+1:]
+		}
+		prefix := name + "("
+		if schema != "" {
+			prefix = schema + "." + name + "("
+		}
+		for key, j := range idx {
+			if strings.HasPrefix(key, prefix) {
+				dependsOn(objIdx, j)
+			}
+		}
+	}
+
 	// Circular FK edges that can be deferred.
 	type deferredFK struct {
 		table *ir.Table
@@ -174,6 +224,31 @@ func (r *Resolver) Sort(objects []pipeline.IRObject) ([]pipeline.IRObject, error
 				}
 			}
 
+			// Table depends on the function(s) its own triggers call — a
+			// trigger created before its function exists fails at apply
+			// time (confirmed live: "function ... does not exist"). Never
+			// errors when unresolved: a trigger function is very commonly a
+			// pg_catalog/extension-provided one (e.g. moddatetime()) that
+			// legitimately isn't part of the managed object set.
+			for _, trg := range o.Triggers {
+				if j, ok := idx[funcRefKey(trg.Function, o.Schema)]; ok {
+					dependsOn(i, j)
+				}
+			}
+
+		case *ir.EventTrigger:
+			// Event trigger depends on the function it calls — same
+			// ordering hazard and the same reasoning for never erroring on
+			// an unresolved reference as the table-trigger case above.
+			// Event triggers aren't schema-scoped, so an unqualified
+			// function reference falls back to "public" (this project's
+			// own default-schema convention), matching how dump.go and
+			// other opaque-object rendering already assume public as the
+			// default when no schema is otherwise known.
+			if j, ok := idx[funcRefKey(o.Function, "public")]; ok {
+				dependsOn(i, j)
+			}
+
 		case *ir.View:
 			// View depends on its schema.
 			schemaEdge(i, o.Schema)
@@ -185,6 +260,14 @@ func (r *Resolver) Sort(objects []pipeline.IRObject) ([]pipeline.IRObject, error
 					}
 				}
 			}
+
+		case *ir.Cast:
+			// Cast depends on its WITH FUNCTION target — same ordering
+			// hazard as Trigger/EventTrigger above, found the same way
+			// (live apply failure: "function ... does not exist"). Casts
+			// aren't schema-scoped in PostgreSQL, so an unqualified
+			// function reference falls back to "public".
+			funcPrefixEdge(i, o.Function, "public")
 
 		case *ir.Type:
 			// Type/domain/enum depends on its schema.
@@ -207,6 +290,12 @@ func (r *Resolver) Sort(objects []pipeline.IRObject) ([]pipeline.IRObject, error
 
 		case *ir.Operator:
 			schemaEdge(i, o.Schema)
+			// Operator depends on its PROCEDURE target — same ordering
+			// hazard, found the same way, as Trigger/EventTrigger/Cast
+			// above: an operator created before its function exists fails
+			// at apply time. Matched by prefix like Cast (a real argument
+			// list, not the zero-arg shape a trigger function always has).
+			funcPrefixEdge(i, o.Function, o.Schema)
 
 		case *ir.OperatorClass:
 			schemaEdge(i, o.Schema)
@@ -219,6 +308,14 @@ func (r *Resolver) Sort(objects []pipeline.IRObject) ([]pipeline.IRObject, error
 			if o.FamilyName != "" {
 				famSchema := defaultSchema(o.FamilySchema, o.Schema)
 				refEdge(i, famSchema+"."+o.FamilyName+" USING "+o.AccessMethod+" FAMILY")
+			}
+			// Class depends on every support FUNCTION it declares — same
+			// ordering hazard as Trigger/EventTrigger/Cast/Operator above,
+			// found the same way (live apply failure). Unlike those single-
+			// function cases, a class can declare several (numbered support
+			// slots), so this loops over all of them.
+			for _, fn := range o.Functions {
+				funcPrefixEdge(i, fn, o.Schema)
 			}
 
 		case *ir.OperatorFamily:
@@ -246,9 +343,24 @@ func (r *Resolver) Sort(objects []pipeline.IRObject) ([]pipeline.IRObject, error
 
 		case *ir.TSParser:
 			schemaEdge(i, o.Schema)
+			// Parser depends on its START/GETTOKEN/END/LEXTYPES/HEADLINE
+			// support functions — same ordering hazard as
+			// Trigger/EventTrigger/Cast/Operator/OperatorClass above. In
+			// practice these almost always name a pg_catalog built-in
+			// (custom ones require C), so funcPrefixEdge's silent no-op on
+			// an unresolved reference is the common case, not the
+			// exception.
+			for _, fn := range o.Functions {
+				funcPrefixEdge(i, fn, o.Schema)
+			}
 
 		case *ir.TSTemplate:
 			schemaEdge(i, o.Schema)
+			// Template depends on its INIT/LEXIZE support functions — same
+			// reasoning as TSParser above.
+			for _, fn := range o.Functions {
+				funcPrefixEdge(i, fn, o.Schema)
+			}
 		}
 	}
 

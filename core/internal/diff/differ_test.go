@@ -280,6 +280,61 @@ func TestDiffAddColumn(t *testing.T) {
 	}
 }
 
+// TestDiffAddGeneratedColumn guards a real bug found live-testing a demo
+// project: createTable's column-rendering loop has always handled
+// col.Generated (GENERATED ALWAYS AS (expr) STORED), but the separate
+// ALTER TABLE ADD COLUMN branch — used when a generated column is added to
+// an already-existing table, not declared with the table from the start —
+// never checked col.Generated at all, silently emitting a plain, ungenerated
+// column instead. Confirmed live: `dpg plan` for a table that already had an
+// `amount` column produced `ADD COLUMN "amount_with_tax" numeric(10,2);`
+// with no GENERATED clause whatsoever, for a column declared as
+// `GENERATED ALWAYS AS (amount * 1.08) STORED`.
+func TestDiffAddGeneratedColumn(t *testing.T) {
+	d := New()
+
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.orders", &snapshot.SnapObject{
+		Kind: "table",
+		Table: &snapshot.SnapTable{
+			Schema:  "public",
+			Name:    "orders",
+			Columns: []snapshot.SnapColumn{{Name: "amount", Type: "numeric"}},
+		},
+	})
+
+	desired := []pipeline.IRObject{
+		&ir.Table{
+			Schema: "public",
+			Name:   "orders",
+			Columns: []*ir.Column{
+				{Name: "amount", Type: ir.TypeRef{Name: "numeric"}},
+				{
+					Name: "amount_with_tax", Type: ir.TypeRef{Name: "numeric"},
+					Generated: &ir.Generated{Expr: "amount * 1.08", Stored: true},
+				},
+			},
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var addOp pipeline.DiffOp
+	for _, o := range ops {
+		if strings.Contains(o.SQL(), "ADD COLUMN") {
+			addOp = o
+			break
+		}
+	}
+	if addOp == nil {
+		t.Fatal("expected ADD COLUMN op")
+	}
+	if !strings.Contains(addOp.SQL(), "GENERATED ALWAYS AS (amount * 1.08) STORED") {
+		t.Errorf("expected GENERATED ALWAYS AS (...) STORED clause, got: %s", addOp.SQL())
+	}
+}
+
 func TestDiffDropColumn(t *testing.T) {
 	d := New()
 	snap := &pipeline.Snapshot{}
@@ -5598,6 +5653,89 @@ func TestDiffStatisticsNoSpuriousBodyDrift(t *testing.T) {
 	}
 	if len(ops) != 0 {
 		t.Fatalf("spurious drift for equivalent statistics spelling: %d ops: %v", len(ops), ops)
+	}
+}
+
+// TestCreateOpaqueSchemaScopedGetsSearchPath guards a real bug found
+// live-testing a demo project: opaque schema-scoped kinds (COLLATION,
+// OPERATOR, OPERATOR CLASS/FAMILY, STATISTICS, the 4 TEXT SEARCH kinds)
+// render their Body as deparsed from source, which only carries a
+// schema-qualified name if the user wrote one explicitly — DPG's own
+// tracked Schema (from directory placement or an enclosing SCHEMA { }
+// block) was never injected. Confirmed live: a STATISTICS object declared
+// under a non-public schema was created in `public` instead, silently
+// landing in the wrong place. Fixed via SET LOCAL search_path (the same
+// technique pg_dump itself uses) rather than rewriting each of the 9
+// differently-shaped CREATE statements to inject a qualified name.
+func TestCreateOpaqueSchemaScopedGetsSearchPath(t *testing.T) {
+	d := New()
+	desired := []pipeline.IRObject{
+		&ir.StatisticsObject{
+			Schema: "billing", Name: "billing_stats",
+			Body: "CREATE STATISTICS billing_stats (dependencies) ON status, amount FROM invoices",
+		},
+	}
+	ops, err := d.Diff(desired, &pipeline.Snapshot{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, o := range ops {
+		if strings.Contains(o.SQL(), "CREATE STATISTICS") {
+			found = true
+			if !strings.Contains(o.SQL(), `SET LOCAL search_path = "billing", public;`) {
+				t.Errorf("expected SET LOCAL search_path before the CREATE, got: %s", o.SQL())
+			}
+		}
+	}
+	if !found {
+		t.Fatal("expected a CREATE STATISTICS op")
+	}
+}
+
+// TestCreateOpaquePublicSchemaNoSearchPath guards the common case: an
+// object declared in the default "public" schema must not get a redundant
+// SET LOCAL, keeping generated migrations for the overwhelmingly common
+// case unchanged from before this fix.
+func TestCreateOpaquePublicSchemaNoSearchPath(t *testing.T) {
+	d := New()
+	desired := []pipeline.IRObject{
+		&ir.StatisticsObject{
+			Schema: "public", Name: "st",
+			Body: "CREATE STATISTICS st ON a, b FROM t",
+		},
+	}
+	ops, err := d.Diff(desired, &pipeline.Snapshot{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, o := range ops {
+		if strings.Contains(o.SQL(), "search_path") {
+			t.Errorf("did not expect a SET LOCAL search_path for the public schema, got: %s", o.SQL())
+		}
+	}
+}
+
+// TestCreateOpaqueNonSchemaScopedKindNoSearchPath guards CAST specifically:
+// unlike the other 9 createOpaque-routed kinds, it has no schema concept at
+// all in PostgreSQL (identified purely by its source/target type pair), so
+// it must never get a SET LOCAL regardless of anything resembling a schema.
+func TestCreateOpaqueNonSchemaScopedKindNoSearchPath(t *testing.T) {
+	d := New()
+	desired := []pipeline.IRObject{
+		&ir.Cast{
+			SourceType: ir.TypeRef{Name: "int4"}, TargetType: ir.TypeRef{Name: "bool"},
+			Body: "CREATE CAST (int4 AS bool) WITH INOUT AS IMPLICIT",
+		},
+	}
+	ops, err := d.Diff(desired, &pipeline.Snapshot{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, o := range ops {
+		if strings.Contains(o.SQL(), "search_path") {
+			t.Errorf("CAST has no schema concept, did not expect SET LOCAL search_path, got: %s", o.SQL())
+		}
 	}
 }
 

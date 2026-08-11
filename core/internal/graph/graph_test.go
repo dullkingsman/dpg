@@ -104,6 +104,125 @@ func TestSort_TypeBeforeTable(t *testing.T) {
 	assertBefore(t, sorted, "app.order_status", "app.orders")
 }
 
+// TestSort_FunctionBeforeTableTrigger guards a real bug found live-testing a
+// demo project: a table-level trigger's EXECUTE FUNCTION target (Trigger.Function,
+// already a structured field) was never turned into a graph edge — the earlier
+// working case only happened to order correctly by coincidental alphabetical
+// file-discovery order (a function file sorting before the table's own file),
+// not real dependency tracking, which is exactly what let the twin
+// EventTrigger bug (below) go unnoticed until file order happened to go the
+// other way.
+func TestSort_FunctionBeforeTableTrigger(t *testing.T) {
+	tbl := table("app", "orders")
+	tbl.Triggers = []*ir.Trigger{
+		{Name: "touch", When: "BEFORE", Events: []string{"UPDATE"}, ForEach: "ROW", Function: "touch_updated_at", Pos: pos},
+	}
+	fn := &ir.Function{Schema: "app", Name: "touch_updated_at", SrcPos: pos}
+	objects := []pipeline.IRObject{
+		schema("app"),
+		tbl,
+		fn,
+	}
+	sorted := sortObjects(t, objects)
+	assertBefore(t, sorted, "app.touch_updated_at()", "app.orders")
+}
+
+// TestSort_FunctionBeforeEventTrigger guards the same bug shape as
+// TestSort_FunctionBeforeTableTrigger for EVENT TRIGGER specifically — the
+// scenario actually found live-testing: an event trigger created before its
+// EXECUTE FUNCTION target failed at apply time ("function ... does not
+// exist") because event_triggers.dpg happened to sort alphabetically before
+// functions.dpg. Event triggers aren't schema-scoped, so an unqualified
+// function reference falls back to "public".
+func TestSort_FunctionBeforeEventTrigger(t *testing.T) {
+	evt := &ir.EventTrigger{Name: "log_ddl", Function: "log_ddl_command", SrcPos: pos}
+	fn := &ir.Function{Schema: "public", Name: "log_ddl_command", SrcPos: pos}
+	objects := []pipeline.IRObject{
+		evt,
+		fn,
+	}
+	sorted := sortObjects(t, objects)
+	assertBefore(t, sorted, "public.log_ddl_command()", "log_ddl")
+}
+
+// TestSort_FunctionBeforeOperatorClass guards the fifth instance of the same
+// bug shape (Trigger, EventTrigger, Cast, Operator, now OperatorClass) — the
+// trickiest to pin down: an initial test WITH an explicit FAMILY clause
+// appeared to pass even with adversarially reversed file names, but only
+// because the class→family edge happens to delay the class's readiness in
+// Kahn's algorithm's queue just long enough for the (genuinely edge-less)
+// function to slot in first — an even more fragile coincidence than plain
+// alphabetical luck, not a real fix. Removing FAMILY (relying on
+// PostgreSQL's own same-name auto-creation, so no family edge exists at
+// all) exposed the real bug cleanly. Unlike Cast/Operator's single
+// function, a class can declare several FUNCTION support-slots, so this
+// checks both a real edge is added for the referenced one.
+func TestSort_FunctionBeforeOperatorClass(t *testing.T) {
+	class := &ir.OperatorClass{
+		Schema: "public", Name: "op_repro_class", AccessMethod: "btree",
+		Functions: []string{"op_repro_cmp"}, SrcPos: pos,
+	}
+	fn := &ir.Function{
+		Schema: "public", Name: "op_repro_cmp",
+		Args:   []ir.FuncArg{{Type: ir.TypeRef{Name: "text"}}, {Type: ir.TypeRef{Name: "text"}}},
+		SrcPos: pos,
+	}
+	objects := []pipeline.IRObject{class, fn}
+	sorted := sortObjects(t, objects)
+	assertBefore(t, sorted, "public.op_repro_cmp(text, text)", "public.op_repro_class USING btree")
+}
+
+// TestSort_FunctionBeforeOperator guards the fourth instance of the same bug
+// shape (Trigger, EventTrigger, Cast, now Operator): found by proactively
+// checking, since the same "opaque object references a function" pattern
+// had already broken three times — an operator's PROCEDURE reference is not
+// tracked by the dependency graph either. Reproduced with adversarially
+// reversed file names (an "a_operators.dpg" sorting before "z_functions.dpg")
+// to prove the demo project's own passing case was just alphabetical luck,
+// not a real fix, exactly like the other three. Matched by prefix like Cast,
+// not the exact zero-arg key Trigger/EventTrigger use, since an operator's
+// function always takes real arguments (its operand types).
+func TestSort_FunctionBeforeOperator(t *testing.T) {
+	leftType, rightType := ir.TypeRef{Name: "bigint"}, ir.TypeRef{Name: "bigint"}
+	op := &ir.Operator{
+		Schema: "public", Name: "##%",
+		LeftType: &leftType, RightType: &rightType,
+		Function: "op_repro_fn", SrcPos: pos,
+	}
+	fn := &ir.Function{
+		Schema: "public", Name: "op_repro_fn",
+		Args:   []ir.FuncArg{{Type: ir.TypeRef{Name: "bigint"}}, {Type: ir.TypeRef{Name: "bigint"}}},
+		SrcPos: pos,
+	}
+	objects := []pipeline.IRObject{op, fn}
+	sorted := sortObjects(t, objects)
+	assertBefore(t, sorted, "public.op_repro_fn(bigint, bigint)", "public.##%(bigint, bigint)")
+}
+
+// TestSort_FunctionBeforeCast guards the same bug shape as
+// TestSort_FunctionBeforeEventTrigger/TestSort_FunctionBeforeTableTrigger for
+// CAST's WITH FUNCTION target — found live-testing a demo project:
+// CREATE CAST ... WITH FUNCTION order_status_to_int(order_status) failed at
+// apply time with "function ... does not exist" because casts.dpg happened
+// to sort alphabetically before functions.dpg. Unlike a trigger's
+// always-zero-argument function, a cast's function takes the source type as
+// a real argument, so the edge is matched by "schema.name(" prefix against
+// every Function object rather than an exact zero-arg key.
+func TestSort_FunctionBeforeCast(t *testing.T) {
+	cast := &ir.Cast{
+		SourceType: ir.TypeRef{Name: "order_status"}, TargetType: ir.TypeRef{Name: "integer"},
+		Function: "order_status_to_int", SrcPos: pos,
+	}
+	fn := &ir.Function{
+		Schema: "public", Name: "order_status_to_int",
+		Args:   []ir.FuncArg{{Type: ir.TypeRef{Name: "order_status"}}},
+		SrcPos: pos,
+	}
+	objects := []pipeline.IRObject{cast, fn}
+	sorted := sortObjects(t, objects)
+	assertBefore(t, sorted, "public.order_status_to_int(order_status)", "order_status->integer")
+}
+
 func TestSort_FKDependency(t *testing.T) {
 	orders := table("app", "orders",
 		fk(`FOREIGN KEY (user_id) REFERENCES app.users (id)`, false),
@@ -343,4 +462,37 @@ func TestSort_TSDictBuiltinTemplateNoError(t *testing.T) {
 	if _, err := graph.New().Sort(objects); err != nil {
 		t.Fatalf("TS dict referencing a built-in template must not error: %v", err)
 	}
+}
+
+// TestSort_FunctionBeforeTSTemplate guards the sixth instance of the same
+// bug shape (Trigger, EventTrigger, Cast, Operator, OperatorClass, now
+// TSTemplate): CREATE TEXT SEARCH TEMPLATE's INIT/LEXIZE support functions
+// were not tracked by the dependency graph either — found by proactively
+// checking every remaining opaque-body kind after the pattern held five
+// times running. Custom TS template functions require C in practice (the
+// required internal-Datum return type can't be produced from SQL/PLpgSQL),
+// so this guards a real ordering hazard that's harder to hit than the other
+// five, not one that's impractical to ever occur — a DPG project with a
+// real C extension declaring its support functions via a normal FUNCTION
+// object (LANGUAGE c) would still hit this.
+func TestSort_FunctionBeforeTSTemplate(t *testing.T) {
+	tmpl := &ir.TSTemplate{Schema: "public", Name: "my_tmpl", Functions: []string{"ts_init", "ts_lexize"}, SrcPos: pos}
+	initFn := &ir.Function{Schema: "public", Name: "ts_init", SrcPos: pos}
+	lexizeFn := &ir.Function{Schema: "public", Name: "ts_lexize", SrcPos: pos}
+	objects := []pipeline.IRObject{tmpl, initFn, lexizeFn}
+	sorted := sortObjects(t, objects)
+	assertBefore(t, sorted, "public.ts_init()", "public.my_tmpl")
+	assertBefore(t, sorted, "public.ts_lexize()", "public.my_tmpl")
+}
+
+// TestSort_FunctionBeforeTSParser guards the same bug shape for CREATE TEXT
+// SEARCH PARSER's START/GETTOKEN/END/LEXTYPES support functions.
+func TestSort_FunctionBeforeTSParser(t *testing.T) {
+	prs := &ir.TSParser{Schema: "public", Name: "my_prs", Functions: []string{"ts_start", "ts_gettoken"}, SrcPos: pos}
+	startFn := &ir.Function{Schema: "public", Name: "ts_start", SrcPos: pos}
+	gettokenFn := &ir.Function{Schema: "public", Name: "ts_gettoken", SrcPos: pos}
+	objects := []pipeline.IRObject{prs, startFn, gettokenFn}
+	sorted := sortObjects(t, objects)
+	assertBefore(t, sorted, "public.ts_start()", "public.my_prs")
+	assertBefore(t, sorted, "public.ts_gettoken()", "public.my_prs")
 }

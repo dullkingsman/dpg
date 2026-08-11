@@ -3324,14 +3324,13 @@ SCHEMA public {
 SCHEMA public {
     OPERATOR FAMILY my_family USING btree;
 
-    OPERATOR CLASS my_ops USING btree FOR TYPE mytype (
-        OPERATOR 1 <  ,
-        OPERATOR 2 <= ,
-        OPERATOR 3 =  ,
-        OPERATOR 4 >= ,
-        OPERATOR 5 >  ,
-        FUNCTION 1 mytype_cmp(mytype, mytype)
-    );
+    OPERATOR CLASS my_ops FOR TYPE mytype USING btree FAMILY my_family AS
+        OPERATOR 1 <,
+        OPERATOR 2 <=,
+        OPERATOR 3 =,
+        OPERATOR 4 >=,
+        OPERATOR 5 >,
+        FUNCTION 1 mytype_cmp(mytype, mytype);
 }
 ```
 

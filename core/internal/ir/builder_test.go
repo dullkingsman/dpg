@@ -192,6 +192,53 @@ func TestBuildView(t *testing.T) {
 	}
 }
 
+// TestBuildMaterializedView guards a real bug found live-testing a demo
+// project: pg_query parses CREATE MATERIALIZED VIEW as CreateTableAsStmt
+// (Objtype == OBJECT_MATVIEW), not ViewStmt like a plain CREATE VIEW —
+// PostgreSQL's own grammar implements it as a CREATE TABLE AS variant.
+// Build's switch had no case for CreateTableAsStmt at all, so every
+// MATERIALIZED VIEW silently fell through to the generic default case (an
+// empty, nameless OpaqueObject) — confirmed live: `dpg plan` reported
+// "-- (no changes)" for a newly-declared MATERIALIZED VIEW instead of a
+// CREATE, because the malformed object's QualifiedName() was "" and never
+// matched anything, in either direction of the diff.
+func TestBuildMaterializedView(t *testing.T) {
+	obj := buildObject(t, pipeline.KindMaterializedView,
+		`order_status_summary AS SELECT status, count(*) AS order_count FROM orders GROUP BY status`,
+		`COMMENT 'Order counts by status';`,
+	)
+	v, ok := obj.(*ir.View)
+	if !ok {
+		t.Fatalf("expected *ir.View, got %T", obj)
+	}
+	if v.Name != "order_status_summary" {
+		t.Errorf("Name: got %q, want %q", v.Name, "order_status_summary")
+	}
+	if !v.Materialized {
+		t.Error("Materialized: got false, want true")
+	}
+	if v.Comment == nil || *v.Comment != "Order counts by status" {
+		t.Errorf("Comment: got %v", v.Comment)
+	}
+	if v.Query == "" {
+		t.Error("Query: got empty, want the deparsed SELECT")
+	}
+}
+
+// TestBuildMaterializedViewWithNoData guards the WITH NO DATA clause, which
+// has no ViewStmt counterpart at all (it's CreateTableAsStmt.Into.SkipData) —
+// a distinct field from anything buildView already handled.
+func TestBuildMaterializedViewWithNoData(t *testing.T) {
+	obj := buildObject(t, pipeline.KindMaterializedView,
+		`order_status_summary AS SELECT status, count(*) AS order_count FROM orders GROUP BY status WITH NO DATA`,
+		``,
+	)
+	v := obj.(*ir.View)
+	if !v.WithNoData {
+		t.Error("WithNoData: got false, want true")
+	}
+}
+
 // ── Enum ──────────────────────────────────────────────────────────────────────
 
 func TestBuildEnum(t *testing.T) {
@@ -213,6 +260,84 @@ func TestBuildEnum(t *testing.T) {
 		t.Errorf("EnumValues: got %d", len(tp.EnumValues))
 	}
 	if tp.Comment == nil || *tp.Comment != "User lifecycle states" {
+		t.Errorf("Comment: got %v", tp.Comment)
+	}
+}
+
+// TestBuildCompositeType guards a real bug found live-testing a demo
+// project, the same shape as TestBuildMaterializedView above: pg_query
+// parses CREATE TYPE name AS (attr type, ...) as its own distinct node,
+// CompositeTypeStmt — unlike CREATE TYPE name AS ENUM (...), which parses as
+// CreateEnumStmt. Build's switch had no case for CompositeTypeStmt at all,
+// so every composite type declaration silently fell through to the generic
+// default case (an empty, nameless OpaqueObject), even though ir.Type
+// already had a "COMPOSITE" Variant and CompositeAttrs field fully wired
+// through differ.go and snapshot/convert.go — just never reachable from
+// source. Confirmed live: `dpg plan` reported "-- (no changes)" for a
+// newly-declared composite TYPE instead of a CREATE.
+func TestBuildCompositeType(t *testing.T) {
+	obj := buildObject(t, pipeline.KindCompositeType,
+		`address AS (street text, city text, zip text)`,
+		`COMMENT 'A postal address';`,
+	)
+	tp, ok := obj.(*ir.Type)
+	if !ok {
+		t.Fatalf("expected *ir.Type, got %T", obj)
+	}
+	if tp.Variant != "COMPOSITE" {
+		t.Errorf("Variant: got %q, want %q", tp.Variant, "COMPOSITE")
+	}
+	if tp.Name != "address" {
+		t.Errorf("Name: got %q, want %q", tp.Name, "address")
+	}
+	if len(tp.CompositeAttrs) != 3 {
+		t.Fatalf("CompositeAttrs: got %d, want 3", len(tp.CompositeAttrs))
+	}
+	wantNames := []string{"street", "city", "zip"}
+	for i, want := range wantNames {
+		if tp.CompositeAttrs[i].Name != want {
+			t.Errorf("CompositeAttrs[%d].Name: got %q, want %q", i, tp.CompositeAttrs[i].Name, want)
+		}
+		if tp.CompositeAttrs[i].Type.Name != "text" {
+			t.Errorf("CompositeAttrs[%d].Type: got %q, want %q", i, tp.CompositeAttrs[i].Type.Name, "text")
+		}
+	}
+	if tp.Comment == nil || *tp.Comment != "A postal address" {
+		t.Errorf("Comment: got %v", tp.Comment)
+	}
+}
+
+// TestBuildRangeType guards a real bug found live-testing a demo project,
+// the same shape as TestBuildMaterializedView/TestBuildCompositeType above:
+// CREATE TYPE name AS RANGE (options) parses as its own distinct node,
+// CreateRangeStmt — the third of three CREATE TYPE variants pg_query splits
+// into dedicated node types (ENUM -> CreateEnumStmt, composite ->
+// CompositeTypeStmt, range -> CreateRangeStmt), none of which is DefineStmt.
+// Build's switch had no case for CreateRangeStmt at all, so every range type
+// declaration silently fell through to the generic default case (an empty,
+// nameless OpaqueObject) — confirmed live: `dpg plan` reported
+// "-- (no changes)" for a newly-declared range TYPE instead of a CREATE.
+// Notably, buildDefineStmt already has dead "isRange" detection logic for a
+// DefineStmt shape pg_query v6 simply never produces for this syntax.
+func TestBuildRangeType(t *testing.T) {
+	obj := buildObject(t, pipeline.KindRangeType,
+		`price_range AS RANGE (SUBTYPE = numeric)`,
+		`COMMENT 'A price range';`,
+	)
+	tp, ok := obj.(*ir.Type)
+	if !ok {
+		t.Fatalf("expected *ir.Type, got %T", obj)
+	}
+	if tp.Variant != "RANGE" {
+		t.Errorf("Variant: got %q, want %q", tp.Variant, "RANGE")
+	}
+	if tp.Name != "price_range" {
+		t.Errorf("Name: got %q, want %q", tp.Name, "price_range")
+	}
+	if tp.Body == "" {
+		t.Error("Body: got empty, want the deparsed CREATE TYPE statement")
+	}
+	if tp.Comment == nil || *tp.Comment != "A price range" {
 		t.Errorf("Comment: got %v", tp.Comment)
 	}
 }
@@ -356,6 +481,51 @@ func TestBuildFunctionArgTypeNeverSetOf(t *testing.T) {
 	fn := obj.(*ir.Function)
 	if fn.Args[0].Type.SetOf {
 		t.Error("Args[0].Type.SetOf: got true, want false (SETOF is only valid on RETURNS)")
+	}
+}
+
+// TestBuildColumnTypeModifiers guards three stacked bugs found live-testing
+// a throwaway demo project (numeric(10,2)/varchar(50)/timestamptz(3) columns
+// all silently lost their modifier in generated DDL):
+//  1. typmodString read a typmod literal via Node.GetInteger(), but pg_query
+//     wraps it in an A_Const node instead (confirmed via a direct pg_query.Parse
+//     probe) — GetInteger() always returned nil, so the whole function always
+//     returned "" regardless of type.
+//  2. Once (1) was fixed, character/varchar's case incorrectly subtracted 4
+//     from the value (a live-catalog atttypmod encoding quirk that does NOT
+//     apply to the parse tree's plain literal typmod — this function is only
+//     ever fed from source-parsed TypeName nodes, never a live atttypmod).
+//  3. Once (1) and (2) were fixed, timestamptz/timetz's switch case only
+//     matched their short internal name, but typeNameToRef always runs the
+//     name through pgCatalogName first, which renames them to the long form
+//     ("timestamp with time zone") before typmodString ever sees it — so the
+//     case never matched and the modifier was dropped a third way.
+//
+// Also guards TypeRef.String() splicing the modifier in the right position
+// for the "with time zone" family specifically: PostgreSQL requires
+// "timestamp(3) with time zone", and errors on "timestamp with time
+// zone(3)" — confirmed live via format_type() against a real column.
+func TestBuildColumnTypeModifiers(t *testing.T) {
+	obj := buildObject(t, pipeline.KindTable,
+		`t (
+			a NUMERIC(10,2),
+			b VARCHAR(50),
+			c TIMESTAMPTZ(3),
+			d TIME(2) WITH TIME ZONE
+		)`,
+		``,
+	)
+	tbl := obj.(*ir.Table)
+	want := map[string]string{
+		"a": "numeric(10,2)",
+		"b": "character varying(50)",
+		"c": "timestamp(3) with time zone",
+		"d": "time(2) with time zone",
+	}
+	for _, col := range tbl.Columns {
+		if w, ok := want[col.Name]; ok && col.Type.String() != w {
+			t.Errorf("column %s: got %q, want %q", col.Name, col.Type.String(), w)
+		}
 	}
 }
 

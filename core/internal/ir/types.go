@@ -6,6 +6,7 @@ package ir
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/dullkingsman/dpg/internal/pipeline"
 )
@@ -39,7 +40,18 @@ type TypeRef struct {
 func (t TypeRef) String() string {
 	s := qualName(t.Schema, t.Name)
 	if t.Mods != "" {
-		s += t.Mods
+		// PostgreSQL's "... with time zone" types take their precision
+		// immediately after the base keyword, not at the end of the full
+		// name — "timestamp(3) with time zone", never "timestamp with time
+		// zone(3)" (the latter is a syntax error; confirmed live via
+		// format_type() against a real column). Every other modifier-bearing
+		// type (numeric, character varying, plain time/timestamp) has no
+		// trailing qualifier, so appending at the end is correct for them.
+		if idx := strings.Index(s, " with time zone"); idx >= 0 {
+			s = s[:idx] + t.Mods + s[idx:]
+		} else {
+			s += t.Mods
+		}
 	}
 	for i := 0; i < t.ArrayDims; i++ {
 		s += "[]"
@@ -573,7 +585,13 @@ func (s *Subscription) irObject()               {}
 
 // EventTrigger is a CREATE EVENT TRIGGER declaration.
 type EventTrigger struct {
-	Name          string
+	Name string
+	// Function is the qualified name of the EXECUTE FUNCTION target, extracted
+	// separately from Body for the dependency graph — an event trigger created
+	// before the function it calls exists fails at apply time (confirmed
+	// live: "function ... does not exist"), and nothing else in the IR
+	// records this reference since EventTrigger is otherwise fully opaque.
+	Function      string
 	Body          string
 	Reconstructed bool // Body rebuilt from the catalog; see Tablespace.Reconstructed
 	SrcPos        pipeline.SourcePos
@@ -604,8 +622,15 @@ type Operator struct {
 	// a unary/prefix operator omits — PostgreSQL requires RightType in
 	// practice since postfix operators were removed in PG14, but this
 	// mirrors the grammar's actual optionality rather than assuming it).
-	LeftType      *TypeRef
-	RightType     *TypeRef
+	LeftType  *TypeRef
+	RightType *TypeRef
+	// Function is the qualified name of the PROCEDURE target, extracted
+	// separately from Body for the dependency graph — same reasoning as
+	// EventTrigger.Function/Cast.Function: an operator created before its
+	// function exists fails at apply time ("function ... does not exist"),
+	// and nothing else in the IR records this reference since Operator is
+	// otherwise fully opaque.
+	Function      string
 	Body          string
 	Reconstructed bool // Body rebuilt from the catalog; see Tablespace.Reconstructed
 	SrcPos        pipeline.SourcePos
@@ -655,8 +680,17 @@ type OperatorClass struct {
 	// "implicit same-name family" special case). Empty FamilyName is only
 	// possible for hand-written source that omits FAMILY, relying on
 	// PostgreSQL's own same-name auto-creation.
-	FamilySchema  string
-	FamilyName    string
+	FamilySchema string
+	FamilyName   string
+	// Functions holds the qualified names of every FUNCTION support-item
+	// target in the class body (a class can declare several, numbered per
+	// support-function slot — e.g. FUNCTION 1/2/3/4 for btree). Populated
+	// purely for dependency-edge ordering, same reasoning as
+	// EventTrigger.Function/Cast.Function/Operator.Function: a class
+	// created before one of its support functions exists fails at apply
+	// time, and nothing else in the IR records these references since the
+	// class is otherwise fully opaque.
+	Functions     []string
 	Body          string
 	Reconstructed bool // Body rebuilt from the catalog; see Tablespace.Reconstructed
 	SrcPos        pipeline.SourcePos
@@ -695,8 +729,16 @@ func (o *OperatorFamily) irObject()               {}
 
 // Cast is a CREATE CAST declaration.
 type Cast struct {
-	SourceType    TypeRef
-	TargetType    TypeRef
+	SourceType TypeRef
+	TargetType TypeRef
+	// Function is the qualified name of the WITH FUNCTION target, extracted
+	// separately from Body for the dependency graph — empty for WITHOUT
+	// FUNCTION/WITH INOUT casts, which have no function to order against.
+	// Same reasoning as EventTrigger.Function: a cast created before its
+	// function exists fails at apply time ("function ... does not exist"),
+	// and nothing else in the IR records this reference since Cast is
+	// otherwise fully opaque.
+	Function      string
 	Body          string
 	Reconstructed bool // Body rebuilt from the catalog; see Tablespace.Reconstructed
 	SrcPos        pipeline.SourcePos
@@ -765,8 +807,19 @@ func (t *TSDict) irObject()               {}
 
 // TSParser is a CREATE TEXT SEARCH PARSER declaration.
 type TSParser struct {
-	Schema        string
-	Name          string
+	Schema string
+	Name   string
+	// Functions holds the qualified names of the parser's START/GETTOKEN/
+	// END/LEXTYPES/HEADLINE support functions. Populated purely for
+	// dependency-edge ordering (see graph.go) — same reasoning as
+	// OperatorClass.Functions: a parser created before one of its support
+	// functions exists fails at apply time, and nothing else in the IR
+	// records these references since the parser is otherwise fully opaque.
+	// In practice these almost always name a pg_catalog built-in (custom
+	// ones require C, since the required internal return types can't be
+	// produced from SQL/PLpgSQL) — never errors when unresolved, same as
+	// every other soft reference in this file.
+	Functions     []string
 	Body          string
 	Reconstructed bool // Body rebuilt from the catalog; see Tablespace.Reconstructed
 	SrcPos        pipeline.SourcePos
@@ -778,8 +831,11 @@ func (t *TSParser) irObject()               {}
 
 // TSTemplate is a CREATE TEXT SEARCH TEMPLATE declaration.
 type TSTemplate struct {
-	Schema        string
-	Name          string
+	Schema string
+	Name   string
+	// Functions holds the qualified names of the template's INIT/LEXIZE
+	// support functions — same reasoning as TSParser.Functions.
+	Functions     []string
 	Body          string
 	Reconstructed bool // Body rebuilt from the catalog; see Tablespace.Reconstructed
 	SrcPos        pipeline.SourcePos

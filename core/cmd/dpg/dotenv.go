@@ -18,20 +18,19 @@ import (
 //  2. <project-root>/.env
 //
 // Existing environment variables are never overwritten (process env wins).
-// Only called when at least one cluster uses a link: connection string, so
-// offline-only commands (plan, diff, portability) skip this entirely.
+// Callers already gate when this runs (apply/verify/dump unconditionally;
+// plan only under --live) — offline-only commands (plan without --live,
+// diff, portability) never call this at all. A prior version additionally
+// gated internally on "at least one cluster uses a link: connection
+// string", which was wrong: a project using a plain url= connection can
+// still reference {{env:VAR}} elsewhere (ROLE PASSWORD, SUBSCRIPTION
+// CONNECTION, USER MAPPING OPTIONS — the secret-reference mechanism is
+// independent of how the cluster itself connects), and that project's .env
+// was silently never read, forcing --env or manual export every time even
+// though the file was present and correctly named. Confirmed live: a demo
+// project with url= and a ROLE PASSWORD '{{env:...}}' failed to resolve
+// with .env present until --env was passed explicitly.
 func loadEnv(proj *project.Project, envFilePath string) {
-	needsEnv := false
-	for _, cl := range proj.Clusters {
-		if cl.IsLink() {
-			needsEnv = true
-			break
-		}
-	}
-	if !needsEnv && envFilePath == "" {
-		return
-	}
-
 	path := envFilePath
 	if path == "" {
 		path = filepath.Join(proj.RootDir, ".env")

@@ -48,10 +48,22 @@ func (b *Builder) Build(pg pipeline.PGParseResult, block pipeline.BlockAST) (pip
 		obj, err = b.buildForeignTable(n.CreateForeignTableStmt, block, pos)
 	case *pg_query.Node_ViewStmt:
 		obj, err = b.buildView(n.ViewStmt, block, pos, false, false)
+	case *pg_query.Node_CreateTableAsStmt:
+		if n.CreateTableAsStmt.Objtype == pg_query.ObjectType_OBJECT_MATVIEW {
+			obj, err = b.buildMaterializedView(n.CreateTableAsStmt, block, pos)
+		} else {
+			// Plain "CREATE TABLE ... AS SELECT ..." — not a DPG-documented
+			// table-declaration form (tables are declared via an explicit
+			// column list, RFC §4); falls through to the generic opaque
+			// fallback below, unchanged from before this case existed.
+			obj = &OpaqueObject{kind: "UNKNOWN", body: "", SrcPos: pos}
+		}
 	case *pg_query.Node_CreateFunctionStmt:
 		obj, err = b.buildFunction(n.CreateFunctionStmt, pg, block, pos)
 	case *pg_query.Node_CreateEnumStmt:
 		obj, err = b.buildEnum(n.CreateEnumStmt, block, pos)
+	case *pg_query.Node_CompositeTypeStmt:
+		obj, err = b.buildCompositeType(n.CompositeTypeStmt, block, pos)
 	case *pg_query.Node_CreateSchemaStmt:
 		obj, err = b.buildSchema(n.CreateSchemaStmt, block, pos)
 	case *pg_query.Node_CreateExtensionStmt:
@@ -78,6 +90,8 @@ func (b *Builder) Build(pg pipeline.PGParseResult, block pipeline.BlockAST) (pip
 		obj, err = b.buildDefineStmt(n.DefineStmt, block, pos, rawSQL(node))
 	case *pg_query.Node_CreateDomainStmt:
 		obj, err = b.buildDomain(n.CreateDomainStmt, block, pos, rawSQL(node))
+	case *pg_query.Node_CreateRangeStmt:
+		obj, err = b.buildRangeType(n.CreateRangeStmt, block, pos, rawSQL(node))
 	case *pg_query.Node_CreateOpClassStmt:
 		obj, err = b.buildOpaque(node, block, pos, "OPERATOR CLASS")
 	case *pg_query.Node_CreateOpFamilyStmt:
@@ -986,6 +1000,61 @@ func (b *Builder) buildView(vs *pg_query.ViewStmt, block pipeline.BlockAST, pos 
 	return v, nil
 }
 
+// buildMaterializedView handles CREATE MATERIALIZED VIEW, which — unlike a
+// plain CREATE VIEW — pg_query parses as CreateTableAsStmt (Objtype ==
+// OBJECT_MATVIEW), not ViewStmt: PostgreSQL's own grammar implements
+// MATERIALIZED VIEW as a variant of CREATE TABLE AS, confirmed via a direct
+// pg_query.Parse probe. Before this, Build's switch had no case for
+// CreateTableAsStmt at all, so every MATERIALIZED VIEW silently fell through
+// to the generic default case (an empty, nameless OpaqueObject) — found
+// live-testing a demo project: dpg plan reported "-- (no changes)" for a
+// newly-added MATERIALIZED VIEW instead of a CREATE, because the malformed
+// object's QualifiedName() was "", not the declared name. This is the
+// analogous fix to buildView, adapted for CreateTableAsStmt's differently
+// -shaped fields (Into.Rel instead of View, Into.SkipData instead of no
+// equivalent — WITH NO DATA has no ViewStmt counterpart at all).
+func (b *Builder) buildMaterializedView(cta *pg_query.CreateTableAsStmt, block pipeline.BlockAST, pos pipeline.SourcePos) (pipeline.IRObject, error) {
+	v := &View{
+		Materialized: true,
+		WithNoData:   cta.Into.SkipData,
+		SrcPos:       pos,
+	}
+	if cta.Into != nil && cta.Into.Rel != nil {
+		v.Schema = rangeVarSchema(cta.Into.Rel)
+		v.Name = cta.Into.Rel.Relname
+	}
+	// Deparse the query as a full statement, not as a subexpression — same
+	// pattern as buildView.
+	if cta.Query != nil {
+		pr := &pg_query.ParseResult{Stmts: []*pg_query.RawStmt{{Stmt: cta.Query}}}
+		if sql, err := pg_query.Deparse(pr); err == nil {
+			v.Query = sql
+		} else {
+			v.Query = nodeToText(cta.Query)
+		}
+	}
+	if block.Comment != nil {
+		v.Comment = &block.Comment.Value
+	}
+	if block.Owner != nil {
+		v.Owner = &block.Owner.Name
+	}
+	if block.RenamedFrom != nil {
+		v.RenamedFrom = &block.RenamedFrom.Name
+	}
+	if block.Deprecated != nil {
+		v.Deprecated = &block.Deprecated.Value
+	}
+	for _, g := range block.Grants {
+		v.Grants = append(v.Grants, blockGrantToIR(g))
+	}
+	for _, r := range block.Revocations {
+		v.Revocations = append(v.Revocations, blockRevocationToIR(r))
+	}
+	v.NameMaps = block.NameMaps
+	return v, nil
+}
+
 // ── Function / Procedure ──────────────────────────────────────────────────────
 
 func (b *Builder) buildFunction(cfs *pg_query.CreateFunctionStmt, pg pipeline.PGParseResult, block pipeline.BlockAST, pos pipeline.SourcePos) (pipeline.IRObject, error) {
@@ -1216,6 +1285,57 @@ func (b *Builder) buildEnum(cs *pg_query.CreateEnumStmt, block pipeline.BlockAST
 	return t, nil
 }
 
+// buildCompositeType handles CREATE TYPE name AS (attr type, ...), which
+// pg_query parses as its own distinct node type, CompositeTypeStmt — unlike
+// CREATE TYPE name AS ENUM (...), which parses as CreateEnumStmt. Build's
+// switch had no case for CompositeTypeStmt at all, so every composite type
+// declaration silently fell through to the generic default case (an empty,
+// nameless OpaqueObject) — the exact same bug shape found and fixed for
+// MATERIALIZED VIEW (CreateTableAsStmt) earlier the same session: fields
+// existed end-to-end downstream (ir.Type.Variant == "COMPOSITE",
+// CompositeAttrs; differ.go's diffType and snapshot's toSnapType both
+// already handled it), just never reachable because nothing ever built one
+// from source. Confirmed live: dpg plan reported "-- (no changes)" for a
+// newly-declared composite TYPE instead of a CREATE.
+//
+// Coldeflist elements are ColumnDef nodes, identically shaped to a table's
+// column list — reuses buildColumn rather than re-implementing type/typmod
+// extraction. Composite type attributes can't carry inline constraints in
+// valid PostgreSQL syntax, so any constraints buildColumn would have
+// promoted are simply unreachable here, not silently dropped.
+func (b *Builder) buildCompositeType(cs *pg_query.CompositeTypeStmt, block pipeline.BlockAST, pos pipeline.SourcePos) (pipeline.IRObject, error) {
+	t := &Type{
+		Variant: "COMPOSITE",
+		SrcPos:  pos,
+	}
+	if cs.Typevar != nil {
+		t.Schema = rangeVarSchema(cs.Typevar)
+		t.Name = cs.Typevar.Relname
+	}
+	for _, node := range cs.Coldeflist {
+		cd := node.GetColumnDef()
+		if cd == nil {
+			continue
+		}
+		col, _, err := b.buildColumn(cd, pos)
+		if err != nil {
+			return nil, err
+		}
+		t.CompositeAttrs = append(t.CompositeAttrs, col)
+	}
+	if block.Comment != nil {
+		t.Comment = &block.Comment.Value
+	}
+	if block.Owner != nil {
+		t.Owner = &block.Owner.Name
+	}
+	if block.Deprecated != nil {
+		t.Deprecated = &block.Deprecated.Value
+	}
+	t.NameMaps = block.NameMaps
+	return t, nil
+}
+
 func extractTypeName(names []*pg_query.Node) (schema, name string) {
 	switch len(names) {
 	case 1:
@@ -1252,6 +1372,17 @@ func defElemQualifiedName(definition []*pg_query.Node, defname string) (schema, 
 		}
 	}
 	return "", ""
+}
+
+// joinQualName combines a schema+name pair into the single dotted string
+// Trigger.Function/Cast.Function/Operator.Function/TSParser.Functions/etc.
+// all use for dependency-edge lookups — schema omitted entirely when empty,
+// matching how an unqualified reference is written in source.
+func joinQualName(schema, name string) string {
+	if schema == "" {
+		return name
+	}
+	return schema + "." + name
 }
 
 // ── Schema ────────────────────────────────────────────────────────────────────
@@ -1502,6 +1633,39 @@ func (b *Builder) buildDomain(cs *pg_query.CreateDomainStmt, block pipeline.Bloc
 	return t, nil
 }
 
+// buildRangeType handles CREATE TYPE name AS RANGE (options), the third
+// distinct CREATE TYPE node kind pg_query parses (alongside CreateEnumStmt
+// for ENUM and CompositeTypeStmt for composite) — confirmed via a direct
+// pg_query.Parse probe that it produces CreateRangeStmt, never DefineStmt.
+// Build's switch had no case for CreateRangeStmt at all, so every range type
+// declaration silently fell through to the generic default case (an empty,
+// nameless OpaqueObject) — the same bug shape as buildMaterializedView and
+// buildCompositeType, found immediately after those two the same session.
+// Notably, buildDefineStmt (below) already contains dead "isRange"/
+// "isComposite" detection logic for a DefineStmt-shaped CREATE TYPE that
+// pg_query v6 simply never produces for RANGE or composite types anymore —
+// that heuristic is only still reachable (and only ever resolves to "BASE")
+// for the bare CREATE TYPE name (INPUT = ..., OUTPUT = ...) base-type form.
+// Kept as Variant "RANGE" + opaque Body (like DOMAIN/BASE), matching the
+// existing ir.Type.Body doc comment ("raw Part1 for range/domain/base") and
+// differ.go's existing "any change = DROP TYPE CASCADE + CREATE TYPE"
+// handling for that variant — no new diff/dump wiring needed.
+func (b *Builder) buildRangeType(cs *pg_query.CreateRangeStmt, block pipeline.BlockAST, pos pipeline.SourcePos, body string) (pipeline.IRObject, error) {
+	schema, name := extractTypeName(cs.TypeName)
+	t := &Type{
+		Schema:  schema,
+		Name:    name,
+		Variant: "RANGE",
+		Body:    body,
+		SrcPos:  pos,
+	}
+	if block.Comment != nil {
+		t.Comment = &block.Comment.Value
+	}
+	t.NameMaps = block.NameMaps
+	return t, nil
+}
+
 // ── Statistics ────────────────────────────────────────────────────────────────
 
 func (b *Builder) buildStatistics(cs *pg_query.CreateStatsStmt, block pipeline.BlockAST, pos pipeline.SourcePos, body string) (pipeline.IRObject, error) {
@@ -1600,6 +1764,12 @@ func (b *Builder) buildDefineStmt(ds *pg_query.DefineStmt, block pipeline.BlockA
 				op.RightType = &t
 			}
 		}
+		if funcSchema, funcName := defElemQualifiedName(ds.Definition, "procedure"); funcName != "" {
+			op.Function = funcName
+			if funcSchema != "" {
+				op.Function = funcSchema + "." + funcName
+			}
+		}
 		return op, nil
 
 	case pg_query.ObjectType_OBJECT_COLLATION:
@@ -1620,10 +1790,22 @@ func (b *Builder) buildDefineStmt(ds *pg_query.DefineStmt, block pipeline.BlockA
 		return td, nil
 
 	case pg_query.ObjectType_OBJECT_TSPARSER:
-		return &TSParser{Schema: schema, Name: name, Body: rawBody, SrcPos: pos}, nil
+		var funcs []string
+		for _, key := range []string{"start", "gettoken", "end", "lextypes", "headline"} {
+			if fnSchema, fnName := defElemQualifiedName(ds.Definition, key); fnName != "" {
+				funcs = append(funcs, joinQualName(fnSchema, fnName))
+			}
+		}
+		return &TSParser{Schema: schema, Name: name, Functions: funcs, Body: rawBody, SrcPos: pos}, nil
 
 	case pg_query.ObjectType_OBJECT_TSTEMPLATE:
-		return &TSTemplate{Schema: schema, Name: name, Body: rawBody, SrcPos: pos}, nil
+		var funcs []string
+		for _, key := range []string{"init", "lexize"} {
+			if fnSchema, fnName := defElemQualifiedName(ds.Definition, key); fnName != "" {
+				funcs = append(funcs, joinQualName(fnSchema, fnName))
+			}
+		}
+		return &TSTemplate{Schema: schema, Name: name, Functions: funcs, Body: rawBody, SrcPos: pos}, nil
 	}
 
 	return &OpaqueObject{kind: ds.Kind.String(), body: name, SrcPos: pos}, nil
@@ -1654,6 +1836,13 @@ func (b *Builder) buildCast(cs *pg_query.CreateCastStmt, _ pipeline.BlockAST, po
 	}
 	if cs.Targettype != nil {
 		c.TargetType = typeNameToRef(cs.Targettype)
+	}
+	if cs.Func != nil {
+		funcSchema, funcName := extractTypeName(cs.Func.Objname)
+		c.Function = funcName
+		if funcSchema != "" {
+			c.Function = funcSchema + "." + funcName
+		}
 	}
 	return c, nil
 }
@@ -1700,13 +1889,35 @@ func (b *Builder) buildOpaque(node *pg_query.Node, block pipeline.BlockAST, pos 
 	case *pg_query.Node_CreateSubscriptionStmt:
 		return b.buildSubscription(n.CreateSubscriptionStmt, block, pos, sql)
 	case *pg_query.Node_CreateEventTrigStmt:
-		return &EventTrigger{Name: n.CreateEventTrigStmt.Trigname, Body: sql, SrcPos: pos}, nil
+		funcSchema, funcName := extractTypeName(n.CreateEventTrigStmt.Funcname)
+		function := funcName
+		if funcSchema != "" {
+			function = funcSchema + "." + funcName
+		}
+		return &EventTrigger{Name: n.CreateEventTrigStmt.Trigname, Function: function, Body: sql, SrcPos: pos}, nil
 	case *pg_query.Node_CreateOpClassStmt:
 		schema, name := extractTypeName(n.CreateOpClassStmt.Opclassname)
 		famSchema, famName := extractTypeName(n.CreateOpClassStmt.Opfamilyname)
+		// itemtype 2 == OPCLASS_ITEM_FUNCTION (parsenodes.h; 1 == OPERATOR,
+		// 3 == STORAGETYPE — pg_query exposes no named constant, confirmed
+		// against PostgreSQL's own C source, not assumed from a probe alone).
+		const opclassItemFunction = 2
+		var functions []string
+		for _, item := range n.CreateOpClassStmt.Items {
+			it := item.GetCreateOpClassItem()
+			if it == nil || it.Itemtype != opclassItemFunction || it.Name == nil {
+				continue
+			}
+			fnSchema, fnName := extractTypeName(it.Name.Objname)
+			if fnSchema != "" {
+				functions = append(functions, fnSchema+"."+fnName)
+			} else {
+				functions = append(functions, fnName)
+			}
+		}
 		return &OperatorClass{
 			Schema: schema, Name: name, AccessMethod: n.CreateOpClassStmt.Amname,
-			FamilySchema: famSchema, FamilyName: famName,
+			FamilySchema: famSchema, FamilyName: famName, Functions: functions,
 			Body: sql, SrcPos: pos,
 		}, nil
 	case *pg_query.Node_CreateOpFamilyStmt:
