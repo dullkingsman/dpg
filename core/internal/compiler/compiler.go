@@ -112,9 +112,22 @@ func Compile(files []string, dbDir string, reg *pipeline.Registry) ([]pipeline.I
 		if name == "public" {
 			continue
 		}
+		// Always double-quote: unlike the explicit `SCHEMA name { }` form
+		// (scanner.go's readSchemaDecl), a directory name is never
+		// "written unquoted in source" the way an identifier is, so there's
+		// no quoted/unquoted distinction to preserve — this is purely an
+		// internally-generated CREATE SCHEMA statement, and quoting is
+		// always valid PG syntax for any identifier. Without it, a schema
+		// directory named after a reserved word (e.g. schemas/order/) hard-
+		// fails pg_query with a syntax error, since the unquoted form is
+		// only valid for non-reserved identifiers (confirmed live via
+		// pg_query.Parse: "CREATE SCHEMA order" errors, "CREATE SCHEMA
+		// \"order\"" doesn't) — same bug class as §6k's explicit-declaration
+		// fix, just never extended to this synthetic path.
+		part1 := `"` + strings.ReplaceAll(name, `"`, `""`) + `"`
 		rawObjects = append(rawObjects, pipeline.RawObject{
 			Kind:  pipeline.KindSchema,
-			Part1: name,
+			Part1: part1,
 			Pos:   pos,
 		})
 	}

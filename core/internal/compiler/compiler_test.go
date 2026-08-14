@@ -83,6 +83,43 @@ func TestCompile_InferSchemaInjectsSyntheticSchema(t *testing.T) {
 	}
 }
 
+// TestCompile_InferSchemaFromReservedWordDirectory guards a real bug: a
+// schema directory literally named after a PostgreSQL reserved word (e.g.
+// schemas/order/) crashed compilation entirely — the synthetic "CREATE
+// SCHEMA <name>" statement Compile injects fed pg_query an unquoted
+// reserved word, a hard syntax error (confirmed live via pg_query.Parse:
+// "CREATE SCHEMA order" errors, "CREATE SCHEMA \"order\"" doesn't). Same bug
+// class as the explicit `SCHEMA name { }` reserved-word fix (scanner.go's
+// readSchemaDecl), never extended to this directory-inferred path. Also
+// covers a table declared inside that schema, proving the fix doesn't just
+// avoid the crash but produces a usable, correctly-scoped schema.
+func TestCompile_InferSchemaFromReservedWordDirectory(t *testing.T) {
+	dbDir := t.TempDir()
+	f := filepath.Join(dbDir, "schemas", "order", "tables.dpg")
+	writeDPG(t, f, `TABLE items (id BIGINT NOT NULL);`)
+
+	objects := compile(t, dbDir, []string{f})
+
+	var schemaFound, tableFound bool
+	for _, o := range objects {
+		if s, ok := o.(*ir.Schema); ok && s.Name == "order" {
+			schemaFound = true
+		}
+		if t2, ok := o.(*ir.Table); ok && t2.Name == "items" {
+			tableFound = true
+			if t2.Schema != "order" {
+				t.Errorf("table Schema: got %q, want %q", t2.Schema, "order")
+			}
+		}
+	}
+	if !schemaFound {
+		t.Error("expected synthetic 'order' schema in output")
+	}
+	if !tableFound {
+		t.Error("expected 'items' table in output")
+	}
+}
+
 func TestCompile_PublicSchemaNotInjected(t *testing.T) {
 	dbDir := t.TempDir()
 	f := filepath.Join(dbDir, "schemas", "public", "tables.dpg")
