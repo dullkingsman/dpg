@@ -129,6 +129,7 @@ func runDump(
 	if err != nil {
 		return ui.WrapDB(fmt.Errorf("introspect: %w", err))
 	}
+	objects = append(objects, mergeExistingVirtualTypes(db)...)
 
 	if err := os.MkdirAll(outDir, 0o755); err != nil {
 		return fmt.Errorf("create output directory: %w", err)
@@ -246,6 +247,39 @@ func runDump(
 	return nil
 }
 
+// mergeExistingVirtualTypes recovers any VIRTUAL TYPE declarations (RFC
+// §5.6) from the project's own current source before dump overwrites it.
+// Virtual types are DPG-native — no CREATE TYPE is ever emitted for one, so
+// nothing about them exists in the live catalog for introspector.Introspect
+// to find. Without this, running `dpg dump` against an already-mature
+// project silently dropped every declared virtual type from both the
+// regenerated source AND the snapshot (confirmed live: a project with 2
+// declared virtual types had 0 left in its snapshot immediately after a
+// dump run) — genuine, silent data loss of the exact structural type
+// information the snapshot exists to preserve for downstream consumers
+// (pkg/dpg, RFC §5.6). A brand-new project (db.SourceFiles empty, nothing
+// to bootstrap from) returns nil, matching dump's inherent inability to
+// discover virtual types from a live database in that case.
+func mergeExistingVirtualTypes(db *project.Database) []pipeline.IRObject {
+	if len(db.SourceFiles) == 0 {
+		return nil
+	}
+	compiled, err := compiler.Compile(db.SourceFiles, db.Dir, pipeline.Default)
+	if err != nil {
+		// Not fatal to the dump itself — the live catalog's own objects are
+		// still valid and worth writing. Surfaced so the loss isn't silent.
+		fmt.Fprintf(os.Stderr, "warning  existing source did not recompile; virtual types could not be recovered: %v\n", err)
+		return nil
+	}
+	var vtypes []pipeline.IRObject
+	for _, obj := range compiled {
+		if vt, ok := obj.(*ir.VirtualType); ok {
+			vtypes = append(vtypes, vt)
+		}
+	}
+	return vtypes
+}
+
 // isClusterScoped reports whether obj lives at the cluster level (shared across
 // every database) rather than inside one database. Only roles and tablespaces
 // qualify; all other schemaless objects (FDWs, servers, user mappings,
@@ -305,6 +339,8 @@ func objectSchema(obj pipeline.IRObject) string {
 	case *ir.TSParser:
 		return o.Schema
 	case *ir.TSTemplate:
+		return o.Schema
+	case *ir.VirtualType:
 		return o.Schema
 	case *ir.DefaultPrivileges:
 		if o.InSchema != nil {
@@ -428,6 +464,8 @@ func renderObjectDPG(b *strings.Builder, obj pipeline.IRObject, fmtOpts format.O
 				}
 				fmt.Fprintf(b, " %s (%s)", kw("OPTIONS"), strings.Join(parts, ", "))
 			}
+		} else if o.Tablespace != nil {
+			fmt.Fprintf(b, " %s %s", kw("TABLESPACE"), quoteIdentIfNeeded(*o.Tablespace))
 		}
 		var colsWithAttrs []*ir.Column
 		for _, col := range o.Columns {
@@ -724,7 +762,33 @@ func renderObjectDPG(b *strings.Builder, obj pipeline.IRObject, fmtOpts format.O
 			}
 			b.WriteString(");\n")
 		case "DOMAIN":
-			fmt.Fprintf(b, "\n%s %s %s %s;\n", kw("DOMAIN"), quoteIdentIfNeeded(o.Name), kw("AS"), o.Body)
+			// Renders via the structured Domain* fields (RFC §5.4's block
+			// syntax), not o.Body — previously the entire domain (base type,
+			// DEFAULT, NOT NULL, every CHECK) was crammed into one opaque
+			// Body string rendered inline after AS, which not only never
+			// matched the RFC's own worked example but meant dump's output
+			// couldn't be recompiled into anything diffType could later
+			// diff property-by-property (an inline blob round-trips back
+			// into Body, not into DomainDefault/DomainConstraints/etc.).
+			fmt.Fprintf(b, "\n%s %s %s %s", kw("DOMAIN"), quoteIdentIfNeeded(o.Name), kw("AS"), o.DomainBaseType.String())
+			if o.DomainDefault != nil || o.DomainNotNull || len(o.DomainConstraints) > 0 || o.Comment != nil {
+				b.WriteString(" {\n")
+				if o.DomainDefault != nil {
+					fmt.Fprintf(b, "%s%s %s;\n", ind, kw("DEFAULT"), *o.DomainDefault)
+				}
+				if o.DomainNotNull {
+					fmt.Fprintf(b, "%s%s %s;\n", ind, kw("NOT"), kw("NULL"))
+				}
+				for _, cst := range o.DomainConstraints {
+					fmt.Fprintf(b, "%s%s %s %s;\n", ind, kw("CONSTRAINT"), quoteIdentIfNeeded(cst.Name), cst.Expr)
+				}
+				if o.Comment != nil {
+					fmt.Fprintf(b, "%s%s %s;\n", ind, kw("COMMENT"), sqlStringLit(*o.Comment))
+				}
+				b.WriteString("}\n")
+			} else {
+				b.WriteString(";\n")
+			}
 		case "COMPOSITE":
 			// Found live-testing a demo project: introspection already fully
 			// captured CompositeAttrs (name+type per field, via
@@ -746,8 +810,43 @@ func renderObjectDPG(b *strings.Builder, obj pipeline.IRObject, fmtOpts format.O
 			// DOMAIN's Body already uses, no "CREATE TYPE ... AS RANGE"
 			// prefix baked in.
 			fmt.Fprintf(b, "\n%s %s %s %s (%s);\n", kw("TYPE"), quoteIdentIfNeeded(o.Name), kw("AS"), kw("RANGE"), o.Body)
+		case "BASE":
+			// No live introspection reconstructs a base type's body today
+			// (would need to recover the original CREATE TYPE(...) options
+			// list from pg_type's separate typinput/typoutput/typlen/...
+			// columns — deliberately out of scope, same class as C-function
+			// TS parser/template bodies). This case exists so a future
+			// introspection fix doesn't ALSO need to remember dump — same
+			// options-only shape as RANGE, consistent with o.Body's doc
+			// comment ("raw Part1 for range/domain/base").
+			fmt.Fprintf(b, "\n%s %s (%s);\n", kw("TYPE"), quoteIdentIfNeeded(o.Name), o.Body)
 		default:
 			fmt.Fprintf(b, "\n-- type %s (%s) omitted\n", o.Name, o.Variant)
+		}
+
+	case *ir.VirtualType:
+		// No case existed here at all — a declared VIRTUAL TYPE silently
+		// vanished from dump output entirely. Doubly consequential for this
+		// kind specifically: virtual types are DPG-native (RFC §5.6, no
+		// backing CREATE TYPE), so live-catalog introspection can never
+		// rediscover one on its own — runDump's caller merges any
+		// already-declared virtual types back in before this ever runs (see
+		// runDump's mergeExistingVirtualTypes call), but without this render
+		// case that merge would have been silently pointless.
+		fmt.Fprintf(b, "\n%s %s %s %s", kw("VIRTUAL"), kw("TYPE"), quoteIdentIfNeeded(o.Name), kw("AS"))
+		fmt.Fprintf(b, " %s", renderVtypeBody(o.Body))
+		b.WriteString(";")
+		if o.Comment != nil || o.JsonFormat != "" {
+			b.WriteString(" {\n")
+			if o.Comment != nil {
+				fmt.Fprintf(b, "%s%s %s;\n", ind, kw("COMMENT"), sqlStringLit(*o.Comment))
+			}
+			if o.JsonFormat != "" {
+				fmt.Fprintf(b, "%s%s %s %s %s;\n", ind, kw("PREFERRED"), kw("JSON"), kw("FORMAT"), o.JsonFormat)
+			}
+			b.WriteString("}\n")
+		} else {
+			b.WriteString("\n")
 		}
 
 	case *ir.Sequence:
@@ -1271,6 +1370,30 @@ func inlineConstraintClause(cst *ir.Constraint) string {
 // explicitly or introspection found a live index that used it — dump never
 // invents one from a project's concurrent_indexes default, since that
 // default is a compile-time behavior, not a fact about the object itself.
+// renderVtypeBody renders a VIRTUAL TYPE's structured body (RFC §5.6) back
+// into DPG source syntax: a bare type reference, a "(field type, ...)"
+// composite, or a "term | term | ..." union of either. Mirrors
+// ir.VtypeTypeRef.String() for the leaf case, extended to composite/union.
+func renderVtypeBody(body ir.VtypeBody) string {
+	switch v := body.(type) {
+	case ir.VtypeTypeRef:
+		return v.String()
+	case ir.VtypeComposite:
+		parts := make([]string, len(v.Fields))
+		for i, f := range v.Fields {
+			parts[i] = quoteIdentIfNeeded(f.Name) + " " + f.Type.String()
+		}
+		return "(" + strings.Join(parts, ", ") + ")"
+	case ir.VtypeUnion:
+		parts := make([]string, len(v.Members))
+		for i, m := range v.Members {
+			parts[i] = renderVtypeBody(m)
+		}
+		return strings.Join(parts, " | ")
+	}
+	return ""
+}
+
 // renderPartitionEntry writes one "name bounds [PARTITION BY strategy (cols)
 // { PARTITIONS {...} }];" entry at the given indent, recursing into p's own
 // sub-partitions (RFC §7.13) when present.
@@ -1396,6 +1519,9 @@ func renderIndex(b *strings.Builder, idx *ir.Index, fmtOpts format.Options) {
 	}
 	if idx.Where != nil {
 		fmt.Fprintf(b, " %s %s", kw("WHERE"), *idx.Where)
+	}
+	if idx.Tablespace != nil {
+		fmt.Fprintf(b, " %s %s", kw("TABLESPACE"), quoteIdentIfNeeded(*idx.Tablespace))
 	}
 	b.WriteString(";\n")
 }

@@ -532,9 +532,37 @@ func (b *blockParser) parseBlock(pos pipeline.SourcePos) (pipeline.BlockAST, err
 		case "MIGRATE":
 			ast.MigrateRemove, err = b.parseMigrateRemove(dirPos)
 		case "DEFAULT":
-			var dp pipeline.DefaultPrivilegesBlock
-			dp, err = b.parseDefaultPrivileges(dirPos)
-			ast.DefaultPrivileges = append(ast.DefaultPrivileges, dp)
+			// Overloaded keyword, disambiguated by what follows: "DEFAULT
+			// PRIVILEGES ..." (existing) vs. RFC §5.4's DOMAIN-only bare
+			// "DEFAULT expr;" directive. peekWord doesn't consume, so a
+			// non-match falls through to parseDefaultPrivileges's own
+			// b.expect("PRIVILEGES") — which would just fail with a
+			// clearer error for an actually-malformed DEFAULT PRIVILEGES,
+			// so this stays a strict two-way split rather than a silent
+			// fallback.
+			b.skipWS()
+			if strings.ToUpper(b.peekWord()) == "PRIVILEGES" {
+				var dp pipeline.DefaultPrivilegesBlock
+				dp, err = b.parseDefaultPrivileges(dirPos)
+				ast.DefaultPrivileges = append(ast.DefaultPrivileges, dp)
+			} else {
+				raw, e2 := b.readRawUntil(";")
+				if e2 != nil {
+					err = e2
+				} else {
+					ast.DomainDefault = &pipeline.RawExpr{Text: strings.TrimSpace(raw), Pos: dirPos}
+					b.advance() // consume ;
+				}
+			}
+		case "NOT":
+			// RFC §5.4's DOMAIN-only "NOT NULL;" block directive.
+			b.skipWS()
+			w2 := strings.ToUpper(b.readWord())
+			if w2 != "NULL" {
+				return ast, b.errorf("expected NULL after NOT, got %q", w2)
+			}
+			ast.DomainNotNull = true
+			err = b.expectSemi()
 		case "MAPPING":
 			var m pipeline.TSMappingDef
 			m, err = b.parseTSMapping(dirPos)

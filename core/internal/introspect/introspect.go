@@ -457,12 +457,14 @@ SELECT c.relname, n.nspname, c.relpersistence::text, c.relkind::text,
        r.rolname AS owner,
        obj_description(c.oid, 'pg_class') AS comment,
        c.relrowsecurity, c.relforcerowsecurity,
-       fs.srvname, ft.ftoptions
+       fs.srvname, ft.ftoptions,
+       ts.spcname AS tablespace
 FROM   pg_class c
 JOIN   pg_namespace n ON n.oid = c.relnamespace
 JOIN   pg_roles r     ON r.oid = c.relowner
 LEFT   JOIN pg_foreign_table ft  ON ft.ftrelid = c.oid
 LEFT   JOIN pg_foreign_server fs ON fs.oid = ft.ftserver
+LEFT   JOIN pg_tablespace ts     ON ts.oid = c.reltablespace
 WHERE  c.relkind IN ('r', 'p', 'f')
 AND    NOT c.relispartition
 AND    n.nspname NOT IN ('pg_catalog','information_schema','pg_toast')
@@ -480,10 +482,10 @@ ORDER  BY n.nspname, c.relname`
 
 	for rs.Next() {
 		var name, schema, persistence, relkind, owner string
-		var comment, server *string
+		var comment, server, tablespace *string
 		var rlsEnabled, rlsForced bool
 		var ftoptions []string
-		if err := rs.Scan(&name, &schema, &persistence, &relkind, &owner, &comment, &rlsEnabled, &rlsForced, &server, &ftoptions); err != nil {
+		if err := rs.Scan(&name, &schema, &persistence, &relkind, &owner, &comment, &rlsEnabled, &rlsForced, &server, &ftoptions, &tablespace); err != nil {
 			return nil, err
 		}
 		t := &ir.Table{
@@ -495,6 +497,7 @@ ORDER  BY n.nspname, c.relname`
 			Comment:    comment,
 			RLSEnabled: rlsEnabled,
 			RLSForced:  rlsForced,
+			Tablespace: tablespace,
 		}
 		if t.Foreign {
 			t.ForeignServer = server
@@ -697,12 +700,14 @@ SELECT n.nspname, c.relname,
        i.relname AS idx_name,
        ix.indisunique,
        am.amname AS method,
-       pg_get_indexdef(ix.indexrelid) AS idx_def
+       pg_get_indexdef(ix.indexrelid) AS idx_def,
+       its.spcname AS tablespace
 FROM   pg_index ix
 JOIN   pg_class c  ON c.oid = ix.indrelid
 JOIN   pg_class i  ON i.oid = ix.indexrelid
 JOIN   pg_namespace n ON n.oid = c.relnamespace
 JOIN   pg_am am    ON am.oid = i.relam
+LEFT   JOIN pg_tablespace its ON its.oid = i.reltablespace
 WHERE  c.relkind IN ('r', 'p')
 AND    n.nspname NOT IN ('pg_catalog','information_schema','pg_toast')
 AND    NOT EXISTS (
@@ -720,7 +725,8 @@ ORDER  BY n.nspname, c.relname, i.relname`
 	for rs.Next() {
 		var schema, table, name, method, def string
 		var unique bool
-		if err := rs.Scan(&schema, &table, &name, &unique, &method, &def); err != nil {
+		var tablespace *string
+		if err := rs.Scan(&schema, &table, &name, &unique, &method, &def, &tablespace); err != nil {
 			return err
 		}
 		t, ok := idx[schema+"."+table]
@@ -745,6 +751,7 @@ ORDER  BY n.nspname, c.relname, i.relname`
 			NullsNotDistinct: strings.Contains(strings.ToUpper(def), "NULLS NOT DISTINCT"),
 			With:             parseIndexWith(def),
 			Where:            where,
+			Tablespace:       tablespace,
 		})
 	}
 	return rs.Err()
@@ -770,12 +777,14 @@ SELECT n.nspname, c.relname,
        i.relname AS idx_name,
        ix.indisunique,
        am.amname AS method,
-       pg_get_indexdef(ix.indexrelid) AS idx_def
+       pg_get_indexdef(ix.indexrelid) AS idx_def,
+       its.spcname AS tablespace
 FROM   pg_index ix
 JOIN   pg_class c  ON c.oid = ix.indrelid
 JOIN   pg_class i  ON i.oid = ix.indexrelid
 JOIN   pg_namespace n ON n.oid = c.relnamespace
 JOIN   pg_am am    ON am.oid = i.relam
+LEFT   JOIN pg_tablespace its ON its.oid = i.reltablespace
 WHERE  c.relkind = 'm'
 AND    n.nspname NOT IN ('pg_catalog','information_schema','pg_toast')
 ORDER  BY n.nspname, c.relname, i.relname`
@@ -789,7 +798,8 @@ ORDER  BY n.nspname, c.relname, i.relname`
 	for rs.Next() {
 		var schema, view, name, method, def string
 		var unique bool
-		if err := rs.Scan(&schema, &view, &name, &unique, &method, &def); err != nil {
+		var tablespace *string
+		if err := rs.Scan(&schema, &view, &name, &unique, &method, &def, &tablespace); err != nil {
 			return err
 		}
 		v, ok := idx[schema+"."+view]
@@ -810,6 +820,7 @@ ORDER  BY n.nspname, c.relname, i.relname`
 			NullsNotDistinct: strings.Contains(strings.ToUpper(def), "NULLS NOT DISTINCT"),
 			With:             parseIndexWith(def),
 			Where:            where,
+			Tablespace:       tablespace,
 		})
 	}
 	return rs.Err()
@@ -1461,19 +1472,22 @@ ORDER  BY n.nspname, t.typname, a.attnum`
 	return rs.Err()
 }
 
+// introspectDomainBodies populates each DOMAIN's structured RFC §5.4
+// diffing inputs (base type, DEFAULT, NOT NULL, CHECK constraints) —
+// previously all four were concatenated into a single opaque Body string
+// ("basetype NOT NULL DEFAULT expr CONSTRAINT c CHECK (...) ...", the same
+// shape as RANGE/BASE's genuinely-opaque bodies), even though a domain is
+// NOT opaque like those two: diffType now diffs each property individually
+// (see differ.go), so it needs them as separate fields, not one blob to
+// hash-compare. pg_type.typdefault is already plain SQL text (unlike a
+// column default, which needs pg_get_expr on a stored node tree), so no
+// deparsing is needed for it.
 func introspectDomainBodies(ctx context.Context, conn pipeline.Querier, types []pipeline.IRObject) error {
 	const q = `
 SELECT n.nspname, t.typname,
        pg_catalog.format_type(t.typbasetype, t.typtypmod) AS base_type,
        t.typnotnull,
-       t.typdefault,
-       (SELECT string_agg(
-                   CASE WHEN con.conname != '' THEN 'CONSTRAINT ' || quote_ident(con.conname) || ' ' ELSE '' END
-                   || pg_get_constraintdef(con.oid),
-                   ' '
-                   ORDER BY con.conname)
-        FROM   pg_constraint con
-        WHERE  con.contypid = t.oid AND con.contype = 'c') AS checks
+       t.typdefault
 FROM   pg_type t
 JOIN   pg_namespace n ON n.oid = t.typnamespace
 WHERE  t.typtype = 'd'
@@ -1496,28 +1510,62 @@ ORDER  BY n.nspname, t.typname`
 	for rs.Next() {
 		var schema, name, baseType string
 		var notNull bool
-		var defaultVal, checks *string
-		if err := rs.Scan(&schema, &name, &baseType, &notNull, &defaultVal, &checks); err != nil {
+		var defaultVal *string
+		if err := rs.Scan(&schema, &name, &baseType, &notNull, &defaultVal); err != nil {
 			return err
 		}
 		t, ok := domainIdx[schema+"."+name]
 		if !ok {
 			continue
 		}
-		var body strings.Builder
-		body.WriteString(baseType)
-		if notNull {
-			body.WriteString(" NOT NULL")
+		t.DomainBaseType = ir.TypeRef{Name: baseType}
+		t.DomainNotNull = notNull
+		t.DomainDefault = defaultVal
+	}
+	if err := rs.Err(); err != nil {
+		return err
+	}
+	return introspectDomainConstraints(ctx, conn, domainIdx)
+}
+
+// introspectDomainConstraints populates DomainConstraints for every domain
+// in idx from pg_constraint — a separate query (rather than introspectDomain
+// Bodies' single-row string_agg this replaced) because each domain can have
+// any number of named CHECK constraints, needing the same one-row-per-entry
+// shape introspectEnumValues already uses for ENUM values.
+func introspectDomainConstraints(ctx context.Context, conn pipeline.Querier, idx map[string]*ir.Type) error {
+	if len(idx) == 0 {
+		return nil
+	}
+	const q = `
+SELECT n.nspname, t.typname, con.conname, pg_get_constraintdef(con.oid)
+FROM   pg_constraint con
+JOIN   pg_type t      ON t.oid = con.contypid
+JOIN   pg_namespace n ON n.oid = t.typnamespace
+WHERE  con.contype = 'c'
+AND    t.typtype = 'd'
+ORDER  BY n.nspname, t.typname, con.conname`
+
+	rs, err := conn.QueryRows(ctx, q)
+	if err != nil {
+		return fmt.Errorf("introspect domain constraints: %w", err)
+	}
+	defer rs.Close()
+
+	for rs.Next() {
+		var schema, name, conname, condef string
+		if err := rs.Scan(&schema, &name, &conname, &condef); err != nil {
+			return err
 		}
-		if defaultVal != nil {
-			body.WriteString(" DEFAULT ")
-			body.WriteString(*defaultVal)
+		t, ok := idx[schema+"."+name]
+		if !ok {
+			continue
 		}
-		if checks != nil {
-			body.WriteString(" ")
-			body.WriteString(*checks)
-		}
-		t.Body = body.String()
+		t.DomainConstraints = append(t.DomainConstraints, &ir.Constraint{
+			Name: conname,
+			Type: "CHECK",
+			Expr: condef,
+		})
 	}
 	return rs.Err()
 }
@@ -1600,6 +1648,7 @@ ORDER  BY n.nspname, t.typname`
 			parts = append(parts, "SUBTYPE_DIFF = "+*subtypeDiff)
 		}
 		t.Body = strings.Join(parts, ", ")
+		t.Reconstructed = true
 	}
 	return rs.Err()
 }
@@ -2085,16 +2134,39 @@ ORDER  BY n.nspname, p.proname, args, grantee, a.privilege_type`
 	return nil
 }
 
-// introspectColumnGrants reads column-level privileges from the information
-// schema and populates each ir.Column's Grants slice.
+// introspectColumnGrants reads explicit column-level privileges from
+// pg_attribute.attacl and populates each ir.Column's Grants slice.
 func introspectColumnGrants(ctx context.Context, conn pipeline.Querier, idx map[string]*ir.Table) error {
+	// Deliberately queries pg_attribute.attacl (via aclexplode) rather than
+	// information_schema.column_privileges — found live-testing a demo
+	// project: column_privileges reports every EFFECTIVE privilege a role
+	// has on a column, which PostgreSQL defines to include privileges the
+	// role only has because of a table-level GRANT, not just genuine
+	// explicit column-level ACL entries. A table with nothing but a
+	// table-level "GRANT SELECT TO app_service" (no column-level grant
+	// anywhere) had that same SELECT duplicated onto attacl.Grants for
+	// EVERY column via this query, even though pg_attribute.attacl itself
+	// was confirmed live to be NULL for all of them — causing dump to
+	// round-trip in a phantom per-column GRANT, and a subsequent plan to
+	// propose spuriously revoking it. attacl only ever holds genuine
+	// explicit column-level grants (confirmed live: a real "GRANT SELECT
+	// (email) ON TABLE users TO app_service" shows up here; the table-level
+	// grant on an unrelated table's columns does not).
+	// aclexplode(NULL) returns 0 rows on PG14+ (see introspectTableGrants'
+	// identical note), so a column with no explicit ACL at all contributes
+	// nothing here without needing a separate NULL guard.
 	const q = `
-SELECT table_schema, table_name, column_name,
-       grantee, privilege_type, is_grantable
-FROM   information_schema.column_privileges
-WHERE  table_schema NOT IN ('pg_catalog','information_schema','pg_toast')
-AND    grantor <> grantee
-ORDER  BY table_schema, table_name, column_name, grantee, privilege_type`
+SELECT n.nspname, c.relname, a.attname,
+       CASE WHEN acl.grantee = 0 THEN 'PUBLIC' ELSE pg_get_userbyid(acl.grantee) END AS grantee,
+       acl.privilege_type, acl.is_grantable
+FROM   pg_attribute a
+JOIN   pg_class c ON c.oid = a.attrelid
+JOIN   pg_namespace n ON n.oid = c.relnamespace,
+       LATERAL aclexplode(a.attacl) acl
+WHERE  a.attnum > 0 AND NOT a.attisdropped
+AND    acl.grantor <> acl.grantee
+AND    n.nspname NOT IN ('pg_catalog','information_schema','pg_toast')
+ORDER  BY n.nspname, c.relname, a.attname, grantee, acl.privilege_type`
 
 	rs, err := conn.QueryRows(ctx, q)
 	if err != nil {
@@ -2112,7 +2184,8 @@ ORDER  BY table_schema, table_name, column_name, grantee, privilege_type`
 	var order []colGrantKey // insertion order for determinism
 
 	for rs.Next() {
-		var schema, table, col, grantee, priv, isGrantable string
+		var schema, table, col, grantee, priv string
+		var isGrantable bool
 		if err := rs.Scan(&schema, &table, &col, &grantee, &priv, &isGrantable); err != nil {
 			return err
 		}
@@ -2124,7 +2197,7 @@ ORDER  BY table_schema, table_name, column_name, grantee, privilege_type`
 			order = append(order, k)
 		}
 		e.privs = append(e.privs, priv)
-		if isGrantable == "YES" {
+		if isGrantable {
 			e.grantable = true
 		}
 	}

@@ -295,6 +295,7 @@ func toSnapTable(o *ir.Table) *SnapTable {
 		ForeignServer:  o.ForeignServer,
 		ForeignOptions: flattenParams(o.ForeignOptions),
 		Owner:          o.Owner,
+		Tablespace:     o.Tablespace,
 		Comment:        o.Comment,
 		RenamedFrom:    o.RenamedFrom,
 		Deprecated:     o.Deprecated,
@@ -433,6 +434,9 @@ func ToSnapIndex(idx *ir.Index) SnapIndex {
 	if idx.Where != nil {
 		si.Where = *idx.Where
 	}
+	if idx.Tablespace != nil {
+		si.Tablespace = *idx.Tablespace
+	}
 	return si
 }
 
@@ -539,6 +543,17 @@ func toSnapType(o *ir.Type) *SnapType {
 		Variant: o.Variant,
 		Values:  o.EnumValues,
 		Comment: o.Comment,
+	}
+	if o.Variant == "RANGE" || o.Variant == "BASE" {
+		st.BodyHash = sourceBodyHash(o.Body, o.Reconstructed)
+	}
+	if o.Variant == "DOMAIN" {
+		st.DomainBaseType = o.DomainBaseType.String()
+		st.DomainDefault = o.DomainDefault
+		st.DomainNotNull = o.DomainNotNull
+		for _, cst := range o.DomainConstraints {
+			st.DomainConstraints = append(st.DomainConstraints, toSnapConstraint(cst))
+		}
 	}
 	for _, attr := range o.CompositeAttrs {
 		st.CompositeAttrs = append(st.CompositeAttrs, toSnapColumn(attr))

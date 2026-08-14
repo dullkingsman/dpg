@@ -147,6 +147,18 @@ func (d *Differ) Diff(desired []pipeline.IRObject, snap *pipeline.Snapshot) ([]p
 		if err := json.Unmarshal(raw, &so); err != nil {
 			return nil, fmt.Errorf("diff: corrupted snapshot entry %q: %w", key, err)
 		}
+		// RFC §7.11/§15.10 Phase 9 Pass 3: a table marked PROTECTED in the
+		// snapshot must never be silently dropped just because it's absent
+		// from desired — that's error DPG-E022, not a DROP TABLE. Found via
+		// this session's live-testing sweep: Protected was parsed all the way
+		// into SnapTable but nothing ever read it back out again, so a
+		// declared PROTECTED table had zero actual protection.
+		if so.Kind == "table" && so.Table != nil && so.Table.Protected {
+			return nil, pipeline.Errorf(pipeline.SourcePos{},
+				"table %q is PROTECTED and cannot be dropped; remove the PROTECTED directive first",
+				key,
+			)
+		}
 		ops = append(ops, dropObject(&so)...)
 	}
 
@@ -619,7 +631,12 @@ func dropObject(so *snapshot.SnapObject) []pipeline.DiffOp {
 		}
 	case "event_trigger":
 		if so.Opaque != nil {
-			return []pipeline.DiffOp{destructiveOp(fmt.Sprintf("DROP EVENT TRIGGER IF EXISTS %s;", quoteIdent(so.Opaque.Name)), zero)}
+			// Unlike its opaque-tier siblings (Collation, Cast, Operator, ...),
+			// an event trigger holds no data and nothing else in the catalog
+			// depends on it — RFC §14.1 explicitly classifies its DROP+CREATE
+			// cycle as SAFE ("no data involved"), not DESTRUCTIVE like the
+			// rest of dropObject's cases.
+			return []pipeline.DiffOp{safeOp(fmt.Sprintf("DROP EVENT TRIGGER IF EXISTS %s;", quoteIdent(so.Opaque.Name)), zero)}
 		}
 	case "collation":
 		if so.Opaque != nil {
@@ -1510,6 +1527,11 @@ func createTable(o *ir.Table, vtypes map[string]string) []pipeline.DiffOp {
 			}
 			b.WriteString(")")
 		}
+	} else if o.Tablespace != nil {
+		// TABLESPACE is real PostgreSQL's final CREATE TABLE clause, and
+		// meaningless for a foreign table (it stores no local data).
+		b.WriteString(" TABLESPACE ")
+		b.WriteString(quoteIdent(*o.Tablespace))
 	}
 	b.WriteString(";")
 
@@ -1655,6 +1677,10 @@ func createIndex(schema, table string, idx *ir.Index, concurrent bool) []pipelin
 			b.WriteString(p.Value)
 		}
 		b.WriteString(")")
+	}
+	if idx.Tablespace != nil {
+		b.WriteString(" TABLESPACE ")
+		b.WriteString(quoteIdent(*idx.Tablespace))
 	}
 	if idx.Where != nil && *idx.Where != "" {
 		b.WriteString(" WHERE ")
@@ -2032,17 +2058,7 @@ func createType(o *ir.Type, vtypes map[string]string) []pipeline.DiffOp {
 	case "COMPOSITE":
 		ops = append(ops, safeOp(buildCompositeTypeSQL(o, vtypes), o.SrcPos))
 	case "DOMAIN":
-		body := o.Body
-		// rawSQL produces "CREATE DOMAIN unqualname AS ..."; qualify the name when schema is set.
-		if o.Schema != "" && body != "" {
-			unqualPrefix := "CREATE DOMAIN " + o.Name
-			if strings.HasPrefix(body, unqualPrefix) {
-				body = "CREATE DOMAIN " + qualIdent(o.Schema, o.Name) + body[len(unqualPrefix):]
-			}
-		}
-		if body != "" {
-			ops = append(ops, safeOp(body+";", o.SrcPos))
-		}
+		ops = append(ops, safeOp(buildDomainSQL(o), o.SrcPos))
 		if o.Comment != nil {
 			ops = append(ops, safeOp(
 				fmt.Sprintf("COMMENT ON DOMAIN %s IS %s;", qualIdent(o.Schema, o.Name), quoteLit(*o.Comment)),
@@ -2078,6 +2094,39 @@ func buildCompositeTypeSQL(o *ir.Type, vtypes map[string]string) string {
 		b.WriteString(resolveColType(attr.Type, vtypes))
 	}
 	b.WriteString(");")
+	return b.String()
+}
+
+// buildDomainSQL builds a full CREATE DOMAIN statement from ir.Type's
+// structured domain fields — never from o.Body, which (for a domain
+// declared via RFC §5.4's block syntax) may only ever have captured the
+// bare "name AS basetype" from Part 1, missing any DEFAULT/CONSTRAINT/NOT
+// NULL the user put in the { } block instead. Building from the structured
+// fields is correct regardless of which syntax (real PG's own inline form,
+// the RFC's block form, or a mix) the user wrote.
+func buildDomainSQL(o *ir.Type) string {
+	var b strings.Builder
+	b.WriteString("CREATE DOMAIN ")
+	b.WriteString(qualIdent(o.Schema, o.Name))
+	b.WriteString(" AS ")
+	b.WriteString(o.DomainBaseType.String())
+	if o.DomainDefault != nil {
+		b.WriteString(" DEFAULT ")
+		b.WriteString(*o.DomainDefault)
+	}
+	if o.DomainNotNull {
+		b.WriteString(" NOT NULL")
+	}
+	for _, cst := range o.DomainConstraints {
+		b.WriteString(" ")
+		if cst.Name != "" {
+			b.WriteString("CONSTRAINT ")
+			b.WriteString(quoteIdent(cst.Name))
+			b.WriteString(" ")
+		}
+		b.WriteString(cst.Expr)
+	}
+	b.WriteString(";")
 	return b.String()
 }
 
@@ -2969,6 +3018,150 @@ func diffType(o *ir.Type, snap *snapshot.SnapType, fullSnap *pipeline.Snapshot, 
 		return ops, nil
 	}
 
+	if o.Variant == "DOMAIN" && snap.Variant == "DOMAIN" {
+		// RFC §5.4: unlike RANGE/BASE (hash-diffed opaque bodies, DROP+CREATE
+		// on any change), a domain's properties are each diffed and altered
+		// individually — DEFAULT/NOT NULL/constraint changes never require
+		// recreating the domain, only a base-type change does. Found live-
+		// testing a demo project: diffType had no case for DOMAIN at all, so
+		// none of this was ever diffed — only the generic COMMENT check
+		// (shared by every variant, below) ever fired for an already-applied
+		// domain.
+		// Same "reconstructed/stale snapshot, no comparison possible yet"
+		// guard as RANGE/BASE below: a snapshot written before this
+		// structured-field tracking existed has snap.DomainBaseType == ""
+		// (Go zero value, never populated) even though the domain is real
+		// and unchanged. Found live-testing a demo project's pre-existing
+		// email_address domain: without this guard, every already-applied
+		// domain looked like a base-type change on the very first plan
+		// after upgrading, proposing a destructive DROP DOMAIN CASCADE
+		// that would have cascade-dropped any column using it. A domain
+		// always has a non-empty base type, so an empty snap value can
+		// only mean "not yet populated" — skip structural diffing entirely
+		// and fall through to the COMMENT check, which still works since
+		// Comment was already tracked before this change.
+		if snap.DomainBaseType == "" {
+			if !ptrEq(o.Comment, snap.Comment) {
+				if o.Comment != nil {
+					ops = append(ops, safeOp(fmt.Sprintf("COMMENT ON DOMAIN %s IS %s;", typeIdent, quoteLit(*o.Comment)), pos))
+				} else {
+					ops = append(ops, safeOp(fmt.Sprintf("COMMENT ON DOMAIN %s IS NULL;", typeIdent), pos))
+				}
+			}
+			// Same PROTECTED-field precedent as diffTable: if nothing else
+			// changed, ops would be empty and apply's len(ops)==0
+			// short-circuit skips Populate, so snap.DomainBaseType would
+			// stay "" forever and this branch would never self-heal. A
+			// harmless comment op forces the snapshot refresh on the very
+			// next apply.
+			if len(ops) == 0 {
+				ops = append(ops, safeOp(fmt.Sprintf("-- refresh snapshot metadata for domain %s", typeIdent), pos))
+			}
+			return ops, nil
+		}
+		if o.DomainBaseType.String() != snap.DomainBaseType {
+			// PG has no ALTER DOMAIN ... TYPE; the base type is fixed at
+			// creation. RFC §5.4 explicitly requires DROP DOMAIN CASCADE.
+			ops = append(ops, destructiveOp(fmt.Sprintf("DROP DOMAIN IF EXISTS %s CASCADE;", typeIdent), pos))
+			ops = append(ops, createType(o, vtypes)...)
+			return ops, nil
+		}
+		if !ptrEq(o.DomainDefault, snap.DomainDefault) {
+			if o.DomainDefault != nil {
+				ops = append(ops, safeOp(fmt.Sprintf("ALTER DOMAIN %s SET DEFAULT %s;", typeIdent, *o.DomainDefault), pos))
+			} else {
+				ops = append(ops, safeOp(fmt.Sprintf("ALTER DOMAIN %s DROP DEFAULT;", typeIdent), pos))
+			}
+		}
+		if o.DomainNotNull != snap.DomainNotNull {
+			if o.DomainNotNull {
+				// Existing rows may already violate it — PG validates on SET,
+				// unlike DROP which can never fail.
+				ops = append(ops, cautionOp(fmt.Sprintf("ALTER DOMAIN %s SET NOT NULL;", typeIdent), pos))
+			} else {
+				ops = append(ops, safeOp(fmt.Sprintf("ALTER DOMAIN %s DROP NOT NULL;", typeIdent), pos))
+			}
+		}
+		// Constraints are matched by name; an unnamed CHECK (Name == "") is
+		// left undiffed — same "genuinely hard, no reliable identity to
+		// match on" class as unnamed table constraints before that was
+		// separately solved with PG's full auto-naming algorithm, out of
+		// scope here since the RFC's own worked example always names them.
+		snapByName := make(map[string]snapshot.SnapConstraint, len(snap.DomainConstraints))
+		for _, c := range snap.DomainConstraints {
+			if c.Name != "" {
+				snapByName[c.Name] = c
+			}
+		}
+		desiredByName := make(map[string]*ir.Constraint, len(o.DomainConstraints))
+		for _, c := range o.DomainConstraints {
+			if c.Name != "" {
+				desiredByName[c.Name] = c
+			}
+		}
+		for name := range snapByName {
+			if _, ok := desiredByName[name]; !ok {
+				ops = append(ops, safeOp(fmt.Sprintf("ALTER DOMAIN %s DROP CONSTRAINT %s;", typeIdent, quoteIdent(name)), pos))
+			}
+		}
+		for name, c := range desiredByName {
+			if sc, existed := snapByName[name]; !existed || sc.Expr != c.Expr {
+				if existed {
+					// Same name, different expression: PG has no ALTER
+					// DOMAIN ... ALTER CONSTRAINT for the check expression
+					// itself, so replace it via drop + add.
+					ops = append(ops, safeOp(fmt.Sprintf("ALTER DOMAIN %s DROP CONSTRAINT %s;", typeIdent, quoteIdent(name)), pos))
+				}
+				ops = append(ops, cautionOp(fmt.Sprintf("ALTER DOMAIN %s ADD CONSTRAINT %s %s;", typeIdent, quoteIdent(name), c.Expr), pos))
+			}
+		}
+		if !ptrEq(o.Comment, snap.Comment) {
+			if o.Comment != nil {
+				ops = append(ops, safeOp(fmt.Sprintf("COMMENT ON DOMAIN %s IS %s;", typeIdent, quoteLit(*o.Comment)), pos))
+			} else {
+				ops = append(ops, safeOp(fmt.Sprintf("COMMENT ON DOMAIN %s IS NULL;", typeIdent), pos))
+			}
+		}
+		return ops, nil
+	}
+
+	if (o.Variant == "RANGE" || o.Variant == "BASE") && snap.Variant == o.Variant {
+		// RFC §5.3/§5.5: any change to a RANGE type's options, or to a BASE
+		// type at all, requires DROP + CREATE (RANGE explicitly says CASCADE;
+		// BASE's RFC text doesn't, so none is added). Found live-testing a
+		// demo project: this whole branch was simply missing — diffType had
+		// no case for RANGE or BASE at all, so an already-applied one whose
+		// Body changed was a silent no-op forever, only the COMMENT (below)
+		// was ever diffed. Same body-hash-with-reconstructed-guard pattern as
+		// diffOpaqueIR (Publication/Collation/...): a reconstructed
+		// (introspected) body isn't byte-identical to hand-written source, so
+		// hashing it would report spurious drift — snap.BodyHash is "" for a
+		// reconstructed snapshot entry, and desiredHash is "" here for the
+		// same reason, both treated as "no comparison possible yet."
+		desiredHash := ""
+		if o.Body != "" && !o.Reconstructed {
+			sum := sha256.Sum256([]byte(strings.TrimSpace(o.Body)))
+			desiredHash = fmt.Sprintf("%x", sum)
+		}
+		if desiredHash != "" && snap.BodyHash != "" && desiredHash != snap.BodyHash {
+			cascade := ""
+			if o.Variant == "RANGE" {
+				cascade = " CASCADE"
+			}
+			ops = append(ops, destructiveOp(fmt.Sprintf("DROP TYPE IF EXISTS %s%s;", typeIdent, cascade), pos))
+			ops = append(ops, createType(o, vtypes)...)
+			return ops, nil
+		}
+		if !ptrEq(o.Comment, snap.Comment) {
+			if o.Comment != nil {
+				ops = append(ops, safeOp(fmt.Sprintf("COMMENT ON TYPE %s IS %s;", typeIdent, quoteLit(*o.Comment)), pos))
+			} else {
+				ops = append(ops, safeOp(fmt.Sprintf("COMMENT ON TYPE %s IS NULL;", typeIdent), pos))
+			}
+		}
+		return ops, nil
+	}
+
 	if o.Variant == "ENUM" && snap.Variant == "ENUM" {
 		snapVals := make(map[string]bool, len(snap.Values))
 		for _, v := range snap.Values {
@@ -3149,6 +3342,18 @@ func diffTable(o *ir.Table, snap *snapshot.SnapTable, fullSnap *pipeline.Snapsho
 
 	if !ptrEq(o.Owner, snap.Owner) && o.Owner != nil {
 		ops = append(ops, safeOp(fmt.Sprintf("ALTER TABLE %s OWNER TO %s;", tbl, quoteIdent(*o.Owner)), pos))
+	}
+	if !ptrEq(o.Tablespace, snap.Tablespace) && o.Tablespace != nil {
+		ops = append(ops, safeOp(fmt.Sprintf("ALTER TABLE %s SET TABLESPACE %s;", tbl, quoteIdent(*o.Tablespace)), pos))
+	}
+	// PROTECTED has no PG DDL equivalent — it's pure DPG-side bookkeeping
+	// (see the Pass-2 deletion check's DPG-E022 guard) — but it must still
+	// appear as an op, or a PROTECTED-only removal produces zero DiffOps and
+	// apply's len(ops)==0 short-circuit means the snapshot's stale
+	// Protected=true is never cleared, permanently blocking the very
+	// "remove PROTECTED first" workflow RFC §7.11 documents.
+	if o.Protected != snap.Protected {
+		ops = append(ops, safeOp(fmt.Sprintf("-- PROTECTED %s on %s", map[bool]string{true: "enabled", false: "removed"}[o.Protected], tbl), pos))
 	}
 	if desiredTxt, snapTxt := effectiveComment(o.Comment, o.Deprecated), effectiveComment(snap.Comment, snap.Deprecated); !ptrEq(desiredTxt, snapTxt) {
 		if desiredTxt != nil {
@@ -3515,14 +3720,28 @@ func diffColumns(tbl string, o *ir.Table, snap *snapshot.SnapTable, vtypes map[s
 		resolvedType := resolveColType(col.Type, vtypes)
 		if resolvedType != sc.Type {
 			using := ""
+			// RFC §7.2 "Column type change diffing": a type change requiring
+			// an explicit cast is DESTRUCTIVE unless a USING expression is
+			// present, in which case it's CAUTION — the user has supplied
+			// their own safe conversion. Found live-testing a demo project:
+			// this was hardcoded destructiveOp unconditionally, so a
+			// correctly-supplied USING clause still got treated as
+			// potential data loss requiring --allow-destructive. Whether an
+			// *implicit* cast exists for a bare (no-USING) change is not
+			// knowable offline (would need PostgreSQL's own pg_cast
+			// resolution), so that case is deliberately left DESTRUCTIVE —
+			// the safe, conservative default when we can't determine it.
+			safety := pipeline.Destructive
 			if col.Using != nil {
 				using = " USING " + *col.Using
+				safety = pipeline.Caution
 			}
-			ops = append(ops, destructiveOp(
-				fmt.Sprintf("ALTER TABLE %s ALTER COLUMN %s TYPE %s%s;",
-					tbl, quoteIdent(col.Name), resolvedType, using),
-				col.SrcPos,
-			))
+			ops = append(ops, &op{
+				sql:    fmt.Sprintf("ALTER TABLE %s ALTER COLUMN %s TYPE %s%s;", tbl, quoteIdent(col.Name), resolvedType, using),
+				safety: safety,
+				pos:    col.SrcPos,
+				txn:    true,
+			})
 		}
 		if col.NotNull && !sc.NotNull {
 			ops = append(ops, cautionOp(

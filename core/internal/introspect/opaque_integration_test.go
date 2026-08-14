@@ -283,6 +283,42 @@ func TestIntrospectRangeTypeNonDefaultOpclass(t *testing.T) {
 	}
 }
 
+// TestIntrospectDomainStructuredFields guards RFC §5.4's structured domain
+// diffing inputs: introspectDomainBodies/introspectDomainConstraints
+// previously concatenated base type, NOT NULL, DEFAULT, and every CHECK
+// constraint into one opaque Body string (the same "just hash it" treatment
+// RANGE/BASE get) — even though DiffType now diffs each property
+// individually, so it needs them as separate fields, not one blob.
+func TestIntrospectDomainStructuredFields(t *testing.T) {
+	objects := setupOpaque(t,
+		`CREATE DOMAIN public.positive_integer AS integer DEFAULT 1 NOT NULL CONSTRAINT positive_only CHECK (VALUE > 0)`)
+	var found *ir.Type
+	for _, obj := range objects {
+		if tp, ok := obj.(*ir.Type); ok && tp.Name == "positive_integer" && tp.Variant == "DOMAIN" {
+			found = tp
+			break
+		}
+	}
+	if found == nil {
+		t.Fatal("domain public.positive_integer not found")
+	}
+	if found.DomainBaseType.Name != "integer" {
+		t.Errorf("DomainBaseType: got %q, want integer", found.DomainBaseType.Name)
+	}
+	if !found.DomainNotNull {
+		t.Error("DomainNotNull: got false, want true")
+	}
+	if found.DomainDefault == nil || *found.DomainDefault != "1" {
+		t.Errorf("DomainDefault: got %v, want \"1\"", found.DomainDefault)
+	}
+	if len(found.DomainConstraints) != 1 || found.DomainConstraints[0].Name != "positive_only" {
+		t.Fatalf("DomainConstraints: got %+v", found.DomainConstraints)
+	}
+	if !strings.Contains(found.DomainConstraints[0].Expr, "VALUE > 0") {
+		t.Errorf("DomainConstraints[0].Expr: got %q", found.DomainConstraints[0].Expr)
+	}
+}
+
 func TestIntrospectCast(t *testing.T) {
 	// A user-defined cast between a custom enum and integer (no built-in exists).
 	objects := setupOpaque(t,
@@ -301,6 +337,26 @@ func TestIntrospectCast(t *testing.T) {
 	}
 	if !strings.Contains(found.Body, "CREATE CAST") || !strings.Contains(found.Body, "rgb_to_int") {
 		t.Errorf("unexpected cast body: %q", found.Body)
+	}
+}
+
+// TestIntrospectCastExcludesInternallyDependent guards a real bug found
+// live-testing a demo project: PostgreSQL auto-creates a CAST from a RANGE
+// type to its own auto-generated multirange companion type the moment the
+// range type is declared — a real pg_cast row, but one with
+// pg_depend.deptype = 'i' ("internal"), meaning it's not an independently
+// manageable object: it can't be explicitly re-created from scratch (CREATE
+// CAST on that exact pairing fails "already exists" even against a database
+// that never declared one) and PostgreSQL refuses to drop it directly.
+// introspectCasts had no filter for this, so `dpg dump` reconstructed it as
+// an ordinary declared CAST — and a subsequent `dpg plan` proposed `DROP
+// CAST` on it, a migration step confirmed live to fail outright.
+func TestIntrospectCastExcludesInternallyDependent(t *testing.T) {
+	objects := setupOpaque(t, `CREATE TYPE public.zz_range AS RANGE (subtype = int4)`)
+	for _, obj := range objects {
+		if c, ok := obj.(*ir.Cast); ok && strings.Contains(c.SourceType.Name, "zz_range") {
+			t.Errorf("expected the auto-created range->multirange cast to be excluded, got: %+v", c)
+		}
 	}
 }
 

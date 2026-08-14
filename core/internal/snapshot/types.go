@@ -82,6 +82,7 @@ type SnapTable struct {
 	ForeignServer  *string            `json:"foreign_server,omitempty"`
 	ForeignOptions string             `json:"foreign_options,omitempty"` // comma-separated key=value options
 	Owner          *string            `json:"owner,omitempty"`
+	Tablespace     *string            `json:"tablespace,omitempty"`
 	Comment        *string            `json:"comment,omitempty"`
 	RenamedFrom    *string            `json:"renamed_from,omitempty"`
 	Deprecated     *string            `json:"deprecated,omitempty"`
@@ -153,6 +154,7 @@ type SnapIndex struct {
 	Include          string `json:"include,omitempty"` // comma-separated covering columns
 	NullsNotDistinct bool   `json:"nulls_not_distinct,omitempty"`
 	With             string `json:"with,omitempty"` // comma-separated key=value storage params
+	Tablespace       string `json:"tablespace,omitempty"`
 }
 
 type SnapPolicy struct {
@@ -218,13 +220,22 @@ type SnapFunction struct {
 }
 
 type SnapType struct {
-	Schema         string             `json:"schema"`
-	Name           string             `json:"name"`
-	Variant        string             `json:"variant"`                   // ENUM, COMPOSITE, RANGE, DOMAIN, BASE
-	Values         []string           `json:"values,omitempty"`          // ENUM only
-	CompositeAttrs []SnapColumn       `json:"composite_attrs,omitempty"` // COMPOSITE only
-	Comment        *string            `json:"comment,omitempty"`
-	NameMaps       []SnapNameMapEntry `json:"name_maps,omitempty"`
+	Schema         string       `json:"schema"`
+	Name           string       `json:"name"`
+	Variant        string       `json:"variant"`                   // ENUM, COMPOSITE, RANGE, DOMAIN, BASE
+	Values         []string     `json:"values,omitempty"`          // ENUM only
+	CompositeAttrs []SnapColumn `json:"composite_attrs,omitempty"` // COMPOSITE only
+	BodyHash       string       `json:"body_hash,omitempty"`       // RANGE/BASE only; see sourceBodyHash
+	// DomainBaseType/DomainDefault/DomainNotNull/DomainConstraints are
+	// DOMAIN-only (RFC §5.4): structured diffing inputs, not just an opaque
+	// body hash, so property-level changes get their own targeted ALTER
+	// DOMAIN op instead of an unconditional DROP+CREATE.
+	DomainBaseType    string             `json:"domain_base_type,omitempty"`
+	DomainDefault     *string            `json:"domain_default,omitempty"`
+	DomainNotNull     bool               `json:"domain_not_null,omitempty"`
+	DomainConstraints []SnapConstraint   `json:"domain_constraints,omitempty"`
+	Comment           *string            `json:"comment,omitempty"`
+	NameMaps          []SnapNameMapEntry `json:"name_maps,omitempty"`
 }
 
 type SnapSequence struct {

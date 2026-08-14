@@ -7524,6 +7524,7 @@ func TestDiffOpaqueOfflineEditEmitsStructuredDropRecreate(t *testing.T) {
 		wantDropSubstr   string
 		wantNewInBody    string
 		wantCreateSafety pipeline.Safety // zero value (Safe) unless overridden
+		dropIsSafe       bool            // false (Destructive) unless overridden — event_trigger is the sole exception, RFC §14.1
 	}{
 		{
 			name:           "tablespace",
@@ -7584,6 +7585,11 @@ func TestDiffOpaqueOfflineEditEmitsStructuredDropRecreate(t *testing.T) {
 			newObj:         &ir.EventTrigger{Name: "et", Body: "CREATE EVENT TRIGGER et ON ddl_command_start EXECUTE FUNCTION f2()"},
 			wantDropSubstr: `DROP EVENT TRIGGER IF EXISTS "et";`,
 			wantNewInBody:  "f2()",
+			// Unlike every other opaque kind here, an event trigger holds no
+			// data and nothing depends on it — RFC §14.1 explicitly classifies
+			// its DROP+CREATE as SAFE, unlike Collation/Cast/Operator below
+			// (all explicitly DESTRUCTIVE per their own RFC sections).
+			dropIsSafe: true,
 		},
 		{
 			name:           "collation",
@@ -7681,8 +7687,12 @@ func TestDiffOpaqueOfflineEditEmitsStructuredDropRecreate(t *testing.T) {
 			if !strings.Contains(createSQL, tc.wantNewInBody) {
 				t.Errorf("op[1] = %q, want substring %q (new body)", createSQL, tc.wantNewInBody)
 			}
-			if ops[0].Safety() != pipeline.Destructive {
-				t.Errorf("DROP op safety = %v, want Destructive", ops[0].Safety())
+			wantDropSafety := pipeline.Destructive
+			if tc.dropIsSafe {
+				wantDropSafety = pipeline.Safe
+			}
+			if ops[0].Safety() != wantDropSafety {
+				t.Errorf("DROP op safety = %v, want %v", ops[0].Safety(), wantDropSafety)
 			}
 			if ops[1].Safety() != tc.wantCreateSafety {
 				t.Errorf("CREATE op safety = %v, want %v", ops[1].Safety(), tc.wantCreateSafety)
@@ -8547,6 +8557,827 @@ func TestDiffFunctionRevocationRemoved(t *testing.T) {
 	}
 	if containsSQL(ops, "REVOKE") {
 		t.Errorf("must not also emit REVOKE when the revocation itself was removed: %v", sqlList(ops))
+	}
+}
+
+// ── TABLE/INDEX Tablespace (RFC §14.7) ────────────────────────────────────────
+// Regression guard for a real bug found live-testing TABLESPACE against a
+// demo project: ir.Table.Tablespace and ir.Index.Tablespace were both parsed
+// from source but never read anywhere downstream — createTable/diffTable and
+// createIndex/diffIndexes never referenced either field, so a declared
+// TABLESPACE clause on a table or an index was a total silent no-op; `dpg
+// plan` reported no changes even for a brand-new TABLESPACE declaration on
+// an already-applied table.
+
+func TestDiffCreateTableEmitsTablespace(t *testing.T) {
+	d := New()
+	desired := []pipeline.IRObject{
+		&ir.Table{
+			Schema:     "public",
+			Name:       "archive",
+			Columns:    []*ir.Column{{Name: "id", Type: ir.TypeRef{Name: "bigint"}}},
+			Tablespace: strPtr("archive_space"),
+		},
+	}
+	ops, err := d.Diff(desired, &pipeline.Snapshot{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsSQL(ops, `TABLESPACE "archive_space"`) {
+		t.Errorf("expected CREATE TABLE with TABLESPACE, got: %v", sqlList(ops))
+	}
+}
+
+func TestDiffTableTablespaceChanged(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.archive", &snapshot.SnapObject{
+		Kind: "table",
+		Table: &snapshot.SnapTable{
+			Schema:  "public",
+			Name:    "archive",
+			Columns: []snapshot.SnapColumn{{Name: "id", Type: "bigint"}},
+		},
+	})
+	desired := []pipeline.IRObject{
+		&ir.Table{
+			Schema:     "public",
+			Name:       "archive",
+			Columns:    []*ir.Column{{Name: "id", Type: ir.TypeRef{Name: "bigint"}}},
+			Tablespace: strPtr("archive_space"),
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsSQL(ops, `ALTER TABLE "public"."archive" SET TABLESPACE "archive_space";`) {
+		t.Errorf("expected ALTER TABLE SET TABLESPACE, got: %v", sqlList(ops))
+	}
+}
+
+func TestDiffTableTablespaceUnchangedIsNoop(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.archive", &snapshot.SnapObject{
+		Kind: "table",
+		Table: &snapshot.SnapTable{
+			Schema:     "public",
+			Name:       "archive",
+			Columns:    []snapshot.SnapColumn{{Name: "id", Type: "bigint"}},
+			Tablespace: strPtr("archive_space"),
+		},
+	})
+	desired := []pipeline.IRObject{
+		&ir.Table{
+			Schema:     "public",
+			Name:       "archive",
+			Columns:    []*ir.Column{{Name: "id", Type: ir.TypeRef{Name: "bigint"}}},
+			Tablespace: strPtr("archive_space"),
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if containsSQL(ops, "TABLESPACE") {
+		t.Errorf("expected no TABLESPACE op for unchanged tablespace, got: %v", sqlList(ops))
+	}
+}
+
+func TestDiffCreateIndexEmitsTablespace(t *testing.T) {
+	d := New()
+	desired := []pipeline.IRObject{
+		&ir.Table{
+			Schema:  "public",
+			Name:    "t",
+			Columns: []*ir.Column{{Name: "id", Type: ir.TypeRef{Name: "bigint"}}},
+			Indexes: []*ir.Index{
+				{
+					Name:       "t_id_idx",
+					Columns:    []pipeline.IndexColumn{{Name: "id"}},
+					Tablespace: strPtr("archive_space"),
+				},
+			},
+		},
+	}
+	ops, err := d.Diff(desired, &pipeline.Snapshot{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsSQL(ops, `TABLESPACE "archive_space"`) {
+		t.Errorf("expected CREATE INDEX with TABLESPACE, got: %v", sqlList(ops))
+	}
+}
+
+func TestDiffIndexTablespaceChangedRecreates(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.t", &snapshot.SnapObject{
+		Kind: "table",
+		Table: &snapshot.SnapTable{
+			Schema:  "public",
+			Name:    "t",
+			Columns: []snapshot.SnapColumn{{Name: "id", Type: "bigint"}},
+			Indexes: []snapshot.SnapIndex{{Name: "t_id_idx", Columns: "id"}},
+		},
+	})
+	desired := []pipeline.IRObject{
+		&ir.Table{
+			Schema:  "public",
+			Name:    "t",
+			Columns: []*ir.Column{{Name: "id", Type: ir.TypeRef{Name: "bigint"}}},
+			Indexes: []*ir.Index{
+				{
+					Name:       "t_id_idx",
+					Columns:    []pipeline.IndexColumn{{Name: "id"}},
+					Tablespace: strPtr("archive_space"),
+				},
+			},
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsSQL(ops, `DROP INDEX IF EXISTS "t_id_idx";`) {
+		t.Errorf("expected DROP INDEX for tablespace change, got: %v", sqlList(ops))
+	}
+	if !containsSQL(ops, `TABLESPACE "archive_space"`) {
+		t.Errorf("expected recreated CREATE INDEX with TABLESPACE, got: %v", sqlList(ops))
+	}
+}
+
+// ── RANGE/BASE type body-change diffing (RFC §5.3/§5.5) ───────────────────────
+// Regression guard for a real bug found live-testing BASE/VIRTUAL types
+// against a demo project: diffType had explicit handling for COMPOSITE and
+// ENUM only — RANGE and BASE both fell through to just the generic COMMENT
+// check, so an already-applied RANGE or BASE type whose body changed was a
+// silent no-op forever. Confirmed live on a throwaway RANGE type: before the
+// fix, changing SUBTYPE produced "-- (no changes)"; after, it correctly
+// emits DROP TYPE CASCADE + CREATE TYPE (RFC §5.3's exact stated semantics).
+
+func TestDiffRangeTypeBodyChangedRecreates(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.zz_range", &snapshot.SnapObject{
+		Kind: "type",
+		Type: &snapshot.SnapType{
+			Schema: "public", Name: "zz_range", Variant: "RANGE",
+			BodyHash: hashText("CREATE TYPE zz_range AS RANGE (subtype = int)"),
+		},
+	})
+	desired := []pipeline.IRObject{
+		&ir.Type{
+			Schema: "public", Name: "zz_range", Variant: "RANGE",
+			Body: "CREATE TYPE zz_range AS RANGE (subtype = numeric)",
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsSQL(ops, `DROP TYPE IF EXISTS "public"."zz_range" CASCADE;`) {
+		t.Errorf("expected DROP TYPE ... CASCADE, got: %v", sqlList(ops))
+	}
+	if !containsSQL(ops, "CREATE TYPE zz_range AS RANGE (subtype = numeric)") {
+		t.Errorf("expected recreated CREATE TYPE with new body, got: %v", sqlList(ops))
+	}
+	var dropOp pipeline.DiffOp
+	for _, o := range ops {
+		if strings.Contains(o.SQL(), "DROP TYPE") {
+			dropOp = o
+		}
+	}
+	if dropOp == nil || dropOp.Safety() != pipeline.Destructive {
+		t.Errorf("DROP TYPE safety = %v, want Destructive", dropOp)
+	}
+}
+
+func TestDiffBaseTypeBodyChangedRecreatesNoCascade(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.zz_base", &snapshot.SnapObject{
+		Kind: "type",
+		Type: &snapshot.SnapType{
+			Schema: "public", Name: "zz_base", Variant: "BASE",
+			BodyHash: hashText("CREATE TYPE zz_base (INPUT = zz_in, OUTPUT = zz_out)"),
+		},
+	})
+	desired := []pipeline.IRObject{
+		&ir.Type{
+			Schema: "public", Name: "zz_base", Variant: "BASE",
+			Body: "CREATE TYPE zz_base (INPUT = zz_in2, OUTPUT = zz_out)",
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsSQL(ops, `DROP TYPE IF EXISTS "public"."zz_base";`) {
+		t.Errorf("expected DROP TYPE (no CASCADE — RFC §5.5 doesn't specify it), got: %v", sqlList(ops))
+	}
+	if containsSQL(ops, "CASCADE") {
+		t.Errorf("BASE type drop must not add CASCADE (RANGE-only per RFC §5.3), got: %v", sqlList(ops))
+	}
+}
+
+func TestDiffRangeTypeBodyUnchangedIsNoop(t *testing.T) {
+	d := New()
+	body := "CREATE TYPE zz_range AS RANGE (subtype = numeric)"
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.zz_range", &snapshot.SnapObject{
+		Kind: "type",
+		Type: &snapshot.SnapType{
+			Schema: "public", Name: "zz_range", Variant: "RANGE",
+			BodyHash: hashText(body),
+		},
+	})
+	desired := []pipeline.IRObject{
+		&ir.Type{Schema: "public", Name: "zz_range", Variant: "RANGE", Body: body},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ops) != 0 {
+		t.Errorf("expected no ops for unchanged RANGE body, got: %v", sqlList(ops))
+	}
+}
+
+// TestDiffRangeTypeReconstructedSnapshotSkipsComparison guards the same
+// "reconstructed body isn't byte-identical to hand-written source" false-
+// positive that diffOpaqueIR's own body-hash guard exists to avoid
+// (Publication/Collation/...): a snapshot entry from live introspection has
+// BodyHash == "" (see introspectRangeBodies setting Reconstructed = true),
+// so a differently-formatted desired Body must NOT be treated as a change.
+func TestDiffRangeTypeReconstructedSnapshotSkipsComparison(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.zz_range", &snapshot.SnapObject{
+		Kind: "type",
+		Type: &snapshot.SnapType{
+			Schema: "public", Name: "zz_range", Variant: "RANGE",
+			BodyHash: "", // reconstructed snapshot entry
+		},
+	})
+	desired := []pipeline.IRObject{
+		&ir.Type{
+			Schema: "public", Name: "zz_range", Variant: "RANGE",
+			Body: "CREATE TYPE zz_range AS RANGE (SUBTYPE = numeric)", // differently formatted
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if containsSQL(ops, "DROP TYPE") {
+		t.Errorf("must not recreate when the snapshot side is reconstructed (unhashable), got: %v", sqlList(ops))
+	}
+}
+
+// ── DOMAIN structured diffing (RFC §5.4) ──────────────────────────────────────
+// Regression guard for a real bug found live-testing a demo project:
+// diffType had no case for DOMAIN at all — an already-applied domain whose
+// DEFAULT/NOT NULL/constraints changed was a silent no-op forever, only the
+// generic COMMENT check ever fired. Unlike RANGE/BASE (hash-diffed opaque
+// bodies), RFC §5.4 requires per-property diffing with distinct safety
+// levels, so each case below checks both the emitted SQL and its safety.
+
+func TestDiffCreateDomainEmitsFullDefinition(t *testing.T) {
+	d := New()
+	def := "1"
+	desired := []pipeline.IRObject{
+		&ir.Type{
+			Schema: "public", Name: "positive_integer", Variant: "DOMAIN",
+			DomainBaseType: ir.TypeRef{Name: "integer"},
+			DomainDefault:  &def,
+			DomainNotNull:  true,
+			DomainConstraints: []*ir.Constraint{
+				{Name: "positive_only", Type: "CHECK", Expr: "CHECK (VALUE > 0)"},
+			},
+		},
+	}
+	ops, err := d.Diff(desired, &pipeline.Snapshot{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sql := sqlList(ops)
+	for _, want := range []string{"CREATE DOMAIN", "AS integer", "DEFAULT 1", "NOT NULL", `CONSTRAINT "positive_only" CHECK (VALUE > 0)`} {
+		if !containsSQL(ops, want) {
+			t.Errorf("expected %q in CREATE DOMAIN, got: %v", want, sql)
+		}
+	}
+}
+
+func TestDiffDomainDefaultAddedIsSafe(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.d", &snapshot.SnapObject{
+		Kind: "type",
+		Type: &snapshot.SnapType{Schema: "public", Name: "d", Variant: "DOMAIN", DomainBaseType: "integer"},
+	})
+	def := "1"
+	desired := []pipeline.IRObject{
+		&ir.Type{Schema: "public", Name: "d", Variant: "DOMAIN", DomainBaseType: ir.TypeRef{Name: "integer"}, DomainDefault: &def},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var found pipeline.DiffOp
+	for _, o := range ops {
+		if strings.Contains(o.SQL(), "SET DEFAULT") {
+			found = o
+		}
+	}
+	if found == nil || found.SQL() != `ALTER DOMAIN "public"."d" SET DEFAULT 1;` {
+		t.Fatalf("expected SET DEFAULT op, got: %v", sqlList(ops))
+	}
+	if found.Safety() != pipeline.Safe {
+		t.Errorf("safety = %v, want Safe (RFC §5.4: adding a DEFAULT is SAFE)", found.Safety())
+	}
+}
+
+func TestDiffDomainDefaultDroppedIsSafe(t *testing.T) {
+	d := New()
+	def := "1"
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.d", &snapshot.SnapObject{
+		Kind: "type",
+		Type: &snapshot.SnapType{Schema: "public", Name: "d", Variant: "DOMAIN", DomainBaseType: "integer", DomainDefault: &def},
+	})
+	desired := []pipeline.IRObject{
+		&ir.Type{Schema: "public", Name: "d", Variant: "DOMAIN", DomainBaseType: ir.TypeRef{Name: "integer"}},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsSQL(ops, `ALTER DOMAIN "public"."d" DROP DEFAULT;`) {
+		t.Fatalf("expected DROP DEFAULT op, got: %v", sqlList(ops))
+	}
+	for _, o := range ops {
+		if strings.Contains(o.SQL(), "DROP DEFAULT") && o.Safety() != pipeline.Safe {
+			t.Errorf("safety = %v, want Safe (RFC §5.4: dropping a DEFAULT is SAFE)", o.Safety())
+		}
+	}
+}
+
+func TestDiffDomainSetNotNullIsCaution(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.d", &snapshot.SnapObject{
+		Kind: "type",
+		Type: &snapshot.SnapType{Schema: "public", Name: "d", Variant: "DOMAIN", DomainBaseType: "integer"},
+	})
+	desired := []pipeline.IRObject{
+		&ir.Type{Schema: "public", Name: "d", Variant: "DOMAIN", DomainBaseType: ir.TypeRef{Name: "integer"}, DomainNotNull: true},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var found pipeline.DiffOp
+	for _, o := range ops {
+		if strings.Contains(o.SQL(), "SET NOT NULL") {
+			found = o
+		}
+	}
+	if found == nil {
+		t.Fatalf("expected SET NOT NULL op, got: %v", sqlList(ops))
+	}
+	if found.Safety() != pipeline.Caution {
+		t.Errorf("safety = %v, want Caution (existing rows may violate it)", found.Safety())
+	}
+}
+
+func TestDiffDomainDropNotNullIsSafe(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.d", &snapshot.SnapObject{
+		Kind: "type",
+		Type: &snapshot.SnapType{Schema: "public", Name: "d", Variant: "DOMAIN", DomainBaseType: "integer", DomainNotNull: true},
+	})
+	desired := []pipeline.IRObject{
+		&ir.Type{Schema: "public", Name: "d", Variant: "DOMAIN", DomainBaseType: ir.TypeRef{Name: "integer"}},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var found pipeline.DiffOp
+	for _, o := range ops {
+		if strings.Contains(o.SQL(), "DROP NOT NULL") {
+			found = o
+		}
+	}
+	if found == nil || found.Safety() != pipeline.Safe {
+		t.Errorf("expected a Safe DROP NOT NULL op, got: %v", sqlList(ops))
+	}
+}
+
+func TestDiffDomainConstraintAddedIsCaution(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.d", &snapshot.SnapObject{
+		Kind: "type",
+		Type: &snapshot.SnapType{Schema: "public", Name: "d", Variant: "DOMAIN", DomainBaseType: "integer"},
+	})
+	desired := []pipeline.IRObject{
+		&ir.Type{
+			Schema: "public", Name: "d", Variant: "DOMAIN", DomainBaseType: ir.TypeRef{Name: "integer"},
+			DomainConstraints: []*ir.Constraint{{Name: "positive_only", Type: "CHECK", Expr: "CHECK (VALUE > 0)"}},
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var found pipeline.DiffOp
+	for _, o := range ops {
+		if strings.Contains(o.SQL(), "ADD CONSTRAINT") {
+			found = o
+		}
+	}
+	if found == nil || !strings.Contains(found.SQL(), "positive_only") {
+		t.Fatalf("expected ADD CONSTRAINT op, got: %v", sqlList(ops))
+	}
+	if found.Safety() != pipeline.Caution {
+		t.Errorf("safety = %v, want Caution (RFC §5.4: adding a constraint is CAUTION)", found.Safety())
+	}
+}
+
+func TestDiffDomainConstraintDroppedIsSafe(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.d", &snapshot.SnapObject{
+		Kind: "type",
+		Type: &snapshot.SnapType{
+			Schema: "public", Name: "d", Variant: "DOMAIN", DomainBaseType: "integer",
+			DomainConstraints: []snapshot.SnapConstraint{{Name: "positive_only", Type: "CHECK", Expr: "CHECK (VALUE > 0)"}},
+		},
+	})
+	desired := []pipeline.IRObject{
+		&ir.Type{Schema: "public", Name: "d", Variant: "DOMAIN", DomainBaseType: ir.TypeRef{Name: "integer"}},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsSQL(ops, `ALTER DOMAIN "public"."d" DROP CONSTRAINT "positive_only";`) {
+		t.Fatalf("expected DROP CONSTRAINT op, got: %v", sqlList(ops))
+	}
+	for _, o := range ops {
+		if strings.Contains(o.SQL(), "DROP CONSTRAINT") && o.Safety() != pipeline.Safe {
+			t.Errorf("safety = %v, want Safe (RFC §5.4: dropping a constraint is SAFE)", o.Safety())
+		}
+	}
+}
+
+func TestDiffDomainConstraintChangedDropsAndAdds(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.d", &snapshot.SnapObject{
+		Kind: "type",
+		Type: &snapshot.SnapType{
+			Schema: "public", Name: "d", Variant: "DOMAIN", DomainBaseType: "integer",
+			DomainConstraints: []snapshot.SnapConstraint{{Name: "positive_only", Type: "CHECK", Expr: "CHECK (VALUE > 0)"}},
+		},
+	})
+	desired := []pipeline.IRObject{
+		&ir.Type{
+			Schema: "public", Name: "d", Variant: "DOMAIN", DomainBaseType: ir.TypeRef{Name: "integer"},
+			DomainConstraints: []*ir.Constraint{{Name: "positive_only", Type: "CHECK", Expr: "CHECK (VALUE > 10)"}},
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsSQL(ops, `DROP CONSTRAINT "positive_only"`) || !containsSQL(ops, "VALUE > 10") {
+		t.Errorf("expected DROP + ADD CONSTRAINT for a changed expression, got: %v", sqlList(ops))
+	}
+}
+
+func TestDiffDomainBaseTypeChangedRecreates(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.d", &snapshot.SnapObject{
+		Kind: "type",
+		Type: &snapshot.SnapType{Schema: "public", Name: "d", Variant: "DOMAIN", DomainBaseType: "integer"},
+	})
+	desired := []pipeline.IRObject{
+		&ir.Type{Schema: "public", Name: "d", Variant: "DOMAIN", DomainBaseType: ir.TypeRef{Name: "bigint"}},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsSQL(ops, `DROP DOMAIN IF EXISTS "public"."d" CASCADE;`) {
+		t.Errorf("expected DROP DOMAIN CASCADE, got: %v", sqlList(ops))
+	}
+	if !containsSQL(ops, "AS bigint") {
+		t.Errorf("expected recreated CREATE DOMAIN with new base type, got: %v", sqlList(ops))
+	}
+	var dropOp pipeline.DiffOp
+	for _, o := range ops {
+		if strings.Contains(o.SQL(), "DROP DOMAIN") {
+			dropOp = o
+		}
+	}
+	if dropOp == nil || dropOp.Safety() != pipeline.Destructive {
+		t.Errorf("DROP DOMAIN safety = %v, want Destructive", dropOp)
+	}
+}
+
+func TestDiffDomainUnchangedIsNoop(t *testing.T) {
+	d := New()
+	def := "1"
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.d", &snapshot.SnapObject{
+		Kind: "type",
+		Type: &snapshot.SnapType{
+			Schema: "public", Name: "d", Variant: "DOMAIN", DomainBaseType: "integer",
+			DomainDefault: &def, DomainNotNull: true,
+			DomainConstraints: []snapshot.SnapConstraint{{Name: "positive_only", Type: "CHECK", Expr: "CHECK (VALUE > 0)"}},
+		},
+	})
+	desired := []pipeline.IRObject{
+		&ir.Type{
+			Schema: "public", Name: "d", Variant: "DOMAIN", DomainBaseType: ir.TypeRef{Name: "integer"},
+			DomainDefault: &def, DomainNotNull: true,
+			DomainConstraints: []*ir.Constraint{{Name: "positive_only", Type: "CHECK", Expr: "CHECK (VALUE > 0)"}},
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ops) != 0 {
+		t.Errorf("expected no ops for an unchanged domain, got: %v", sqlList(ops))
+	}
+}
+
+// Regression guard for a real bug found live-testing a demo project's
+// pre-existing email_address domain: a snapshot written before domain
+// structured-field tracking existed has DomainBaseType == "" (Go zero
+// value), which used to compare unequal to any real desired base type and
+// spuriously trigger the destructive DROP DOMAIN CASCADE + recreate branch
+// on the very first plan after upgrading — for a domain that never actually
+// changed. Must instead skip structural comparison and self-heal via a
+// harmless comment op so the snapshot gets refreshed on apply.
+func TestDiffDomainStaleSnapshotDoesNotRecreate(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.email_address", &snapshot.SnapObject{
+		Kind: "type",
+		Type: &snapshot.SnapType{Schema: "public", Name: "email_address", Variant: "DOMAIN"},
+	})
+	desired := []pipeline.IRObject{
+		&ir.Type{
+			Schema: "public", Name: "email_address", Variant: "DOMAIN",
+			DomainBaseType:    ir.TypeRef{Name: "text"},
+			DomainConstraints: []*ir.Constraint{{Name: "email_address_check", Type: "CHECK", Expr: "CHECK (value ~ '^[^@]+@[^@]+$')"}},
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if containsSQL(ops, "DROP DOMAIN") {
+		t.Errorf("stale snapshot must not trigger DROP DOMAIN, got: %v", sqlList(ops))
+	}
+	for _, o := range ops {
+		if o.Safety() == pipeline.Destructive {
+			t.Errorf("stale snapshot transition must never be destructive, got: %v", sqlList(ops))
+		}
+	}
+}
+
+// ── Table PROTECTED / DROP CASCADE (RFC §7.11) ────────────────────────────────
+// Regression guard for a real bug found live-testing PROTECTED against a
+// demo project: SnapTable.Protected was populated all the way from source
+// but the Pass-2 deletion loop never read it back — a PROTECTED table was
+// silently DROPped exactly like any other, with zero actual protection
+// (RFC §15.10 Phase 9 Pass 3 / DPG-E022 says the diff must instead error).
+// DROP CASCADE was already correctly wired (found already-working while
+// investigating), so its test here is a regression guard, not a bug fix.
+
+func TestDiffProtectedTableDropIsBlocked(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.locked", &snapshot.SnapObject{
+		Kind: "table",
+		Table: &snapshot.SnapTable{
+			Schema:    "public",
+			Name:      "locked",
+			Columns:   []snapshot.SnapColumn{{Name: "id", Type: "bigint"}},
+			Protected: true,
+		},
+	})
+	_, err := d.Diff(nil, snap)
+	if err == nil {
+		t.Fatal("expected an error blocking the drop of a PROTECTED table, got nil")
+	}
+	if !strings.Contains(err.Error(), "PROTECTED") {
+		t.Errorf("expected error to mention PROTECTED, got: %v", err)
+	}
+}
+
+func TestDiffUnprotectedTableDropSucceeds(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.plain", &snapshot.SnapObject{
+		Kind: "table",
+		Table: &snapshot.SnapTable{
+			Schema:  "public",
+			Name:    "plain",
+			Columns: []snapshot.SnapColumn{{Name: "id", Type: "bigint"}},
+		},
+	})
+	ops, err := d.Diff(nil, snap)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !containsSQL(ops, `DROP TABLE IF EXISTS "public"."plain";`) {
+		t.Errorf("expected normal DROP TABLE for an unprotected table, got: %v", sqlList(ops))
+	}
+}
+
+func TestDiffTableDropCascadeEmitsCascade(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.plain", &snapshot.SnapObject{
+		Kind: "table",
+		Table: &snapshot.SnapTable{
+			Schema:      "public",
+			Name:        "plain",
+			Columns:     []snapshot.SnapColumn{{Name: "id", Type: "bigint"}},
+			DropCascade: true,
+		},
+	})
+	ops, err := d.Diff(nil, snap)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !containsSQL(ops, `DROP TABLE IF EXISTS "public"."plain" CASCADE;`) {
+		t.Errorf("expected DROP TABLE ... CASCADE, got: %v", sqlList(ops))
+	}
+}
+
+// TestDiffTableProtectedRemovedEmitsOp guards the OTHER half of the same
+// bug: PROTECTED has no PG DDL equivalent, so removing it (table still
+// desired) produced zero DiffOps — and apply's len(ops)==0 "already up to
+// date" short-circuit means the snapshot's stale Protected=true was never
+// cleared, permanently blocking the RFC's own documented "remove PROTECTED
+// first, then drop" two-step workflow. Live-confirmed via the demo project:
+// this exact sequence (unprotect, apply, then remove the table, apply)
+// before the fix left the table permanently undroppable.
+func TestDiffTableProtectedRemovedEmitsOp(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.locked", &snapshot.SnapObject{
+		Kind: "table",
+		Table: &snapshot.SnapTable{
+			Schema:    "public",
+			Name:      "locked",
+			Columns:   []snapshot.SnapColumn{{Name: "id", Type: "bigint"}},
+			Protected: true,
+		},
+	})
+	desired := []pipeline.IRObject{
+		&ir.Table{
+			Schema:  "public",
+			Name:    "locked",
+			Columns: []*ir.Column{{Name: "id", Type: ir.TypeRef{Name: "bigint"}}},
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ops) == 0 {
+		t.Fatal("expected a non-empty op set so apply doesn't short-circuit and skip the snapshot refresh")
+	}
+	if !containsSQL(ops, "PROTECTED") {
+		t.Errorf("expected an op reflecting the PROTECTED removal, got: %v", sqlList(ops))
+	}
+}
+
+func TestDiffTableProtectedUnchangedIsNoop(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.plain", &snapshot.SnapObject{
+		Kind: "table",
+		Table: &snapshot.SnapTable{
+			Schema:  "public",
+			Name:    "plain",
+			Columns: []snapshot.SnapColumn{{Name: "id", Type: "bigint"}},
+		},
+	})
+	desired := []pipeline.IRObject{
+		&ir.Table{
+			Schema:  "public",
+			Name:    "plain",
+			Columns: []*ir.Column{{Name: "id", Type: ir.TypeRef{Name: "bigint"}}},
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ops) != 0 {
+		t.Errorf("expected no ops for an unprotected table staying unprotected, got: %v", sqlList(ops))
+	}
+}
+
+// ── Column type-change USING safety (RFC §7.2) ────────────────────────────────
+// Regression guard for a real bug found live-testing COLUMN { USING expr; }
+// against a demo project: the USING expression WAS correctly appended to the
+// emitted ALTER COLUMN TYPE SQL, but the op's safety was hardcoded
+// destructiveOp unconditionally — so a user-supplied, correct USING
+// conversion was still treated as DESTRUCTIVE (blocked without
+// --allow-destructive) exactly like a bare, unguarded type change. RFC §7.2
+// is explicit: "unless a USING expression is present ... in which case it
+// is classified CAUTION."
+
+func TestDiffColumnTypeChangeWithUsingIsCaution(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.t", &snapshot.SnapObject{
+		Kind: "table",
+		Table: &snapshot.SnapTable{
+			Schema:  "public",
+			Name:    "t",
+			Columns: []snapshot.SnapColumn{{Name: "code", Type: "text"}},
+		},
+	})
+	using := "code::integer"
+	desired := []pipeline.IRObject{
+		&ir.Table{
+			Schema:  "public",
+			Name:    "t",
+			Columns: []*ir.Column{{Name: "code", Type: ir.TypeRef{Name: "integer"}, Using: &using}},
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var found pipeline.DiffOp
+	for _, o := range ops {
+		if strings.Contains(o.SQL(), "ALTER COLUMN") {
+			found = o
+		}
+	}
+	if found == nil {
+		t.Fatalf("expected an ALTER COLUMN TYPE op, got: %v", sqlList(ops))
+	}
+	if !strings.Contains(found.SQL(), "USING code::integer") {
+		t.Errorf("expected USING clause in the emitted SQL, got: %s", found.SQL())
+	}
+	if found.Safety() != pipeline.Caution {
+		t.Errorf("safety = %v, want Caution (USING clause supplied)", found.Safety())
+	}
+}
+
+func TestDiffColumnTypeChangeWithoutUsingIsDestructive(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.t", &snapshot.SnapObject{
+		Kind: "table",
+		Table: &snapshot.SnapTable{
+			Schema:  "public",
+			Name:    "t",
+			Columns: []snapshot.SnapColumn{{Name: "code", Type: "text"}},
+		},
+	})
+	desired := []pipeline.IRObject{
+		&ir.Table{
+			Schema:  "public",
+			Name:    "t",
+			Columns: []*ir.Column{{Name: "code", Type: ir.TypeRef{Name: "integer"}}},
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var found pipeline.DiffOp
+	for _, o := range ops {
+		if strings.Contains(o.SQL(), "ALTER COLUMN") {
+			found = o
+		}
+	}
+	if found == nil {
+		t.Fatalf("expected an ALTER COLUMN TYPE op, got: %v", sqlList(ops))
+	}
+	if strings.Contains(found.SQL(), "USING") {
+		t.Errorf("expected no USING clause when none was declared, got: %s", found.SQL())
+	}
+	if found.Safety() != pipeline.Destructive {
+		t.Errorf("safety = %v, want Destructive (no USING clause, cast compatibility unknown offline)", found.Safety())
 	}
 }
 

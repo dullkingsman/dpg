@@ -438,13 +438,28 @@ type Type struct {
 	Variant        string    // "ENUM", "COMPOSITE", "RANGE", "DOMAIN", "BASE"
 	EnumValues     []string  // ENUM only
 	CompositeAttrs []*Column // COMPOSITE only: ordered list of attributes
-	Body           string    // raw Part1 for range/domain/base (opaque for now)
+	Body           string    // raw Part1 for range/base (opaque); DOMAIN's full CREATE DOMAIN text, used only for a base-type change (DROP+CREATE)
+	Reconstructed  bool      // Body rebuilt from the catalog; see Tablespace.Reconstructed. RANGE/BASE only.
 	Comment        *string
 	Owner          *string
 	Deprecated     *string
 	MigrateRemove  *pipeline.MigrateRemoveBlock // ENUM only: MIGRATE REMOVE { } block
 	NameMaps       []pipeline.NameMapEntry
-	SrcPos         pipeline.SourcePos
+	// DomainBaseType/DomainDefault/DomainNotNull/DomainConstraints (DOMAIN
+	// only) are RFC §5.4's structured domain diffing inputs — a domain is
+	// NOT purely opaque like RANGE/BASE despite sharing the Body field, so
+	// property-level changes (DEFAULT, NOT NULL, individual CHECK
+	// constraints) can each get their own targeted ALTER DOMAIN op instead
+	// of an unconditional DROP+CREATE. Populated from whichever source the
+	// user wrote: real PG's own inline "CREATE DOMAIN name AS type DEFAULT
+	// expr CONSTRAINT c CHECK (...)" syntax (parsed from Part 1 via
+	// pg_query), RFC §5.4's block-based "{ DEFAULT expr; CONSTRAINT c
+	// CHECK (...); }" form, or both merged together.
+	DomainBaseType    TypeRef
+	DomainDefault     *string
+	DomainNotNull     bool
+	DomainConstraints []*Constraint
+	SrcPos            pipeline.SourcePos
 }
 
 func (t *Type) QualifiedName() string   { return qualName(t.Schema, t.Name) }

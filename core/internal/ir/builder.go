@@ -1708,17 +1708,66 @@ func (b *Builder) buildUserMapping(cs *pg_query.CreateUserMappingStmt, block pip
 
 // ── Domain ────────────────────────────────────────────────────────────────────
 
+// buildDomain extracts DOMAIN's structured RFC §5.4 diffing inputs
+// (base type, DEFAULT, NOT NULL, CHECK constraints) from Part 1's real PG
+// CreateDomainStmt node, then merges in anything additionally declared via
+// the { } block's DEFAULT/NOT NULL/CONSTRAINT directives — found live-
+// testing a demo project: none of this was ever extracted at all before
+// (buildDomain only read block.Comment), so diffType had nothing to diff a
+// changed DEFAULT/constraint/NOT NULL against and fell through to
+// comment-only diffing forever, contradicting RFC §5.4's explicit
+// per-property SAFE/CAUTION semantics.
 func (b *Builder) buildDomain(cs *pg_query.CreateDomainStmt, block pipeline.BlockAST, pos pipeline.SourcePos, body string) (pipeline.IRObject, error) {
 	schema, name := extractTypeName(cs.Domainname)
 	t := &Type{
-		Schema:  schema,
-		Name:    name,
-		Variant: "DOMAIN",
-		Body:    body,
-		SrcPos:  pos,
+		Schema:         schema,
+		Name:           name,
+		Variant:        "DOMAIN",
+		Body:           body,
+		DomainBaseType: typeNameToRef(cs.TypeName),
+		SrcPos:         pos,
+	}
+	for _, cn := range cs.Constraints {
+		c := cn.GetConstraint()
+		if c == nil {
+			continue
+		}
+		switch c.Contype {
+		case pg_query.ConstrType_CONSTR_DEFAULT:
+			if c.RawExpr != nil {
+				expr := nodeToText(c.RawExpr)
+				t.DomainDefault = &expr
+			}
+		case pg_query.ConstrType_CONSTR_NOTNULL:
+			t.DomainNotNull = true
+		case pg_query.ConstrType_CONSTR_CHECK:
+			if c.RawExpr != nil {
+				expr := nodeToText(c.RawExpr)
+				t.DomainConstraints = append(t.DomainConstraints, &Constraint{
+					Name: c.Conname,
+					Type: "CHECK",
+					Expr: "CHECK (" + expr + ")",
+					Pos:  pos,
+				})
+			}
+		}
 	}
 	if block.Comment != nil {
 		t.Comment = &block.Comment.Value
+	}
+	if block.DomainDefault != nil {
+		t.DomainDefault = &block.DomainDefault.Text
+	}
+	if block.DomainNotNull {
+		t.DomainNotNull = true
+	}
+	for _, cst := range block.Constraints {
+		t.DomainConstraints = append(t.DomainConstraints, &Constraint{
+			Name: cst.Name.Name,
+			Type: "CHECK",
+			Expr: cst.Expr.Text,
+			Pos:  cst.Pos,
+		})
 	}
 	t.NameMaps = block.NameMaps
 	return t, nil
@@ -1817,7 +1866,14 @@ func (b *Builder) buildDefineStmt(ds *pg_query.DefineStmt, block pipeline.BlockA
 				t.CompositeAttrs = append(t.CompositeAttrs, col)
 			}
 		} else {
+			// rawBody was never assigned here — a declared BASE type parsed
+			// with Variant set but Body permanently empty ("" is treated as
+			// "nothing to create" by createType's default branch and by
+			// sourceBodyHash), found live-testing a demo project. RANGE and
+			// DOMAIN's own builder functions (buildRangeType/buildDomain)
+			// already set Body: rawBody identically.
 			t.Variant = "BASE"
+			t.Body = rawBody
 		}
 		t.NameMaps = block.NameMaps
 		return t, nil

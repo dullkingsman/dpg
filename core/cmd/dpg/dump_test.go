@@ -12,6 +12,7 @@ import (
 	"github.com/dullkingsman/dpg/internal/format"
 	"github.com/dullkingsman/dpg/internal/ir"
 	"github.com/dullkingsman/dpg/internal/pipeline"
+	"github.com/dullkingsman/dpg/internal/project"
 )
 
 // TestRenderIndexUsingMethodCompiles guards a real bug found live-testing a
@@ -156,6 +157,258 @@ func TestRenderUnloggedTableCompiles(t *testing.T) {
 	}
 	if found == nil || !found.Unlogged {
 		t.Errorf("Unlogged did not round-trip: %+v", found)
+	}
+}
+
+// TestRenderTableAndIndexTablespaceCompiles guards a real bug found live-
+// testing a demo project: case *ir.Table in renderObjectDPG had no
+// TABLESPACE rendering at all, table-level or per-index, despite both being
+// fully parsed and (after this fix) diffed — a table's or index's declared
+// TABLESPACE silently vanished on dump.
+func TestRenderTableAndIndexTablespaceCompiles(t *testing.T) {
+	strPtr := func(s string) *string { return &s }
+	fmtOpts := format.Options{IndentSize: 4, KeywordCase: "upper"}
+	tbl := &ir.Table{
+		Schema: "public", Name: "archive",
+		Columns:    []*ir.Column{{Name: "id", Type: ir.TypeRef{Name: "bigint"}}},
+		Tablespace: strPtr("archive_space"),
+		Indexes: []*ir.Index{
+			{Name: "archive_id_idx", Columns: []pipeline.IndexColumn{{Name: "id"}}, Tablespace: strPtr("archive_space")},
+		},
+	}
+
+	var b strings.Builder
+	renderObjectDPG(&b, tbl, fmtOpts)
+	rendered := b.String()
+
+	if !strings.Contains(rendered, "TABLESPACE archive_space") {
+		t.Errorf("rendered table missing table-level TABLESPACE, got:\n%s", rendered)
+	}
+	if strings.Count(rendered, "TABLESPACE archive_space") != 2 {
+		t.Errorf("expected both table-level and index-level TABLESPACE, got:\n%s", rendered)
+	}
+
+	dir := t.TempDir()
+	f := filepath.Join(dir, "objects.dpg")
+	if err := os.WriteFile(f, []byte(rendered), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	compiled, err := compiler.Compile([]string{f}, dir, pipeline.Default)
+	if err != nil {
+		t.Fatalf("dumped table/index tablespace failed to recompile: %v\n---\n%s", err, rendered)
+	}
+	var found *ir.Table
+	for _, o := range compiled {
+		if tb, ok := o.(*ir.Table); ok && tb.Name == "archive" {
+			found = tb
+		}
+	}
+	if found == nil {
+		t.Fatalf("table archive missing after recompile\n---\n%s", rendered)
+	}
+	if found.Tablespace == nil || *found.Tablespace != "archive_space" {
+		t.Errorf("Table.Tablespace did not round-trip: %v", found.Tablespace)
+	}
+	if len(found.Indexes) != 1 || found.Indexes[0].Tablespace == nil || *found.Indexes[0].Tablespace != "archive_space" {
+		t.Errorf("Index.Tablespace did not round-trip: %+v", found.Indexes)
+	}
+}
+
+// TestRenderVirtualTypeCompiles guards a real bug found live-testing a demo
+// project: renderObjectDPG had no case at all for *ir.VirtualType — a
+// declared VIRTUAL TYPE silently vanished from dump output entirely. Doubly
+// consequential for this kind: since virtual types are DPG-native (RFC
+// §5.6, no backing CREATE TYPE), running `dpg dump` against a project that
+// already had one declared didn't just fail to render it — with nothing in
+// the live catalog for introspection to find, `dpg dump` overwrote the
+// project's own snapshot with zero virtual_type entries, a genuine, silent
+// loss of the structural type info the snapshot exists to preserve
+// (confirmed live: a project with 2 declared virtual types had 0 left
+// immediately after a dump run). See mergeExistingVirtualTypes for the
+// other half of that fix (recovering the declarations pre-overwrite); this
+// test covers the render path that fix depends on to be worth anything.
+func TestRenderVirtualTypeCompiles(t *testing.T) {
+	fmtOpts := format.Options{IndentSize: 4, KeywordCase: "upper"}
+	comment := "polymorphic payment method blob"
+	vt := &ir.VirtualType{
+		Schema: "public", Name: "payment",
+		Body: ir.VtypeUnion{Members: []ir.VtypeBody{
+			ir.VtypeComposite{Fields: []ir.VtypeField{
+				{Name: "kind", Type: ir.VtypeTypeRef{Name: "text"}},
+				{Name: "amount", Type: ir.VtypeTypeRef{Name: "numeric"}},
+			}},
+			ir.VtypeComposite{Fields: []ir.VtypeField{
+				{Name: "kind", Type: ir.VtypeTypeRef{Name: "text"}},
+				{Name: "token", Type: ir.VtypeTypeRef{Name: "text"}},
+			}},
+			ir.VtypeTypeRef{Name: "text"},
+		}},
+		JsonFormat: "json",
+		Comment:    &comment,
+	}
+
+	var b strings.Builder
+	renderObjectDPG(&b, vt, fmtOpts)
+	rendered := b.String()
+
+	if !strings.Contains(rendered, "VIRTUAL TYPE payment AS") {
+		t.Errorf("expected VIRTUAL TYPE declaration, got:\n%s", rendered)
+	}
+	if !strings.Contains(rendered, "PREFERRED JSON FORMAT json;") {
+		t.Errorf("expected PREFERRED JSON FORMAT, got:\n%s", rendered)
+	}
+	if !strings.Contains(rendered, "COMMENT 'polymorphic payment method blob';") {
+		t.Errorf("expected COMMENT, got:\n%s", rendered)
+	}
+
+	dir := t.TempDir()
+	f := filepath.Join(dir, "schema.dpg")
+	if err := os.WriteFile(f, []byte(rendered), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	compiled, err := compiler.Compile([]string{f}, dir, pipeline.Default)
+	if err != nil {
+		t.Fatalf("dumped virtual type failed to recompile: %v\n---\n%s", err, rendered)
+	}
+	var found *ir.VirtualType
+	for _, o := range compiled {
+		if v, ok := o.(*ir.VirtualType); ok && v.Name == "payment" {
+			found = v
+		}
+	}
+	if found == nil {
+		t.Fatalf("virtual type payment missing after recompile\n---\n%s", rendered)
+	}
+	union, ok := found.Body.(ir.VtypeUnion)
+	if !ok || len(union.Members) != 3 {
+		t.Errorf("Body did not round-trip as a 3-member union: %+v", found.Body)
+	}
+	if found.JsonFormat != "json" {
+		t.Errorf("JsonFormat did not round-trip: %v", found.JsonFormat)
+	}
+	if found.Comment == nil || *found.Comment != comment {
+		t.Errorf("Comment did not round-trip: %v", found.Comment)
+	}
+}
+
+// TestRenderDomainCompiles guards RFC §5.4's structured domain rendering:
+// case "DOMAIN" previously rendered the entire domain (base type, DEFAULT,
+// NOT NULL, every CHECK) as one opaque Body string crammed inline after AS
+// — not just a cosmetically different shape from the RFC's own worked
+// example, but one that couldn't round-trip through diffType's new
+// property-level diffing (an inline blob recompiles back into Body, never
+// into DomainDefault/DomainConstraints/etc., so a dumped-then-reapplied
+// domain would silently lose all future per-property diffing). Now renders
+// via the RFC §5.4 block form directly.
+func TestRenderDomainCompiles(t *testing.T) {
+	fmtOpts := format.Options{IndentSize: 4, KeywordCase: "upper"}
+	def := "1"
+	comment := "must be positive"
+	dt := &ir.Type{
+		Schema: "public", Name: "positive_integer", Variant: "DOMAIN",
+		DomainBaseType: ir.TypeRef{Name: "integer"},
+		DomainDefault:  &def,
+		DomainNotNull:  true,
+		DomainConstraints: []*ir.Constraint{
+			{Name: "positive_only", Type: "CHECK", Expr: "CHECK (VALUE > 0)"},
+		},
+		Comment: &comment,
+	}
+
+	var b strings.Builder
+	renderObjectDPG(&b, dt, fmtOpts)
+	rendered := b.String()
+
+	if !strings.Contains(rendered, "DOMAIN positive_integer AS integer {") {
+		t.Errorf("expected DOMAIN ... AS integer { block, got:\n%s", rendered)
+	}
+	if !strings.Contains(rendered, "DEFAULT 1;") {
+		t.Errorf("expected DEFAULT directive, got:\n%s", rendered)
+	}
+	if !strings.Contains(rendered, "NOT NULL;") {
+		t.Errorf("expected NOT NULL directive, got:\n%s", rendered)
+	}
+	if !strings.Contains(rendered, `CONSTRAINT positive_only CHECK (VALUE > 0);`) {
+		t.Errorf("expected CONSTRAINT directive, got:\n%s", rendered)
+	}
+
+	dir := t.TempDir()
+	f := filepath.Join(dir, "schema.dpg")
+	if err := os.WriteFile(f, []byte(rendered), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	compiled, err := compiler.Compile([]string{f}, dir, pipeline.Default)
+	if err != nil {
+		t.Fatalf("dumped domain failed to recompile: %v\n---\n%s", err, rendered)
+	}
+	var found *ir.Type
+	for _, o := range compiled {
+		if tp, ok := o.(*ir.Type); ok && tp.Name == "positive_integer" {
+			found = tp
+		}
+	}
+	if found == nil {
+		t.Fatalf("domain positive_integer missing after recompile\n---\n%s", rendered)
+	}
+	if found.DomainBaseType.Name != "integer" {
+		t.Errorf("DomainBaseType did not round-trip: %v", found.DomainBaseType)
+	}
+	if found.DomainDefault == nil || *found.DomainDefault != "1" {
+		t.Errorf("DomainDefault did not round-trip: %v", found.DomainDefault)
+	}
+	if !found.DomainNotNull {
+		t.Error("DomainNotNull did not round-trip")
+	}
+	if len(found.DomainConstraints) != 1 || found.DomainConstraints[0].Name != "positive_only" {
+		t.Errorf("DomainConstraints did not round-trip: %+v", found.DomainConstraints)
+	}
+	if found.Comment == nil || *found.Comment != comment {
+		t.Errorf("Comment did not round-trip: %v", found.Comment)
+	}
+}
+
+// TestMergeExistingVirtualTypesRecovers guards the other half of the same
+// bug TestRenderVirtualTypeCompiles covers: virtual types are DPG-native, so
+// introspector.Introspect can never find one — mergeExistingVirtualTypes is
+// what recovers them from the project's own current source before dump
+// overwrites it. Also covers the two edge cases: no source files at all
+// (brand-new project bootstrap, nothing to recover — not an error), and
+// source that fails to recompile (surfaced as a warning, not fatal to dump).
+func TestMergeExistingVirtualTypesRecovers(t *testing.T) {
+	dir := t.TempDir()
+	src := "VIRTUAL TYPE line_item AS (sku text, quantity integer);\n"
+	f := filepath.Join(dir, "schema.dpg")
+	if err := os.WriteFile(f, []byte(src), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	db := &project.Database{Dir: dir, SourceFiles: []string{f}}
+	objs := mergeExistingVirtualTypes(db)
+	if len(objs) != 1 {
+		t.Fatalf("expected 1 recovered virtual type, got %d: %+v", len(objs), objs)
+	}
+	vt, ok := objs[0].(*ir.VirtualType)
+	if !ok || vt.Name != "line_item" {
+		t.Errorf("expected VirtualType line_item, got %+v", objs[0])
+	}
+}
+
+func TestMergeExistingVirtualTypesNoSourceFiles(t *testing.T) {
+	db := &project.Database{Dir: t.TempDir()}
+	if objs := mergeExistingVirtualTypes(db); objs != nil {
+		t.Errorf("expected nil for a project with no source files, got %+v", objs)
+	}
+}
+
+func TestMergeExistingVirtualTypesBrokenSourceIsNotFatal(t *testing.T) {
+	dir := t.TempDir()
+	f := filepath.Join(dir, "schema.dpg")
+	if err := os.WriteFile(f, []byte("TABLE ( totally not valid dpg"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	db := &project.Database{Dir: dir, SourceFiles: []string{f}}
+	if objs := mergeExistingVirtualTypes(db); objs != nil {
+		t.Errorf("expected nil (warning, not panic/error) for unparseable source, got %+v", objs)
 	}
 }
 

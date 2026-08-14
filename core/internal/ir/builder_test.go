@@ -60,6 +60,33 @@ func TestBuildUnloggedTableSetsFlag(t *testing.T) {
 	}
 }
 
+// TestBuildTableAndIndexTablespace guards a real bug found live-testing a
+// demo project: ir.Table.Tablespace and ir.Index.Tablespace were both parsed
+// (Table's from real pg_query CreateStmt.Tablespacename, Index's from the
+// blockparser's own TABLESPACE clause) but never read by the differ,
+// snapshot, introspect, or dump — a declared TABLESPACE on a table or index
+// was a total silent no-op at apply time; `dpg plan` reported "(no changes)"
+// even after adding TABLESPACE to both a table and one of its indexes.
+func TestBuildTableAndIndexTablespace(t *testing.T) {
+	obj := buildObject(t, pipeline.KindTable,
+		`archive (
+			id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+			data JSONB
+		) TABLESPACE archive_space`,
+		`INDICES { idx_data (data) TABLESPACE archive_space; }`,
+	)
+	tbl, ok := obj.(*ir.Table)
+	if !ok {
+		t.Fatalf("expected *ir.Table, got %T", obj)
+	}
+	if tbl.Tablespace == nil || *tbl.Tablespace != "archive_space" {
+		t.Errorf("Table.Tablespace: got %v, want archive_space", tbl.Tablespace)
+	}
+	if len(tbl.Indexes) != 1 || tbl.Indexes[0].Tablespace == nil || *tbl.Indexes[0].Tablespace != "archive_space" {
+		t.Errorf("Index.Tablespace: got %+v", tbl.Indexes)
+	}
+}
+
 func TestBuildSimpleTable(t *testing.T) {
 	obj := buildObject(t, pipeline.KindTable,
 		`users (
@@ -508,6 +535,98 @@ func TestBuildRangeType(t *testing.T) {
 	}
 	if tp.Comment == nil || *tp.Comment != "A price range" {
 		t.Errorf("Comment: got %v", tp.Comment)
+	}
+}
+
+// TestBuildBaseType guards a real bug found live-testing a demo project:
+// unlike buildRangeType/buildDomain (both of which set Body: rawBody),
+// buildDefineStmt's BASE branch set Variant = "BASE" but never assigned
+// Body at all — a declared base (shell) type parsed successfully but
+// carried an empty Body forever, which createType's default branch (and
+// sourceBodyHash) both treat as "nothing to create/hash."
+func TestBuildBaseType(t *testing.T) {
+	obj := buildObject(t, pipeline.KindBaseType,
+		`mytype (INPUT = mytype_in, OUTPUT = mytype_out, INTERNALLENGTH = 16)`,
+		`COMMENT 'A custom base type';`,
+	)
+	tp, ok := obj.(*ir.Type)
+	if !ok {
+		t.Fatalf("expected *ir.Type, got %T", obj)
+	}
+	if tp.Variant != "BASE" {
+		t.Errorf("Variant: got %q, want %q", tp.Variant, "BASE")
+	}
+	if tp.Body == "" {
+		t.Error("Body: got empty, want the deparsed CREATE TYPE statement")
+	}
+	if tp.Comment == nil || *tp.Comment != "A custom base type" {
+		t.Errorf("Comment: got %v", tp.Comment)
+	}
+}
+
+// TestBuildDomainInlineSyntax guards RFC §5.4's structured domain diffing
+// inputs (base type, DEFAULT, NOT NULL, CHECK) using real PostgreSQL's own
+// inline CREATE DOMAIN syntax — the form this codebase's demo project
+// already used before this fix (e.g. email_address), which buildDomain
+// never extracted at all: only block.Comment was ever read, so diffType had
+// nothing to compare a changed DEFAULT/constraint/NOT NULL against.
+func TestBuildDomainInlineSyntax(t *testing.T) {
+	obj := buildObject(t, pipeline.KindDomainType,
+		`positive_integer AS integer DEFAULT 1 CONSTRAINT positive_only CHECK (VALUE > 0) NOT NULL`,
+		``,
+	)
+	tp, ok := obj.(*ir.Type)
+	if !ok {
+		t.Fatalf("expected *ir.Type, got %T", obj)
+	}
+	if tp.Variant != "DOMAIN" {
+		t.Errorf("Variant: got %q, want %q", tp.Variant, "DOMAIN")
+	}
+	if tp.DomainBaseType.Name != "integer" && tp.DomainBaseType.Name != "int4" {
+		t.Errorf("DomainBaseType: got %q", tp.DomainBaseType.Name)
+	}
+	if tp.DomainDefault == nil || *tp.DomainDefault != "1" {
+		t.Errorf("DomainDefault: got %v", tp.DomainDefault)
+	}
+	if !tp.DomainNotNull {
+		t.Error("DomainNotNull: got false, want true")
+	}
+	if len(tp.DomainConstraints) != 1 || tp.DomainConstraints[0].Name != "positive_only" {
+		t.Fatalf("DomainConstraints: got %+v", tp.DomainConstraints)
+	}
+	// pg_query's deparser lowercases the VALUE keyword; real PG treats it
+	// case-insensitively, so this is cosmetic, not a bug.
+	if !strings.Contains(strings.ToLower(tp.DomainConstraints[0].Expr), "value > 0") {
+		t.Errorf("DomainConstraints[0].Expr: got %q", tp.DomainConstraints[0].Expr)
+	}
+}
+
+// TestBuildDomainBlockSyntax guards the same extraction via RFC §5.4's own
+// literal ABNF: DEFAULT/CONSTRAINT/NOT NULL declared in the { } block
+// instead of inline after AS. Real PG's CreateDomainStmt parser only sees
+// the bare "name AS basetype" in Part 1 here — this form is additive to,
+// not a replacement for, the inline syntax TestBuildDomainInlineSyntax
+// covers.
+func TestBuildDomainBlockSyntax(t *testing.T) {
+	obj := buildObject(t, pipeline.KindDomainType,
+		`positive_integer AS integer`,
+		`DEFAULT 1; CONSTRAINT positive_only CHECK (VALUE > 0); NOT NULL;`,
+	)
+	tp, ok := obj.(*ir.Type)
+	if !ok {
+		t.Fatalf("expected *ir.Type, got %T", obj)
+	}
+	if tp.DomainDefault == nil || *tp.DomainDefault != "1" {
+		t.Errorf("DomainDefault: got %v", tp.DomainDefault)
+	}
+	if !tp.DomainNotNull {
+		t.Error("DomainNotNull: got false, want true")
+	}
+	if len(tp.DomainConstraints) != 1 || tp.DomainConstraints[0].Name != "positive_only" {
+		t.Fatalf("DomainConstraints: got %+v", tp.DomainConstraints)
+	}
+	if !strings.Contains(tp.DomainConstraints[0].Expr, "VALUE > 0") {
+		t.Errorf("DomainConstraints[0].Expr: got %q", tp.DomainConstraints[0].Expr)
 	}
 }
 

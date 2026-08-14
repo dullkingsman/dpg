@@ -28,6 +28,24 @@ func notExtensionOwned(catalog, aliasOID string) string {
 		catalog, aliasOID)
 }
 
+// notInternallyDependent excludes catalog rows PostgreSQL creates itself as
+// an automatic ('i' = "internal") consequence of some other object's own
+// creation — e.g. the CAST from a RANGE type to its auto-generated
+// multirange companion, created the moment the range type is declared and
+// tied to it for as long as it exists. Such a row is not an independently
+// manageable DPG object: it cannot be explicitly re-created from scratch
+// (CREATE CAST on that exact pairing fails "already exists" even against a
+// database that never had one explicitly declared) and PostgreSQL refuses
+// to drop it on its own (it can only go away via CASCADE-dropping the
+// parent). Found live-testing a demo project: introspectCasts had no such
+// filter, so dpg dump proposed `DROP CAST` on one of these — a migration
+// step that would fail live and abort the whole transaction.
+func notInternallyDependent(catalog, aliasOID string) string {
+	return fmt.Sprintf(
+		"NOT EXISTS (SELECT 1 FROM pg_depend d WHERE d.classid = '%s'::regclass AND d.objid = %s AND d.deptype = 'i')",
+		catalog, aliasOID)
+}
+
 // ── DDL reconstruction helpers ────────────────────────────────────────────────
 
 // canonicalDDL runs a reconstructed CREATE statement through pg_query
@@ -308,6 +326,7 @@ LEFT   JOIN pg_proc p      ON p.oid = c.castfunc
 LEFT   JOIN pg_namespace n ON n.oid = p.pronamespace
 WHERE  c.oid >= $1
 AND    ` + notExtensionOwned("pg_cast", "c.oid") + `
+AND    ` + notInternallyDependent("pg_cast", "c.oid") + `
 ORDER  BY src, tgt`
 
 	rs, err := conn.QueryRows(ctx, q, firstNormalObjectID)

@@ -249,4 +249,13 @@ type BlockAST struct {
 	Mappings            []TSMappingDef
 	PreferredJsonFormat string // "json" or "jsonb"; empty = not set (default jsonb)
 	NameMaps            []NameMapEntry
+	// DomainDefault/DomainNotNull are RFC §5.4's DOMAIN-only "DEFAULT expr;"
+	// and "NOT NULL;" block directives, MERGED with any DEFAULT/NOT NULL/
+	// CHECK already present in the domain's Part 1 (real PG's own inline
+	// CREATE DOMAIN syntax remains fully supported; this block form is
+	// additive, not a replacement). CHECK constraints declared this way use
+	// the existing Constraints field — a domain CHECK has the exact same
+	// "CONSTRAINT name CHECK (expr);" shape as a table's.
+	DomainDefault *RawExpr
+	DomainNotNull bool
 }

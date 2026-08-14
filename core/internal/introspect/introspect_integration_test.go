@@ -146,6 +146,71 @@ func TestIntrospectDefaultPrivileges(t *testing.T) {
 	}
 }
 
+// TestIntrospectColumnGrantsExcludesTableInheritedPrivileges guards a real
+// bug found live-testing a demo project: introspectColumnGrants used to
+// query information_schema.column_privileges, which PostgreSQL defines to
+// report every EFFECTIVE privilege a role has on a column — including
+// privileges the role only has because of a table-level GRANT, not a real
+// column-level ACL entry. A table with nothing but a table-level "GRANT
+// SELECT TO app_reader" (no column-level grant anywhere) had that same
+// SELECT spuriously duplicated onto every column's Grants, confirmed live
+// against a real PostgreSQL 17 container: pg_attribute.attacl itself was
+// NULL for all of them the whole time. Now queries attacl directly (via
+// aclexplode), the same technique introspectTableGrants already used for
+// pg_class.relacl. This table declares both shapes side by side: a
+// table-level-only grant (id, name — must end up with zero column grants)
+// and a genuine column-level grant (email — must end up with exactly one).
+func TestIntrospectColumnGrantsExcludesTableInheritedPrivileges(t *testing.T) {
+	connStr := testpg.Start(t)
+	ctx := context.Background()
+
+	conn, err := executor.Connect(ctx, connStr)
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	defer conn.Close(ctx)
+
+	stmts := []string{
+		`CREATE ROLE app_reader`,
+		`CREATE TABLE cg_users (id bigint, email text, name text)`,
+		`GRANT SELECT ON TABLE cg_users TO app_reader`,
+		`GRANT SELECT (email) ON TABLE cg_users TO app_reader`,
+	}
+	for _, stmt := range stmts {
+		if _, err := conn.Exec(ctx, stmt); err != nil {
+			t.Fatalf("exec %q: %v", stmt, err)
+		}
+	}
+
+	ci := introspect.New()
+	objects, err := ci.Introspect(ctx, conn)
+	if err != nil {
+		t.Fatalf("introspect: %v", err)
+	}
+
+	var tbl *ir.Table
+	for _, obj := range objects {
+		if t2, ok := obj.(*ir.Table); ok && t2.Name == "cg_users" {
+			tbl = t2
+		}
+	}
+	if tbl == nil {
+		t.Fatal("table cg_users missing from introspection")
+	}
+	for _, col := range tbl.Columns {
+		switch col.Name {
+		case "id", "name":
+			if len(col.Grants) != 0 {
+				t.Errorf("column %s: expected zero grants (table-level only), got %+v", col.Name, col.Grants)
+			}
+		case "email":
+			if len(col.Grants) != 1 || col.Grants[0].Roles[0] != "app_reader" || col.Grants[0].Privileges[0] != "SELECT" {
+				t.Errorf("column email: expected exactly one SELECT grant to app_reader, got %+v", col.Grants)
+			}
+		}
+	}
+}
+
 func TestIntrospectTable(t *testing.T) {
 	connStr := testpg.Start(t)
 	ctx := context.Background()
