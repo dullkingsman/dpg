@@ -5,6 +5,7 @@ package graph
 
 import (
 	"fmt"
+	"regexp"
 	"sort"
 	"strings"
 
@@ -150,6 +151,73 @@ func (r *Resolver) Sort(objects []pipeline.IRObject) ([]pipeline.IRObject, error
 		}
 	}
 
+	// typeRefEdge adds a dependency from objIdx to the custom TYPE referenced
+	// by t — same ordering hazard as the *ir.Table column-type case below,
+	// but for a Function/Procedure parameter or return type (a function
+	// referencing a not-yet-created custom type fails at apply time,
+	// confirmed live). Unlike the Table case this never errors when
+	// unresolved: t.Schema=="" is ambiguous here between "built-in" and
+	// "same schema as the function" the way it isn't for a table column
+	// (which always has a definite owning schema to fall back to), so
+	// silence on a miss is the safer default — same reasoning as refEdge.
+	typeRefEdge := func(objIdx int, t ir.TypeRef, fallbackSchema string) {
+		if t.Schema == "pg_catalog" || t.Name == "" {
+			return
+		}
+		schema := defaultSchema(t.Schema, fallbackSchema)
+		if schema == "" {
+			refEdge(objIdx, t.Name)
+			return
+		}
+		refEdge(objIdx, schema+"."+t.Name)
+	}
+
+	// sqlBodyCallsIdent matches whether name appears as a whole-word
+	// identifier (case-insensitive, PostgreSQL identifiers being
+	// case-insensitive unless quoted) inside body. Not a real SQL parse —
+	// a plain text scan, like funcPrefixEdge's own prefix matching — so it
+	// can over-match a same-named column/variable/literal; a spurious extra
+	// ordering constraint from that is harmless, never a wrong result.
+	sqlBodyCallsIdent := func(body, name string) bool {
+		if body == "" || name == "" {
+			return false
+		}
+		re := regexp.MustCompile(`(?i)\b` + regexp.QuoteMeta(name) + `\b`)
+		return re.MatchString(body)
+	}
+
+	// bodyCallsFuncEdge adds a dependency from objIdx to every Function/
+	// Procedure in the object set whose name is referenced in body — used
+	// for a LANGUAGE sql function/procedure body calling another function.
+	// Real PostgreSQL validates a LANGUAGE sql body immediately at CREATE
+	// FUNCTION/PROCEDURE time (unlike plpgsql, which is compiled lazily and
+	// not checked against the catalog at creation), so a call to a
+	// not-yet-created function fails at apply time — same ordering hazard,
+	// found the same way, as the funcPrefixEdge cases elsewhere in this
+	// file.
+	bodyCallsFuncEdge := func(objIdx int, body string) {
+		if body == "" {
+			return
+		}
+		for j, dep := range objects {
+			if j == objIdx {
+				continue
+			}
+			var name string
+			switch d := dep.(type) {
+			case *ir.Function:
+				name = d.Name
+			case *ir.Procedure:
+				name = d.Name
+			default:
+				continue
+			}
+			if sqlBodyCallsIdent(body, name) {
+				dependsOn(objIdx, j)
+			}
+		}
+	}
+
 	// Circular FK edges that can be deferred.
 	type deferredFK struct {
 		table *ir.Table
@@ -249,6 +317,18 @@ func (r *Resolver) Sort(objects []pipeline.IRObject) ([]pipeline.IRObject, error
 				dependsOn(i, j)
 			}
 
+		case *ir.Publication:
+			// Depends on every FOR TABLE target — a publication created
+			// before its table exists fails at apply time (confirmed live:
+			// "relation ... does not exist"), same ordering hazard as the
+			// Trigger/EventTrigger/Cast cases elsewhere in this file.
+			// Publications aren't schema-scoped, so an unqualified table
+			// reference falls back to "public", the same convention used
+			// for EventTrigger/Cast's unqualified function references.
+			for _, t := range o.Tables {
+				refEdge(i, defaultSchema(t.Schema, "public")+"."+t.Name)
+			}
+
 		case *ir.View:
 			// View depends on its schema.
 			schemaEdge(i, o.Schema)
@@ -275,9 +355,27 @@ func (r *Resolver) Sort(objects []pipeline.IRObject) ([]pipeline.IRObject, error
 
 		case *ir.Function:
 			schemaEdge(i, o.Schema)
+			// Depends on any custom TYPE used in its parameters or return
+			// type, and (for a LANGUAGE sql body) any function/procedure it
+			// calls — see typeRefEdge/bodyCallsFuncEdge above.
+			for _, arg := range o.Args {
+				typeRefEdge(i, arg.Type, o.Schema)
+			}
+			typeRefEdge(i, o.ReturnType, o.Schema)
+			if strings.EqualFold(o.Attrs.Language, "sql") {
+				bodyCallsFuncEdge(i, o.Attrs.Body)
+			}
 
 		case *ir.Procedure:
 			schemaEdge(i, o.Schema)
+			// Same reasoning as *ir.Function above (a procedure has no
+			// return type).
+			for _, arg := range o.Args {
+				typeRefEdge(i, arg.Type, o.Schema)
+			}
+			if strings.EqualFold(o.Attrs.Language, "sql") {
+				bodyCallsFuncEdge(i, o.Attrs.Body)
+			}
 
 		case *ir.Aggregate:
 			schemaEdge(i, o.Schema)

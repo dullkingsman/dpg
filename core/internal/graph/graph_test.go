@@ -496,3 +496,142 @@ func TestSort_FunctionBeforeTSParser(t *testing.T) {
 	assertBefore(t, sorted, "public.ts_start()", "public.my_prs")
 	assertBefore(t, sorted, "public.ts_gettoken()", "public.my_prs")
 }
+
+// ── Dependency-graph gaps flagged 2026-08-14, closed here ──────────────────────
+//
+// Three edges the graph never computed: PUBLICATION ... FOR TABLE x → table x;
+// a LANGUAGE sql function/procedure body calling another function/procedure;
+// and a function/procedure's parameter or return TYPE referencing a custom
+// type. Each test declares the referencing object BEFORE its reference in the
+// input slice (same convention as the operator-class/TS-config tests above),
+// so a passing assertBefore proves a real edge, not input-order luck.
+
+func TestSort_TableBeforePublicationForTable(t *testing.T) {
+	pub := &ir.Publication{Name: "orders_pub", Tables: []ir.PublicationTableRef{{Schema: "app", Name: "orders"}}, SrcPos: pos}
+	objects := []pipeline.IRObject{pub, table("app", "orders"), schema("app")}
+	sorted := sortObjects(t, objects)
+	assertBefore(t, sorted, "app.orders", "orders_pub")
+}
+
+// An unqualified FOR TABLE reference falls back to "public", the same
+// convention already used for EventTrigger/Cast's unqualified function refs.
+func TestSort_TableBeforePublicationForTable_UnqualifiedRef(t *testing.T) {
+	pub := &ir.Publication{Name: "orders_pub", Tables: []ir.PublicationTableRef{{Name: "orders"}}, SrcPos: pos}
+	objects := []pipeline.IRObject{pub, table("public", "orders")}
+	sorted := sortObjects(t, objects)
+	assertBefore(t, sorted, "public.orders", "orders_pub")
+}
+
+// A publication with no fixed table target (FOR ALL TABLES, or FOR TABLES IN
+// SCHEMA — neither populates Tables) must not error.
+func TestSort_PublicationNoTableTargetNoError(t *testing.T) {
+	objects := []pipeline.IRObject{&ir.Publication{Name: "all_pub", SrcPos: pos}}
+	if _, err := graph.New().Sort(objects); err != nil {
+		t.Fatalf("publication with no FOR TABLE target must not error: %v", err)
+	}
+}
+
+// TestSort_SqlFunctionCallsAnotherFunction guards the second dependency-graph
+// gap: real PostgreSQL validates a LANGUAGE sql body immediately at CREATE
+// FUNCTION time (unlike plpgsql, compiled lazily), so a LANGUAGE sql
+// function calling another not-yet-created function fails at apply time.
+func TestSort_SqlFunctionCallsAnotherFunction(t *testing.T) {
+	caller := &ir.Function{
+		Schema: "app", Name: "total_price",
+		Attrs:  ir.FuncAttrs{Language: "sql", Body: "SELECT base_price() * 2"},
+		SrcPos: pos,
+	}
+	callee := &ir.Function{Schema: "app", Name: "base_price", SrcPos: pos}
+	objects := []pipeline.IRObject{caller, callee, schema("app")}
+	sorted := sortObjects(t, objects)
+	assertBefore(t, sorted, "app.base_price()", "app.total_price()")
+}
+
+// A LANGUAGE plpgsql body is deliberately NOT scanned — plpgsql is compiled
+// lazily and PostgreSQL does not resolve called-function names against the
+// catalog at CREATE FUNCTION time, so there is no matching ordering hazard to
+// guard against. Proven by declaring caller before callee with no schema
+// dependency forcing either order: Kahn's algorithm preserves input order
+// for nodes with no edge between them (both start at inDegree 0, tiebroken
+// by original position), so caller staying first shows no edge was added —
+// if plpgsql were wrongly scanned like sql, the added edge would force
+// callee first instead, exactly like TestSort_SqlFunctionCallsAnotherFunction.
+func TestSort_PlpgsqlFunctionBodyNotScanned(t *testing.T) {
+	caller := &ir.Function{
+		Schema: "app", Name: "total_price",
+		Attrs:  ir.FuncAttrs{Language: "plpgsql", Body: "BEGIN RETURN base_price() * 2; END;"},
+		SrcPos: pos,
+	}
+	callee := &ir.Function{Schema: "app", Name: "base_price", SrcPos: pos}
+	objects := []pipeline.IRObject{caller, callee}
+	sorted := sortObjects(t, objects)
+	assertBefore(t, sorted, "app.total_price()", "app.base_price()")
+}
+
+// TestSort_SqlProcedureCallsFunction guards the same gap for a LANGUAGE sql
+// PROCEDURE body.
+func TestSort_SqlProcedureCallsFunction(t *testing.T) {
+	proc := &ir.Procedure{
+		Schema: "app", Name: "apply_discount",
+		Attrs:  ir.FuncAttrs{Language: "sql", Body: "SELECT base_price()"},
+		SrcPos: pos,
+	}
+	fn := &ir.Function{Schema: "app", Name: "base_price", SrcPos: pos}
+	objects := []pipeline.IRObject{proc, fn, schema("app")}
+	sorted := sortObjects(t, objects)
+	assertBefore(t, sorted, "app.base_price()", "app.apply_discount()")
+}
+
+// TestSort_TypeBeforeFunctionParam guards the third dependency-graph gap: a
+// function whose parameter type is a custom TYPE, created before that type,
+// fails at apply time ("type ... does not exist").
+func TestSort_TypeBeforeFunctionParam(t *testing.T) {
+	fn := &ir.Function{
+		Schema: "app", Name: "classify",
+		Args:   []ir.FuncArg{{Name: "s", Type: ir.TypeRef{Schema: "app", Name: "order_status"}}},
+		SrcPos: pos,
+	}
+	objects := []pipeline.IRObject{fn, enumType("app", "order_status"), schema("app")}
+	sorted := sortObjects(t, objects)
+	assertBefore(t, sorted, "app.order_status", "app.classify(app.order_status)")
+}
+
+// Same gap for a function's RETURN TYPE.
+func TestSort_TypeBeforeFunctionReturnType(t *testing.T) {
+	fn := &ir.Function{
+		Schema: "app", Name: "current_status",
+		ReturnType: ir.TypeRef{Schema: "app", Name: "order_status"},
+		SrcPos:     pos,
+	}
+	objects := []pipeline.IRObject{fn, enumType("app", "order_status"), schema("app")}
+	sorted := sortObjects(t, objects)
+	assertBefore(t, sorted, "app.order_status", "app.current_status()")
+}
+
+// An unqualified parameter type resolves against the function's own schema —
+// same convention as an unqualified table column type.
+func TestSort_TypeBeforeFunctionParam_UnqualifiedRef(t *testing.T) {
+	fn := &ir.Function{
+		Schema: "app", Name: "classify",
+		Args:   []ir.FuncArg{{Name: "s", Type: ir.TypeRef{Name: "order_status"}}},
+		SrcPos: pos,
+	}
+	objects := []pipeline.IRObject{fn, enumType("app", "order_status"), schema("app")}
+	sorted := sortObjects(t, objects)
+	assertBefore(t, sorted, "app.order_status", "app.classify(order_status)")
+}
+
+// A built-in parameter/return type must not error.
+func TestSort_FunctionBuiltinTypesNoError(t *testing.T) {
+	fn := &ir.Function{
+		Schema:     "app",
+		Name:       "add",
+		Args:       []ir.FuncArg{{Type: ir.TypeRef{Schema: "pg_catalog", Name: "int4"}}},
+		ReturnType: ir.TypeRef{Name: "integer"},
+		SrcPos:     pos,
+	}
+	objects := []pipeline.IRObject{fn, schema("app")}
+	if _, err := graph.New().Sort(objects); err != nil {
+		t.Fatalf("function with only built-in types must not error: %v", err)
+	}
+}

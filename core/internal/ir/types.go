@@ -584,6 +584,15 @@ func (u *UserMapping) QualifiedName() string   { return u.User + "@" + u.Server 
 func (u *UserMapping) Pos() pipeline.SourcePos { return u.SrcPos }
 func (u *UserMapping) irObject()               {}
 
+// PublicationTableRef is one FOR TABLE target of a CREATE PUBLICATION
+// declaration, used only to compute dependency-graph ordering (graph.go) —
+// Publication itself stays opaque (Body carries the full statement text) for
+// diff/snapshot/dump purposes, same as every other reconstruction-tier kind.
+type PublicationTableRef struct {
+	Schema string // empty for an unqualified reference
+	Name   string
+}
+
 // Publication is a CREATE PUBLICATION declaration.
 type Publication struct {
 	Name string
@@ -593,7 +602,11 @@ type Publication struct {
 	// confirmed live via \h COMMENT that real PostgreSQL genuinely supports
 	// this, despite Publication being excluded from the original 14-kind
 	// Comment/Grant fix on the mistaken assumption that it didn't apply.
-	Comment       *string
+	Comment *string
+	// Tables is the FOR TABLE target list (PUBLICATIONOBJ_TABLE entries
+	// only — FOR TABLES IN SCHEMA/FOR ALL TABLES have no single fixed table
+	// to order against). See PublicationTableRef.
+	Tables        []PublicationTableRef
 	Reconstructed bool // Body rebuilt from the catalog; see Tablespace.Reconstructed
 	SrcPos        pipeline.SourcePos
 }

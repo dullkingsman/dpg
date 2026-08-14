@@ -2130,6 +2130,17 @@ func (b *Builder) buildOpaque(node *pg_query.Node, block pipeline.BlockAST, pos 
 		if block.Comment != nil {
 			pub.Comment = &block.Comment.Value
 		}
+		for _, obj := range n.CreatePublicationStmt.Pubobjects {
+			spec := obj.GetPublicationObjSpec()
+			if spec == nil || spec.Pubobjtype != pg_query.PublicationObjSpecType_PUBLICATIONOBJ_TABLE {
+				continue
+			}
+			rv := spec.GetPubtable().GetRelation()
+			if rv == nil || rv.Relname == "" {
+				continue
+			}
+			pub.Tables = append(pub.Tables, PublicationTableRef{Schema: rv.Schemaname, Name: rv.Relname})
+		}
 		return pub, nil
 	case *pg_query.Node_CreateSubscriptionStmt:
 		return b.buildSubscription(n.CreateSubscriptionStmt, block, pos, sql)
