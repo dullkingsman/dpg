@@ -59,8 +59,7 @@ WITH NO DATA;
 
 GRANT SELECT ON "public"."product_stats" TO "app_readonly";
 
--- non-transactional:
-CREATE INDEX CONCURRENTLY IF NOT EXISTS "idx_product_stats_id"
+CREATE INDEX IF NOT EXISTS "idx_product_stats_id"
     ON "public"."product_stats" ("product_id");
 ```
 

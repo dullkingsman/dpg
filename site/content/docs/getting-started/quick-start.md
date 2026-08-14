@@ -115,15 +115,14 @@ CREATE TABLE "public"."users" (
     CONSTRAINT "uq_users_email" UNIQUE ("email")
 );
 
+-- source: schemas/public/tables/users.dpg:4
+CREATE INDEX IF NOT EXISTS "idx_users_email" ON "public"."users" ("email");
+
 GRANT SELECT ON TABLE "public"."users" TO "app_readonly";
 GRANT SELECT, INSERT, UPDATE ON TABLE "public"."users" TO "app_service";
 ALTER TABLE "public"."users" ENABLE ROW LEVEL SECURITY;
 
 COMMIT;
-
--- non-transactional
--- source: schemas/public/tables/users.dpg:4, safety: MANUAL
-CREATE INDEX CONCURRENTLY IF NOT EXISTS "idx_users_email" ON "public"."users" ("email");
 ```
 
 No database connection required — the diff runs against the committed snapshot (empty on first run).

@@ -278,13 +278,13 @@ OPERATOR CLASS public.rt_same_name FOR TYPE integer USING btree FAMILY rt_same_n
 func TestRoundtripIndexVariants(t *testing.T) {
 	assertOpaqueRoundtrip(t, `TABLE t (a INTEGER, b INTEGER, c TEXT, e TEXT) {
     INDICES {
-        i_uniq UNIQUE (a);
+        UNIQUE i_uniq (a);
         i_sort (c DESC NULLS LAST, b);
         i_partial (b) WHERE (b > 0);
         i_cover (a) INCLUDE (c, b);
         i_expr (lower(e));
-        i_gin (to_tsvector('english', e)) USING gin;
-        i_nulls_nd UNIQUE (b) NULLS NOT DISTINCT;
+        i_gin USING gin (to_tsvector('english', e));
+        UNIQUE i_nulls_nd (b) NULLS NOT DISTINCT;
         i_with (a) WITH (fillfactor = 70);
     }
 }`)
@@ -300,7 +300,7 @@ func TestRoundtripIndexVariants(t *testing.T) {
 func TestRoundtripIndexModeB(t *testing.T) {
 	assertOpaqueRoundtrip(t, `TABLE t (a INTEGER, b INTEGER) {
     INDEX i_modeb_a (a);
-    INDEX i_modeb_uniq UNIQUE (b) NULLS NOT DISTINCT;
+    UNIQUE INDEX i_modeb_uniq (b) NULLS NOT DISTINCT;
     INDICES { i_modea_ab (a, b); }
 }`)
 }
@@ -617,7 +617,7 @@ func TestRoundtripIndexDefinitionChangeAppliesLive(t *testing.T) {
 	// apply — this must route through diffIndexes' new content-comparison
 	// branch, not the name-only-existence check.
 	v2 := `TABLE t (a INTEGER, e TEXT) {
-    INDICES { t_idx (to_tsvector('english', e)) USING gin WHERE (a > 0); }
+    INDICES { t_idx USING gin (to_tsvector('english', e)) WHERE (a > 0); }
 }`
 	if err := os.WriteFile(f, []byte(v2), 0o644); err != nil {
 		t.Fatalf("write v2: %v", err)

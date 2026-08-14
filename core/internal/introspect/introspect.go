@@ -53,6 +53,10 @@ func (ci *CatalogIntrospector) Introspect(ctx context.Context, conn pipeline.Que
 	}
 	all = append(all, views...)
 
+	if err := introspectViewIndexes(ctx, conn, views); err != nil {
+		return nil, err
+	}
+
 	functions, err := introspectFunctions(ctx, conn)
 	if err != nil {
 		return nil, err
@@ -82,6 +86,12 @@ func (ci *CatalogIntrospector) Introspect(ctx context.Context, conn pipeline.Que
 		return nil, err
 	}
 	all = append(all, aggregates...)
+
+	defaultPrivs, err := introspectDefaultPrivileges(ctx, conn)
+	if err != nil {
+		return nil, err
+	}
+	all = append(all, defaultPrivs...)
 
 	// Reliable-tier opaque objects: reconstructed CREATE DDL, canonicalised
 	// through pg_query so the body hash matches the compiler's. See opaque.go.
@@ -121,9 +131,16 @@ func introspectAggregates(ctx context.Context, conn pipeline.Querier) ([]pipelin
 SELECT n.nspname, p.proname,
        pg_get_function_identity_arguments(p.oid) AS args,
        pg_catalog.oidvectortypes(p.proargtypes)   AS arg_types,
-       obj_description(p.oid, 'pg_proc') AS comment
+       obj_description(p.oid, 'pg_proc') AS comment,
+       a.aggtransfn::text                AS sfunc,
+       a.aggtranstype::regtype::text     AS stype,
+       a.agginitval                      AS initcond,
+       NULLIF(a.aggfinalfn::text, '-')   AS finalfunc,
+       NULLIF(a.aggcombinefn::text, '-') AS combinefunc,
+       NULLIF(a.aggserialfn::text, '-')  AS serialfunc
 FROM   pg_proc p
 JOIN   pg_namespace n ON n.oid = p.pronamespace
+JOIN   pg_aggregate a ON a.aggfnoid = p.oid
 WHERE  p.prokind = 'a'
 AND    n.nspname NOT IN ('pg_catalog','information_schema','pg_toast')
 AND    NOT EXISTS (SELECT 1 FROM pg_depend d WHERE d.classid = 'pg_proc'::regclass AND d.objid = p.oid AND d.deptype = 'e')
@@ -138,17 +155,16 @@ ORDER  BY n.nspname, p.proname, args`
 	aggIdx := make(map[string]*ir.Aggregate)
 	var out []pipeline.IRObject
 	for rs.Next() {
-		var schema, name, args, argTypes string
-		var comment *string
-		if err := rs.Scan(&schema, &name, &args, &argTypes, &comment); err != nil {
+		var schema, name, args, argTypes, sfunc, stype string
+		var comment, initcond, finalfunc, combinefunc, serialfunc *string
+		if err := rs.Scan(&schema, &name, &args, &argTypes, &comment,
+			&sfunc, &stype, &initcond, &finalfunc, &combinefunc, &serialfunc); err != nil {
 			return nil, err
 		}
 		agg := &ir.Aggregate{
 			Schema:  schema,
 			Name:    name,
 			Comment: comment,
-			// Body is intentionally empty: we cannot reconstruct DDL from catalog.
-			// diffAggregate skips the body check when Body == "".
 		}
 		// Use argTypes (type-only, from oidvectortypes) so QualifiedName matches
 		// ir.ArgsKey(). Keep args (with parameter names) for the grants index key.
@@ -157,6 +173,31 @@ ORDER  BY n.nspname, p.proname, args`
 				agg.Args = append(agg.Args, ir.FuncArg{Type: ir.TypeRef{Name: strings.TrimSpace(a)}})
 			}
 		}
+		agg.Options = append(agg.Options, pipeline.StorageParam{Key: "sfunc", Value: sfunc})
+		agg.Options = append(agg.Options, pipeline.StorageParam{Key: "stype", Value: stype})
+		if initcond != nil {
+			agg.Options = append(agg.Options, pipeline.StorageParam{Key: "initcond", Value: quoteLit(*initcond)})
+		}
+		if finalfunc != nil {
+			agg.Options = append(agg.Options, pipeline.StorageParam{Key: "finalfunc", Value: *finalfunc})
+		}
+		if combinefunc != nil {
+			agg.Options = append(agg.Options, pipeline.StorageParam{Key: "combinefunc", Value: *combinefunc})
+		}
+		if serialfunc != nil {
+			agg.Options = append(agg.Options, pipeline.StorageParam{Key: "serialfunc", Value: *serialfunc})
+		}
+		optParts := make([]string, len(agg.Options))
+		for i, p := range agg.Options {
+			optParts[i] = p.Key + " = " + p.Value
+		}
+		argParts := make([]string, len(agg.Args))
+		for i, a := range agg.Args {
+			argParts[i] = a.Type.String()
+		}
+		agg.Body = fmt.Sprintf("CREATE AGGREGATE %s (%s) (%s)",
+			qualIdentQ(schema, name), strings.Join(argParts, ", "), strings.Join(optParts, ", "))
+
 		aggIdx[schema+"."+name+"("+args+")"] = agg
 		out = append(out, agg)
 	}
@@ -235,6 +276,119 @@ ORDER  BY n.nspname, p.proname, args, grantee, a.privilege_type`
 	return nil
 }
 
+// ── default privileges ──────────────────────────────────────────────────────
+
+// defaclObjTypeNames maps pg_default_acl.defaclobjtype's single-char code to
+// the ON <type> keyword real PostgreSQL's own ALTER DEFAULT PRIVILEGES
+// grammar uses (confirmed live via \h ALTER DEFAULT PRIVILEGES: TABLES,
+// SEQUENCES, FUNCTIONS, TYPES, SCHEMAS).
+var defaclObjTypeNames = map[string]string{
+	"r": "TABLES",
+	"S": "SEQUENCES",
+	"f": "FUNCTIONS",
+	"T": "TYPES",
+	"n": "SCHEMAS",
+}
+
+// introspectDefaultPrivileges reads pg_default_acl, one *ir.DefaultPrivileges
+// per (role, schema, object type) tuple — matching the catalog's own model,
+// and Builder.BuildDefaultPrivileges's identical split for the compiled-
+// source side (see ir.DefaultPrivileges.QualifiedName). defaclnamespace == 0
+// means "no schema restriction" (a database-wide default), represented as a
+// nil InSchema, matching how the compiler leaves it unset when no "IN
+// SCHEMA" clause was declared.
+func introspectDefaultPrivileges(ctx context.Context, conn pipeline.Querier) ([]pipeline.IRObject, error) {
+	const q = `
+SELECT r.rolname AS for_role, n.nspname AS in_schema, d.defaclobjtype::text,
+       CASE WHEN a.grantee = 0 THEN 'PUBLIC' ELSE pg_get_userbyid(a.grantee) END AS grantee,
+       a.privilege_type, a.is_grantable
+FROM   pg_default_acl d
+JOIN   pg_roles r ON r.oid = d.defaclrole
+LEFT   JOIN pg_namespace n ON n.oid = NULLIF(d.defaclnamespace, 0),
+       LATERAL aclexplode(d.defaclacl) a
+WHERE  n.nspname IS NULL OR n.nspname NOT IN ('pg_catalog', 'information_schema', 'pg_toast')
+ORDER  BY r.rolname, n.nspname, d.defaclobjtype, grantee, a.privilege_type`
+
+	rs, err := conn.QueryRows(ctx, q)
+	if err != nil {
+		return nil, fmt.Errorf("introspect default privileges: %w", err)
+	}
+	defer rs.Close()
+
+	type dpKey struct{ forRole, inSchema, objType string }
+	type grantKey struct {
+		dpKey
+		grantee string
+	}
+	type grantEntry struct {
+		privs     []string
+		grantable bool
+	}
+	grants := make(map[grantKey]*grantEntry)
+	var grantOrder []grantKey
+	dpSeen := make(map[dpKey]bool)
+	var dpOrder []dpKey
+
+	for rs.Next() {
+		var forRole, objType, grantee, priv string
+		var inSchema *string
+		var grantable bool
+		if err := rs.Scan(&forRole, &inSchema, &objType, &grantee, &priv, &grantable); err != nil {
+			return nil, err
+		}
+		schemaVal := ""
+		if inSchema != nil {
+			schemaVal = *inSchema
+		}
+		dk := dpKey{forRole: forRole, inSchema: schemaVal, objType: objType}
+		if !dpSeen[dk] {
+			dpSeen[dk] = true
+			dpOrder = append(dpOrder, dk)
+		}
+		gk := grantKey{dpKey: dk, grantee: grantee}
+		e, ok := grants[gk]
+		if !ok {
+			e = &grantEntry{}
+			grants[gk] = e
+			grantOrder = append(grantOrder, gk)
+		}
+		e.privs = append(e.privs, priv)
+		if grantable {
+			e.grantable = true
+		}
+	}
+	if err := rs.Err(); err != nil {
+		return nil, err
+	}
+
+	dpIdx := make(map[dpKey]*ir.DefaultPrivileges, len(dpOrder))
+	out := make([]pipeline.IRObject, 0, len(dpOrder))
+	for _, dk := range dpOrder {
+		objType := defaclObjTypeNames[dk.objType]
+		if objType == "" {
+			objType = dk.objType // unrecognized code: pass through raw rather than silently drop
+		}
+		role := dk.forRole
+		dp := &ir.DefaultPrivileges{ForRole: &role, ObjectType: objType}
+		if dk.inSchema != "" {
+			schema := dk.inSchema
+			dp.InSchema = &schema
+		}
+		dpIdx[dk] = dp
+		out = append(out, dp)
+	}
+	for _, gk := range grantOrder {
+		dp := dpIdx[gk.dpKey]
+		e := grants[gk]
+		dp.Grants = append(dp.Grants, ir.Grant{
+			Privileges: e.privs,
+			Roles:      []string{gk.grantee},
+			WithGrant:  e.grantable,
+		})
+	}
+	return out, nil
+}
+
 // ── schemas ───────────────────────────────────────────────────────────────────
 
 func introspectSchemas(ctx context.Context, conn pipeline.Querier) ([]pipeline.IRObject, error) {
@@ -299,14 +453,17 @@ ORDER  BY e.extname`
 
 func introspectTables(ctx context.Context, conn pipeline.Querier) ([]pipeline.IRObject, error) {
 	const q = `
-SELECT c.relname, n.nspname, c.relpersistence::text,
+SELECT c.relname, n.nspname, c.relpersistence::text, c.relkind::text,
        r.rolname AS owner,
        obj_description(c.oid, 'pg_class') AS comment,
-       c.relrowsecurity, c.relforcerowsecurity
+       c.relrowsecurity, c.relforcerowsecurity,
+       fs.srvname, ft.ftoptions
 FROM   pg_class c
 JOIN   pg_namespace n ON n.oid = c.relnamespace
 JOIN   pg_roles r     ON r.oid = c.relowner
-WHERE  c.relkind IN ('r', 'p')
+LEFT   JOIN pg_foreign_table ft  ON ft.ftrelid = c.oid
+LEFT   JOIN pg_foreign_server fs ON fs.oid = ft.ftserver
+WHERE  c.relkind IN ('r', 'p', 'f')
 AND    NOT c.relispartition
 AND    n.nspname NOT IN ('pg_catalog','information_schema','pg_toast')
 AND    NOT EXISTS (SELECT 1 FROM pg_depend d WHERE d.classid = 'pg_class'::regclass AND d.objid = c.oid AND d.deptype = 'e')
@@ -322,20 +479,30 @@ ORDER  BY n.nspname, c.relname`
 	tableIdx := map[string]*ir.Table{}
 
 	for rs.Next() {
-		var name, schema, persistence, owner string
-		var comment *string
+		var name, schema, persistence, relkind, owner string
+		var comment, server *string
 		var rlsEnabled, rlsForced bool
-		if err := rs.Scan(&name, &schema, &persistence, &owner, &comment, &rlsEnabled, &rlsForced); err != nil {
+		var ftoptions []string
+		if err := rs.Scan(&name, &schema, &persistence, &relkind, &owner, &comment, &rlsEnabled, &rlsForced, &server, &ftoptions); err != nil {
 			return nil, err
 		}
 		t := &ir.Table{
 			Schema:     schema,
 			Name:       name,
 			Unlogged:   persistence == "u",
+			Foreign:    relkind == "f",
 			Owner:      &owner,
 			Comment:    comment,
 			RLSEnabled: rlsEnabled,
 			RLSForced:  rlsForced,
+		}
+		if t.Foreign {
+			t.ForeignServer = server
+			for _, kv := range ftoptions {
+				if k, v, ok := strings.Cut(kv, "="); ok {
+					t.ForeignOptions = append(t.ForeignOptions, pipeline.StorageParam{Key: k, Value: v})
+				}
+			}
 		}
 		tables = append(tables, t)
 		tableIdx[schema+"."+name] = t
@@ -409,7 +576,7 @@ JOIN   pg_type t      ON t.oid = a.atttypid
 LEFT   JOIN pg_attrdef d ON d.adrelid = a.attrelid AND d.adnum = a.attnum
 WHERE  a.attnum > 0
 AND    NOT a.attisdropped
-AND    c.relkind IN ('r', 'p')
+AND    c.relkind IN ('r', 'p', 'f')
 AND    n.nspname NOT IN ('pg_catalog','information_schema','pg_toast')
 ORDER  BY n.nspname, c.relname, a.attnum`
 
@@ -483,7 +650,7 @@ SELECT n.nspname, c.relname,
 FROM   pg_constraint con
 JOIN   pg_class c     ON c.oid = con.conrelid
 JOIN   pg_namespace n ON n.oid = c.relnamespace
-WHERE  c.relkind IN ('r', 'p')
+WHERE  c.relkind IN ('r', 'p', 'f')
 AND    con.contype != 'n'
 AND    n.nspname NOT IN ('pg_catalog','information_schema','pg_toast')
 ORDER  BY n.nspname, c.relname, con.conname`
@@ -570,6 +737,71 @@ ORDER  BY n.nspname, c.relname, i.relname`
 			where = &w
 		}
 		t.Indexes = append(t.Indexes, &ir.Index{
+			Name:             name,
+			Unique:           unique,
+			Method:           method,
+			Columns:          parseIndexDef(def),
+			Include:          parseIndexInclude(def),
+			NullsNotDistinct: strings.Contains(strings.ToUpper(def), "NULLS NOT DISTINCT"),
+			With:             parseIndexWith(def),
+			Where:            where,
+		})
+	}
+	return rs.Err()
+}
+
+// introspectViewIndexes is introspectIndexes' sibling for a materialized
+// view's indexes (RFC §8.2) — real PostgreSQL only supports indexes on a
+// materialized view or a table, never a plain view, so this only ever
+// matches relkind = 'm'.
+func introspectViewIndexes(ctx context.Context, conn pipeline.Querier, views []pipeline.IRObject) error {
+	idx := make(map[string]*ir.View, len(views))
+	for _, obj := range views {
+		if v, ok := obj.(*ir.View); ok && v.Materialized {
+			idx[v.Schema+"."+v.Name] = v
+		}
+	}
+	if len(idx) == 0 {
+		return nil
+	}
+
+	const q = `
+SELECT n.nspname, c.relname,
+       i.relname AS idx_name,
+       ix.indisunique,
+       am.amname AS method,
+       pg_get_indexdef(ix.indexrelid) AS idx_def
+FROM   pg_index ix
+JOIN   pg_class c  ON c.oid = ix.indrelid
+JOIN   pg_class i  ON i.oid = ix.indexrelid
+JOIN   pg_namespace n ON n.oid = c.relnamespace
+JOIN   pg_am am    ON am.oid = i.relam
+WHERE  c.relkind = 'm'
+AND    n.nspname NOT IN ('pg_catalog','information_schema','pg_toast')
+ORDER  BY n.nspname, c.relname, i.relname`
+
+	rs, err := conn.QueryRows(ctx, q)
+	if err != nil {
+		return fmt.Errorf("introspect view indexes: %w", err)
+	}
+	defer rs.Close()
+
+	for rs.Next() {
+		var schema, view, name, method, def string
+		var unique bool
+		if err := rs.Scan(&schema, &view, &name, &unique, &method, &def); err != nil {
+			return err
+		}
+		v, ok := idx[schema+"."+view]
+		if !ok {
+			continue
+		}
+		var where *string
+		if i := strings.Index(strings.ToUpper(def), " WHERE "); i >= 0 {
+			w := stripStringLiteralCasts(strings.TrimSpace(def[i+7:]))
+			where = &w
+		}
+		v.Indexes = append(v.Indexes, &ir.Index{
 			Name:             name,
 			Unique:           unique,
 			Method:           method,
@@ -1180,6 +1412,9 @@ ORDER  BY n.nspname, t.typname`
 	if err := introspectCompositeAttrs(ctx, conn, out); err != nil {
 		return nil, err
 	}
+	if err := introspectRangeBodies(ctx, conn, out); err != nil {
+		return nil, err
+	}
 	return out, nil
 }
 
@@ -1283,6 +1518,88 @@ ORDER  BY n.nspname, t.typname`
 			body.WriteString(*checks)
 		}
 		t.Body = body.String()
+	}
+	return rs.Err()
+}
+
+// introspectRangeBodies reads each RANGE type's pg_range row and reconstructs
+// its DPG-source options text into Body — the same "trailing-clause-only"
+// shape introspectDomainBodies already establishes (no "CREATE TYPE name AS
+// RANGE" prefix; dump.go's renderer supplies that). Found live-testing a
+// demo project: RANGE types had NO introspection at all before this — not
+// even a partial/wrong reconstruction, nothing whatsoever selected SUBTYPE
+// or any other pg_range column, so `dpg dump` could only emit
+// "-- type X (RANGE) omitted" for every range type in the database, despite
+// the RFC listing Range types as "Declared, Diffed" with no caveat that
+// introspection was incomplete.
+//
+// SUBTYPE_OPCLASS is only rendered when it differs from the subtype's own
+// default btree opclass — same "suppress when it matches the type's default"
+// discipline already used for column STORAGE (§6m) — otherwise nearly every
+// range type would render a redundant SUBTYPE_OPCLASS clause. COLLATION,
+// CANONICAL, and SUBTYPE_DIFF are only rendered when actually set (PG
+// reports 0/no-collation for the common case of a non-collatable subtype
+// like numeric or a range with no custom CANONICAL/SUBTYPE_DIFF function).
+func introspectRangeBodies(ctx context.Context, conn pipeline.Querier, types []pipeline.IRObject) error {
+	const q = `
+WITH btree_am AS (SELECT oid FROM pg_am WHERE amname = 'btree')
+SELECT n.nspname, t.typname,
+       pg_catalog.format_type(r.rngsubtype, NULL) AS subtype,
+       CASE WHEN dflt.oid IS NULL OR dflt.oid <> r.rngsubopc
+            THEN quote_ident(opc.opcname) END AS subtype_opclass,
+       CASE WHEN r.rngcollation <> 0 THEN quote_ident(coll.collname) END AS collation,
+       CASE WHEN r.rngcanonical <> 0 THEN quote_ident(canfn.proname) END AS canonical,
+       CASE WHEN r.rngsubdiff <> 0 THEN quote_ident(difffn.proname) END AS subtype_diff
+FROM   pg_range r
+JOIN   pg_type t          ON t.oid = r.rngtypid
+JOIN   pg_namespace n     ON n.oid = t.typnamespace
+LEFT JOIN pg_opclass opc  ON opc.oid = r.rngsubopc
+LEFT JOIN pg_opclass dflt ON dflt.opcintype = r.rngsubtype
+                          AND dflt.opcmethod = (SELECT oid FROM btree_am)
+                          AND dflt.opcdefault
+LEFT JOIN pg_collation coll ON coll.oid = r.rngcollation
+LEFT JOIN pg_proc canfn     ON canfn.oid = r.rngcanonical
+LEFT JOIN pg_proc difffn    ON difffn.oid = r.rngsubdiff
+WHERE  n.nspname NOT IN ('pg_catalog','information_schema','pg_toast')
+ORDER  BY n.nspname, t.typname`
+
+	rs, err := conn.QueryRows(ctx, q)
+	if err != nil {
+		return fmt.Errorf("introspect range bodies: %w", err)
+	}
+	defer rs.Close()
+
+	rangeIdx := map[string]*ir.Type{}
+	for _, obj := range types {
+		if t, ok := obj.(*ir.Type); ok && t.Variant == "RANGE" {
+			rangeIdx[t.Schema+"."+t.Name] = t
+		}
+	}
+
+	for rs.Next() {
+		var schema, name, subtype string
+		var opclass, collation, canonical, subtypeDiff *string
+		if err := rs.Scan(&schema, &name, &subtype, &opclass, &collation, &canonical, &subtypeDiff); err != nil {
+			return err
+		}
+		t, ok := rangeIdx[schema+"."+name]
+		if !ok {
+			continue
+		}
+		parts := []string{"SUBTYPE = " + subtype}
+		if opclass != nil {
+			parts = append(parts, "SUBTYPE_OPCLASS = "+*opclass)
+		}
+		if collation != nil {
+			parts = append(parts, "COLLATION = "+*collation)
+		}
+		if canonical != nil {
+			parts = append(parts, "CANONICAL = "+*canonical)
+		}
+		if subtypeDiff != nil {
+			parts = append(parts, "SUBTYPE_DIFF = "+*subtypeDiff)
+		}
+		t.Body = strings.Join(parts, ", ")
 	}
 	return rs.Err()
 }
@@ -1517,7 +1834,7 @@ SELECT n.nspname, c.relname,
 FROM   pg_class c
 JOIN   pg_namespace n ON n.oid = c.relnamespace,
        LATERAL aclexplode(c.relacl) a
-WHERE  c.relkind IN ('r', 'p')
+WHERE  c.relkind IN ('r', 'p', 'f')
 AND    NOT c.relispartition
 AND    n.nspname NOT IN ('pg_catalog','information_schema','pg_toast')
 ORDER  BY n.nspname, c.relname, grantee, a.privilege_type`
@@ -1837,8 +2154,12 @@ ORDER  BY table_schema, table_name, column_name, grantee, privilege_type`
 }
 
 // introspectPartitions populates PartitionBy and Partitions on partitioned
-// tables. Two queries are used: one for the partition key (pg_get_partkeydef),
-// one for the child partition bounds (pg_get_expr on relpartbound).
+// tables, recursing into sub-partitioned children (RFC §7.13) — a partition
+// has relkind 'p' too when it's itself further partitioned, so both queries
+// below deliberately cover ALL partitioned relations, not just top-level
+// tables in idx. Two queries are used: one for the partition key
+// (pg_get_partkeydef), one for the child partition bounds (pg_get_expr on
+// relpartbound); the parent-child edges are then assembled into a tree.
 func introspectPartitions(ctx context.Context, conn pipeline.Querier, idx map[string]*ir.Table) error {
 	const keyQ = `
 SELECT n.nspname, c.relname, pg_get_partkeydef(c.oid) AS partkeydef
@@ -1852,15 +2173,14 @@ ORDER  BY n.nspname, c.relname`
 	if err != nil {
 		return fmt.Errorf("introspect partition keys: %w", err)
 	}
+	partKeys := make(map[string]string)
 	for rs.Next() {
 		var schema, name, keyDef string
 		if err := rs.Scan(&schema, &name, &keyDef); err != nil {
 			rs.Close()
 			return err
 		}
-		if t, ok := idx[schema+"."+name]; ok {
-			t.PartitionBy = parsePartitionKey(keyDef)
-		}
+		partKeys[schema+"."+name] = keyDef
 	}
 	if err := rs.Err(); err != nil {
 		return err
@@ -1888,23 +2208,43 @@ ORDER  BY pn.nspname, pc.relname, cc.relname`
 	if err != nil {
 		return fmt.Errorf("introspect partition children: %w", err)
 	}
+	childrenOf := make(map[string][]*ir.Partition)
+	byKey := make(map[string]*ir.Partition) // child qualified name -> its own Partition node
 	for rs2.Next() {
 		var parentSchema, parentName, childSchema, childName, bound string
 		if err := rs2.Scan(&parentSchema, &parentName, &childSchema, &childName, &bound); err != nil {
 			rs2.Close()
 			return err
 		}
-		if t, ok := idx[parentSchema+"."+parentName]; ok {
-			t.Partitions = append(t.Partitions, &ir.Partition{
-				Name:   childName,
-				Bounds: bound,
-			})
+		parentKey := parentSchema + "." + parentName
+		childKey := childSchema + "." + childName
+		part := &ir.Partition{Name: childName, Bounds: bound}
+		if keyDef, ok := partKeys[childKey]; ok {
+			part.PartitionBy = parsePartitionKey(keyDef)
 		}
+		childrenOf[parentKey] = append(childrenOf[parentKey], part)
+		byKey[childKey] = part
 	}
 	if err := rs2.Err(); err != nil {
 		return err
 	}
 	rs2.Close()
+
+	// Attach nested sub-partitions to their own Partition node before wiring
+	// the top-level tables, since each level's .Partitions must already be
+	// populated by the time its parent reads childrenOf[key].
+	for childKey, part := range byKey {
+		if part.PartitionBy != nil {
+			part.Partitions = childrenOf[childKey]
+		}
+	}
+
+	for key, t := range idx {
+		if keyDef, ok := partKeys[key]; ok {
+			t.PartitionBy = parsePartitionKey(keyDef)
+			t.Partitions = childrenOf[key]
+		}
+	}
 	return nil
 }
 

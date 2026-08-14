@@ -34,6 +34,32 @@ func buildObject(t *testing.T, kind pipeline.ObjectKind, part1, part2 string) pi
 
 // ── Table ─────────────────────────────────────────────────────────────────────
 
+// TestBuildUnloggedTableSetsFlag guards a real, pre-existing bug found while
+// testing an unrelated FOREIGN TABLE fix: CREATE TABLE and CREATE UNLOGGED
+// TABLE parse to the identical pg_query node type (Node_CreateStmt),
+// distinguished only by Relation.Relpersistence == "u" — but Build()'s
+// dispatch unconditionally passed unlogged=false to buildTable, so a
+// declared "UNLOGGED TABLE" always silently built as a regular table. The
+// scanner correctly classified it as KindUnloggedTable (see
+// scanner_test.go's TestUnloggedTable), which is exactly why this went
+// unnoticed: nothing tested past the scan step to the actual IR object.
+func TestBuildUnloggedTableSetsFlag(t *testing.T) {
+	obj := buildObject(t, pipeline.KindUnloggedTable,
+		`session_cache (
+			key   TEXT,
+			value JSONB
+		)`,
+		``,
+	)
+	tbl, ok := obj.(*ir.Table)
+	if !ok {
+		t.Fatalf("expected *ir.Table, got %T", obj)
+	}
+	if !tbl.Unlogged {
+		t.Error("expected Unlogged = true")
+	}
+}
+
 func TestBuildSimpleTable(t *testing.T) {
 	obj := buildObject(t, pipeline.KindTable,
 		`users (
@@ -117,6 +143,102 @@ func TestBuildTableWithBlock(t *testing.T) {
 	}
 	if emailCol.Statistics == nil || *emailCol.Statistics != 300 {
 		t.Errorf("email.Statistics: got %v", emailCol.Statistics)
+	}
+}
+
+// TestBuildTableSubPartitioned guards RFC §7.13 sub-partitioning: a partition
+// entry may itself carry a nested PARTITION BY clause and PARTITIONS { }
+// block. Before this, the blockparser swallowed the whole nested clause as
+// opaque raw "Bounds" text and there was no IR field to hold structured
+// sub-partition data.
+func TestBuildTableSubPartitioned(t *testing.T) {
+	obj := buildObject(t, pipeline.KindTable,
+		`metrics (
+			id         BIGINT GENERATED ALWAYS AS IDENTITY,
+			created_at TIMESTAMPTZ NOT NULL,
+			channel    TEXT NOT NULL
+		) PARTITION BY RANGE (created_at)`,
+		`
+			PARTITIONS {
+				metrics_2025 FOR VALUES FROM ('2025-01-01') TO ('2026-01-01');
+				metrics_2026 FOR VALUES FROM ('2026-01-01') TO ('2027-01-01')
+					PARTITION BY LIST (channel) {
+						PARTITIONS {
+							metrics_2026_web   FOR VALUES IN ('web');
+							metrics_2026_other FOR VALUES IN ('mobile', 'api');
+						}
+					};
+			}
+		`,
+	)
+	tbl, ok := obj.(*ir.Table)
+	if !ok {
+		t.Fatalf("expected *ir.Table, got %T", obj)
+	}
+	if tbl.PartitionBy == nil || tbl.PartitionBy.Strategy != "RANGE" {
+		t.Fatalf("expected top-level PartitionBy RANGE, got %v", tbl.PartitionBy)
+	}
+	if len(tbl.Partitions) != 2 {
+		t.Fatalf("expected 2 partitions, got %d", len(tbl.Partitions))
+	}
+
+	leaf := tbl.Partitions[0]
+	if leaf.Name != "metrics_2025" || leaf.PartitionBy != nil || len(leaf.Partitions) != 0 {
+		t.Errorf("metrics_2025: got %+v", leaf)
+	}
+
+	sub := tbl.Partitions[1]
+	if sub.Name != "metrics_2026" {
+		t.Errorf("partitions[1] name: got %q", sub.Name)
+	}
+	if sub.PartitionBy == nil || sub.PartitionBy.Strategy != "LIST" {
+		t.Fatalf("metrics_2026: expected nested PartitionBy LIST, got %v", sub.PartitionBy)
+	}
+	if len(sub.PartitionBy.Columns) != 1 || sub.PartitionBy.Columns[0] != "channel" {
+		t.Errorf("metrics_2026 sub-partition columns: got %v", sub.PartitionBy.Columns)
+	}
+	if len(sub.Partitions) != 2 {
+		t.Fatalf("expected 2 nested sub-partitions, got %d", len(sub.Partitions))
+	}
+	if sub.Partitions[0].Name != "metrics_2026_web" {
+		t.Errorf("sub-partition[0] name: got %q", sub.Partitions[0].Name)
+	}
+	if sub.Partitions[1].Bounds != "FOR VALUES IN ('mobile', 'api')" {
+		t.Errorf("sub-partition[1] bounds: got %q", sub.Partitions[1].Bounds)
+	}
+}
+
+// TestBuildForeignTableOptions guards a real bug found live-testing a demo
+// project: buildForeignTable captured Foreign/ForeignServer but silently
+// dropped OPTIONS (...) entirely — no field existed to hold it, so a
+// declared FOREIGN TABLE's table_name/schema_name options were lost before
+// they ever reached the differ.
+func TestBuildForeignTableOptions(t *testing.T) {
+	obj := buildObject(t, pipeline.KindForeignTable,
+		`remote_users (
+			id    BIGINT,
+			email TEXT
+		) SERVER loopback_server OPTIONS (table_name 'users', schema_name 'public')`,
+		``,
+	)
+	tbl, ok := obj.(*ir.Table)
+	if !ok {
+		t.Fatalf("expected *ir.Table, got %T", obj)
+	}
+	if !tbl.Foreign {
+		t.Error("expected Foreign = true")
+	}
+	if tbl.ForeignServer == nil || *tbl.ForeignServer != "loopback_server" {
+		t.Errorf("ForeignServer: got %v", tbl.ForeignServer)
+	}
+	want := map[string]string{"table_name": "users", "schema_name": "public"}
+	if len(tbl.ForeignOptions) != len(want) {
+		t.Fatalf("ForeignOptions: expected %d entries, got %d: %v", len(want), len(tbl.ForeignOptions), tbl.ForeignOptions)
+	}
+	for _, p := range tbl.ForeignOptions {
+		if want[p.Key] != p.Value {
+			t.Errorf("ForeignOptions[%q]: got %q, want %q", p.Key, p.Value, want[p.Key])
+		}
 	}
 }
 
@@ -236,6 +358,53 @@ func TestBuildMaterializedViewWithNoData(t *testing.T) {
 	v := obj.(*ir.View)
 	if !v.WithNoData {
 		t.Error("WithNoData: got false, want true")
+	}
+}
+
+// TestBuildMaterializedViewIndices guards RFC §8.2's matview-block: a
+// materialized view's { } block MAY contain INDICES { } — previously
+// entirely unimplemented (no IR field existed to hold it, and the
+// blockparser's generically-parsed block.Indices was just never read here).
+func TestBuildMaterializedViewIndices(t *testing.T) {
+	obj := buildObject(t, pipeline.KindMaterializedView,
+		`order_status_summary AS SELECT status, count(*) AS order_count FROM orders GROUP BY status`,
+		`INDICES { UNIQUE order_status_summary_status_uq (status); }`,
+	)
+	v := obj.(*ir.View)
+	if len(v.Indexes) != 1 {
+		t.Fatalf("Indexes: got %d, want 1", len(v.Indexes))
+	}
+	idx := v.Indexes[0]
+	if idx.Name != "order_status_summary_status_uq" || !idx.Unique {
+		t.Errorf("Indexes[0]: got %+v", idx)
+	}
+}
+
+// TestBuildViewIndicesRejected guards the RFC's own restriction: INDICES is
+// only valid in a MATERIALIZED VIEW's block (matview-directive), never a
+// plain or recursive VIEW's (view-directive omits indices-block) — real
+// PostgreSQL doesn't support indexes on a non-materialized view at all, so
+// silently accepting (and then dropping) this would be worse than erroring.
+func TestBuildViewIndicesRejected(t *testing.T) {
+	p := pgparser.New()
+	pgResult, err := p.Parse(pipeline.KindView,
+		`active_users AS SELECT id FROM users WHERE active`, zeroPos)
+	if err != nil {
+		t.Fatalf("pg parse error: %v", err)
+	}
+	bp := blockparser.New()
+	blockAST, err := bp.Parse(pipeline.KindView,
+		`INDICES { idx_active (id); }`, zeroPos)
+	if err != nil {
+		t.Fatalf("block parse error: %v", err)
+	}
+	builder := ir.NewBuilder()
+	_, err = builder.Build(pgResult, blockAST)
+	if err == nil {
+		t.Fatal("expected an error declaring INDICES on a plain VIEW, got nil")
+	}
+	if !strings.Contains(err.Error(), "INDICES") || !strings.Contains(err.Error(), "MATERIALIZED VIEW") {
+		t.Errorf("error should mention INDICES and MATERIALIZED VIEW, got: %v", err)
 	}
 }
 
@@ -386,6 +555,53 @@ func TestBuildFunction(t *testing.T) {
 	}
 	if fn.Comment == nil || *fn.Comment != "Adds two integers" {
 		t.Errorf("Comment: got %v", fn.Comment)
+	}
+}
+
+// TestBuildFunctionGrantsAndRevocations guards a real bug found live-testing
+// REVOCATIONS against a demo project: ir.Function had no Revocations field at
+// all, so a declared REVOCATIONS block was parsed generically by the
+// blockparser but silently dropped by buildFunction — only the GRANT half of
+// the block ever reached the IR.
+func TestBuildFunctionGrantsAndRevocations(t *testing.T) {
+	obj := buildObject(t, pipeline.KindFunction,
+		`add(a INT, b INT) RETURNS INT LANGUAGE sql AS $$ SELECT a + b $$;`,
+		`GRANTS { EXECUTE TO app_service; } REVOCATIONS { EXECUTE FROM PUBLIC; }`,
+	)
+	fn, ok := obj.(*ir.Function)
+	if !ok {
+		t.Fatalf("expected *ir.Function, got %T", obj)
+	}
+	if len(fn.Grants) != 1 {
+		t.Fatalf("Grants: got %d", len(fn.Grants))
+	}
+	if len(fn.Revocations) != 1 {
+		t.Fatalf("Revocations: got %d", len(fn.Revocations))
+	}
+	if len(fn.Revocations[0].Roles) != 1 || fn.Revocations[0].Roles[0] != "PUBLIC" {
+		t.Errorf("Revocations[0].Roles: got %v", fn.Revocations[0].Roles)
+	}
+}
+
+// TestBuildProcedureGrantsAndRevocations is TestBuildFunctionGrantsAndRevocations's
+// PROCEDURE counterpart — ir.Procedure had the identical missing-field bug.
+func TestBuildProcedureGrantsAndRevocations(t *testing.T) {
+	obj := buildObject(t, pipeline.KindProcedure,
+		`mark_order_paid(bigint) LANGUAGE plpgsql AS $$ BEGIN NULL; END; $$;`,
+		`GRANTS { EXECUTE TO app_service; } REVOCATIONS { EXECUTE FROM PUBLIC; }`,
+	)
+	proc, ok := obj.(*ir.Procedure)
+	if !ok {
+		t.Fatalf("expected *ir.Procedure, got %T", obj)
+	}
+	if len(proc.Grants) != 1 {
+		t.Fatalf("Grants: got %d", len(proc.Grants))
+	}
+	if len(proc.Revocations) != 1 {
+		t.Fatalf("Revocations: got %d", len(proc.Revocations))
+	}
+	if len(proc.Revocations[0].Roles) != 1 || proc.Revocations[0].Roles[0] != "PUBLIC" {
+		t.Errorf("Revocations[0].Roles: got %v", proc.Revocations[0].Roles)
 	}
 }
 
@@ -575,6 +791,60 @@ func TestBuildFunctionImplicitReturnsInout(t *testing.T) {
 	fn := obj.(*ir.Function)
 	if fn.ReturnType.Name != "integer" {
 		t.Errorf("ReturnType.Name: got %q, want integer", fn.ReturnType.Name)
+	}
+}
+
+// ── Aggregate ─────────────────────────────────────────────────────────────────
+
+// TestBuildAggregateArgs guards a real bug found live-testing a demo
+// project: for CREATE AGGREGATE, pg_query's DefineStmt.Args is NOT a flat
+// list of FunctionParameter nodes like a regular function's — Args[0] is
+// itself a List node wrapping the actual input-type parameter(s), and
+// Args[1] is an unrelated integer sentinel (-1 for a normal aggregate).
+// Calling GetFunctionParameter() directly on the top-level Args elements (as
+// the code previously did) always returned nil, so agg.Args silently stayed
+// empty — the RFC's own worked example round-tripped with an empty "()"
+// signature everywhere (CREATE AGGREGATE, COMMENT ON AGGREGATE, GRANT ON
+// FUNCTION), referencing a different, nonexistent zero-arg aggregate.
+func TestBuildAggregateArgs(t *testing.T) {
+	obj := buildObject(t, pipeline.KindAggregate,
+		`amount_product (numeric) (SFUNC = numeric_mul, STYPE = numeric, INITCOND = '1')`,
+		`COMMENT 'multiplicative aggregate';`,
+	)
+	agg, ok := obj.(*ir.Aggregate)
+	if !ok {
+		t.Fatalf("expected *ir.Aggregate, got %T", obj)
+	}
+	if len(agg.Args) != 1 || agg.Args[0].Type.Name != "numeric" {
+		t.Fatalf("Args: got %+v, want 1 arg of type numeric", agg.Args)
+	}
+	if agg.QualifiedName() != "public.amount_product(numeric)" {
+		t.Errorf("QualifiedName: got %q", agg.QualifiedName())
+	}
+	if !strings.Contains(agg.Body, "(numeric)") {
+		t.Errorf("Body should carry the (numeric) signature, got %q", agg.Body)
+	}
+}
+
+// TestBuildAggregateOptions guards agg.Options, the structured (ordered)
+// SFUNC/STYPE/INITCOND/... list dump needs to reconstruct DPG source syntax
+// without re-parsing Body's raw "CREATE AGGREGATE ..." SQL text.
+func TestBuildAggregateOptions(t *testing.T) {
+	obj := buildObject(t, pipeline.KindAggregate,
+		`amount_product (numeric) (SFUNC = numeric_mul, STYPE = numeric, INITCOND = '1')`,
+		``,
+	)
+	agg := obj.(*ir.Aggregate)
+	if len(agg.Options) != 3 {
+		t.Fatalf("Options: got %d, want 3: %+v", len(agg.Options), agg.Options)
+	}
+	want := []struct{ key, val string }{
+		{"sfunc", "numeric_mul"}, {"stype", "numeric"}, {"initcond", "'1'"},
+	}
+	for i, w := range want {
+		if agg.Options[i].Key != w.key || agg.Options[i].Value != w.val {
+			t.Errorf("Options[%d]: got %+v, want {%s %s}", i, agg.Options[i], w.key, w.val)
+		}
 	}
 }
 
@@ -1883,5 +2153,67 @@ func TestBuildRoleComment(t *testing.T) {
 	}
 	if r.CanLogin == nil || *r.CanLogin {
 		t.Errorf("CanLogin: got %v, want false (NOLOGIN)", r.CanLogin)
+	}
+}
+
+// TestBuildOpaqueCommentSupport guards a real bug found live-testing a demo
+// project: PostgreSQL genuinely supports COMMENT ON for all 14 of these
+// opaque kinds, but 9 had no Comment field at all (the blockparser's
+// generic { COMMENT '...'; } was silently discarded, no error, no effect)
+// and a 10th (TSDict) had the field but the builder never populated it —
+// found auditing every kind with a Comment field for whether it's actually
+// wired, not just declared. Table-driven across a representative sample
+// covering both routing paths (buildDefineStmt for Collation/Operator/
+// TSDict, buildOpaque for Cast/EventTrigger/OperatorClass).
+func TestBuildOpaqueCommentSupport(t *testing.T) {
+	const comment = "a comment"
+	cases := []struct {
+		name       string
+		kind       pipeline.ObjectKind
+		part1      string
+		getComment func(pipeline.IRObject) *string
+	}{
+		{
+			"Collation", pipeline.KindCollation,
+			`case_insensitive (provider = icu, locale = 'und-u-ks-level2')`,
+			func(o pipeline.IRObject) *string { return o.(*ir.Collation).Comment },
+		},
+		{
+			"Cast", pipeline.KindCast,
+			`(order_status AS integer) WITH FUNCTION order_status_to_int(order_status)`,
+			func(o pipeline.IRObject) *string { return o.(*ir.Cast).Comment },
+		},
+		{
+			"Operator", pipeline.KindOperator,
+			`<<< (LEFTARG = order_status, RIGHTARG = order_status, PROCEDURE = order_status_precedes)`,
+			func(o pipeline.IRObject) *string { return o.(*ir.Operator).Comment },
+		},
+		{
+			"EventTrigger", pipeline.KindEventTrigger,
+			`log_ddl ON ddl_command_end EXECUTE FUNCTION log_ddl_command()`,
+			func(o pipeline.IRObject) *string { return o.(*ir.EventTrigger).Comment },
+		},
+		{
+			// TSDict specifically guards the "field existed but was never
+			// populated" half of the bug — distinct from the 9 kinds that
+			// gained the field entirely in this fix.
+			"TSDict", pipeline.KindTSDict,
+			`my_dict (TEMPLATE = simple)`,
+			func(o pipeline.IRObject) *string { return o.(*ir.TSDict).Comment },
+		},
+		{
+			"OperatorClass", pipeline.KindOperatorClass,
+			`text_ci_ops FOR TYPE text USING btree AS OPERATOR 1 <, FUNCTION 1 text_ci_cmp(text, text)`,
+			func(o pipeline.IRObject) *string { return o.(*ir.OperatorClass).Comment },
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			obj := buildObject(t, tc.kind, tc.part1, `COMMENT 'a comment';`)
+			got := tc.getComment(obj)
+			if got == nil || *got != comment {
+				t.Errorf("Comment: got %v, want %q", got, comment)
+			}
+		})
 	}
 }

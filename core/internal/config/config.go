@@ -84,9 +84,6 @@ type CompilerConfig struct {
 	// DefaultDropBehavior controls whether DROPs cascade or restrict.
 	// Valid values: "restrict" (default), "cascade".
 	DefaultDropBehavior string `toml:"default_drop_behavior"`
-	// ConcurrentIndexes controls whether new indexes on existing tables are
-	// created with CONCURRENTLY by default. Default: true.
-	ConcurrentIndexes bool `toml:"concurrent_indexes"`
 }
 
 // LinterConfig holds the linter rule settings.
@@ -118,7 +115,6 @@ func DefaultRootConfig() RootConfig {
 	return RootConfig{
 		Compiler: CompilerConfig{
 			DefaultDropBehavior: "restrict",
-			ConcurrentIndexes:   true,
 		},
 		Linter: LinterConfig{
 			WarnOnDeprecated:          true,

@@ -92,6 +92,9 @@ func toSnapObject(obj pipeline.IRObject) *SnapObject {
 		for _, g := range o.Grants {
 			so.Grants = append(so.Grants, toSnapGrant(g))
 		}
+		for _, r := range o.Revocations {
+			so.Revocations = append(so.Revocations, toSnapRevocation(r))
+		}
 		return &SnapObject{Kind: "procedure", Opaque: so}
 	case *ir.Aggregate:
 		so := &SnapOpaque{
@@ -126,7 +129,7 @@ func toSnapObject(obj pipeline.IRObject) *SnapObject {
 		}}
 	case *ir.Publication:
 		return &SnapObject{Kind: "publication", Opaque: &SnapOpaque{
-			Kind: "publication", Name: o.Name, BodyHash: sourceBodyHash(o.Body, o.Reconstructed),
+			Kind: "publication", Name: o.Name, BodyHash: sourceBodyHash(o.Body, o.Reconstructed), Comment: o.Comment,
 		}}
 	case *ir.Subscription:
 		return &SnapObject{Kind: "subscription", Opaque: &SnapOpaque{
@@ -134,51 +137,64 @@ func toSnapObject(obj pipeline.IRObject) *SnapObject {
 		}}
 	case *ir.EventTrigger:
 		return &SnapObject{Kind: "event_trigger", Opaque: &SnapOpaque{
-			Kind: "event_trigger", Name: o.Name, BodyHash: sourceBodyHash(o.Body, o.Reconstructed),
+			Kind: "event_trigger", Name: o.Name, BodyHash: sourceBodyHash(o.Body, o.Reconstructed), Comment: o.Comment,
 		}}
 	case *ir.Collation:
 		return &SnapObject{Kind: "collation", Opaque: &SnapOpaque{
-			Kind: "collation", Schema: o.Schema, Name: o.Name, BodyHash: sourceBodyHash(o.Body, o.Reconstructed),
+			Kind: "collation", Schema: o.Schema, Name: o.Name, BodyHash: sourceBodyHash(o.Body, o.Reconstructed), Comment: o.Comment,
 		}}
 	case *ir.Operator:
 		return &SnapObject{Kind: "operator", Opaque: &SnapOpaque{
 			Kind: "operator", Schema: o.Schema, Name: o.Name,
 			Args:     ir.OperandsKey(o.LeftType, o.RightType),
 			BodyHash: sourceBodyHash(o.Body, o.Reconstructed),
+			Comment:  o.Comment,
 		}}
 	case *ir.OperatorClass:
 		return &SnapObject{Kind: "operator_class", Opaque: &SnapOpaque{
-			Kind: "operator_class", Schema: o.Schema, Name: o.Name, Using: o.AccessMethod, BodyHash: sourceBodyHash(o.Body, o.Reconstructed),
+			Kind: "operator_class", Schema: o.Schema, Name: o.Name, Using: o.AccessMethod, BodyHash: sourceBodyHash(o.Body, o.Reconstructed), Comment: o.Comment,
 		}}
 	case *ir.OperatorFamily:
 		return &SnapObject{Kind: "operator_family", Opaque: &SnapOpaque{
-			Kind: "operator_family", Schema: o.Schema, Name: o.Name, Using: o.AccessMethod, BodyHash: sourceBodyHash(o.Body, o.Reconstructed),
+			Kind: "operator_family", Schema: o.Schema, Name: o.Name, Using: o.AccessMethod, BodyHash: sourceBodyHash(o.Body, o.Reconstructed), Comment: o.Comment,
 		}}
 	case *ir.Cast:
 		return &SnapObject{Kind: "cast", Opaque: &SnapOpaque{
 			Kind:     "cast",
 			Name:     o.SourceType.String() + "->" + o.TargetType.String(),
 			BodyHash: sourceBodyHash(o.Body, o.Reconstructed),
+			Comment:  o.Comment,
 		}}
 	case *ir.StatisticsObject:
 		return &SnapObject{Kind: "statistics", Opaque: &SnapOpaque{
-			Kind: "statistics", Schema: o.Schema, Name: o.Name, BodyHash: sourceBodyHash(o.Body, o.Reconstructed),
+			Kind: "statistics", Schema: o.Schema, Name: o.Name, BodyHash: sourceBodyHash(o.Body, o.Reconstructed), Comment: o.Comment,
 		}}
 	case *ir.TSConfig:
-		return &SnapObject{Kind: "ts_config", Opaque: &SnapOpaque{
+		opaque := &SnapOpaque{
 			Kind: "ts_config", Schema: o.Schema, Name: o.Name, BodyHash: sourceBodyHash(o.Body, o.Reconstructed), Comment: o.Comment,
-		}}
+		}
+		for _, m := range o.Mappings {
+			dicts := make([]string, len(m.Dictionaries))
+			for i, d := range m.Dictionaries {
+				dicts[i] = d.String()
+			}
+			opaque.Mappings = append(opaque.Mappings, SnapTSMapping{
+				TokenTypes:   append([]string(nil), m.TokenTypes...),
+				Dictionaries: dicts,
+			})
+		}
+		return &SnapObject{Kind: "ts_config", Opaque: opaque}
 	case *ir.TSDict:
 		return &SnapObject{Kind: "ts_dict", Opaque: &SnapOpaque{
 			Kind: "ts_dict", Schema: o.Schema, Name: o.Name, BodyHash: sourceBodyHash(o.Body, o.Reconstructed), Comment: o.Comment,
 		}}
 	case *ir.TSParser:
 		return &SnapObject{Kind: "ts_parser", Opaque: &SnapOpaque{
-			Kind: "ts_parser", Schema: o.Schema, Name: o.Name, BodyHash: sourceBodyHash(o.Body, o.Reconstructed),
+			Kind: "ts_parser", Schema: o.Schema, Name: o.Name, BodyHash: sourceBodyHash(o.Body, o.Reconstructed), Comment: o.Comment,
 		}}
 	case *ir.TSTemplate:
 		return &SnapObject{Kind: "ts_template", Opaque: &SnapOpaque{
-			Kind: "ts_template", Schema: o.Schema, Name: o.Name, BodyHash: sourceBodyHash(o.Body, o.Reconstructed),
+			Kind: "ts_template", Schema: o.Schema, Name: o.Name, BodyHash: sourceBodyHash(o.Body, o.Reconstructed), Comment: o.Comment,
 		}}
 	case *ir.DefaultPrivileges:
 		sdp := &SnapDefaultPrivileges{
@@ -251,31 +267,48 @@ func toSnapExtension(o *ir.Extension) *SnapExtension {
 	}
 }
 
+// toSnapPartition converts an ir.Partition into a SnapPartition, recursing
+// into nested sub-partitions (RFC §7.13). schema is the owning table's (or
+// parent partition's) schema, since a partition itself carries no schema
+// field.
+func toSnapPartition(schema string, p *ir.Partition) SnapPartition {
+	sp := SnapPartition{
+		Schema: schema,
+		Name:   p.Name,
+		Bound:  p.Bounds,
+	}
+	if p.PartitionBy != nil {
+		sp.PartitionBy = p.PartitionBy.Strategy + " (" + strings.Join(p.PartitionBy.Columns, ", ") + ")"
+	}
+	for _, sub := range p.Partitions {
+		sp.Partitions = append(sp.Partitions, toSnapPartition(schema, sub))
+	}
+	return sp
+}
+
 func toSnapTable(o *ir.Table) *SnapTable {
 	t := &SnapTable{
-		Schema:      o.Schema,
-		Name:        o.Name,
-		Unlogged:    o.Unlogged,
-		Foreign:     o.Foreign,
-		Owner:       o.Owner,
-		Comment:     o.Comment,
-		RenamedFrom: o.RenamedFrom,
-		Deprecated:  o.Deprecated,
-		Protected:   o.Protected,
-		DropCascade: o.DropCascade,
-		RLSEnabled:  o.RLSEnabled,
-		RLSForced:   o.RLSForced,
-		Inherits:    append([]string(nil), o.Inherits...),
+		Schema:         o.Schema,
+		Name:           o.Name,
+		Unlogged:       o.Unlogged,
+		Foreign:        o.Foreign,
+		ForeignServer:  o.ForeignServer,
+		ForeignOptions: flattenParams(o.ForeignOptions),
+		Owner:          o.Owner,
+		Comment:        o.Comment,
+		RenamedFrom:    o.RenamedFrom,
+		Deprecated:     o.Deprecated,
+		Protected:      o.Protected,
+		DropCascade:    o.DropCascade,
+		RLSEnabled:     o.RLSEnabled,
+		RLSForced:      o.RLSForced,
+		Inherits:       append([]string(nil), o.Inherits...),
 	}
 	if o.PartitionBy != nil {
 		t.PartitionBy = o.PartitionBy.Strategy + " (" + strings.Join(o.PartitionBy.Columns, ", ") + ")"
 	}
 	for _, p := range o.Partitions {
-		t.Partitions = append(t.Partitions, SnapPartition{
-			Schema: o.Schema,
-			Name:   p.Name,
-			Bound:  p.Bounds,
-		})
+		t.Partitions = append(t.Partitions, toSnapPartition(o.Schema, p))
 	}
 	for _, col := range o.Columns {
 		t.Columns = append(t.Columns, toSnapColumn(col))
@@ -351,6 +384,26 @@ func toSnapConstraint(cst *ir.Constraint) SnapConstraint {
 // form. Exported so diff.diffIndexes can build the same representation from
 // the desired side and compare it against the stored snapshot with `==` to
 // detect a same-named index whose definition changed.
+// flattenParams renders an ordered key/value param list (Index.With,
+// Table.ForeignOptions) as a comma-separated "key=value" string for
+// snapshot storage/comparison. Reloption/option values are often quoted by
+// PostgreSQL's own reconstruction (pg_get_indexdef, pg_options_to_table) but
+// not necessarily by hand-written source — stripping one layer of
+// surrounding single quotes keeps the two spellings comparing equal, so a
+// live/introspected catalog never shows spurious drift against unchanged
+// source.
+func flattenParams(params []pipeline.StorageParam) string {
+	parts := make([]string, 0, len(params))
+	for _, p := range params {
+		v := p.Value
+		if len(v) >= 2 && v[0] == '\'' && v[len(v)-1] == '\'' {
+			v = v[1 : len(v)-1]
+		}
+		parts = append(parts, p.Key+"="+v)
+	}
+	return strings.Join(parts, ", ")
+}
+
 func ToSnapIndex(idx *ir.Index) SnapIndex {
 	cols := make([]string, 0, len(idx.Columns))
 	for _, c := range idx.Columns {
@@ -368,19 +421,6 @@ func ToSnapIndex(idx *ir.Index) SnapIndex {
 		}
 		cols = append(cols, s)
 	}
-	withParts := make([]string, 0, len(idx.With))
-	for _, p := range idx.With {
-		// pg_get_indexdef always quotes reloption values (e.g. fillfactor='70'),
-		// while hand-written source may not (fillfactor = 70). Strip one layer
-		// of surrounding single quotes so the two spellings compare equal —
-		// otherwise every WITH-bearing index would show spurious drift against
-		// a live/introspected catalog despite being unchanged.
-		v := p.Value
-		if len(v) >= 2 && v[0] == '\'' && v[len(v)-1] == '\'' {
-			v = v[1 : len(v)-1]
-		}
-		withParts = append(withParts, p.Key+"="+v)
-	}
 	si := SnapIndex{
 		Name:             idx.Name,
 		Unique:           idx.Unique,
@@ -388,7 +428,7 @@ func ToSnapIndex(idx *ir.Index) SnapIndex {
 		Columns:          strings.Join(cols, ", "),
 		Include:          strings.Join(idx.Include, ", "),
 		NullsNotDistinct: idx.NullsNotDistinct,
-		With:             strings.Join(withParts, ", "),
+		With:             flattenParams(idx.With),
 	}
 	if idx.Where != nil {
 		si.Where = *idx.Where
@@ -448,6 +488,7 @@ func toSnapView(o *ir.View) *SnapView {
 		Query:      o.Query,
 		Owner:      o.Owner,
 		Comment:    o.Comment,
+		Deprecated: o.Deprecated,
 		Recursive:  o.Recursive,
 		WithNoData: o.WithNoData,
 	}
@@ -456,6 +497,9 @@ func toSnapView(o *ir.View) *SnapView {
 	}
 	for _, r := range o.Revocations {
 		sv.Revocations = append(sv.Revocations, toSnapRevocation(r))
+	}
+	for _, idx := range o.Indexes {
+		sv.Indexes = append(sv.Indexes, ToSnapIndex(idx))
 	}
 	sv.NameMaps = toSnapNameMaps(o.NameMaps)
 	return sv
@@ -476,9 +520,13 @@ func toSnapFunction(o *ir.Function) *SnapFunction {
 		Rows:        o.Attrs.Rows,
 		BodyHash:    o.BodyHash,
 		Comment:     o.Comment,
+		Deprecated:  o.Deprecated,
 	}
 	for _, g := range o.Grants {
 		sf.Grants = append(sf.Grants, toSnapGrant(g))
+	}
+	for _, r := range o.Revocations {
+		sf.Revocations = append(sf.Revocations, toSnapRevocation(r))
 	}
 	sf.NameMaps = toSnapNameMaps(o.NameMaps)
 	return sf

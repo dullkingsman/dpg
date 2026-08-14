@@ -30,6 +30,15 @@ type PGSQLParser interface {
 // Default implementation: internal/blockparser.
 type BlockParser interface {
 	Parse(kind ObjectKind, part2 string, pos SourcePos) (BlockAST, error)
+
+	// ParseDefaultPrivileges parses a top-level (non-nested) DEFAULT
+	// PRIVILEGES declaration's header ("[FOR ROLE x] [IN SCHEMA y]", the
+	// text between "DEFAULT PRIVILEGES" and the opening '{') and body (the
+	// '{ }' content, braces excluded). DEFAULT PRIVILEGES never goes through
+	// PGSQLParser: real PostgreSQL's ALTER DEFAULT PRIVILEGES statement
+	// requires its GRANT/REVOKE action inline, so the header alone is never
+	// valid standalone PG SQL — see DefaultPrivilegesBlock.
+	ParseDefaultPrivileges(header, body string, pos SourcePos) (DefaultPrivilegesBlock, error)
 }
 
 // IRBuilder converts a (PGParseResult, BlockAST) pair into a fully-resolved
@@ -37,6 +46,14 @@ type BlockParser interface {
 // Default implementation: internal/ir.Builder.
 type IRBuilder interface {
 	Build(pg PGParseResult, block BlockAST) (IRObject, error)
+
+	// BuildDefaultPrivileges converts a parsed DEFAULT PRIVILEGES
+	// declaration into one IRObject per distinct object type referenced by
+	// its grants/revocations (real PostgreSQL's pg_default_acl catalog has
+	// one row per (role, schema, object type) tuple — a single DPG
+	// declaration naming TABLES, FUNCTIONS, and SEQUENCES together, per the
+	// RFC's own example, splits into three independently-diffable objects).
+	BuildDefaultPrivileges(block DefaultPrivilegesBlock) ([]IRObject, error)
 }
 
 // Merger merges same-object IRObject declarations from multiple .dpg files

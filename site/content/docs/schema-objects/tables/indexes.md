@@ -4,7 +4,9 @@ description: "All index methods, partial indexes, expression indexes, covering i
 weight: 4
 ---
 
-Indexes are declared in the `INDICES { }` block inside a table's `{ }`. By default, DPG emits `CREATE INDEX CONCURRENTLY` for additions on existing tables — emitted as a non-transactional step after `COMMIT`. To disable concurrent creation for a specific index, use `CONCURRENTLY false`.
+Indexes are declared in the `INDICES { }` block inside a table's `{ }`. By default, DPG emits plain `CREATE INDEX` for additions on existing tables. Write `CONCURRENTLY` on an individual index to make it `CREATE INDEX CONCURRENTLY` instead — emitted as a non-transactional step after `COMMIT`.
+
+`UNIQUE` and `CONCURRENTLY` are both prefix keywords, written before the index name — mirroring real PostgreSQL's own `CREATE UNIQUE INDEX CONCURRENTLY name ON table` order exactly. `CONCURRENTLY` is a bare presence keyword, same as in real PostgreSQL: there is no `CONCURRENTLY false` and no project-wide setting that changes the default — writing the keyword is the only way an index is ever created concurrently.
 
 ## Standard btree index
 
@@ -16,19 +18,19 @@ TABLE users ( email TEXT NOT NULL, ... )
 ```
 
 ```sql
--- emits (non-transactional, after COMMIT)
-CREATE INDEX CONCURRENTLY IF NOT EXISTS "idx_users_email"
+-- emits (transactional)
+CREATE INDEX IF NOT EXISTS "idx_users_email"
     ON "public"."users" ("email");
 ```
 
 ## Unique index
 
 ```sql
-{ INDICES { idx_unique_slug UNIQUE (slug); } }
+{ INDICES { UNIQUE idx_unique_slug (slug); } }
 ```
 
 ```sql
-CREATE UNIQUE INDEX CONCURRENTLY IF NOT EXISTS "idx_unique_slug"
+CREATE UNIQUE INDEX IF NOT EXISTS "idx_unique_slug"
     ON "public"."users" ("slug");
 ```
 
@@ -39,7 +41,7 @@ CREATE UNIQUE INDEX CONCURRENTLY IF NOT EXISTS "idx_unique_slug"
 ```
 
 ```sql
-CREATE INDEX CONCURRENTLY IF NOT EXISTS "idx_tenant_created"
+CREATE INDEX IF NOT EXISTS "idx_tenant_created"
     ON "public"."events" ("tenant_id" ASC, "created_at" DESC);
 ```
 
@@ -50,7 +52,7 @@ CREATE INDEX CONCURRENTLY IF NOT EXISTS "idx_tenant_created"
 ```
 
 ```sql
-CREATE INDEX CONCURRENTLY IF NOT EXISTS "idx_active_users"
+CREATE INDEX IF NOT EXISTS "idx_active_users"
     ON "public"."users" ("email") WHERE (status = 'active');
 ```
 
@@ -61,7 +63,7 @@ CREATE INDEX CONCURRENTLY IF NOT EXISTS "idx_active_users"
 ```
 
 ```sql
-CREATE INDEX CONCURRENTLY IF NOT EXISTS "idx_lower_email"
+CREATE INDEX IF NOT EXISTS "idx_lower_email"
     ON "public"."users" (lower("email"));
 ```
 
@@ -72,7 +74,7 @@ CREATE INDEX CONCURRENTLY IF NOT EXISTS "idx_lower_email"
 ```
 
 ```sql
-CREATE INDEX CONCURRENTLY IF NOT EXISTS "idx_covering"
+CREATE INDEX IF NOT EXISTS "idx_covering"
     ON "public"."users" ("user_id") INCLUDE ("email", "created_at");
 ```
 
@@ -86,10 +88,10 @@ CREATE INDEX CONCURRENTLY IF NOT EXISTS "idx_covering"
 ```
 
 ```sql
-CREATE INDEX CONCURRENTLY IF NOT EXISTS "idx_tags"
+CREATE INDEX IF NOT EXISTS "idx_tags"
     ON "public"."posts" USING gin ("tags");
 
-CREATE INDEX CONCURRENTLY IF NOT EXISTS "idx_fts"
+CREATE INDEX IF NOT EXISTS "idx_fts"
     ON "public"."posts" USING gin ("search_vec");
 ```
 
@@ -100,7 +102,7 @@ CREATE INDEX CONCURRENTLY IF NOT EXISTS "idx_fts"
 ```
 
 ```sql
-CREATE INDEX CONCURRENTLY IF NOT EXISTS "idx_location"
+CREATE INDEX IF NOT EXISTS "idx_location"
     ON "public"."places" USING gist ("location");
 ```
 
@@ -111,7 +113,7 @@ CREATE INDEX CONCURRENTLY IF NOT EXISTS "idx_location"
 ```
 
 ```sql
-CREATE INDEX CONCURRENTLY IF NOT EXISTS "idx_brin"
+CREATE INDEX IF NOT EXISTS "idx_brin"
     ON "public"."events" USING brin ("created_at") WITH (pages_per_range = 128);
 ```
 
@@ -122,20 +124,24 @@ CREATE INDEX CONCURRENTLY IF NOT EXISTS "idx_brin"
 ```
 
 ```sql
-CREATE INDEX CONCURRENTLY IF NOT EXISTS "idx_archived"
+CREATE INDEX IF NOT EXISTS "idx_archived"
     ON "public"."records" ("archived_at") TABLESPACE "archive_space";
 ```
 
-## Disable CONCURRENTLY for a specific index
+## Concurrent index creation
+
+Write `CONCURRENTLY` to avoid locking the table during index creation on a large, live table:
 
 ```sql
-{ INDICES { idx_email (email) CONCURRENTLY false; } }
+{ INDICES { CONCURRENTLY idx_email (email); } }
 ```
 
 ```sql
--- emits inside the transaction block (not after COMMIT)
-CREATE INDEX IF NOT EXISTS "idx_email" ON "public"."users" ("email");
+-- emits (non-transactional, after COMMIT)
+CREATE INDEX CONCURRENTLY IF NOT EXISTS "idx_email" ON "public"."users" ("email");
 ```
+
+This has no effect on an index declared alongside its own brand-new table — PostgreSQL rejects `CREATE INDEX CONCURRENTLY` inside a transaction block, and a new table's indexes are always emitted transactionally with it, so the compiler silently forces them non-concurrent regardless of this keyword.
 
 ## Index removal
 

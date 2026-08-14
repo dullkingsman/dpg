@@ -51,13 +51,14 @@ CREATE TABLE "public"."users" (
     CONSTRAINT "uq_users_email" UNIQUE ("email")
 );
 
+CREATE INDEX "idx_email" ON "public"."users" ("email");
+
 COMMENT ON TABLE "public"."users" IS 'Primary identity store';
 ALTER TABLE "public"."users" OWNER TO "app_role";
 GRANT SELECT ON TABLE "public"."users" TO "app_readonly";
-
--- non-transactional (after COMMIT):
-CREATE INDEX CONCURRENTLY "idx_email" ON "public"."users" ("email");
 ```
+
+Since `idx_email` is declared alongside its own brand-new table, it's created inside the same transaction as the `CREATE TABLE` — PostgreSQL rejects `CREATE INDEX CONCURRENTLY` inside a transaction block, so DPG never emits `CONCURRENTLY` here, even if the index had written it explicitly. See [Indexes](../../schema-objects/tables/indexes/) for `CONCURRENTLY` on indexes added to an already-existing table.
 
 ## No-verb mandate
 
@@ -104,8 +105,7 @@ CREATE TABLE "analytics"."events" (
     CONSTRAINT "pk_events" PRIMARY KEY ("id")
 );
 
--- non-transactional:
-CREATE INDEX CONCURRENTLY "idx_ts" ON "analytics"."events" ("created_at");
+CREATE INDEX "idx_ts" ON "analytics"."events" ("created_at");
 ```
 
 Schemas have no `( )` list — their `{ }` block directly contains attributes and nested objects.

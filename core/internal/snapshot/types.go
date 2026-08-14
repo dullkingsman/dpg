@@ -41,12 +41,22 @@ type SnapOpaque struct {
 	// "lefttype, righttype" (see ir.OperandsKey) used for DROP OPERATOR's
 	// mandatory operand-type clause, in the same string-goes-straight-into-
 	// the-parens shape.
-	Args     string             `json:"args,omitempty"`
-	Using    string             `json:"using,omitempty"` // index access method (operator_class/operator_family)
-	BodyHash string             `json:"body_hash,omitempty"`
-	Comment  *string            `json:"comment,omitempty"`
-	Grants   []SnapGrant        `json:"grants,omitempty"` // aggregate and procedure
-	NameMaps []SnapNameMapEntry `json:"name_maps,omitempty"`
+	Args        string             `json:"args,omitempty"`
+	Using       string             `json:"using,omitempty"` // index access method (operator_class/operator_family)
+	BodyHash    string             `json:"body_hash,omitempty"`
+	Comment     *string            `json:"comment,omitempty"`
+	Grants      []SnapGrant        `json:"grants,omitempty"`      // aggregate and procedure
+	Revocations []SnapGrant        `json:"revocations,omitempty"` // procedure only
+	Mappings    []SnapTSMapping    `json:"mappings,omitempty"`    // ts_config only (RFC §12.1 MAPPING FOR)
+	NameMaps    []SnapNameMapEntry `json:"name_maps,omitempty"`
+}
+
+// SnapTSMapping is one MAPPING FOR entry (RFC §12.1) on a text search
+// configuration. Dictionaries is a fallback chain — real PG syntax, tried in
+// order until one recognizes the token.
+type SnapTSMapping struct {
+	TokenTypes   []string `json:"token_types"`
+	Dictionaries []string `json:"dictionaries"`
 }
 
 type SnapSchema struct {
@@ -65,36 +75,43 @@ type SnapExtension struct {
 }
 
 type SnapTable struct {
-	Schema      string             `json:"schema"`
-	Name        string             `json:"name"`
-	Unlogged    bool               `json:"unlogged,omitempty"`
-	Foreign     bool               `json:"foreign,omitempty"`
-	Owner       *string            `json:"owner,omitempty"`
-	Comment     *string            `json:"comment,omitempty"`
-	RenamedFrom *string            `json:"renamed_from,omitempty"`
-	Deprecated  *string            `json:"deprecated,omitempty"`
-	Protected   bool               `json:"protected,omitempty"`
-	DropCascade bool               `json:"drop_cascade,omitempty"`
-	RLSEnabled  bool               `json:"rls_enabled,omitempty"`
-	RLSForced   bool               `json:"rls_forced,omitempty"`
-	Inherits    []string           `json:"inherits,omitempty"`
-	PartitionBy string             `json:"partition_by,omitempty"` // e.g. "RANGE (created_at)"
-	Partitions  []SnapPartition    `json:"partitions,omitempty"`
-	Columns     []SnapColumn       `json:"columns,omitempty"`
-	Constraints []SnapConstraint   `json:"constraints,omitempty"`
-	Indexes     []SnapIndex        `json:"indexes,omitempty"`
-	Policies    []SnapPolicy       `json:"policies,omitempty"`
-	Triggers    []SnapTrigger      `json:"triggers,omitempty"`
-	Grants      []SnapGrant        `json:"grants,omitempty"`
-	Revocations []SnapGrant        `json:"revocations,omitempty"`
-	NameMaps    []SnapNameMapEntry `json:"name_maps,omitempty"`
+	Schema         string             `json:"schema"`
+	Name           string             `json:"name"`
+	Unlogged       bool               `json:"unlogged,omitempty"`
+	Foreign        bool               `json:"foreign,omitempty"`
+	ForeignServer  *string            `json:"foreign_server,omitempty"`
+	ForeignOptions string             `json:"foreign_options,omitempty"` // comma-separated key=value options
+	Owner          *string            `json:"owner,omitempty"`
+	Comment        *string            `json:"comment,omitempty"`
+	RenamedFrom    *string            `json:"renamed_from,omitempty"`
+	Deprecated     *string            `json:"deprecated,omitempty"`
+	Protected      bool               `json:"protected,omitempty"`
+	DropCascade    bool               `json:"drop_cascade,omitempty"`
+	RLSEnabled     bool               `json:"rls_enabled,omitempty"`
+	RLSForced      bool               `json:"rls_forced,omitempty"`
+	Inherits       []string           `json:"inherits,omitempty"`
+	PartitionBy    string             `json:"partition_by,omitempty"` // e.g. "RANGE (created_at)"
+	Partitions     []SnapPartition    `json:"partitions,omitempty"`
+	Columns        []SnapColumn       `json:"columns,omitempty"`
+	Constraints    []SnapConstraint   `json:"constraints,omitempty"`
+	Indexes        []SnapIndex        `json:"indexes,omitempty"`
+	Policies       []SnapPolicy       `json:"policies,omitempty"`
+	Triggers       []SnapTrigger      `json:"triggers,omitempty"`
+	Grants         []SnapGrant        `json:"grants,omitempty"`
+	Revocations    []SnapGrant        `json:"revocations,omitempty"`
+	NameMaps       []SnapNameMapEntry `json:"name_maps,omitempty"`
 }
 
 // SnapPartition is one partition entry attached to a partitioned table.
+// PartitionBy/Partitions describe sub-partitioning (RFC §7.13): PartitionBy
+// is "" for a leaf partition; when set, Partitions holds that partition's
+// own nested partition entries, recursively.
 type SnapPartition struct {
-	Schema string `json:"schema,omitempty"`
-	Name   string `json:"name"`
-	Bound  string `json:"bound"` // raw FOR VALUES … expression
+	Schema      string          `json:"schema,omitempty"`
+	Name        string          `json:"name"`
+	Bound       string          `json:"bound"` // raw FOR VALUES … expression
+	PartitionBy string          `json:"partition_by,omitempty"`
+	Partitions  []SnapPartition `json:"partitions,omitempty"`
 }
 
 type SnapColumn struct {
@@ -161,16 +178,19 @@ type SnapGrant struct {
 }
 
 type SnapView struct {
-	Schema      string             `json:"schema"`
-	Name        string             `json:"name"`
-	Query       string             `json:"query"`
-	Owner       *string            `json:"owner,omitempty"`
-	Comment     *string            `json:"comment,omitempty"`
-	Recursive   bool               `json:"recursive,omitempty"`
-	WithNoData  bool               `json:"with_no_data,omitempty"`
-	Grants      []SnapGrant        `json:"grants,omitempty"`
-	Revocations []SnapGrant        `json:"revocations,omitempty"`
-	NameMaps    []SnapNameMapEntry `json:"name_maps,omitempty"`
+	Schema      string      `json:"schema"`
+	Name        string      `json:"name"`
+	Query       string      `json:"query"`
+	Owner       *string     `json:"owner,omitempty"`
+	Comment     *string     `json:"comment,omitempty"`
+	Deprecated  *string     `json:"deprecated,omitempty"`
+	Recursive   bool        `json:"recursive,omitempty"`
+	WithNoData  bool        `json:"with_no_data,omitempty"`
+	Grants      []SnapGrant `json:"grants,omitempty"`
+	Revocations []SnapGrant `json:"revocations,omitempty"`
+	// Indexes is only meaningful when Materialized (see ir.View.Indexes).
+	Indexes  []SnapIndex        `json:"indexes,omitempty"`
+	NameMaps []SnapNameMapEntry `json:"name_maps,omitempty"`
 }
 
 type SnapFunction struct {
@@ -191,7 +211,9 @@ type SnapFunction struct {
 	Rows        *float64           `json:"rows,omitempty"`
 	BodyHash    string             `json:"body_hash"`
 	Comment     *string            `json:"comment,omitempty"`
+	Deprecated  *string            `json:"deprecated,omitempty"`
 	Grants      []SnapGrant        `json:"grants,omitempty"`
+	Revocations []SnapGrant        `json:"revocations,omitempty"`
 	NameMaps    []SnapNameMapEntry `json:"name_maps,omitempty"`
 }
 

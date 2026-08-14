@@ -80,8 +80,6 @@ func Reconstruct(kind pipeline.ObjectKind, part1 string) string {
 		return "CREATE TEXT SEARCH PARSER " + part1
 	case pipeline.KindTSTemplate:
 		return "CREATE TEXT SEARCH TEMPLATE " + part1
-	case pipeline.KindDefaultPrivileges:
-		return "ALTER DEFAULT PRIVILEGES " + part1
 	default:
 		return part1
 	}

@@ -259,11 +259,16 @@ type PartitionSpec struct {
 	Columns  []string // partitioning columns/expressions
 }
 
-// Partition is one partition entry.
+// Partition is one partition entry. PartitionBy/Partitions describe
+// sub-partitioning (RFC §7.13): PartitionBy is nil for a leaf partition; when
+// set, Partitions holds that partition's own nested partition entries, which
+// may themselves be further sub-partitioned (arbitrary depth).
 type Partition struct {
-	Name   string
-	Bounds string // raw bounds expression
-	SrcPos pipeline.SourcePos
+	Name        string
+	Bounds      string // raw bounds expression
+	PartitionBy *PartitionSpec
+	Partitions  []*Partition
+	SrcPos      pipeline.SourcePos
 }
 
 // ── concrete IR object types ──────────────────────────────────────────────────
@@ -306,24 +311,28 @@ type Table struct {
 	Unlogged      bool
 	Foreign       bool
 	ForeignServer *string
-	Owner         *string
-	Comment       *string
-	Columns       []*Column
-	Constraints   []*Constraint
-	Indexes       []*Index
-	Policies      []*Policy
-	Triggers      []*Trigger
-	Grants        []Grant
-	Revocations   []Revocation
-	RLSEnabled    bool
-	RLSForced     bool
-	Inherits      []string
-	PartitionBy   *PartitionSpec
-	Partitions    []*Partition
-	StorageParams map[string]string
-	Tablespace    *string
-	NameMaps      []pipeline.NameMapEntry
-	SrcPos        pipeline.SourcePos
+	// ForeignOptions is FOREIGN TABLE's OPTIONS (...) clause — ordered like
+	// Index.With, since it renders back into deterministic DPG source and
+	// SQL text the same way.
+	ForeignOptions []pipeline.StorageParam
+	Owner          *string
+	Comment        *string
+	Columns        []*Column
+	Constraints    []*Constraint
+	Indexes        []*Index
+	Policies       []*Policy
+	Triggers       []*Trigger
+	Grants         []Grant
+	Revocations    []Revocation
+	RLSEnabled     bool
+	RLSForced      bool
+	Inherits       []string
+	PartitionBy    *PartitionSpec
+	Partitions     []*Partition
+	StorageParams  map[string]string
+	Tablespace     *string
+	NameMaps       []pipeline.NameMapEntry
+	SrcPos         pipeline.SourcePos
 }
 
 func (t *Table) QualifiedName() string   { return qualName(t.Schema, t.Name) }
@@ -344,8 +353,13 @@ type View struct {
 	Grants       []Grant
 	Revocations  []Revocation
 	WithNoData   bool // MATERIALIZED VIEW ... WITH NO DATA
-	NameMaps     []pipeline.NameMapEntry
-	SrcPos       pipeline.SourcePos
+	// Indexes is only meaningful when Materialized is true — real PostgreSQL
+	// does not support indexes on a plain or recursive view, only on a
+	// materialized view (or a table). RFC §8.2's matview-block grammar is
+	// the only view-block variant that includes indices-block.
+	Indexes  []*Index
+	NameMaps []pipeline.NameMapEntry
+	SrcPos   pipeline.SourcePos
 }
 
 func (v *View) QualifiedName() string   { return qualName(v.Schema, v.Name) }
@@ -364,6 +378,7 @@ type Function struct {
 	Deprecated  *string
 	RenamedFrom *string
 	Grants      []Grant
+	Revocations []Revocation
 	NameMaps    []pipeline.NameMapEntry
 	SrcPos      pipeline.SourcePos
 }
@@ -376,15 +391,16 @@ func (f *Function) irObject()               {}
 
 // Procedure is a CREATE PROCEDURE declaration.
 type Procedure struct {
-	Schema   string
-	Name     string
-	Args     []FuncArg
-	Attrs    FuncAttrs
-	BodyHash string // SHA-256 of normalised body
-	Comment  *string
-	Grants   []Grant
-	NameMaps []pipeline.NameMapEntry
-	SrcPos   pipeline.SourcePos
+	Schema      string
+	Name        string
+	Args        []FuncArg
+	Attrs       FuncAttrs
+	BodyHash    string // SHA-256 of normalised body
+	Comment     *string
+	Grants      []Grant
+	Revocations []Revocation
+	NameMaps    []pipeline.NameMapEntry
+	SrcPos      pipeline.SourcePos
 }
 
 func (p *Procedure) QualifiedName() string {
@@ -395,10 +411,14 @@ func (p *Procedure) irObject()               {}
 
 // Aggregate is a CREATE AGGREGATE declaration.
 type Aggregate struct {
-	Schema   string
-	Name     string
-	Args     []FuncArg
-	Body     string // raw aggregate definition options text
+	Schema string
+	Name   string
+	Args   []FuncArg
+	Body   string // full "CREATE AGGREGATE ..." statement text, used directly for SQL emission
+	// Options is the same SFUNC/STYPE/INITCOND/... key=value list as Body,
+	// kept structured (and in source order) so dump can reconstruct the DPG
+	// "AGGREGATE name (args) (options)" declaration without re-parsing Body.
+	Options  []pipeline.StorageParam
 	Comment  *string
 	Grants   []Grant
 	NameMaps []pipeline.NameMapEntry
@@ -551,8 +571,14 @@ func (u *UserMapping) irObject()               {}
 
 // Publication is a CREATE PUBLICATION declaration.
 type Publication struct {
-	Name          string
-	Body          string
+	Name string
+	Body string
+	// Comment is diffed/emitted independently of Body (COMMENT ON
+	// PUBLICATION), same as every other Comment-bearing opaque kind —
+	// confirmed live via \h COMMENT that real PostgreSQL genuinely supports
+	// this, despite Publication being excluded from the original 14-kind
+	// Comment/Grant fix on the mistaken assumption that it didn't apply.
+	Comment       *string
 	Reconstructed bool // Body rebuilt from the catalog; see Tablespace.Reconstructed
 	SrcPos        pipeline.SourcePos
 }
@@ -591,7 +617,17 @@ type EventTrigger struct {
 	// before the function it calls exists fails at apply time (confirmed
 	// live: "function ... does not exist"), and nothing else in the IR
 	// records this reference since EventTrigger is otherwise fully opaque.
-	Function      string
+	Function string
+	// Comment is diffed/emitted independently of Body (COMMENT ON EVENT
+	// TRIGGER), same as every other Comment-bearing opaque kind — added
+	// alongside Cast/Operator/OperatorClass/OperatorFamily/Collation/
+	// StatisticsObject/TSParser/TSTemplate, found live-testing a demo
+	// project: PostgreSQL genuinely supports COMMENT ON for all of these
+	// (confirmed via \h COMMENT against a real server), but the blockparser's
+	// generic { COMMENT '...'; } was silently discarded for every one of
+	// them — no field existed to store it, so dpg plan reported
+	// "-- (no changes)" with no error and no effect.
+	Comment       *string
 	Body          string
 	Reconstructed bool // Body rebuilt from the catalog; see Tablespace.Reconstructed
 	SrcPos        pipeline.SourcePos
@@ -605,6 +641,7 @@ func (e *EventTrigger) irObject()               {}
 type Collation struct {
 	Schema        string
 	Name          string
+	Comment       *string // see EventTrigger.Comment
 	Body          string
 	Reconstructed bool // Body rebuilt from the catalog; see Tablespace.Reconstructed
 	SrcPos        pipeline.SourcePos
@@ -631,6 +668,7 @@ type Operator struct {
 	// and nothing else in the IR records this reference since Operator is
 	// otherwise fully opaque.
 	Function      string
+	Comment       *string // see EventTrigger.Comment
 	Body          string
 	Reconstructed bool // Body rebuilt from the catalog; see Tablespace.Reconstructed
 	SrcPos        pipeline.SourcePos
@@ -691,6 +729,7 @@ type OperatorClass struct {
 	// time, and nothing else in the IR records these references since the
 	// class is otherwise fully opaque.
 	Functions     []string
+	Comment       *string // see EventTrigger.Comment
 	Body          string
 	Reconstructed bool // Body rebuilt from the catalog; see Tablespace.Reconstructed
 	SrcPos        pipeline.SourcePos
@@ -710,7 +749,8 @@ func (o *OperatorClass) irObject()               {}
 type OperatorFamily struct {
 	Schema        string
 	Name          string
-	AccessMethod  string // the index access method (btree/gin/gist/...); needed for DROP
+	AccessMethod  string  // the index access method (btree/gin/gist/...); needed for DROP
+	Comment       *string // see EventTrigger.Comment
 	Body          string
 	Reconstructed bool // Body rebuilt from the catalog; see Tablespace.Reconstructed
 	SrcPos        pipeline.SourcePos
@@ -739,6 +779,7 @@ type Cast struct {
 	// and nothing else in the IR records this reference since Cast is
 	// otherwise fully opaque.
 	Function      string
+	Comment       *string // see EventTrigger.Comment
 	Body          string
 	Reconstructed bool // Body rebuilt from the catalog; see Tablespace.Reconstructed
 	SrcPos        pipeline.SourcePos
@@ -752,6 +793,7 @@ func (c *Cast) irObject()               {}
 type StatisticsObject struct {
 	Schema        string
 	Name          string
+	Comment       *string // see EventTrigger.Comment
 	Body          string
 	Reconstructed bool // Body rebuilt from the catalog; see Tablespace.Reconstructed
 	SrcPos        pipeline.SourcePos
@@ -820,6 +862,7 @@ type TSParser struct {
 	// produced from SQL/PLpgSQL) — never errors when unresolved, same as
 	// every other soft reference in this file.
 	Functions     []string
+	Comment       *string // see EventTrigger.Comment
 	Body          string
 	Reconstructed bool // Body rebuilt from the catalog; see Tablespace.Reconstructed
 	SrcPos        pipeline.SourcePos
@@ -836,6 +879,7 @@ type TSTemplate struct {
 	// Functions holds the qualified names of the template's INIT/LEXIZE
 	// support functions — same reasoning as TSParser.Functions.
 	Functions     []string
+	Comment       *string // see EventTrigger.Comment
 	Body          string
 	Reconstructed bool // Body rebuilt from the catalog; see Tablespace.Reconstructed
 	SrcPos        pipeline.SourcePos
@@ -923,6 +967,13 @@ type DefaultPrivileges struct {
 	SrcPos      pipeline.SourcePos
 }
 
+// QualifiedName must include ObjectType: PostgreSQL's own pg_default_acl
+// catalog has one row per (role, schema, object type) tuple, and a single
+// DPG declaration naming multiple object types (RFC's own worked example:
+// TABLES, FUNCTIONS, and SEQUENCES together) is built into one
+// *DefaultPrivileges per type (see Builder.BuildDefaultPrivileges) — without
+// ObjectType here, those independently-diffable objects would collide under
+// one identity and the merger would silently drop all but one.
 func (d *DefaultPrivileges) QualifiedName() string {
 	key := "DEFAULT PRIVILEGES"
 	if d.ForRole != nil {
@@ -930,6 +981,9 @@ func (d *DefaultPrivileges) QualifiedName() string {
 	}
 	if d.InSchema != nil {
 		key += " IN " + *d.InSchema
+	}
+	if d.ObjectType != "" {
+		key += " " + d.ObjectType
 	}
 	return key
 }

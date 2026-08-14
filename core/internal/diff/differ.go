@@ -315,6 +315,27 @@ func ptrEq(a, b *string) bool {
 	return *a == *b
 }
 
+// effectiveComment resolves an object's live COMMENT text — used for
+// columns, tables, views, and functions (the RFC's own stated scope for
+// DEPRECATED, §19.1: "Applied to tables, columns, views, functions").
+// DEPRECATED (when set) always wins, rendered with the RFC's own
+// "[DEPRECATED] msg" prefix — real PostgreSQL only ever stores one comment
+// per object, so an explicit Comment is shadowed whenever Deprecated is
+// also set, rather than inventing an undocumented combined format. Found
+// live-testing a demo project: DEPRECATED was captured by the parser and
+// snapshot and used by the linter (hence its warning appearing in `dpg
+// plan` output), but the differ never referenced it at all for ANY of the
+// four kinds — it had zero effect on the actual generated SQL, despite the
+// RFC documenting `COMMENT ON COLUMN t.c IS '[DEPRECATED] msg'` (and the
+// table/view/function equivalents) as the expected output.
+func effectiveComment(comment, deprecated *string) *string {
+	if deprecated != nil {
+		s := "[DEPRECATED] " + *deprecated
+		return &s
+	}
+	return comment
+}
+
 // compositeAttrsChanged returns true if the composite type attribute list has
 // changed compared to the snapshot. Any addition, removal, or type change
 // counts as a change (PG requires DROP + CREATE for attribute changes).
@@ -368,11 +389,24 @@ func privStr(privs []string) string {
 	return strings.Join(privs, ", ")
 }
 
-// roleList quotes and joins a list of role names.
+// roleList quotes and joins a list of role names. PUBLIC is PostgreSQL's
+// pseudo-role keyword, not an actual role — GRANT/REVOKE ... TO/FROM PUBLIC
+// must stay bare. Quoting it (as every other role name is) makes PG look up
+// an actual role literally named "PUBLIC", which doesn't exist and errors
+// with "role \"PUBLIC\" does not exist". Confirmed live: introspection's
+// grant queries emit the literal string "PUBLIC" as the grantee for PG's
+// own implicit default EXECUTE-to-PUBLIC grant (grantee = 0), across every
+// grant-bearing object kind (tables, columns, views, functions, sequences,
+// aggregates, ...) — any REVOKE reconciling that implicit grant away hit
+// this.
 func roleList(roles []string) string {
 	quoted := make([]string, len(roles))
 	for i, r := range roles {
-		quoted[i] = quoteIdent(r)
+		if strings.EqualFold(r, "PUBLIC") {
+			quoted[i] = "PUBLIC"
+		} else {
+			quoted[i] = quoteIdent(r)
+		}
 	}
 	return strings.Join(quoted, ", ")
 }
@@ -546,7 +580,9 @@ func dropObject(so *snapshot.SnapObject) []pipeline.DiffOp {
 		}
 	case "tablespace":
 		if so.Opaque != nil {
-			return []pipeline.DiffOp{destructiveOp(fmt.Sprintf("DROP TABLESPACE IF EXISTS %s;", quoteIdent(so.Opaque.Name)), zero)}
+			// DROP TABLESPACE cannot run inside a transaction block
+			// (confirmed live) — same restriction as CREATE TABLESPACE.
+			return []pipeline.DiffOp{destructiveManualOp(fmt.Sprintf("DROP TABLESPACE IF EXISTS %s;", quoteIdent(so.Opaque.Name)), zero)}
 		}
 	case "fdw":
 		if so.Opaque != nil {
@@ -675,39 +711,61 @@ func createObject(obj pipeline.IRObject, vtypes map[string]string) ([]pipeline.D
 	case *ir.Aggregate:
 		return createAggregate(o)
 	case *ir.Tablespace:
-		return createOpaque(o.Name, o.Body, "TABLESPACE", "", o.SrcPos)
+		ops, err := createOpaque(o.Name, o.Body, "TABLESPACE", "", o.SrcPos)
+		return appendCommentOp(ops, err, "tablespace", "", o.Name, "", "", o.Comment, o.SrcPos)
 	case *ir.ForeignDataWrapper:
-		return createOpaque(o.Name, o.Body, "FOREIGN DATA WRAPPER", "", o.SrcPos)
+		ops, err := createOpaque(o.Name, o.Body, "FOREIGN DATA WRAPPER", "", o.SrcPos)
+		return appendCommentOp(ops, err, "fdw", "", o.Name, "", "", o.Comment, o.SrcPos)
 	case *ir.ForeignServer:
-		return createOpaque(o.Name, o.Body, "SERVER", "", o.SrcPos)
+		ops, err := createOpaque(o.Name, o.Body, "SERVER", "", o.SrcPos)
+		return appendCommentOp(ops, err, "server", "", o.Name, "", "", o.Comment, o.SrcPos)
 	case *ir.UserMapping:
 		return createUserMapping(o)
 	case *ir.Publication:
-		return createOpaque(o.Name, o.Body, "PUBLICATION", "", o.SrcPos)
+		ops, err := createOpaque(o.Name, o.Body, "PUBLICATION", "", o.SrcPos)
+		return appendCommentOp(ops, err, "publication", "", o.Name, "", "", o.Comment, o.SrcPos)
 	case *ir.Subscription:
 		return createSubscription(o)
 	case *ir.EventTrigger:
-		return createOpaque(o.Name, o.Body, "EVENT TRIGGER", "", o.SrcPos)
+		ops, err := createOpaque(o.Name, o.Body, "EVENT TRIGGER", "", o.SrcPos)
+		return appendCommentOp(ops, err, "event_trigger", "", o.Name, "", "", o.Comment, o.SrcPos)
 	case *ir.Collation:
-		return createOpaque(o.QualifiedName(), o.Body, "COLLATION", o.Schema, o.SrcPos)
+		ops, err := createOpaque(o.QualifiedName(), o.Body, "COLLATION", o.Schema, o.SrcPos)
+		return appendCommentOp(ops, err, "collation", o.Schema, o.Name, "", "", o.Comment, o.SrcPos)
 	case *ir.Operator:
-		return createOpaque(o.QualifiedName(), o.Body, "OPERATOR", o.Schema, o.SrcPos)
+		ops, err := createOpaque(o.QualifiedName(), o.Body, "OPERATOR", o.Schema, o.SrcPos)
+		return appendCommentOp(ops, err, "operator", o.Schema, o.Name, ir.OperandsKey(o.LeftType, o.RightType), "", o.Comment, o.SrcPos)
 	case *ir.OperatorClass:
-		return createOpaque(o.QualifiedName(), o.Body, "OPERATOR CLASS", o.Schema, o.SrcPos)
+		ops, err := createOpaque(o.QualifiedName(), o.Body, "OPERATOR CLASS", o.Schema, o.SrcPos)
+		return appendCommentOp(ops, err, "operator_class", o.Schema, o.Name, "", o.AccessMethod, o.Comment, o.SrcPos)
 	case *ir.OperatorFamily:
-		return createOpaque(o.QualifiedName(), o.Body, "OPERATOR FAMILY", o.Schema, o.SrcPos)
+		ops, err := createOpaque(o.QualifiedName(), o.Body, "OPERATOR FAMILY", o.Schema, o.SrcPos)
+		return appendCommentOp(ops, err, "operator_family", o.Schema, o.Name, "", o.AccessMethod, o.Comment, o.SrcPos)
 	case *ir.Cast:
-		return createOpaque(o.QualifiedName(), o.Body, "CAST", "", o.SrcPos)
+		ops, err := createOpaque(o.QualifiedName(), o.Body, "CAST", "", o.SrcPos)
+		return appendCommentOp(ops, err, "cast", "", o.QualifiedName(), "", "", o.Comment, o.SrcPos)
 	case *ir.StatisticsObject:
-		return createOpaque(o.QualifiedName(), o.Body, "STATISTICS", o.Schema, o.SrcPos)
+		ops, err := createOpaque(o.QualifiedName(), o.Body, "STATISTICS", o.Schema, o.SrcPos)
+		return appendCommentOp(ops, err, "statistics", o.Schema, o.Name, "", "", o.Comment, o.SrcPos)
 	case *ir.TSConfig:
-		return createOpaque(o.QualifiedName(), o.Body, "TEXT SEARCH CONFIGURATION", o.Schema, o.SrcPos)
+		ops, err := createOpaque(o.QualifiedName(), o.Body, "TEXT SEARCH CONFIGURATION", o.Schema, o.SrcPos)
+		ops, err = appendCommentOp(ops, err, "ts_config", o.Schema, o.Name, "", "", o.Comment, o.SrcPos)
+		if err != nil {
+			return ops, err
+		}
+		for _, m := range o.Mappings {
+			ops = append(ops, safeOp(tsMappingAlterSQL(qualIdent(o.Schema, o.Name), m), o.SrcPos))
+		}
+		return ops, nil
 	case *ir.TSDict:
-		return createOpaque(o.QualifiedName(), o.Body, "TEXT SEARCH DICTIONARY", o.Schema, o.SrcPos)
+		ops, err := createOpaque(o.QualifiedName(), o.Body, "TEXT SEARCH DICTIONARY", o.Schema, o.SrcPos)
+		return appendCommentOp(ops, err, "ts_dict", o.Schema, o.Name, "", "", o.Comment, o.SrcPos)
 	case *ir.TSParser:
-		return createOpaque(o.QualifiedName(), o.Body, "TEXT SEARCH PARSER", o.Schema, o.SrcPos)
+		ops, err := createOpaque(o.QualifiedName(), o.Body, "TEXT SEARCH PARSER", o.Schema, o.SrcPos)
+		return appendCommentOp(ops, err, "ts_parser", o.Schema, o.Name, "", "", o.Comment, o.SrcPos)
 	case *ir.TSTemplate:
-		return createOpaque(o.QualifiedName(), o.Body, "TEXT SEARCH TEMPLATE", o.Schema, o.SrcPos)
+		ops, err := createOpaque(o.QualifiedName(), o.Body, "TEXT SEARCH TEMPLATE", o.Schema, o.SrcPos)
+		return appendCommentOp(ops, err, "ts_template", o.Schema, o.Name, "", "", o.Comment, o.SrcPos)
 	case *ir.DefaultPrivileges:
 		return createDefaultPrivileges(o), nil
 	case *ir.VirtualType:
@@ -754,7 +812,101 @@ func createOpaque(name, body, kind, schema string, pos pipeline.SourcePos) ([]pi
 	if schema != "" && schema != "public" {
 		sql = fmt.Sprintf("SET LOCAL search_path = %s, public;\n%s", quoteIdent(schema), sql)
 	}
+	// CREATE TABLESPACE cannot run inside a transaction block (confirmed
+	// live: "ERROR: CREATE TABLESPACE cannot run inside a transaction
+	// block") — unlike every other opaque kind this function handles (FDW,
+	// SERVER, EVENT TRIGGER, COLLATION, etc.), which all run fine
+	// transactionally. kind arrives both uppercase (createObject's literal
+	// "TABLESPACE") and lowercase snake_case (diffOpaqueIR's snap.Kind
+	// "tablespace"), hence the case-insensitive compare.
+	if strings.EqualFold(kind, "tablespace") {
+		return []pipeline.DiffOp{manualOp(sql, pos)}, nil
+	}
 	return []pipeline.DiffOp{safeOp(sql, pos)}, nil
+}
+
+// commentOnOpaqueSQL renders "COMMENT ON <kind-specific identity> IS
+// <lit-or-NULL>;" for the 14 opaque kinds that carry a Comment field
+// (tablespace, fdw, server, event_trigger, collation, operator,
+// operator_class, operator_family, cast, statistics, and all 4 TS kinds) —
+// found live-testing a demo project: PostgreSQL genuinely supports
+// COMMENT ON for every one of these (confirmed via \h COMMENT against a
+// real server), but the blockparser's generic { COMMENT '...'; } was
+// silently discarded for 9 of them (no field existed at all) and captured-
+// but-never-emitted for the other 5 — dpg plan reported "-- (no changes)"
+// with no error and no effect either way.
+//
+// kind uses the same lowercase snake_case vocabulary as dropObject/
+// snapshot.SnapOpaque.Kind (not createOpaque's own uppercase display kind),
+// so callers already holding a SnapOpaque (the diff/update path) can pass
+// its Kind/Schema/Name/Args/Using straight through with no translation.
+// Reuses the exact same per-kind identity shapes dropObject already relies
+// on, so a comment always targets the identical object dropObject would —
+// operator/operator class/operator family/cast all need their special
+// (non-plain-identifier) COMMENT ON syntax, confirmed against \h COMMENT.
+// Returns "" for an unrecognized kind.
+func commentOnOpaqueSQL(kind, schema, name, args, using string, comment *string) string {
+	var ident string
+	switch kind {
+	case "tablespace":
+		ident = "TABLESPACE " + quoteIdent(name)
+	case "fdw":
+		ident = "FOREIGN DATA WRAPPER " + quoteIdent(name)
+	case "server":
+		ident = "SERVER " + quoteIdent(name)
+	case "publication":
+		ident = "PUBLICATION " + quoteIdent(name)
+	case "event_trigger":
+		ident = "EVENT TRIGGER " + quoteIdent(name)
+	case "collation":
+		ident = "COLLATION " + qualIdent(schema, name)
+	case "operator":
+		ident = "OPERATOR " + qualOperatorIdent(schema, name) + "(" + args + ")"
+	case "operator_class":
+		ident = "OPERATOR CLASS " + qualIdent(schema, name) + " USING " + accessMethodOrDefault(using)
+	case "operator_family":
+		ident = "OPERATOR FAMILY " + qualIdent(schema, name) + " USING " + accessMethodOrDefault(using)
+	case "cast":
+		parts := strings.SplitN(name, "->", 2)
+		if len(parts) != 2 {
+			return ""
+		}
+		ident = fmt.Sprintf("CAST (%s AS %s)", parts[0], parts[1])
+	case "statistics":
+		ident = "STATISTICS " + qualIdent(schema, name)
+	case "ts_config":
+		ident = "TEXT SEARCH CONFIGURATION " + qualIdent(schema, name)
+	case "ts_dict":
+		ident = "TEXT SEARCH DICTIONARY " + qualIdent(schema, name)
+	case "ts_parser":
+		ident = "TEXT SEARCH PARSER " + qualIdent(schema, name)
+	case "ts_template":
+		ident = "TEXT SEARCH TEMPLATE " + qualIdent(schema, name)
+	default:
+		return ""
+	}
+	val := "NULL"
+	if comment != nil {
+		val = quoteLit(*comment)
+	}
+	return fmt.Sprintf("COMMENT ON %s IS %s;", ident, val)
+}
+
+// appendCommentOp appends a COMMENT ON op to ops (the result of a preceding
+// createOpaque call) when comment is set, passing err through unchanged —
+// lets each createObject call site stay a single return statement:
+// return appendCommentOp(createOpaque(...), kind, schema, name, args, using, comment, pos)
+// wouldn't type-check (createOpaque's 2 return values can't feed more
+// params in the same call), so callers destructure first; this only
+// centralizes the "skip on error or nil comment" check itself.
+func appendCommentOp(ops []pipeline.DiffOp, err error, kind, schema, name, args, using string, comment *string, pos pipeline.SourcePos) ([]pipeline.DiffOp, error) {
+	if err != nil || comment == nil {
+		return ops, err
+	}
+	if sql := commentOnOpaqueSQL(kind, schema, name, args, using, comment); sql != "" {
+		ops = append(ops, safeOp(sql, pos))
+	}
+	return ops, nil
 }
 
 // userMappingCreateOp is the DiffOp for a CREATE USER MAPPING statement
@@ -971,6 +1123,9 @@ func createProcedure(o *ir.Procedure) []pipeline.DiffOp {
 			sql += " WITH GRANT OPTION"
 		}
 		ops = append(ops, safeOp(sql+";", o.SrcPos))
+	}
+	for _, r := range o.Revocations {
+		ops = append(ops, explicitRevokeOp(r, "PROCEDURE "+sig, o.SrcPos))
 	}
 	return ops
 }
@@ -1334,22 +1489,34 @@ func createTable(o *ir.Table, vtypes map[string]string) []pipeline.DiffOp {
 		b.WriteString(strings.Join(o.PartitionBy.Columns, ", "))
 		b.WriteString(")")
 	}
+	if o.Foreign {
+		// Real PostgreSQL grammar: CREATE FOREIGN TABLE name (cols)
+		// SERVER server_name [OPTIONS (...)]. Without this, the emitted
+		// statement was missing SERVER entirely — not just incomplete, an
+		// outright syntax error, since SERVER is mandatory for a foreign table.
+		if o.ForeignServer != nil {
+			b.WriteString(" SERVER ")
+			b.WriteString(quoteIdent(*o.ForeignServer))
+		}
+		if len(o.ForeignOptions) > 0 {
+			b.WriteString(" OPTIONS (")
+			for i, p := range o.ForeignOptions {
+				if i > 0 {
+					b.WriteString(", ")
+				}
+				b.WriteString(p.Key)
+				b.WriteString(" ")
+				b.WriteString(quoteLit(p.Value))
+			}
+			b.WriteString(")")
+		}
+	}
 	b.WriteString(";")
 
 	var ops []pipeline.DiffOp
 	ops = append(ops, safeOp(b.String(), o.SrcPos))
 	for _, p := range o.Partitions {
-		// p.Bounds already carries the full clause ("FOR VALUES FROM (...) TO
-		// (...)"/"FOR VALUES IN (...)"/"FOR VALUES WITH (...)"/"DEFAULT") —
-		// both the parser (raw text after the partition name) and
-		// introspection (pg_get_expr on relpartbound) capture it that way, so
-		// prepending "FOR VALUES" here would double it up (and be outright
-		// wrong for a DEFAULT partition, which has no FOR VALUES at all).
-		ops = append(ops, safeOp(
-			fmt.Sprintf("CREATE TABLE %s PARTITION OF %s %s;",
-				qualIdent(o.Schema, p.Name), qualIdent(o.Schema, o.Name), p.Bounds),
-			p.SrcPos,
-		))
+		ops = append(ops, createPartitionOps(o.Schema, qualIdent(o.Schema, o.Name), p)...)
 	}
 
 	if o.Owner != nil {
@@ -1358,9 +1525,9 @@ func createTable(o *ir.Table, vtypes map[string]string) []pipeline.DiffOp {
 			o.SrcPos,
 		))
 	}
-	if o.Comment != nil {
+	if txt := effectiveComment(o.Comment, o.Deprecated); txt != nil {
 		ops = append(ops, safeOp(
-			fmt.Sprintf("COMMENT ON TABLE %s IS %s;", qualIdent(o.Schema, o.Name), quoteLit(*o.Comment)),
+			fmt.Sprintf("COMMENT ON TABLE %s IS %s;", qualIdent(o.Schema, o.Name), quoteLit(*txt)),
 			o.SrcPos,
 		))
 	}
@@ -1380,7 +1547,15 @@ func createTable(o *ir.Table, vtypes map[string]string) []pipeline.DiffOp {
 		ops = append(ops, safeOp(fmt.Sprintf("ALTER TABLE %s FORCE ROW LEVEL SECURITY;", qualIdent(o.Schema, o.Name)), o.SrcPos))
 	}
 	for _, idx := range o.Indexes {
-		ops = append(ops, createIndex(o.Schema, o.Name, idx)...)
+		// Always non-concurrent, regardless of idx.Concurrently or the
+		// project's concurrent_indexes default: this table doesn't exist yet,
+		// so its indexes are created in the SAME transactional migration as
+		// the CREATE TABLE itself — and PostgreSQL rejects CREATE INDEX
+		// CONCURRENTLY inside a transaction block. See createIndex's doc
+		// comment; diffIndexes is the path where the default/explicit
+		// CONCURRENTLY actually applies (adding an index to a table that
+		// already exists).
+		ops = append(ops, createIndex(o.Schema, o.Name, idx, false)...)
 	}
 	for _, pol := range o.Policies {
 		ops = append(ops, createPolicy(o.Schema, o.Name, pol)...)
@@ -1393,7 +1568,7 @@ func createTable(o *ir.Table, vtypes map[string]string) []pipeline.DiffOp {
 		ops = append(ops, tableGrantOp(g, tblIdent, o.SrcPos))
 	}
 	for _, r := range o.Revocations {
-		ops = append(ops, tableExplicitRevokeOp(r, tblIdent, o.SrcPos))
+		ops = append(ops, explicitRevokeOp(r, "TABLE "+tblIdent, o.SrcPos))
 	}
 	for _, col := range o.Columns {
 		for _, g := range col.Grants {
@@ -1406,14 +1581,23 @@ func createTable(o *ir.Table, vtypes map[string]string) []pipeline.DiffOp {
 	return ops
 }
 
-func createIndex(schema, table string, idx *ir.Index) []pipeline.DiffOp {
+// createIndex builds the CREATE INDEX statement for idx. concurrent is the
+// caller-resolved effective value — NOT idx.Concurrently directly — since an
+// index created alongside its own brand-new table is always forced to false
+// regardless of idx.Concurrently: PostgreSQL rejects CREATE INDEX
+// CONCURRENTLY inside a transaction block, and a new table's indexes are
+// always emitted transactionally with it (see createTable). An index added
+// to an already-existing table (see diffIndexes) passes idx.Concurrently
+// straight through — CONCURRENTLY only ever fires when the source wrote it
+// explicitly; there is no project-wide default.
+func createIndex(schema, table string, idx *ir.Index, concurrent bool) []pipeline.DiffOp {
 	var b strings.Builder
 	b.WriteString("CREATE ")
 	if idx.Unique {
 		b.WriteString("UNIQUE ")
 	}
 	b.WriteString("INDEX ")
-	if idx.Concurrently {
+	if concurrent {
 		b.WriteString("CONCURRENTLY ")
 	}
 	b.WriteString(quoteIdent(idx.Name))
@@ -1478,7 +1662,7 @@ func createIndex(schema, table string, idx *ir.Index) []pipeline.DiffOp {
 	}
 	b.WriteString(";")
 
-	if idx.Concurrently {
+	if concurrent {
 		return []pipeline.DiffOp{manualOp(b.String(), idx.Pos)}
 	}
 	return []pipeline.DiffOp{cautionOp(b.String(), idx.Pos)}
@@ -1500,12 +1684,7 @@ func createPolicy(schema, table string, pol *ir.Policy) []pipeline.DiffOp {
 	}
 	if len(pol.Roles) > 0 {
 		b.WriteString(" TO ")
-		for i, r := range pol.Roles {
-			if i > 0 {
-				b.WriteString(", ")
-			}
-			b.WriteString(quoteIdent(r))
-		}
+		b.WriteString(roleList(pol.Roles))
 	}
 	if pol.Using != nil {
 		b.WriteString(" USING (")
@@ -1553,11 +1732,7 @@ func tableGrantOp(g ir.Grant, tblIdent string, pos pipeline.SourcePos) *op {
 	} else {
 		privs = strings.Join(g.Privileges, ", ")
 	}
-	roles := make([]string, len(g.Roles))
-	for i, r := range g.Roles {
-		roles[i] = quoteIdent(r)
-	}
-	sql := fmt.Sprintf("GRANT %s ON TABLE %s TO %s", privs, tblIdent, strings.Join(roles, ", "))
+	sql := fmt.Sprintf("GRANT %s ON TABLE %s TO %s", privs, tblIdent, roleList(g.Roles))
 	if g.WithGrant {
 		sql += " WITH GRANT OPTION"
 	}
@@ -1575,35 +1750,28 @@ func colGrantOp(g ir.Grant, tbl, col string, pos pipeline.SourcePos) pipeline.Di
 			privParts = append(privParts, p+" ("+colIdent+")")
 		}
 	}
-	roles := make([]string, len(g.Roles))
-	for i, r := range g.Roles {
-		roles[i] = quoteIdent(r)
-	}
-	sql := "GRANT " + strings.Join(privParts, ", ") + " ON TABLE " + tbl + " TO " + strings.Join(roles, ", ")
+	sql := "GRANT " + strings.Join(privParts, ", ") + " ON TABLE " + tbl + " TO " + roleList(g.Roles)
 	if g.WithGrant {
 		sql += " WITH GRANT OPTION"
 	}
 	return safeOp(sql+";", pos)
 }
 
-// tableExplicitRevokeOp emits the REVOKE for an explicit REVOCATION directive
+// explicitRevokeOp emits the REVOKE for an explicit REVOCATION directive
 // (RFC §11.3) — distinct from the additive-model's implicit revoke (see
 // colRevokeOp) that fires when a GRANT declaration is simply removed. Explicit
 // revocations are CAUTION (not SAFE): they can break access that something
 // else depends on. PG's REVOKE grammar has no IF EXISTS clause, so there's
-// no guard to add regardless.
-func tableExplicitRevokeOp(r ir.Revocation, tblIdent string, pos pipeline.SourcePos) *op {
+// no guard to add regardless. onClause is the SQL object specifier after ON,
+// e.g. "TABLE \"public\".\"users\"" or "FUNCTION \"public\".\"f\"(integer)".
+func explicitRevokeOp(r ir.Revocation, onClause string, pos pipeline.SourcePos) *op {
 	var privs string
 	if len(r.Privileges) == 0 {
 		privs = "ALL"
 	} else {
 		privs = strings.Join(r.Privileges, ", ")
 	}
-	roles := make([]string, len(r.Roles))
-	for i, role := range r.Roles {
-		roles[i] = quoteIdent(role)
-	}
-	sql := fmt.Sprintf("REVOKE %s ON TABLE %s FROM %s", privs, tblIdent, strings.Join(roles, ", "))
+	sql := fmt.Sprintf("REVOKE %s ON %s FROM %s", privs, onClause, roleList(r.Roles))
 	if r.Cascade {
 		sql += " CASCADE"
 	}
@@ -1611,7 +1779,7 @@ func tableExplicitRevokeOp(r ir.Revocation, tblIdent string, pos pipeline.Source
 	return cautionOp(sql, pos)
 }
 
-// colExplicitRevokeOp is tableExplicitRevokeOp's column-level counterpart,
+// colExplicitRevokeOp is explicitRevokeOp's column-level counterpart,
 // mirroring colGrantOp's column-parenthesized privilege syntax.
 func colExplicitRevokeOp(r ir.Revocation, tbl, col string, pos pipeline.SourcePos) pipeline.DiffOp {
 	colIdent := quoteIdent(col)
@@ -1623,11 +1791,7 @@ func colExplicitRevokeOp(r ir.Revocation, tbl, col string, pos pipeline.SourcePo
 			privParts = append(privParts, p+" ("+colIdent+")")
 		}
 	}
-	roles := make([]string, len(r.Roles))
-	for i, role := range r.Roles {
-		roles[i] = quoteIdent(role)
-	}
-	sql := "REVOKE " + strings.Join(privParts, ", ") + " ON TABLE " + tbl + " FROM " + strings.Join(roles, ", ")
+	sql := "REVOKE " + strings.Join(privParts, ", ") + " ON TABLE " + tbl + " FROM " + roleList(r.Roles)
 	if r.Cascade {
 		sql += " CASCADE"
 	}
@@ -1644,12 +1808,8 @@ func colRevokeOp(sg snapshot.SnapGrant, tbl, col string, pos pipeline.SourcePos)
 			privParts = append(privParts, p+" ("+colIdent+")")
 		}
 	}
-	roles := make([]string, len(sg.Roles))
-	for i, r := range sg.Roles {
-		roles[i] = quoteIdent(r)
-	}
 	return safeOp(
-		"REVOKE "+strings.Join(privParts, ", ")+" ON TABLE "+tbl+" FROM "+strings.Join(roles, ", ")+";",
+		"REVOKE "+strings.Join(privParts, ", ")+" ON TABLE "+tbl+" FROM "+roleList(sg.Roles)+";",
 		pos,
 	)
 }
@@ -1725,9 +1885,15 @@ func createView(o *ir.View) []pipeline.DiffOp {
 	if o.Materialized {
 		viewKind = "MATERIALIZED VIEW"
 	}
-	if o.Comment != nil {
+	if o.Owner != nil {
 		ops = append(ops, safeOp(
-			fmt.Sprintf("COMMENT ON %s %s IS %s;", viewKind, qualIdent(o.Schema, o.Name), quoteLit(*o.Comment)),
+			fmt.Sprintf("ALTER %s %s OWNER TO %s;", viewKind, qualIdent(o.Schema, o.Name), quoteIdent(*o.Owner)),
+			o.SrcPos,
+		))
+	}
+	if txt := effectiveComment(o.Comment, o.Deprecated); txt != nil {
+		ops = append(ops, safeOp(
+			fmt.Sprintf("COMMENT ON %s %s IS %s;", viewKind, qualIdent(o.Schema, o.Name), quoteLit(*txt)),
 			o.SrcPos,
 		))
 	}
@@ -1740,7 +1906,14 @@ func createView(o *ir.View) []pipeline.DiffOp {
 		ops = append(ops, safeOp(sql+";", o.SrcPos))
 	}
 	for _, r := range o.Revocations {
-		ops = append(ops, tableExplicitRevokeOp(r, viewIdent, o.SrcPos))
+		ops = append(ops, explicitRevokeOp(r, "TABLE "+viewIdent, o.SrcPos))
+	}
+	for _, idx := range o.Indexes {
+		// Always non-concurrent — this view doesn't exist yet, so its
+		// indexes are created in the same transactional migration as the
+		// CREATE MATERIALIZED VIEW itself, matching createTable's identical
+		// reasoning for a brand-new table's indexes.
+		ops = append(ops, createIndex(o.Schema, o.Name, idx, false)...)
 	}
 	return ops
 }
@@ -1748,9 +1921,9 @@ func createView(o *ir.View) []pipeline.DiffOp {
 func createFunction(o *ir.Function) []pipeline.DiffOp {
 	ops := []pipeline.DiffOp{safeOp(buildFunctionSQL(o), o.SrcPos)}
 	sig := buildFuncSignature(o)
-	if o.Comment != nil {
+	if txt := effectiveComment(o.Comment, o.Deprecated); txt != nil {
 		ops = append(ops, safeOp(
-			fmt.Sprintf("COMMENT ON FUNCTION %s IS %s;", sig, quoteLit(*o.Comment)),
+			fmt.Sprintf("COMMENT ON FUNCTION %s IS %s;", sig, quoteLit(*txt)),
 			o.SrcPos,
 		))
 	}
@@ -1760,6 +1933,9 @@ func createFunction(o *ir.Function) []pipeline.DiffOp {
 			sql += " WITH GRANT OPTION"
 		}
 		ops = append(ops, safeOp(sql+";", o.SrcPos))
+	}
+	for _, r := range o.Revocations {
+		ops = append(ops, explicitRevokeOp(r, "FUNCTION "+sig, o.SrcPos))
 	}
 	return ops
 }
@@ -2117,17 +2293,17 @@ func diffObject(desired pipeline.IRObject, snap *snapshot.SnapObject, fullSnap *
 		if snap.Opaque == nil {
 			return nil, nil
 		}
-		return diffOpaqueIR(o.Name, o.Body, o.Reconstructed, snap.Opaque, o.SrcPos)
+		return diffOpaqueIR(o.Name, o.Body, o.Reconstructed, o.Comment, snap.Opaque, o.SrcPos)
 	case *ir.ForeignDataWrapper:
 		if snap.Opaque == nil {
 			return nil, nil
 		}
-		return diffOpaqueIR(o.Name, o.Body, o.Reconstructed, snap.Opaque, o.SrcPos)
+		return diffOpaqueIR(o.Name, o.Body, o.Reconstructed, o.Comment, snap.Opaque, o.SrcPos)
 	case *ir.ForeignServer:
 		if snap.Opaque == nil {
 			return nil, nil
 		}
-		return diffOpaqueIR(o.Name, o.Body, o.Reconstructed, snap.Opaque, o.SrcPos)
+		return diffOpaqueIR(o.Name, o.Body, o.Reconstructed, o.Comment, snap.Opaque, o.SrcPos)
 	case *ir.UserMapping:
 		if snap.Opaque == nil {
 			return nil, nil
@@ -2137,7 +2313,7 @@ func diffObject(desired pipeline.IRObject, snap *snapshot.SnapObject, fullSnap *
 		if snap.Opaque == nil {
 			return nil, nil
 		}
-		return diffOpaqueIR(o.Name, o.Body, o.Reconstructed, snap.Opaque, o.SrcPos)
+		return diffOpaqueIR(o.Name, o.Body, o.Reconstructed, o.Comment, snap.Opaque, o.SrcPos)
 	case *ir.Subscription:
 		if snap.Opaque == nil {
 			return nil, nil
@@ -2147,57 +2323,57 @@ func diffObject(desired pipeline.IRObject, snap *snapshot.SnapObject, fullSnap *
 		if snap.Opaque == nil {
 			return nil, nil
 		}
-		return diffOpaqueIR(o.Name, o.Body, o.Reconstructed, snap.Opaque, o.SrcPos)
+		return diffOpaqueIR(o.Name, o.Body, o.Reconstructed, o.Comment, snap.Opaque, o.SrcPos)
 	case *ir.Collation:
 		if snap.Opaque == nil {
 			return nil, nil
 		}
-		return diffOpaqueIR(o.QualifiedName(), o.Body, o.Reconstructed, snap.Opaque, o.SrcPos)
+		return diffOpaqueIR(o.QualifiedName(), o.Body, o.Reconstructed, o.Comment, snap.Opaque, o.SrcPos)
 	case *ir.Operator:
 		if snap.Opaque == nil {
 			return nil, nil
 		}
-		return diffOpaqueIR(o.QualifiedName(), o.Body, o.Reconstructed, snap.Opaque, o.SrcPos)
+		return diffOpaqueIR(o.QualifiedName(), o.Body, o.Reconstructed, o.Comment, snap.Opaque, o.SrcPos)
 	case *ir.OperatorClass:
 		if snap.Opaque == nil {
 			return nil, nil
 		}
-		return diffOpaqueIR(o.QualifiedName(), o.Body, o.Reconstructed, snap.Opaque, o.SrcPos)
+		return diffOpaqueIR(o.QualifiedName(), o.Body, o.Reconstructed, o.Comment, snap.Opaque, o.SrcPos)
 	case *ir.OperatorFamily:
 		if snap.Opaque == nil {
 			return nil, nil
 		}
-		return diffOpaqueIR(o.QualifiedName(), o.Body, o.Reconstructed, snap.Opaque, o.SrcPos)
+		return diffOpaqueIR(o.QualifiedName(), o.Body, o.Reconstructed, o.Comment, snap.Opaque, o.SrcPos)
 	case *ir.Cast:
 		if snap.Opaque == nil {
 			return nil, nil
 		}
-		return diffOpaqueIR(o.QualifiedName(), o.Body, o.Reconstructed, snap.Opaque, o.SrcPos)
+		return diffOpaqueIR(o.QualifiedName(), o.Body, o.Reconstructed, o.Comment, snap.Opaque, o.SrcPos)
 	case *ir.StatisticsObject:
 		if snap.Opaque == nil {
 			return nil, nil
 		}
-		return diffOpaqueIR(o.QualifiedName(), o.Body, o.Reconstructed, snap.Opaque, o.SrcPos)
+		return diffOpaqueIR(o.QualifiedName(), o.Body, o.Reconstructed, o.Comment, snap.Opaque, o.SrcPos)
 	case *ir.TSConfig:
 		if snap.Opaque == nil {
 			return nil, nil
 		}
-		return diffOpaqueIR(o.QualifiedName(), o.Body, o.Reconstructed, snap.Opaque, o.SrcPos)
+		return diffTSConfig(o, snap.Opaque)
 	case *ir.TSDict:
 		if snap.Opaque == nil {
 			return nil, nil
 		}
-		return diffOpaqueIR(o.QualifiedName(), o.Body, o.Reconstructed, snap.Opaque, o.SrcPos)
+		return diffOpaqueIR(o.QualifiedName(), o.Body, o.Reconstructed, o.Comment, snap.Opaque, o.SrcPos)
 	case *ir.TSParser:
 		if snap.Opaque == nil {
 			return nil, nil
 		}
-		return diffOpaqueIR(o.QualifiedName(), o.Body, o.Reconstructed, snap.Opaque, o.SrcPos)
+		return diffOpaqueIR(o.QualifiedName(), o.Body, o.Reconstructed, o.Comment, snap.Opaque, o.SrcPos)
 	case *ir.TSTemplate:
 		if snap.Opaque == nil {
 			return nil, nil
 		}
-		return diffOpaqueIR(o.QualifiedName(), o.Body, o.Reconstructed, snap.Opaque, o.SrcPos)
+		return diffOpaqueIR(o.QualifiedName(), o.Body, o.Reconstructed, o.Comment, snap.Opaque, o.SrcPos)
 	case *ir.DefaultPrivileges:
 		if snap.DefaultPrivileges == nil {
 			return nil, nil
@@ -2220,6 +2396,73 @@ func accessMethodOrDefault(am string) string {
 	return am
 }
 
+// tsMappingAlterSQL builds "ALTER TEXT SEARCH CONFIGURATION cfg ALTER MAPPING
+// FOR tok1, tok2 WITH dict1, dict2;" — confirmed live against postgres:17
+// that ALTER MAPPING FOR is an upsert (adds the mapping if none exists yet
+// for that token type, replaces it if one does), so it's always the right
+// verb regardless of whether the config was COPY'd from an existing one
+// (which pre-populates default mappings) or created from scratch — no need
+// to distinguish ADD vs ALTER, matching the RFC's own diffing-semantics
+// table (§12.1), which only ever uses ALTER MAPPING FOR.
+func tsMappingAlterSQL(configIdent string, m pipeline.TSMappingDef) string {
+	dicts := make([]string, len(m.Dictionaries))
+	for i, d := range m.Dictionaries {
+		dicts[i] = d.String()
+	}
+	return tsMappingAlterSQLStrings(configIdent, m.TokenTypes, dicts)
+}
+
+func tsMappingAlterSQLStrings(configIdent string, tokenTypes, dictionaries []string) string {
+	return fmt.Sprintf("ALTER TEXT SEARCH CONFIGURATION %s ALTER MAPPING FOR %s WITH %s;",
+		configIdent, strings.Join(tokenTypes, ", "), strings.Join(dictionaries, ", "))
+}
+
+// tsMappingDropSQL builds "ALTER TEXT SEARCH CONFIGURATION cfg DROP MAPPING
+// FOR tok;" for a token type whose mapping was removed from source.
+func tsMappingDropSQL(configIdent, tokenType string) string {
+	return fmt.Sprintf("ALTER TEXT SEARCH CONFIGURATION %s DROP MAPPING FOR %s;", configIdent, tokenType)
+}
+
+// diffTSConfigMappings diffs MAPPING FOR entries at the per-token-type level
+// (not per declared entry): a real PG mapping is keyed by individual token
+// type, and DPG's "MAPPING FOR word, hword WITH ..." grouping is just a
+// source-side convenience for declaring several token types at once — two
+// entries covering the same token types with different groupings must NOT
+// show as spurious drift, so both sides are flattened to tokenType->
+// dictionaries before comparing (mirrors how introspection naturally reads
+// pg_ts_config_map, one row per token type).
+func diffTSConfigMappings(configIdent string, desired []pipeline.TSMappingDef, snap []snapshot.SnapTSMapping, pos pipeline.SourcePos) []pipeline.DiffOp {
+	desiredByToken := make(map[string][]string)
+	for _, m := range desired {
+		dicts := make([]string, len(m.Dictionaries))
+		for i, d := range m.Dictionaries {
+			dicts[i] = d.String()
+		}
+		for _, tt := range m.TokenTypes {
+			desiredByToken[tt] = dicts
+		}
+	}
+	snapByToken := make(map[string][]string)
+	for _, m := range snap {
+		for _, tt := range m.TokenTypes {
+			snapByToken[tt] = m.Dictionaries
+		}
+	}
+
+	var ops []pipeline.DiffOp
+	for tt, dicts := range desiredByToken {
+		if !slices.Equal(snapByToken[tt], dicts) {
+			ops = append(ops, safeOp(tsMappingAlterSQLStrings(configIdent, []string{tt}, dicts), pos))
+		}
+	}
+	for tt := range snapByToken {
+		if _, ok := desiredByToken[tt]; !ok {
+			ops = append(ops, safeOp(tsMappingDropSQL(configIdent, tt), pos))
+		}
+	}
+	return ops
+}
+
 // diffOpaqueIR checks whether an opaque object's body hash has changed and, if
 // so, emits a structured DROP (via dropObject, reusing the exact statement
 // already used when the object is removed outright) followed by a CREATE from
@@ -2229,21 +2472,64 @@ func accessMethodOrDefault(am string) string {
 // desired side) or when the snapshot side carries no hash (a reconstructed
 // baseline, e.g. plan --live). Offline plan/apply (source vs source) compare
 // normally and detect genuine edits.
-func diffOpaqueIR(name, body string, reconstructed bool, snap *snapshot.SnapOpaque, pos pipeline.SourcePos) ([]pipeline.DiffOp, error) {
-	if body == "" || reconstructed {
-		return nil, nil
+//
+// comment is diffed independently of Body — a comment-only change never
+// needs the DROP+CREATE a body change requires, so it's checked even when
+// the body branch above doesn't fire (unchanged body, reconstructed, or no
+// baseline hash yet). Uses snap's own Schema/Name/Args/Using (already the
+// exact per-object identity dropObject/commentOnOpaqueSQL need) rather than
+// requiring a second set of identity params from every call site. Runs on
+// the live/reconstructed path too, unlike Body: an exact comment string has
+// no canonical-form-vs-hand-written ambiguity the way a reconstructed body
+// does, so comparing it is always reliable.
+func diffOpaqueIR(name, body string, reconstructed bool, comment *string, snap *snapshot.SnapOpaque, pos pipeline.SourcePos) ([]pipeline.DiffOp, error) {
+	if body != "" && !reconstructed {
+		sum := sha256.Sum256([]byte(strings.TrimSpace(body)))
+		newHash := fmt.Sprintf("%x", sum)
+		if snap.BodyHash != "" && newHash != snap.BodyHash {
+			ops := dropObject(&snapshot.SnapObject{Kind: snap.Kind, Opaque: snap})
+			createOps, err := createOpaque(name, body, snap.Kind, snap.Schema, pos)
+			if err != nil {
+				return nil, err
+			}
+			ops = append(ops, createOps...)
+			return appendCommentOp(ops, nil, snap.Kind, snap.Schema, snap.Name, snap.Args, snap.Using, comment, pos)
+		}
 	}
-	sum := sha256.Sum256([]byte(strings.TrimSpace(body)))
-	newHash := fmt.Sprintf("%x", sum)
-	if snap.BodyHash == "" || newHash == snap.BodyHash {
-		return nil, nil
+	if !ptrEq(comment, snap.Comment) {
+		if sql := commentOnOpaqueSQL(snap.Kind, snap.Schema, snap.Name, snap.Args, snap.Using, comment); sql != "" {
+			return []pipeline.DiffOp{safeOp(sql, pos)}, nil
+		}
 	}
-	ops := dropObject(&snapshot.SnapObject{Kind: snap.Kind, Opaque: snap})
-	createOps, err := createOpaque(name, body, snap.Kind, snap.Schema, pos)
+	return nil, nil
+}
+
+// diffTSConfig is diffOpaqueIR's TSConfig-specific wrapper: MAPPING FOR
+// entries (RFC §12.1) are a TSConfig-only concern diffOpaqueIR knows nothing
+// about. When the base diff triggers a full DROP+CREATE (body/PARSER
+// changed — diffOpaqueIR calls createOpaque directly, not createObject, so
+// none of o.Mappings gets applied automatically), every declared mapping is
+// unconditionally re-applied (ALTER MAPPING FOR is confirmed live to be an
+// upsert, so this is always correct against a config that was just
+// recreated from scratch) instead of being diffed against the old
+// snapshot's mappings, which no longer describe anything real. Otherwise
+// mappings are diffed at the per-token-type level (diffTSConfigMappings).
+func diffTSConfig(o *ir.TSConfig, snap *snapshot.SnapOpaque) ([]pipeline.DiffOp, error) {
+	ops, err := diffOpaqueIR(o.QualifiedName(), o.Body, o.Reconstructed, o.Comment, snap, o.SrcPos)
 	if err != nil {
 		return nil, err
 	}
-	return append(ops, createOps...), nil
+	configIdent := qualIdent(o.Schema, o.Name)
+	for _, op := range ops {
+		if op.Safety() == pipeline.Destructive {
+			for _, m := range o.Mappings {
+				ops = append(ops, safeOp(tsMappingAlterSQL(configIdent, m), o.SrcPos))
+			}
+			return ops, nil
+		}
+	}
+	ops = append(ops, diffTSConfigMappings(configIdent, o.Mappings, snap.Mappings, o.SrcPos)...)
+	return ops, nil
 }
 
 func diffProcedure(o *ir.Procedure, snap *snapshot.SnapOpaque) ([]pipeline.DiffOp, error) {
@@ -2264,6 +2550,7 @@ func diffProcedure(o *ir.Procedure, snap *snapshot.SnapOpaque) ([]pipeline.DiffO
 		}
 	}
 	ops = append(ops, diffGrantSet(snap.Grants, o.Grants, "PROCEDURE "+sig, pos)...)
+	ops = append(ops, diffRevocationSet(snap.Revocations, o.Revocations, "PROCEDURE "+sig, pos)...)
 	return ops, nil
 }
 
@@ -2572,16 +2859,21 @@ func diffView(o *ir.View, snap *snapshot.SnapView) []pipeline.DiffOp {
 		))
 	}
 
-	if !ptrEq(o.Comment, snap.Comment) {
-		if o.Comment != nil {
-			ops = append(ops, safeOp(fmt.Sprintf("COMMENT ON %s %s IS %s;", viewKind, tbl, quoteLit(*o.Comment)), pos))
+	if desiredTxt, snapTxt := effectiveComment(o.Comment, o.Deprecated), effectiveComment(snap.Comment, snap.Deprecated); !ptrEq(desiredTxt, snapTxt) {
+		if desiredTxt != nil {
+			ops = append(ops, safeOp(fmt.Sprintf("COMMENT ON %s %s IS %s;", viewKind, tbl, quoteLit(*desiredTxt)), pos))
 		} else {
 			ops = append(ops, safeOp(fmt.Sprintf("COMMENT ON %s %s IS NULL;", viewKind, tbl), pos))
 		}
 	}
 
+	if !ptrEq(o.Owner, snap.Owner) && o.Owner != nil {
+		ops = append(ops, safeOp(fmt.Sprintf("ALTER %s %s OWNER TO %s;", viewKind, tbl, quoteIdent(*o.Owner)), pos))
+	}
+
 	ops = append(ops, diffGrantSet(snap.Grants, o.Grants, "TABLE "+tbl, pos)...)
 	ops = append(ops, diffRevocationSet(snap.Revocations, o.Revocations, "TABLE "+tbl, pos)...)
+	ops = append(ops, diffViewIndexes(o.Schema, o.Name, o.Indexes, snap.Indexes)...)
 	return ops
 }
 
@@ -2641,14 +2933,15 @@ func diffFunction(o *ir.Function, snap *snapshot.SnapFunction) []pipeline.DiffOp
 		desiredFloatChanged(o.Attrs.Cost, snap.Cost) || desiredFloatChanged(o.Attrs.Rows, snap.Rows) {
 		ops = append(ops, safeOp(buildFunctionSQL(o), pos))
 	}
-	if !ptrEq(o.Comment, snap.Comment) {
-		if o.Comment != nil {
-			ops = append(ops, safeOp(fmt.Sprintf("COMMENT ON FUNCTION %s IS %s;", sig, quoteLit(*o.Comment)), pos))
+	if desiredTxt, snapTxt := effectiveComment(o.Comment, o.Deprecated), effectiveComment(snap.Comment, snap.Deprecated); !ptrEq(desiredTxt, snapTxt) {
+		if desiredTxt != nil {
+			ops = append(ops, safeOp(fmt.Sprintf("COMMENT ON FUNCTION %s IS %s;", sig, quoteLit(*desiredTxt)), pos))
 		} else {
 			ops = append(ops, safeOp(fmt.Sprintf("COMMENT ON FUNCTION %s IS NULL;", sig), pos))
 		}
 	}
 	ops = append(ops, diffGrantSet(snap.Grants, o.Grants, "FUNCTION "+sig, pos)...)
+	ops = append(ops, diffRevocationSet(snap.Revocations, o.Revocations, "FUNCTION "+sig, pos)...)
 	return ops
 }
 
@@ -2841,12 +3134,25 @@ func diffTable(o *ir.Table, snap *snapshot.SnapTable, fullSnap *pipeline.Snapsho
 			pos,
 		))
 	}
+
+	// A foreign table's SERVER cannot be changed via ALTER FOREIGN TABLE —
+	// real PostgreSQL has no such clause — so it requires DROP + CREATE,
+	// same as diffView's handling of a materialized view's query change.
+	if o.Foreign && !ptrEq(o.ForeignServer, snap.ForeignServer) {
+		ops = append(ops, destructiveOp(fmt.Sprintf("DROP FOREIGN TABLE IF EXISTS %s;", tbl), pos))
+		ops = append(ops, createTable(o, vtypes)...)
+		return ops, nil
+	}
+	if o.Foreign {
+		ops = append(ops, diffForeignOptions(tbl, o.ForeignOptions, snap.ForeignOptions, pos)...)
+	}
+
 	if !ptrEq(o.Owner, snap.Owner) && o.Owner != nil {
 		ops = append(ops, safeOp(fmt.Sprintf("ALTER TABLE %s OWNER TO %s;", tbl, quoteIdent(*o.Owner)), pos))
 	}
-	if !ptrEq(o.Comment, snap.Comment) {
-		if o.Comment != nil {
-			ops = append(ops, safeOp(fmt.Sprintf("COMMENT ON TABLE %s IS %s;", tbl, quoteLit(*o.Comment)), pos))
+	if desiredTxt, snapTxt := effectiveComment(o.Comment, o.Deprecated), effectiveComment(snap.Comment, snap.Deprecated); !ptrEq(desiredTxt, snapTxt) {
+		if desiredTxt != nil {
+			ops = append(ops, safeOp(fmt.Sprintf("COMMENT ON TABLE %s IS %s;", tbl, quoteLit(*desiredTxt)), pos))
 		} else {
 			ops = append(ops, safeOp(fmt.Sprintf("COMMENT ON TABLE %s IS NULL;", tbl), pos))
 		}
@@ -2880,6 +3186,80 @@ func diffTable(o *ir.Table, snap *snapshot.SnapTable, fullSnap *pipeline.Snapsho
 	return ops, nil
 }
 
+// diffForeignOptions computes ALTER FOREIGN TABLE ... OPTIONS (ADD/SET/DROP
+// ...) for a changed FOREIGN TABLE OPTIONS clause. Unlike a SERVER change,
+// real PostgreSQL supports altering OPTIONS in place — no drop+recreate
+// needed. snapFlat is the snapshot's flattened "key=value, key=value" form
+// (see flattenParams); desired is the live IR's ordered param list.
+func diffForeignOptions(tbl string, desired []pipeline.StorageParam, snapFlat string, pos pipeline.SourcePos) []pipeline.DiffOp {
+	snapMap := make(map[string]string)
+	for _, kv := range strings.Split(snapFlat, ", ") {
+		if kv == "" {
+			continue
+		}
+		if k, v, ok := strings.Cut(kv, "="); ok {
+			snapMap[k] = v
+		}
+	}
+
+	desiredKeys := make(map[string]bool, len(desired))
+	var actions []string
+	for _, p := range desired {
+		desiredKeys[p.Key] = true
+		old, existed := snapMap[p.Key]
+		switch {
+		case !existed:
+			actions = append(actions, fmt.Sprintf("ADD %s %s", p.Key, quoteLit(p.Value)))
+		case old != p.Value:
+			actions = append(actions, fmt.Sprintf("SET %s %s", p.Key, quoteLit(p.Value)))
+		}
+	}
+	// Iterate snapFlat's own order (not map order) for deterministic DROP output.
+	for _, kv := range strings.Split(snapFlat, ", ") {
+		if kv == "" {
+			continue
+		}
+		k, _, _ := strings.Cut(kv, "=")
+		if !desiredKeys[k] {
+			actions = append(actions, fmt.Sprintf("DROP %s", k))
+		}
+	}
+	if len(actions) == 0 {
+		return nil
+	}
+	return []pipeline.DiffOp{safeOp(
+		fmt.Sprintf("ALTER FOREIGN TABLE %s OPTIONS (%s);", tbl, strings.Join(actions, ", ")),
+		pos,
+	)}
+}
+
+// createPartitionOps emits "CREATE TABLE child PARTITION OF parent
+// FOR VALUES ...;" for p, recursing into any sub-partitions (RFC §7.13). A
+// sub-partitioned child gets its own trailing "PARTITION BY strategy (cols)"
+// clause — real PostgreSQL allows this directly on a PARTITION OF statement —
+// then each of its sub-partitions is created as PARTITION OF the child.
+//
+// p.Bounds already carries the full clause ("FOR VALUES FROM (...) TO
+// (...)"/"FOR VALUES IN (...)"/"FOR VALUES WITH (...)"/"DEFAULT") — both the
+// parser (raw text after the partition name) and introspection (pg_get_expr
+// on relpartbound) capture it that way, so prepending "FOR VALUES" here
+// would double it up (and be outright wrong for a DEFAULT partition, which
+// has no FOR VALUES at all).
+func createPartitionOps(schema string, parent string, p *ir.Partition) []pipeline.DiffOp {
+	childTbl := qualIdent(schema, p.Name)
+	stmt := fmt.Sprintf("CREATE TABLE %s PARTITION OF %s %s", childTbl, parent, p.Bounds)
+	if p.PartitionBy != nil {
+		stmt += fmt.Sprintf(" PARTITION BY %s (%s)", p.PartitionBy.Strategy, strings.Join(p.PartitionBy.Columns, ", "))
+	}
+	stmt += ";"
+
+	ops := []pipeline.DiffOp{safeOp(stmt, p.SrcPos)}
+	for _, sub := range p.Partitions {
+		ops = append(ops, createPartitionOps(schema, childTbl, sub)...)
+	}
+	return ops
+}
+
 func diffPartitions(tbl string, o *ir.Table, snap *snapshot.SnapTable, pos pipeline.SourcePos) []pipeline.DiffOp {
 	var ops []pipeline.DiffOp
 
@@ -2896,38 +3276,52 @@ func diffPartitions(tbl string, o *ir.Table, snap *snapshot.SnapTable, pos pipel
 		return ops
 	}
 
-	snapMap := make(map[string]snapshot.SnapPartition, len(snap.Partitions))
-	for _, p := range snap.Partitions {
-		snapMap[p.Name] = p
+	ops = append(ops, diffPartitionList(o.Schema, tbl, o.Partitions, snap.Partitions, pos)...)
+	return ops
+}
+
+// diffPartitionList diffs one level of partition entries (desired vs.
+// snapshot), recursing into each matched pair's sub-partitions
+// (RFC §7.13). parent is the qualified name of the owning table (or, one
+// level down, the qualified name of the parent partition).
+func diffPartitionList(schema, parent string, desired []*ir.Partition, snap []snapshot.SnapPartition, pos pipeline.SourcePos) []pipeline.DiffOp {
+	var ops []pipeline.DiffOp
+
+	snapMap := make(map[string]snapshot.SnapPartition, len(snap))
+	for _, sp := range snap {
+		snapMap[sp.Name] = sp
 	}
-	desiredSet := make(map[string]bool, len(o.Partitions))
-	for _, p := range o.Partitions {
+	desiredSet := make(map[string]bool, len(desired))
+	for _, p := range desired {
 		desiredSet[p.Name] = true
 	}
 
-	for _, p := range o.Partitions {
+	for _, p := range desired {
 		sp, exists := snapMap[p.Name]
-		partTbl := qualIdent(o.Schema, p.Name)
-		if !exists {
-			// See createTable's identical construction: p.Bounds already
-			// carries the full "FOR VALUES ..."/"DEFAULT" clause.
-			ops = append(ops, safeOp(
-				fmt.Sprintf("CREATE TABLE %s PARTITION OF %s %s;", partTbl, tbl, p.Bounds),
-				p.SrcPos,
-			))
-		} else if sp.Bound != p.Bounds {
+		partTbl := qualIdent(schema, p.Name)
+		desiredPB := ""
+		if p.PartitionBy != nil {
+			desiredPB = p.PartitionBy.Strategy + " (" + strings.Join(p.PartitionBy.Columns, ", ") + ")"
+		}
+		switch {
+		case !exists:
+			ops = append(ops, createPartitionOps(schema, parent, p)...)
+		case sp.Bound != p.Bounds:
 			// PG cannot alter partition bounds; requires DROP + CREATE.
-			ops = append(ops, destructiveOp(
-				fmt.Sprintf("DROP TABLE %s;", partTbl),
+			ops = append(ops, destructiveOp(fmt.Sprintf("DROP TABLE %s;", partTbl), p.SrcPos))
+			ops = append(ops, createPartitionOps(schema, parent, p)...)
+		case sp.PartitionBy != desiredPB:
+			// A sub-partition's own PARTITION BY strategy cannot be altered
+			// in place either.
+			ops = append(ops, manualOp(
+				fmt.Sprintf("-- PARTITION BY changed on %s; table must be recreated to alter the partition strategy", partTbl),
 				p.SrcPos,
 			))
-			ops = append(ops, safeOp(
-				fmt.Sprintf("CREATE TABLE %s PARTITION OF %s %s;", partTbl, tbl, p.Bounds),
-				p.SrcPos,
-			))
+		default:
+			ops = append(ops, diffPartitionList(schema, partTbl, p.Partitions, sp.Partitions, p.SrcPos)...)
 		}
 	}
-	for _, sp := range snap.Partitions {
+	for _, sp := range snap {
 		if !desiredSet[sp.Name] {
 			ops = append(ops, destructiveOp(
 				fmt.Sprintf("DROP TABLE %s;", qualIdent(sp.Schema, sp.Name)),
@@ -3102,9 +3496,9 @@ func diffColumns(tbl string, o *ir.Table, snap *snapshot.SnapTable, vtypes map[s
 				safety = pipeline.Caution
 			}
 			ops = append(ops, &op{sql: b.String(), safety: safety, pos: col.SrcPos, txn: true})
-			if col.Comment != nil {
+			if txt := effectiveComment(col.Comment, col.Deprecated); txt != nil {
 				ops = append(ops, safeOp(
-					fmt.Sprintf("COMMENT ON COLUMN %s.%s IS %s;", tbl, quoteIdent(col.Name), quoteLit(*col.Comment)),
+					fmt.Sprintf("COMMENT ON COLUMN %s.%s IS %s;", tbl, quoteIdent(col.Name), quoteLit(*txt)),
 					col.SrcPos,
 				))
 			}
@@ -3155,10 +3549,10 @@ func diffColumns(tbl string, o *ir.Table, snap *snapshot.SnapTable, vtypes map[s
 				))
 			}
 		}
-		if !ptrEq(col.Comment, sc.Comment) {
-			if col.Comment != nil {
+		if desiredTxt, snapTxt := effectiveComment(col.Comment, col.Deprecated), effectiveComment(sc.Comment, sc.Deprecated); !ptrEq(desiredTxt, snapTxt) {
+			if desiredTxt != nil {
 				ops = append(ops, safeOp(
-					fmt.Sprintf("COMMENT ON COLUMN %s.%s IS %s;", tbl, quoteIdent(col.Name), quoteLit(*col.Comment)),
+					fmt.Sprintf("COMMENT ON COLUMN %s.%s IS %s;", tbl, quoteIdent(col.Name), quoteLit(*desiredTxt)),
 					col.SrcPos,
 				))
 			} else {
@@ -3387,13 +3781,15 @@ func diffConstraints(tbl string, o *ir.Table, snap *snapshot.SnapTable, fullSnap
 		))
 	}
 	for _, c := range o.Constraints {
-		if _, exists := snapByKey[key(c.Name, c.Type, c.Expr)]; exists {
+		if sc, exists := snapByKey[key(c.Name, c.Type, c.Expr)]; exists {
+			ops = append(ops, validateConstraintOp(tbl, sc, c)...)
 			continue
 		}
 		if c.Name == "" {
 			if label, ok := pgConstraintNameLabel(c.Type); ok {
 				if predicted, predOK := predictName(c, label); predOK {
-					if _, exists := snapByKey["n:"+predicted]; exists {
+					if sc, exists := snapByKey["n:"+predicted]; exists {
+						ops = append(ops, validateConstraintOp(tbl, sc, c)...)
 						continue
 					}
 				}
@@ -3413,6 +3809,27 @@ func diffConstraints(tbl string, o *ir.Table, snap *snapshot.SnapTable, fullSnap
 		ops = append(ops, cautionOp(sql, c.Pos))
 	}
 	return ops
+}
+
+// validateConstraintOp emits ALTER TABLE ... VALIDATE CONSTRAINT ... when a
+// constraint that was previously added NOT VALID has had NOT VALID removed
+// from source — the second half of the RFC §7.3 NOT VALID lifecycle
+// (ADD CONSTRAINT ... NOT VALID, then later VALIDATE CONSTRAINT once the
+// author is ready to scan existing rows). sc.Name (the snapshot's recorded
+// name), not c.Name, is used as the target: every PostgreSQL constraint has
+// a real catalog name even when DPG's source never spelled one out, and sc
+// only reaches here via a key that already matched an auto-predicted name.
+// The reverse transition (NotValid: false → true) has no PostgreSQL
+// equivalent — an already-validated constraint can't be marked NOT VALID
+// again — so it's silently a no-op, same as any other unrepresentable state.
+func validateConstraintOp(tbl string, sc *snapshot.SnapConstraint, c *ir.Constraint) []pipeline.DiffOp {
+	if !sc.NotValid || c.NotValid || sc.Name == "" {
+		return nil
+	}
+	return []pipeline.DiffOp{cautionOp(
+		fmt.Sprintf("ALTER TABLE %s VALIDATE CONSTRAINT %s;", tbl, quoteIdent(sc.Name)),
+		c.Pos,
+	)}
 }
 
 // pgConstraintNameLabel returns the label PostgreSQL's auto-naming
@@ -3633,6 +4050,47 @@ func schemaRelationNames(fullSnap *pipeline.Snapshot, schema, excludeTable strin
 	return names
 }
 
+// diffViewIndexes is diffIndexes' sibling for a materialized view's INDICES
+// (RFC §8.2). Simpler than the table version: a view has no COLUMN block, so
+// there's no RENAMED FROM / DROP COLUMN cascade to translate index
+// definitions through — indexes are matched by name and compared as-is.
+func diffViewIndexes(schema, view string, desired []*ir.Index, snapIdx []snapshot.SnapIndex) []pipeline.DiffOp {
+	var ops []pipeline.DiffOp
+
+	snapByName := make(map[string]*snapshot.SnapIndex, len(snapIdx))
+	for i := range snapIdx {
+		snapByName[snapIdx[i].Name] = &snapIdx[i]
+	}
+	desiredByName := make(map[string]*ir.Index, len(desired))
+	for _, idx := range desired {
+		desiredByName[idx.Name] = idx
+	}
+
+	for _, si := range snapIdx {
+		if _, ok := desiredByName[si.Name]; !ok {
+			ops = append(ops, cautionOp(
+				fmt.Sprintf("DROP INDEX IF EXISTS %s;", quoteIdent(si.Name)),
+				pipeline.SourcePos{},
+			))
+		}
+	}
+	for _, idx := range desired {
+		si, exists := snapByName[idx.Name]
+		if !exists {
+			ops = append(ops, createIndex(schema, view, idx, idx.Concurrently)...)
+			continue
+		}
+		if snapshot.ToSnapIndex(idx) != *si {
+			ops = append(ops, cautionOp(
+				fmt.Sprintf("DROP INDEX IF EXISTS %s;", quoteIdent(idx.Name)),
+				idx.Pos,
+			))
+			ops = append(ops, createIndex(schema, view, idx, idx.Concurrently)...)
+		}
+	}
+	return ops
+}
+
 func diffIndexes(schema, table string, o *ir.Table, snap *snapshot.SnapTable, renamedCols map[string]string, droppedCols map[string]bool) []pipeline.DiffOp {
 	var ops []pipeline.DiffOp
 
@@ -3663,9 +4121,17 @@ func diffIndexes(schema, table string, o *ir.Table, snap *snapshot.SnapTable, re
 		))
 	}
 	for _, idx := range o.Indexes {
+		// idx.Concurrently is only ever true when the source wrote
+		// CONCURRENTLY explicitly on this index (a bare presence keyword,
+		// same as real PostgreSQL — there is no project-wide default and no
+		// boolean form). An index added to an EXISTING table (as opposed to
+		// one created alongside its own brand-new table — see createTable)
+		// honors that explicit request directly.
+		concurrent := idx.Concurrently
+
 		si, exists := snapByName[idx.Name]
 		if !exists {
-			ops = append(ops, createIndex(schema, table, idx)...)
+			ops = append(ops, createIndex(schema, table, idx, concurrent)...)
 			continue
 		}
 		// A same-named index must still be compared: PG has no generic ALTER
@@ -3674,12 +4140,24 @@ func diffIndexes(schema, table string, o *ir.Table, snap *snapshot.SnapTable, re
 		// INCLUDE, WITH, or NULLS NOT DISTINCT requires DROP + recreate.
 		// Without this, an edited index that keeps its name was a silent
 		// no-op on plan/apply.
-		if snapshot.ToSnapIndex(idx) != *si {
+		//
+		// The snapshot's Columns/Include/Where still reference the OLD
+		// column name after a RENAMED FROM — translate them before
+		// comparing, or every index on a renamed column spuriously compares
+		// unequal and gets dropped + recreated for no reason (real
+		// PostgreSQL's ALTER TABLE RENAME COLUMN keeps every dependent
+		// index transparently, no rebuild needed at all — confirmed live).
+		// Mirrors diffConstraints' identical translateConstraintExpr step.
+		translatedSnap := *si
+		translatedSnap.Columns = translateIndexColumnList(si.Columns, renamedCols)
+		translatedSnap.Include = translateIndexColumnList(si.Include, renamedCols)
+		translatedSnap.Where = replaceQuotedIdents(si.Where, renamedCols)
+		if snapshot.ToSnapIndex(idx) != translatedSnap {
 			ops = append(ops, cautionOp(
 				fmt.Sprintf("DROP INDEX IF EXISTS %s;", quoteIdent(idx.Name)),
 				idx.Pos,
 			))
-			ops = append(ops, createIndex(schema, table, idx)...)
+			ops = append(ops, createIndex(schema, table, idx, concurrent)...)
 		}
 	}
 	return ops
@@ -3775,6 +4253,36 @@ func translateIndexCols(cols string, renamedCols map[string]string) []string {
 		out = append(out, p)
 	}
 	return out
+}
+
+// translateIndexColumnList rewrites a SnapIndex-style comma-separated
+// column/Include list (bare names, optionally suffixed with ASC/DESC/NULLS
+// …, or a parenthesized "(expr)" entry — see snapshot.ToSnapIndex) so a
+// renamed column's OLD name compares equal to the desired side's NEW name.
+// Unlike translateIndexCols (which only extracts base names for the
+// column-dropped check), this reconstructs the full entry text, suffix and
+// all, for direct SnapIndex-to-SnapIndex comparison.
+func translateIndexColumnList(list string, renamedCols map[string]string) string {
+	if list == "" || len(renamedCols) == 0 {
+		return list
+	}
+	parts := strings.Split(list, ", ")
+	for i, p := range parts {
+		if strings.HasPrefix(p, "(") {
+			parts[i] = replaceQuotedIdents(p, renamedCols)
+			continue
+		}
+		name, rest, hasSuffix := strings.Cut(p, " ")
+		if newName, ok := renamedCols[name]; ok {
+			name = newName
+		}
+		if hasSuffix {
+			parts[i] = name + " " + rest
+		} else {
+			parts[i] = name
+		}
+	}
+	return strings.Join(parts, ", ")
 }
 
 // firstParenGroup returns the byte indices of the matching '(' and ')' that

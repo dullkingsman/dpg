@@ -43,7 +43,15 @@ func (b *Builder) Build(pg pipeline.PGParseResult, block pipeline.BlockAST) (pip
 	var err error
 	switch n := node.Node.(type) {
 	case *pg_query.Node_CreateStmt:
-		obj, err = b.buildTable(n.CreateStmt, block, pos, false, false)
+		// CREATE TABLE and CREATE UNLOGGED TABLE parse to the identical
+		// Node_CreateStmt type — pg_query distinguishes them only via
+		// Relation.Relpersistence ("u" for unlogged), not a separate node —
+		// so unlogged must be read from the parsed statement itself, not
+		// hardcoded. Found live-testing a demo project: this was
+		// unconditionally false regardless of source, so a declared
+		// UNLOGGED TABLE always silently built as a regular table.
+		unlogged := n.CreateStmt.Relation != nil && n.CreateStmt.Relation.Relpersistence == "u"
+		obj, err = b.buildTable(n.CreateStmt, block, pos, unlogged, false)
 	case *pg_query.Node_CreateForeignTableStmt:
 		obj, err = b.buildForeignTable(n.CreateForeignTableStmt, block, pos)
 	case *pg_query.Node_ViewStmt:
@@ -98,8 +106,6 @@ func (b *Builder) Build(pg pipeline.PGParseResult, block pipeline.BlockAST) (pip
 		obj, err = b.buildOpaque(node, block, pos, "OPERATOR FAMILY")
 	case *pg_query.Node_CreateStatsStmt:
 		obj, err = b.buildStatistics(n.CreateStatsStmt, block, pos, rawSQL(node))
-	case *pg_query.Node_AlterDefaultPrivilegesStmt:
-		obj, err = b.buildDefaultPrivileges(n.AlterDefaultPrivilegesStmt, block, pos)
 	case *pg_query.Node_CreateOpClassItem:
 		obj, err = b.buildOpaque(node, block, pos, "OPERATOR")
 	case *pg_query.Node_CreateCastStmt:
@@ -259,6 +265,9 @@ func (b *Builder) buildForeignTable(cs *pg_query.CreateForeignTableStmt, block p
 	t.Foreign = true
 	if cs.Servername != "" {
 		t.ForeignServer = &cs.Servername
+	}
+	if len(cs.Options) > 0 {
+		t.ForeignOptions = buildOrderedOptions(cs.Options)
 	}
 	return t, nil
 }
@@ -768,6 +777,59 @@ func buildStorageParams(options []*pg_query.Node) map[string]string {
 	return m
 }
 
+// buildOrderedOptions parses a DefElem OPTIONS (...) list preserving source
+// order — used for FOREIGN TABLE's OPTIONS clause, where (unlike
+// buildStorageParams' WITH-clause map) deterministic re-emission needs a
+// stable order, the same reason Index.With is a slice, not a map.
+func buildOrderedOptions(options []*pg_query.Node) []pipeline.StorageParam {
+	var params []pipeline.StorageParam
+	for _, opt := range options {
+		de := opt.GetDefElem()
+		if de == nil {
+			continue
+		}
+		val := ""
+		if de.Arg != nil {
+			val = nodeToText(de.Arg)
+		}
+		params = append(params, pipeline.StorageParam{Key: de.Defname, Value: val})
+	}
+	return params
+}
+
+// buildAggregateOptions converts CREATE AGGREGATE's option list (SFUNC,
+// STYPE, INITCOND, FINALFUNC, ...) into ordered StorageParams. Deliberately
+// NOT reusing buildOrderedOptions/nodeToText: a function/type name value
+// here (SFUNC, STYPE, FINALFUNC, ...) parses as a bare pg_query TypeName
+// node — PG's grammar generically reuses TypeName for "any qualified name"
+// in this position — which nodeToText has no case for and falls back to the
+// literal string "<expr>" (confirmed via a direct pg_query.Parse probe: it
+// only handles actual expression nodes via a SELECT-target deparse trick,
+// and TypeName isn't a valid SELECT target). A literal value (INITCOND) is a
+// bare pg_query String node, which nodeToText renders unquoted — correct for
+// most other DefElem consumers, but wrong here since INITCOND must round-trip
+// as a properly single-quoted SQL literal.
+func buildAggregateOptions(definition []*pg_query.Node) []pipeline.StorageParam {
+	var params []pipeline.StorageParam
+	for _, opt := range definition {
+		de := opt.GetDefElem()
+		if de == nil || de.Arg == nil {
+			continue
+		}
+		var val string
+		switch {
+		case de.Arg.GetTypeName() != nil:
+			val = typeNameToRef(de.Arg.GetTypeName()).String()
+		case de.Arg.GetString_() != nil:
+			val = "'" + strings.ReplaceAll(de.Arg.GetString_().Sval, "'", "''") + "'"
+		default:
+			val = nodeToText(de.Arg)
+		}
+		params = append(params, pipeline.StorageParam{Key: de.Defname, Value: val})
+	}
+	return params
+}
+
 func mergeTableBlock(tbl *Table, block pipeline.BlockAST) error {
 	if block.MigrateRemove != nil {
 		return pipeline.Errorf(block.MigrateRemove.Pos,
@@ -873,14 +935,30 @@ func mergeTableBlock(tbl *Table, block pipeline.BlockAST) error {
 	// Partitions
 	if block.Partitions != nil {
 		for _, p := range block.Partitions.Partitions {
-			tbl.Partitions = append(tbl.Partitions, &Partition{
-				Name:   p.Name.Name,
-				Bounds: p.Bounds.Text,
-				SrcPos: p.Pos,
-			})
+			tbl.Partitions = append(tbl.Partitions, buildPartitionBound(p))
 		}
 	}
 	return nil
+}
+
+// buildPartitionBound converts a parsed pipeline.PartitionBound into an
+// ir.Partition, recursing into any nested sub-partitioning (RFC §7.13).
+func buildPartitionBound(p pipeline.PartitionBound) *Partition {
+	part := &Partition{
+		Name:   p.Name.Name,
+		Bounds: p.Bounds.Text,
+		SrcPos: p.Pos,
+	}
+	if p.SubStrategy != "" {
+		part.PartitionBy = &PartitionSpec{
+			Strategy: p.SubStrategy,
+			Columns:  p.SubColumns,
+		}
+		for _, sp := range p.SubPartitions {
+			part.Partitions = append(part.Partitions, buildPartitionBound(sp))
+		}
+	}
+	return part
 }
 
 // suggestColumns formats a "; did you mean ..." or "; declared columns are ..."
@@ -978,6 +1056,10 @@ func (b *Builder) buildView(vs *pg_query.ViewStmt, block pipeline.BlockAST, pos 
 			v.Query = nodeToText(vs.Query)
 		}
 	}
+	if len(block.Indices) > 0 {
+		return nil, pipeline.Errorf(block.Indices[0].Pos,
+			"INDICES is not supported for VIEW/RECURSIVE VIEW objects; it is only valid for MATERIALIZED VIEW (real PostgreSQL does not support indexes on a plain view)")
+	}
 	if block.Comment != nil {
 		v.Comment = &block.Comment.Value
 	}
@@ -1051,6 +1133,9 @@ func (b *Builder) buildMaterializedView(cta *pg_query.CreateTableAsStmt, block p
 	for _, r := range block.Revocations {
 		v.Revocations = append(v.Revocations, blockRevocationToIR(r))
 	}
+	for _, idx := range block.Indices {
+		v.Indexes = append(v.Indexes, blockIndexToIR(idx))
+	}
 	v.NameMaps = block.NameMaps
 	return v, nil
 }
@@ -1096,6 +1181,9 @@ func (b *Builder) buildFunction(cfs *pg_query.CreateFunctionStmt, pg pipeline.PG
 	for _, g := range block.Grants {
 		fn.Grants = append(fn.Grants, blockGrantToIR(g))
 	}
+	for _, r := range block.Revocations {
+		fn.Revocations = append(fn.Revocations, blockRevocationToIR(r))
+	}
 	fn.NameMaps = block.NameMaps
 	return fn, nil
 }
@@ -1117,6 +1205,9 @@ func (b *Builder) buildProcedure(cfs *pg_query.CreateFunctionStmt, _ *pg_query.P
 	}
 	for _, g := range block.Grants {
 		proc.Grants = append(proc.Grants, blockGrantToIR(g))
+	}
+	for _, r := range block.Revocations {
+		proc.Revocations = append(proc.Revocations, blockRevocationToIR(r))
 	}
 	proc.NameMaps = block.NameMaps
 	return proc, nil
@@ -1673,6 +1764,9 @@ func (b *Builder) buildStatistics(cs *pg_query.CreateStatsStmt, block pipeline.B
 	if len(cs.Defnames) > 0 {
 		s.Schema, s.Name = extractTypeName(cs.Defnames)
 	}
+	if block.Comment != nil {
+		s.Comment = &block.Comment.Value
+	}
 	return s, nil
 }
 
@@ -1730,11 +1824,33 @@ func (b *Builder) buildDefineStmt(ds *pg_query.DefineStmt, block pipeline.BlockA
 
 	case pg_query.ObjectType_OBJECT_AGGREGATE:
 		agg := &Aggregate{Schema: schema, Name: name, Body: rawBody, SrcPos: pos}
-		for _, p := range ds.Args {
-			if fp := p.GetFunctionParameter(); fp != nil {
-				agg.Args = append(agg.Args, buildFuncArg(fp))
+		// ds.Args is NOT a flat list of FunctionParameter nodes (unlike a
+		// regular function's Parameters): ds.Args[0] is itself a List node
+		// wrapping the actual input-type parameter(s), and ds.Args[1] is an
+		// unrelated integer sentinel (-1 for a normal aggregate; PG's
+		// internal ordered-set-aggregate marker) — confirmed via a direct
+		// pg_query.Parse probe. Calling GetFunctionParameter() on the
+		// top-level ds.Args elements directly (as done previously) always
+		// returns nil for both, so agg.Args silently stayed empty — found
+		// live-testing a demo project: the RFC's own worked example
+		// ("AGGREGATE product (DOUBLE PRECISION) (...)") round-tripped with
+		// an empty "()" signature everywhere (CREATE AGGREGATE, COMMENT ON
+		// AGGREGATE, GRANT ON FUNCTION), not just cosmetically wrong but
+		// referencing a different (nonexistent, zero-arg) aggregate entirely.
+		if len(ds.Args) > 0 {
+			if lst := ds.Args[0].GetList(); lst != nil {
+				for _, item := range lst.Items {
+					if fp := item.GetFunctionParameter(); fp != nil {
+						agg.Args = append(agg.Args, buildFuncArg(fp))
+					}
+				}
 			}
+			// ds.Args[0] == nil represents the "*" wildcard input list
+			// (AGGREGATE name (*) (...)) — agg.Args intentionally stays
+			// empty in that case too; DPG doesn't yet distinguish a
+			// wildcard-arg aggregate from a genuinely zero-arg one.
 		}
+		agg.Options = buildAggregateOptions(ds.Definition)
 		if block.Comment != nil {
 			agg.Comment = &block.Comment.Value
 		}
@@ -1770,10 +1886,17 @@ func (b *Builder) buildDefineStmt(ds *pg_query.DefineStmt, block pipeline.BlockA
 				op.Function = funcSchema + "." + funcName
 			}
 		}
+		if block.Comment != nil {
+			op.Comment = &block.Comment.Value
+		}
 		return op, nil
 
 	case pg_query.ObjectType_OBJECT_COLLATION:
-		return &Collation{Schema: schema, Name: name, Body: rawBody, SrcPos: pos}, nil
+		col := &Collation{Schema: schema, Name: name, Body: rawBody, SrcPos: pos}
+		if block.Comment != nil {
+			col.Comment = &block.Comment.Value
+		}
+		return col, nil
 
 	case pg_query.ObjectType_OBJECT_TSCONFIGURATION:
 		tc := &TSConfig{Schema: schema, Name: name, Body: rawBody, SrcPos: pos}
@@ -1787,6 +1910,13 @@ func (b *Builder) buildDefineStmt(ds *pg_query.DefineStmt, block pipeline.BlockA
 	case pg_query.ObjectType_OBJECT_TSDICTIONARY:
 		td := &TSDict{Schema: schema, Name: name, Body: rawBody, SrcPos: pos}
 		td.TemplateSchema, td.TemplateName = defElemQualifiedName(ds.Definition, "template")
+		if block.Comment != nil {
+			// TSDict's Comment field already existed (unlike the 9 kinds
+			// gaining one alongside this fix) but was never actually
+			// populated here — found auditing every kind with a Comment
+			// field for whether it's actually wired, not just declared.
+			td.Comment = &block.Comment.Value
+		}
 		return td, nil
 
 	case pg_query.ObjectType_OBJECT_TSPARSER:
@@ -1796,7 +1926,11 @@ func (b *Builder) buildDefineStmt(ds *pg_query.DefineStmt, block pipeline.BlockA
 				funcs = append(funcs, joinQualName(fnSchema, fnName))
 			}
 		}
-		return &TSParser{Schema: schema, Name: name, Functions: funcs, Body: rawBody, SrcPos: pos}, nil
+		prs := &TSParser{Schema: schema, Name: name, Functions: funcs, Body: rawBody, SrcPos: pos}
+		if block.Comment != nil {
+			prs.Comment = &block.Comment.Value
+		}
+		return prs, nil
 
 	case pg_query.ObjectType_OBJECT_TSTEMPLATE:
 		var funcs []string
@@ -1805,7 +1939,11 @@ func (b *Builder) buildDefineStmt(ds *pg_query.DefineStmt, block pipeline.BlockA
 				funcs = append(funcs, joinQualName(fnSchema, fnName))
 			}
 		}
-		return &TSTemplate{Schema: schema, Name: name, Functions: funcs, Body: rawBody, SrcPos: pos}, nil
+		tmpl := &TSTemplate{Schema: schema, Name: name, Functions: funcs, Body: rawBody, SrcPos: pos}
+		if block.Comment != nil {
+			tmpl.Comment = &block.Comment.Value
+		}
+		return tmpl, nil
 	}
 
 	return &OpaqueObject{kind: ds.Kind.String(), body: name, SrcPos: pos}, nil
@@ -1813,23 +1951,67 @@ func (b *Builder) buildDefineStmt(ds *pg_query.DefineStmt, block pipeline.BlockA
 
 // ── Default Privileges ────────────────────────────────────────────────────────
 
-func (b *Builder) buildDefaultPrivileges(stmt *pg_query.AlterDefaultPrivilegesStmt, block pipeline.BlockAST, pos pipeline.SourcePos) (pipeline.IRObject, error) {
-	dp := &DefaultPrivileges{SrcPos: pos}
+// BuildDefaultPrivileges implements pipeline.IRBuilder. See
+// pipeline.DefaultPrivilegesBlock for why this bypasses the normal
+// pg_query-parsed-Part-1 path entirely. Splits into one *DefaultPrivileges
+// per distinct object type named across the block's grants/revocations,
+// matching pg_default_acl's real one-row-per-(role,schema,objtype) model —
+// the RFC's own worked example declares TABLES, FUNCTIONS, and SEQUENCES
+// together in one block, which must become three independently-diffable
+// objects, not one.
+func (b *Builder) BuildDefaultPrivileges(block pipeline.DefaultPrivilegesBlock) ([]pipeline.IRObject, error) {
+	var forRole *string
+	if block.ForRole != nil {
+		s := block.ForRole.String()
+		forRole = &s
+	}
+	var inSchema *string
+	if block.InSchema != nil {
+		s := block.InSchema.String()
+		inSchema = &s
+	}
+
+	byType := make(map[string]*DefaultPrivileges)
+	var order []string
+	get := func(objType string) *DefaultPrivileges {
+		if dp, ok := byType[objType]; ok {
+			return dp
+		}
+		dp := &DefaultPrivileges{ForRole: forRole, InSchema: inSchema, ObjectType: objType, SrcPos: block.Pos}
+		byType[objType] = dp
+		order = append(order, objType)
+		return dp
+	}
 	for _, g := range block.Grants {
-		dp.Grants = append(dp.Grants, blockGrantToIR(g))
+		dp := get(g.ObjectType)
+		dp.Grants = append(dp.Grants, Grant{Privileges: g.Privileges, WithGrant: g.WithGrant, Pos: g.Pos, Roles: identifierStrings(g.Roles)})
 	}
 	for _, r := range block.Revocations {
-		dp.Revocations = append(dp.Revocations, blockRevocationToIR(r))
+		dp := get(r.ObjectType)
+		dp.Revocations = append(dp.Revocations, Revocation{Privileges: r.Privileges, Cascade: r.Cascade, Pos: r.Pos, Roles: identifierStrings(r.Roles)})
 	}
-	if block.Owner != nil {
-		dp.ForRole = &block.Owner.Name
+
+	objs := make([]pipeline.IRObject, 0, len(order))
+	for _, t := range order {
+		objs = append(objs, byType[t])
 	}
-	return dp, nil
+	return objs, nil
+}
+
+func identifierStrings(ids []pipeline.Identifier) []string {
+	if len(ids) == 0 {
+		return nil
+	}
+	out := make([]string, len(ids))
+	for i, id := range ids {
+		out[i] = id.String()
+	}
+	return out
 }
 
 // ── Cast ──────────────────────────────────────────────────────────────────────
 
-func (b *Builder) buildCast(cs *pg_query.CreateCastStmt, _ pipeline.BlockAST, pos pipeline.SourcePos, body string) (pipeline.IRObject, error) {
+func (b *Builder) buildCast(cs *pg_query.CreateCastStmt, block pipeline.BlockAST, pos pipeline.SourcePos, body string) (pipeline.IRObject, error) {
 	c := &Cast{Body: body, SrcPos: pos}
 	if cs.Sourcetype != nil {
 		c.SourceType = typeNameToRef(cs.Sourcetype)
@@ -1843,6 +2025,9 @@ func (b *Builder) buildCast(cs *pg_query.CreateCastStmt, _ pipeline.BlockAST, po
 		if funcSchema != "" {
 			c.Function = funcSchema + "." + funcName
 		}
+	}
+	if block.Comment != nil {
+		c.Comment = &block.Comment.Value
 	}
 	return c, nil
 }
@@ -1885,7 +2070,11 @@ func (b *Builder) buildOpaque(node *pg_query.Node, block pipeline.BlockAST, pos 
 	sql := rawSQL(node)
 	switch n := node.Node.(type) {
 	case *pg_query.Node_CreatePublicationStmt:
-		return &Publication{Name: n.CreatePublicationStmt.Pubname, Body: sql, SrcPos: pos}, nil
+		pub := &Publication{Name: n.CreatePublicationStmt.Pubname, Body: sql, SrcPos: pos}
+		if block.Comment != nil {
+			pub.Comment = &block.Comment.Value
+		}
+		return pub, nil
 	case *pg_query.Node_CreateSubscriptionStmt:
 		return b.buildSubscription(n.CreateSubscriptionStmt, block, pos, sql)
 	case *pg_query.Node_CreateEventTrigStmt:
@@ -1894,7 +2083,11 @@ func (b *Builder) buildOpaque(node *pg_query.Node, block pipeline.BlockAST, pos 
 		if funcSchema != "" {
 			function = funcSchema + "." + funcName
 		}
-		return &EventTrigger{Name: n.CreateEventTrigStmt.Trigname, Function: function, Body: sql, SrcPos: pos}, nil
+		evt := &EventTrigger{Name: n.CreateEventTrigStmt.Trigname, Function: function, Body: sql, SrcPos: pos}
+		if block.Comment != nil {
+			evt.Comment = &block.Comment.Value
+		}
+		return evt, nil
 	case *pg_query.Node_CreateOpClassStmt:
 		schema, name := extractTypeName(n.CreateOpClassStmt.Opclassname)
 		famSchema, famName := extractTypeName(n.CreateOpClassStmt.Opfamilyname)
@@ -1915,14 +2108,22 @@ func (b *Builder) buildOpaque(node *pg_query.Node, block pipeline.BlockAST, pos 
 				functions = append(functions, fnName)
 			}
 		}
-		return &OperatorClass{
+		opc := &OperatorClass{
 			Schema: schema, Name: name, AccessMethod: n.CreateOpClassStmt.Amname,
 			FamilySchema: famSchema, FamilyName: famName, Functions: functions,
 			Body: sql, SrcPos: pos,
-		}, nil
+		}
+		if block.Comment != nil {
+			opc.Comment = &block.Comment.Value
+		}
+		return opc, nil
 	case *pg_query.Node_CreateOpFamilyStmt:
 		schema, name := extractTypeName(n.CreateOpFamilyStmt.Opfamilyname)
-		return &OperatorFamily{Schema: schema, Name: name, AccessMethod: n.CreateOpFamilyStmt.Amname, Body: sql, SrcPos: pos}, nil
+		opf := &OperatorFamily{Schema: schema, Name: name, AccessMethod: n.CreateOpFamilyStmt.Amname, Body: sql, SrcPos: pos}
+		if block.Comment != nil {
+			opf.Comment = &block.Comment.Value
+		}
+		return opf, nil
 	}
 	return &OpaqueObject{kind: kind, body: kind, SrcPos: pos}, nil
 }

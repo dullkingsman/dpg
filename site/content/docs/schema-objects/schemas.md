@@ -93,8 +93,7 @@ CREATE TABLE "analytics"."events" (
     CONSTRAINT "pk_events" PRIMARY KEY ("id")
 );
 
--- non-transactional:
-CREATE INDEX CONCURRENTLY "idx_ts" ON "analytics"."events" ("created_at");
+CREATE INDEX "idx_ts" ON "analytics"."events" ("created_at");
 ```
 
 ---

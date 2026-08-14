@@ -24,9 +24,6 @@ func TestDefaultRootConfig(t *testing.T) {
 	if cfg.Compiler.DefaultDropBehavior != "restrict" {
 		t.Errorf("DefaultDropBehavior: got %q", cfg.Compiler.DefaultDropBehavior)
 	}
-	if !cfg.Compiler.ConcurrentIndexes {
-		t.Error("ConcurrentIndexes: expected true")
-	}
 	if !cfg.Linter.WarnOnDeprecated {
 		t.Error("WarnOnDeprecated: expected true")
 	}

@@ -120,7 +120,7 @@ func TestSimpleIndex(t *testing.T) {
 }
 
 func TestUniqueIndex(t *testing.T) {
-	ast := parse(t, `INDICES { idx_uq UNIQUE (email, name); }`)
+	ast := parse(t, `INDICES { UNIQUE idx_uq (email, name); }`)
 	if len(ast.Indices) != 1 {
 		t.Fatalf("expected 1 index, got %d", len(ast.Indices))
 	}
@@ -130,6 +130,64 @@ func TestUniqueIndex(t *testing.T) {
 	}
 	if len(idx.Columns) != 2 {
 		t.Errorf("expected 2 columns, got %d", len(idx.Columns))
+	}
+}
+
+// TestIndexConcurrentlyPrefix guards a real bug found live-testing a demo
+// project: the RFC's ABNF/parser used to accept a trailing
+// "CONCURRENTLY <bool>;" clause that has no real PostgreSQL equivalent —
+// CONCURRENTLY is a bare presence keyword in real PG (CREATE [UNIQUE] INDEX
+// [CONCURRENTLY] name), never a boolean toggle. This guards the corrected
+// grammar: CONCURRENTLY as a bare prefix keyword, positioned exactly where
+// real PG puts it, stacking with UNIQUE in the same PG order.
+func TestIndexConcurrentlyPrefix(t *testing.T) {
+	ast := parse(t, `INDICES { CONCURRENTLY idx_c (email); }`)
+	idx := ast.Indices[0]
+	if !idx.Concurrently {
+		t.Error("expected Concurrently = true")
+	}
+}
+
+func TestIndexUniqueConcurrentlyPrefixOrder(t *testing.T) {
+	ast := parse(t, `INDICES { UNIQUE CONCURRENTLY idx_uc (email); }`)
+	idx := ast.Indices[0]
+	if !idx.Unique {
+		t.Error("expected Unique = true")
+	}
+	if !idx.Concurrently {
+		t.Error("expected Concurrently = true")
+	}
+}
+
+// TestIndexModeBUniqueIndexPrefix guards Mode B's "UNIQUE INDEX name (...)"
+// form, mirroring real PostgreSQL's CREATE UNIQUE INDEX order exactly —
+// added alongside the CONCURRENTLY fix since Mode B's whole purpose is to
+// mirror the literal CREATE INDEX statement shape.
+func TestIndexModeBUniqueIndexPrefix(t *testing.T) {
+	ast := parse(t, `UNIQUE INDEX idx_uq (email);`)
+	if len(ast.Indices) != 1 {
+		t.Fatalf("expected 1 index, got %d", len(ast.Indices))
+	}
+	idx := ast.Indices[0]
+	if !idx.Unique {
+		t.Error("expected Unique = true")
+	}
+}
+
+func TestIndexModeBUniqueIndexConcurrentlyPrefix(t *testing.T) {
+	ast := parse(t, `UNIQUE INDEX CONCURRENTLY idx_uqc (email);`)
+	idx := ast.Indices[0]
+	if !idx.Unique {
+		t.Error("expected Unique = true")
+	}
+	if !idx.Concurrently {
+		t.Error("expected Concurrently = true")
+	}
+}
+
+func TestIndexModeBUniqueWithoutIndexErrors(t *testing.T) {
+	if err := parseErr(t, `UNIQUE idx_uq (email);`); err == nil {
+		t.Error("expected parse error for UNIQUE not followed by INDEX")
 	}
 }
 
@@ -148,7 +206,11 @@ func TestIndexWithWhere(t *testing.T) {
 }
 
 func TestIndexWithUsing(t *testing.T) {
-	ast := parse(t, `INDICES { idx_text (content) USING gin; }`)
+	// USING precedes the column list, mirroring real PostgreSQL's own
+	// CREATE INDEX ... USING method (columns) order and the RFC's own
+	// worked examples (idx_location USING gist (location);) — this used
+	// to be accepted only after the columns, rejecting the RFC's syntax.
+	ast := parse(t, `INDICES { idx_text USING gin (content); }`)
 	idx := ast.Indices[0]
 	if idx.Method == nil || idx.Method.Name != "gin" {
 		t.Errorf("Method: got %v", idx.Method)
@@ -185,7 +247,7 @@ func TestIndexModeBSingularKeyword(t *testing.T) {
 }
 
 func TestIndexModeBWithWhereAndUsing(t *testing.T) {
-	ast := parse(t, `INDEX idx_status (status) USING gin WHERE (status != 'deleted');`)
+	ast := parse(t, `INDEX idx_status USING gin (status) WHERE (status != 'deleted');`)
 	if len(ast.Indices) != 1 {
 		t.Fatalf("expected 1 index, got %d", len(ast.Indices))
 	}
@@ -210,7 +272,7 @@ func TestIndexModeAAndBCanMix(t *testing.T) {
 }
 
 func TestIndexNullsNotDistinct(t *testing.T) {
-	ast := parse(t, `INDICES { idx_uq UNIQUE (email) NULLS NOT DISTINCT; }`)
+	ast := parse(t, `INDICES { UNIQUE idx_uq (email) NULLS NOT DISTINCT; }`)
 	idx := ast.Indices[0]
 	if !idx.NullsNotDistinct {
 		t.Error("expected NullsNotDistinct = true")
@@ -220,7 +282,7 @@ func TestIndexNullsNotDistinct(t *testing.T) {
 // The explicit-default spelling ("NULLS DISTINCT") must parse (not error) but
 // records no special state — it's PG's default made explicit.
 func TestIndexNullsDistinctExplicitDefault(t *testing.T) {
-	ast := parse(t, `INDICES { idx_uq UNIQUE (email) NULLS DISTINCT; }`)
+	ast := parse(t, `INDICES { UNIQUE idx_uq (email) NULLS DISTINCT; }`)
 	idx := ast.Indices[0]
 	if idx.NullsNotDistinct {
 		t.Error("expected NullsNotDistinct = false for explicit NULLS DISTINCT")
@@ -228,7 +290,7 @@ func TestIndexNullsDistinctExplicitDefault(t *testing.T) {
 }
 
 func TestIndexNullsInvalidSuffix(t *testing.T) {
-	if err := parseErr(t, `INDICES { idx_uq UNIQUE (email) NULLS MAYBE; }`); err == nil {
+	if err := parseErr(t, `INDICES { UNIQUE idx_uq (email) NULLS MAYBE; }`); err == nil {
 		t.Error("expected parse error for NULLS MAYBE")
 	}
 }
@@ -393,13 +455,134 @@ func TestGrantModeBInColumnBlock(t *testing.T) {
 // GRANT/REVOCATION Mode B inside a DEFAULT PRIVILEGES block exercises the
 // third of the three dispatch sites that had this conflation.
 func TestGrantModeBInDefaultPrivilegesBlock(t *testing.T) {
-	ast := parse(t, `DEFAULT PRIVILEGES { GRANT SELECT TO reader; REVOCATION UPDATE FROM guest; }`)
+	ast := parse(t, `DEFAULT PRIVILEGES { GRANT SELECT ON TABLES TO reader; REVOCATION UPDATE ON TABLES FROM guest; }`)
 	if len(ast.DefaultPrivileges) != 1 {
 		t.Fatalf("expected 1 default privileges block, got %d", len(ast.DefaultPrivileges))
 	}
 	dp := ast.DefaultPrivileges[0]
 	if len(dp.Grants) != 1 || len(dp.Revocations) != 1 {
 		t.Errorf("dp grants/revocations: got %d/%d", len(dp.Grants), len(dp.Revocations))
+	}
+	if dp.Grants[0].ObjectType != "TABLES" || dp.Revocations[0].ObjectType != "TABLES" {
+		t.Errorf("dp grant/revocation ObjectType: got %q/%q", dp.Grants[0].ObjectType, dp.Revocations[0].ObjectType)
+	}
+}
+
+// TestDefaultPrivilegesMultipleObjectTypes guards the RFC's own worked
+// example: TABLES, FUNCTIONS, and SEQUENCES declared together in one
+// GRANTS { } block, each carrying its own ON <type> clause — real
+// PostgreSQL's actual ALTER DEFAULT PRIVILEGES grammar (confirmed via
+// \h ALTER DEFAULT PRIVILEGES), not a DPG-invented whole-declaration
+// "FOR object_type" wrapper the parser used to require instead.
+func TestDefaultPrivilegesMultipleObjectTypes(t *testing.T) {
+	ast := parse(t, `DEFAULT PRIVILEGES FOR ROLE app_admin IN SCHEMA public {
+		GRANTS {
+			SELECT ON TABLES TO app_readonly;
+			EXECUTE ON FUNCTIONS TO app_service;
+			USAGE ON SEQUENCES TO app_service;
+		}
+	}`)
+	if len(ast.DefaultPrivileges) != 1 {
+		t.Fatalf("expected 1 default privileges block, got %d", len(ast.DefaultPrivileges))
+	}
+	dp := ast.DefaultPrivileges[0]
+	if dp.ForRole == nil || dp.ForRole.Name != "app_admin" {
+		t.Errorf("ForRole: got %v", dp.ForRole)
+	}
+	if dp.InSchema == nil || dp.InSchema.Name != "public" {
+		t.Errorf("InSchema: got %v", dp.InSchema)
+	}
+	if len(dp.Grants) != 3 {
+		t.Fatalf("expected 3 grants, got %d", len(dp.Grants))
+	}
+	wantTypes := []string{"TABLES", "FUNCTIONS", "SEQUENCES"}
+	for i, want := range wantTypes {
+		if dp.Grants[i].ObjectType != want {
+			t.Errorf("Grants[%d].ObjectType: got %q, want %q", i, dp.Grants[i].ObjectType, want)
+		}
+	}
+}
+
+// TestDefaultPrivilegesHeaderOrderIndependent guards that IN SCHEMA and FOR
+// ROLE may appear in either order — matching how the header is parsed as a
+// keyword loop, not a fixed sequence.
+func TestDefaultPrivilegesHeaderOrderIndependent(t *testing.T) {
+	ast := parse(t, `DEFAULT PRIVILEGES IN SCHEMA public FOR ROLE app_admin {
+		GRANTS { SELECT ON TABLES TO app_readonly; }
+	}`)
+	if len(ast.DefaultPrivileges) != 1 {
+		t.Fatalf("expected 1 default privileges block, got %d", len(ast.DefaultPrivileges))
+	}
+	dp := ast.DefaultPrivileges[0]
+	if dp.ForRole == nil || dp.ForRole.Name != "app_admin" {
+		t.Errorf("ForRole: got %v", dp.ForRole)
+	}
+	if dp.InSchema == nil || dp.InSchema.Name != "public" {
+		t.Errorf("InSchema: got %v", dp.InSchema)
+	}
+}
+
+// TestDefaultPrivilegesWithGrantOption and ALL PRIVILEGES / CASCADE guard
+// the remaining grant-clause options real PG supports.
+func TestDefaultPrivilegesWithGrantOptionAndAllPrivileges(t *testing.T) {
+	ast := parse(t, `DEFAULT PRIVILEGES {
+		GRANTS { ALL PRIVILEGES ON TABLES TO app_admin WITH GRANT OPTION; }
+		REVOCATIONS { ALL ON TABLES FROM app_readonly CASCADE; }
+	}`)
+	dp := ast.DefaultPrivileges[0]
+	if dp.Grants[0].Privileges != nil {
+		t.Errorf("ALL PRIVILEGES should leave Privileges nil, got %v", dp.Grants[0].Privileges)
+	}
+	if !dp.Grants[0].WithGrant {
+		t.Error("WITH GRANT OPTION did not parse")
+	}
+	if dp.Revocations[0].Privileges != nil {
+		t.Errorf("ALL should leave Privileges nil, got %v", dp.Revocations[0].Privileges)
+	}
+	if !dp.Revocations[0].Cascade {
+		t.Error("CASCADE did not parse")
+	}
+}
+
+// TestParseDefaultPrivilegesTopLevel guards the exported top-level entry
+// point used by the compiler's DEFAULT PRIVILEGES bypass (see
+// compiler.Compile): header text ("FOR ROLE x IN SCHEMA y", DPG's Part 1
+// equivalent for this kind) and body text (the '{ }' content, braces
+// excluded — matching Parse's own part2 convention) are parsed from two
+// separate strings, mirroring exactly what raw.Part1/raw.Part2 already are.
+func TestParseDefaultPrivilegesTopLevel(t *testing.T) {
+	dp, err := blockparser.ParseDefaultPrivileges(
+		"FOR ROLE app_admin IN SCHEMA public",
+		`GRANTS { SELECT ON TABLES TO app_readonly; }`,
+		zeroPos,
+	)
+	if err != nil {
+		t.Fatalf("ParseDefaultPrivileges: %v", err)
+	}
+	if dp.ForRole == nil || dp.ForRole.Name != "app_admin" {
+		t.Errorf("ForRole: got %v", dp.ForRole)
+	}
+	if dp.InSchema == nil || dp.InSchema.Name != "public" {
+		t.Errorf("InSchema: got %v", dp.InSchema)
+	}
+	if len(dp.Grants) != 1 || dp.Grants[0].ObjectType != "TABLES" {
+		t.Fatalf("Grants: got %+v", dp.Grants)
+	}
+}
+
+// TestParseDefaultPrivilegesTopLevelNoHeader guards an empty header (no FOR
+// ROLE / IN SCHEMA at all — a database-wide default for the current role).
+func TestParseDefaultPrivilegesTopLevelNoHeader(t *testing.T) {
+	dp, err := blockparser.ParseDefaultPrivileges(
+		"",
+		`GRANTS { SELECT ON TABLES TO app_readonly; }`,
+		zeroPos,
+	)
+	if err != nil {
+		t.Fatalf("ParseDefaultPrivileges: %v", err)
+	}
+	if dp.ForRole != nil || dp.InSchema != nil {
+		t.Errorf("expected nil ForRole/InSchema, got %v/%v", dp.ForRole, dp.InSchema)
 	}
 }
 
@@ -637,6 +820,171 @@ func TestPartitionModeBThenModeACanMix(t *testing.T) {
 	ast := parse(t, src)
 	if ast.Partitions == nil || len(ast.Partitions.Partitions) != 2 {
 		t.Fatalf("expected 2 partitions (one per mode), got %v — PARTITIONS must merge into, not overwrite, a preceding Mode-B PARTITION", ast.Partitions)
+	}
+}
+
+// Sub-partitioning (RFC §7.13): a partition entry may itself carry a nested
+// PARTITION BY clause and PARTITIONS { } block.
+func TestPartitionSubPartitioned(t *testing.T) {
+	src := `PARTITIONS {
+		metrics_2025 FOR VALUES FROM ('2025-01-01') TO ('2026-01-01');
+		metrics_2026 FOR VALUES FROM ('2026-01-01') TO ('2027-01-01')
+			PARTITION BY LIST (channel) {
+				PARTITIONS {
+					metrics_2026_web   FOR VALUES IN ('web');
+					metrics_2026_other FOR VALUES IN ('mobile', 'api');
+				}
+			};
+	}`
+	ast := parse(t, src)
+	if ast.Partitions == nil || len(ast.Partitions.Partitions) != 2 {
+		t.Fatalf("expected 2 top-level partitions, got %v", ast.Partitions)
+	}
+
+	leaf := ast.Partitions.Partitions[0]
+	if leaf.Name.Name != "metrics_2025" {
+		t.Errorf("partition[0] name: got %q", leaf.Name.Name)
+	}
+	if leaf.SubStrategy != "" || leaf.SubPartitions != nil {
+		t.Errorf("partition[0] should have no sub-partitioning, got %+v", leaf)
+	}
+	wantBounds := "FOR VALUES FROM ('2025-01-01') TO ('2026-01-01')"
+	if leaf.Bounds.Text != wantBounds {
+		t.Errorf("partition[0] bounds: got %q, want %q", leaf.Bounds.Text, wantBounds)
+	}
+
+	sub := ast.Partitions.Partitions[1]
+	if sub.Name.Name != "metrics_2026" {
+		t.Errorf("partition[1] name: got %q", sub.Name.Name)
+	}
+	wantBounds = "FOR VALUES FROM ('2026-01-01') TO ('2027-01-01')"
+	if sub.Bounds.Text != wantBounds {
+		t.Errorf("partition[1] bounds: got %q, want %q", sub.Bounds.Text, wantBounds)
+	}
+	if sub.SubStrategy != "LIST" {
+		t.Fatalf("partition[1] SubStrategy: got %q, want LIST", sub.SubStrategy)
+	}
+	if len(sub.SubColumns) != 1 || sub.SubColumns[0] != "channel" {
+		t.Fatalf("partition[1] SubColumns: got %v", sub.SubColumns)
+	}
+	if len(sub.SubPartitions) != 2 {
+		t.Fatalf("partition[1] SubPartitions: got %d, want 2", len(sub.SubPartitions))
+	}
+	if sub.SubPartitions[0].Name.Name != "metrics_2026_web" {
+		t.Errorf("sub-partition[0] name: got %q", sub.SubPartitions[0].Name.Name)
+	}
+	if sub.SubPartitions[1].Bounds.Text != "FOR VALUES IN ('mobile', 'api')" {
+		t.Errorf("sub-partition[1] bounds: got %q", sub.SubPartitions[1].Bounds.Text)
+	}
+}
+
+// A partition's PARTITION BY may itself be further sub-partitioned (depth > 2).
+func TestPartitionSubPartitionedRecursive(t *testing.T) {
+	src := `PARTITIONS {
+		p1 FOR VALUES FROM (0) TO (100)
+			PARTITION BY RANGE (b) {
+				PARTITIONS {
+					p1_1 FOR VALUES FROM (0) TO (50)
+						PARTITION BY RANGE (c) {
+							PARTITIONS {
+								p1_1_1 FOR VALUES FROM (0) TO (25);
+							}
+						};
+				}
+			};
+	}`
+	ast := parse(t, src)
+	if ast.Partitions == nil || len(ast.Partitions.Partitions) != 1 {
+		t.Fatalf("expected 1 top-level partition, got %v", ast.Partitions)
+	}
+	p1 := ast.Partitions.Partitions[0]
+	if p1.SubStrategy != "RANGE" || len(p1.SubPartitions) != 1 {
+		t.Fatalf("p1: got %+v", p1)
+	}
+	p11 := p1.SubPartitions[0]
+	if p11.Name.Name != "p1_1" || p11.SubStrategy != "RANGE" || len(p11.SubPartitions) != 1 {
+		t.Fatalf("p1_1: got %+v", p11)
+	}
+	p111 := p11.SubPartitions[0]
+	if p111.Name.Name != "p1_1_1" || p111.SubStrategy != "" {
+		t.Fatalf("p1_1_1: got %+v", p111)
+	}
+}
+
+// Mode B (singular PARTITION keyword) must also support a trailing
+// sub-partition clause, not just Mode A inside a PARTITIONS { } block.
+func TestPartitionModeBSubPartitioned(t *testing.T) {
+	src := `PARTITION metrics_2026 FOR VALUES FROM ('2026-01-01') TO ('2027-01-01')
+		PARTITION BY HASH (id) {
+			PARTITIONS {
+				metrics_2026_0 FOR VALUES WITH (modulus 2, remainder 0);
+				metrics_2026_1 FOR VALUES WITH (modulus 2, remainder 1);
+			}
+		};`
+	ast := parse(t, src)
+	if ast.Partitions == nil || len(ast.Partitions.Partitions) != 1 {
+		t.Fatalf("expected 1 partition, got %v", ast.Partitions)
+	}
+	p := ast.Partitions.Partitions[0]
+	if p.SubStrategy != "HASH" || len(p.SubColumns) != 1 || p.SubColumns[0] != "id" {
+		t.Fatalf("got %+v", p)
+	}
+	if len(p.SubPartitions) != 2 {
+		t.Fatalf("expected 2 sub-partitions, got %d", len(p.SubPartitions))
+	}
+}
+
+// ── TEXT SEARCH MAPPING ───────────────────────────────────────────────────────
+
+// TestTSMappingSingleDictionary guards the common case: one dictionary per
+// mapping entry.
+func TestTSMappingSingleDictionary(t *testing.T) {
+	ast := parse(t, `MAPPING FOR word, hword, hword_part WITH english_stem;`)
+	if len(ast.Mappings) != 1 {
+		t.Fatalf("expected 1 mapping, got %d", len(ast.Mappings))
+	}
+	m := ast.Mappings[0]
+	if len(m.TokenTypes) != 3 || m.TokenTypes[0] != "word" || m.TokenTypes[2] != "hword_part" {
+		t.Errorf("TokenTypes: got %v", m.TokenTypes)
+	}
+	if len(m.Dictionaries) != 1 || m.Dictionaries[0].Name != "english_stem" {
+		t.Errorf("Dictionaries: got %v", m.Dictionaries)
+	}
+}
+
+// TestTSMappingDictionaryFallbackChain guards a real PG feature (confirmed
+// real, not a DPG invention): "WITH dict1, dict2, ..." is a fallback chain —
+// dictionaries are tried in order until one recognizes the token. The RFC's
+// own worked example (§12.1) uses "WITH unaccent, english_stem". Before this,
+// the parser only ever read a single identifier after WITH, then immediately
+// expected ';' — so a genuine, RFC-documented multi-dictionary mapping
+// failed to parse at all ("expected ';' after directive, got ','"), found
+// live-testing a demo project.
+func TestTSMappingDictionaryFallbackChain(t *testing.T) {
+	ast := parse(t, `MAPPING FOR hword, hword_part, word WITH unaccent, english_stem;`)
+	if len(ast.Mappings) != 1 {
+		t.Fatalf("expected 1 mapping, got %d", len(ast.Mappings))
+	}
+	m := ast.Mappings[0]
+	if len(m.Dictionaries) != 2 || m.Dictionaries[0].Name != "unaccent" || m.Dictionaries[1].Name != "english_stem" {
+		t.Fatalf("Dictionaries: got %v, want [unaccent english_stem]", m.Dictionaries)
+	}
+}
+
+// TestTSMappingMultipleEntries guards MULTIPLE MAPPING FOR directives
+// accumulating into ast.Mappings (Mode A: one directive per token-type
+// grouping, matching how a real config typically declares distinct mappings
+// for different token classes).
+func TestTSMappingMultipleEntries(t *testing.T) {
+	ast := parse(t, `
+		MAPPING FOR word WITH english_stem;
+		MAPPING FOR asciiword WITH simple;
+	`)
+	if len(ast.Mappings) != 2 {
+		t.Fatalf("expected 2 mappings, got %d", len(ast.Mappings))
+	}
+	if ast.Mappings[0].TokenTypes[0] != "word" || ast.Mappings[1].TokenTypes[0] != "asciiword" {
+		t.Errorf("mappings out of order or wrong: %+v", ast.Mappings)
 	}
 }
 

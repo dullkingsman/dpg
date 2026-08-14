@@ -493,11 +493,6 @@ Author's Address .................................................. 154
 # Per-object DROP CASCADE overrides this setting.
 default_drop_behavior = "restrict"
 
-# concurrent_indexes controls whether index additions on existing
-# tables emit CREATE INDEX CONCURRENTLY (true, default) or
-# CREATE INDEX (false). Per-index override: CONCURRENTLY false.
-concurrent_indexes = true
-
 [linter]
 # Emit a warning when any DEPRECATED object or column is referenced.
 warn_on_deprecated = true
@@ -1887,15 +1882,15 @@ TABLE users (
    singular `INDEX` keyword) inside a table's `{ }` block.
 
 ```abnf
-index-decl  = index-name WSP
-              [ "UNIQUE" WSP ]
+index-decl  = [ "UNIQUE" WSP ]
+              [ "CONCURRENTLY" WSP ]
+              index-name WSP
               [ "USING" WSP method WSP ]
               "(" index-col-list ")"
               [ "INCLUDE" WSP "(" col-list ")" ]
               [ "WITH" WSP "(" storage-params ")" ]
               [ "WHERE" WSP "(" predicate ")" ]
               [ "TABLESPACE" WSP identifier ]
-              [ "CONCURRENTLY" WSP boolean ]
               ";"
 
 index-col-list = index-col *( "," index-col )
@@ -1906,20 +1901,42 @@ index-col   = ( col-name / "(" expr ")" )
               [ "opclass" ]
 ```
 
+   `UNIQUE` and `CONCURRENTLY` are both prefix keywords before the index
+   name, in that fixed order — mirroring real PostgreSQL's own
+   `CREATE UNIQUE INDEX CONCURRENTLY name ON table USING method (columns)`
+   exactly (only the implicit `INDEX`/`ON table` are dropped, since DPG's
+   `INDICES { }` block already establishes both). In **Mode B** (§4.8),
+   which does carry the literal `INDEX` keyword, the same order applies
+   with `INDEX` inserted where PostgreSQL puts it:
+   `[ "UNIQUE" WSP ] "INDEX" WSP [ "CONCURRENTLY" WSP ] index-name ...`.
+
+   **`CONCURRENTLY` is a bare presence keyword, not a boolean** — this
+   matches real PostgreSQL exactly: `CONCURRENTLY` is either written or it
+   isn't, there is no `CONCURRENTLY false` and no project-wide default that
+   turns it on implicitly. Writing it is the only way an index is ever
+   created concurrently; omitting it always means plain `CREATE INDEX`.
+
    **Concurrency behaviour:**
 
-   -   By default, index additions on existing tables emit
-       `CREATE INDEX CONCURRENTLY`.  This is a `MANUAL` operation
-       (non-transactional; emitted after `COMMIT`).
+   -   Writing `CONCURRENTLY` on an individual index emits
+       `CREATE INDEX CONCURRENTLY`. This is a `MANUAL` operation
+       (non-transactional; emitted after `COMMIT`) — *except* for a
+       brand-new table's own indexes (see below), where it is silently
+       ignored.
 
-   -   When `concurrent_indexes = false` in the root `dpg.toml`, or
-       when `CONCURRENTLY false` is specified on the individual index,
-       the compiler emits `CREATE INDEX` (transactional; Safety `CAUTION`
-       for index additions on non-empty tables).
+   -   Omitting `CONCURRENTLY` emits plain `CREATE INDEX` (transactional;
+       Safety `CAUTION` for index additions on non-empty tables). There is
+       no configuration knob that changes this — matching real PostgreSQL,
+       which has no such default either.
 
-   -   For brand-new tables (no rows), concurrent index creation is
-       equivalent to non-concurrent.  The compiler MAY still emit
-       `CONCURRENTLY` for consistency; it is not harmful.
+   -   **Indexes on a brand-new table are always non-concurrent —
+       this is a hard PostgreSQL restriction, not a preference.** A new
+       table's indexes are emitted in the SAME transactional migration as
+       its `CREATE TABLE`, and PostgreSQL rejects `CREATE INDEX
+       CONCURRENTLY` inside a transaction block. The compiler therefore
+       forces these non-concurrent unconditionally — an explicit
+       `CONCURRENTLY` on such an index has no effect until a later
+       migration adds the index to the now-existing table.
 
    **Index identity:** An index is uniquely identified by its name
    within a schema.  Two indexes with the same name but different
@@ -1943,13 +1960,13 @@ index-col   = ( col-name / "(" expr ")" )
 
    | Change | DDL emitted | Safety |
    |--------|-------------|--------|
-   | New index (existing table) | `CREATE [UNIQUE] INDEX [CONCURRENTLY] [IF NOT EXISTS] name ON ...` | `MANUAL` (default) or `CAUTION` |
+   | New index (existing table) | `CREATE [UNIQUE] INDEX [CONCURRENTLY] [IF NOT EXISTS] name ON ...` | `MANUAL` if `CONCURRENTLY` written, else `CAUTION` (default) |
    | Index removed | `DROP INDEX [CONCURRENTLY] name` | `CAUTION` |
    | Any structural change | Drop + recreate | `CAUTION` or `MANUAL` |
 
    Indexes on new tables (emitted in the same migration as the
-   `CREATE TABLE`) are emitted as non-concurrent `CREATE INDEX` in the
-   same transactional block.
+   `CREATE TABLE`) are always emitted as non-concurrent `CREATE INDEX` in
+   the same transactional block — see **Concurrency behaviour** above.
 
    Examples:
 
@@ -1957,20 +1974,28 @@ index-col   = ( col-name / "(" expr ")" )
 TABLE users ( email TEXT, status user_status, ... )
 {
     INDICES {
-        idx_email          (email);
-        idx_unique_slug    UNIQUE (slug);
-        idx_tenant_created (tenant_id ASC, created_at DESC);
-        idx_active_users   (email) WHERE (status = 'active');
-        idx_location       USING gist  (location);
-        idx_tags           USING gin   (tags);
-        idx_lower_email    (lower(email));
-        idx_covering       (user_id) INCLUDE (email, created_at);
-        idx_brin           USING brin (created_at)
-                               WITH (pages_per_range = 128);
-        idx_archived       (archived_at) TABLESPACE archive_space;
-        idx_no_concurrent  (payload) CONCURRENTLY false;
+        idx_email             (email);
+        UNIQUE idx_unique_slug (slug);
+        idx_tenant_created    (tenant_id ASC, created_at DESC);
+        idx_active_users      (email) WHERE (status = 'active');
+        idx_location          USING gist (location);
+        idx_tags              USING gin  (tags);
+        idx_lower_email       (lower(email));
+        idx_covering          (user_id) INCLUDE (email, created_at);
+        idx_brin              USING brin (created_at)
+                                  WITH (pages_per_range = 128);
+        idx_archived          (archived_at) TABLESPACE archive_space;
+        CONCURRENTLY idx_forced_concurrent (payload);
+        UNIQUE CONCURRENTLY idx_unique_concurrent (external_id);
     }
 }
+
+-- Mode B (§4.8): the literal INDEX keyword carries UNIQUE/CONCURRENTLY in
+-- the exact same order PostgreSQL's own CREATE UNIQUE INDEX CONCURRENTLY
+-- statement does.
+UNIQUE INDEX idx_unique_slug (slug);
+INDEX CONCURRENTLY idx_forced_concurrent (payload);
+UNIQUE INDEX CONCURRENTLY idx_unique_concurrent (external_id);
 ```
 
 ### 7.8. Row Level Security
@@ -4952,7 +4977,6 @@ spread      = "..." identifier
 # dpg.toml
 [compiler]
 default_drop_behavior = "restrict"
-concurrent_indexes    = true
 
 [linter]
 warn_on_deprecated           = true

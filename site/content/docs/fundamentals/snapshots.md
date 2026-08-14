@@ -155,12 +155,13 @@ CREATE TABLE "public"."users" (
     CONSTRAINT "uq_users_email" UNIQUE ("email")
 );
 
-COMMIT;
-
--- Non-transactional steps (executed after COMMIT):
 -- [source: schemas/public/tables/users.dpg:22]
-CREATE INDEX CONCURRENTLY IF NOT EXISTS "idx_users_email" ON "public"."users" ("email");
+CREATE INDEX IF NOT EXISTS "idx_users_email" ON "public"."users" ("email");
+
+COMMIT;
 ```
+
+Indexes declared alongside a brand-new table are always created inside the same transaction, non-concurrently — PostgreSQL rejects `CREATE INDEX CONCURRENTLY` inside a transaction block. A `CONCURRENTLY` index added to an already-existing table in a later migration is emitted as its own non-transactional step instead (see [Indexes](../schema-objects/tables/indexes/)).
 
 Source file references (`[source: ...]`) appear before every statement group.
 

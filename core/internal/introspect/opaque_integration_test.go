@@ -136,6 +136,66 @@ func TestIntrospectTSConfigParserFields(t *testing.T) {
 	}
 }
 
+// TestIntrospectTSConfigMappings is the live-catalog guard for RFC §12.1's
+// MAPPING FOR block: before this, pg_ts_config_map was never queried at
+// all, so TSConfig.Mappings was always empty from introspection — a live
+// config's mappings (including PG's own real multi-dictionary fallback-chain
+// feature) were completely invisible to dump/diff. Also proves token types
+// sharing an identical dictionary chain get grouped into one MAPPING FOR
+// entry (matching how a human would naturally write it, and how the live
+// config's own \dF+ output groups them) rather than one row per token type.
+func TestIntrospectTSConfigMappings(t *testing.T) {
+	objects := setupOpaque(t,
+		`CREATE TEXT SEARCH CONFIGURATION public.rt_map_cfg (PARSER = pg_catalog."default")`,
+		`ALTER TEXT SEARCH CONFIGURATION public.rt_map_cfg ALTER MAPPING FOR word, hword WITH simple, english_stem`,
+		`ALTER TEXT SEARCH CONFIGURATION public.rt_map_cfg ALTER MAPPING FOR asciiword WITH english_stem`,
+	)
+	var found *ir.TSConfig
+	for _, o := range objects {
+		if c, ok := o.(*ir.TSConfig); ok && c.Name == "rt_map_cfg" {
+			found = c
+		}
+	}
+	if found == nil {
+		t.Fatal("TS config public.rt_map_cfg not found")
+	}
+	if len(found.Mappings) != 2 {
+		t.Fatalf("Mappings: got %d, want 2 (one per distinct dictionary chain): %+v", len(found.Mappings), found.Mappings)
+	}
+
+	var sawChain, sawSingle bool
+	for _, m := range found.Mappings {
+		switch len(m.Dictionaries) {
+		case 2:
+			if m.Dictionaries[0].Name != "simple" || m.Dictionaries[1].Name != "english_stem" {
+				t.Errorf("2-dict mapping: got %+v, want [simple english_stem]", m.Dictionaries)
+			}
+			gotTokens := map[string]bool{}
+			for _, tt := range m.TokenTypes {
+				gotTokens[tt] = true
+			}
+			if !gotTokens["word"] || !gotTokens["hword"] {
+				t.Errorf("2-dict mapping token types: got %v, want word+hword grouped together", m.TokenTypes)
+			}
+			sawChain = true
+		case 1:
+			if m.Dictionaries[0].Name != "english_stem" {
+				t.Errorf("1-dict mapping: got %+v, want [english_stem]", m.Dictionaries)
+			}
+			if len(m.TokenTypes) != 1 || m.TokenTypes[0] != "asciiword" {
+				t.Errorf("1-dict mapping token types: got %v, want [asciiword] alone (different chain than word/hword)", m.TokenTypes)
+			}
+			sawSingle = true
+		}
+	}
+	if !sawChain {
+		t.Errorf("fallback-chain mapping (word, hword WITH simple, english_stem) not found: %+v", found.Mappings)
+	}
+	if !sawSingle {
+		t.Errorf("single-dictionary mapping (asciiword WITH english_stem) not found: %+v", found.Mappings)
+	}
+}
+
 // TestIntrospectTSDictTemplateFields guards TemplateSchema/TemplateName
 // wiring — needed for the new dict→template dependency edge in graph.go.
 func TestIntrospectTSDictTemplateFields(t *testing.T) {
@@ -168,6 +228,58 @@ func TestIntrospectCollation(t *testing.T) {
 	}
 	if !strings.Contains(found.Body, "CREATE COLLATION") || !strings.Contains(found.Body, "mycoll") {
 		t.Errorf("unexpected collation body: %q", found.Body)
+	}
+}
+
+// TestIntrospectRangeType guards a real bug found live-testing a demo
+// project: RANGE types had NO introspection at all before this — not even
+// a partial reconstruction, so dump could only emit
+// "-- type X (RANGE) omitted" for every range type, despite the RFC listing
+// Range types as "Declared, Diffed" with no such caveat. Uses a
+// non-collatable subtype (numeric) so this also guards the common case:
+// SUBTYPE_OPCLASS/COLLATION both correctly suppressed when they match the
+// subtype's own defaults, rather than always rendering them.
+func TestIntrospectRangeType(t *testing.T) {
+	objects := setupOpaque(t, `CREATE TYPE public.myrange AS RANGE (SUBTYPE = numeric)`)
+	var found *ir.Type
+	for _, obj := range objects {
+		if tp, ok := obj.(*ir.Type); ok && tp.Name == "myrange" && tp.Variant == "RANGE" {
+			found = tp
+			break
+		}
+	}
+	if found == nil {
+		t.Fatal("range type public.myrange not found")
+	}
+	if found.Body != "SUBTYPE = numeric" {
+		t.Errorf("Body: got %q, want %q (SUBTYPE_OPCLASS/COLLATION must be suppressed for numeric's defaults)", found.Body, "SUBTYPE = numeric")
+	}
+}
+
+// TestIntrospectRangeTypeNonDefaultOpclass guards the opposite case: when a
+// range type's SUBTYPE_OPCLASS genuinely differs from the subtype's default
+// (text has multiple real opclasses, unlike numeric), it must actually be
+// rendered, not suppressed by an overly-broad "always omit" heuristic. Also
+// confirms COLLATION renders for a collatable subtype (text), unlike
+// numeric's non-collatable case above.
+func TestIntrospectRangeTypeNonDefaultOpclass(t *testing.T) {
+	objects := setupOpaque(t,
+		`CREATE TYPE public.textpatrange AS RANGE (SUBTYPE = text, SUBTYPE_OPCLASS = text_pattern_ops)`)
+	var found *ir.Type
+	for _, obj := range objects {
+		if tp, ok := obj.(*ir.Type); ok && tp.Name == "textpatrange" && tp.Variant == "RANGE" {
+			found = tp
+			break
+		}
+	}
+	if found == nil {
+		t.Fatal("range type public.textpatrange not found")
+	}
+	if !strings.Contains(found.Body, "SUBTYPE_OPCLASS = text_pattern_ops") {
+		t.Errorf("expected non-default SUBTYPE_OPCLASS to be rendered, got: %q", found.Body)
+	}
+	if !strings.Contains(found.Body, "COLLATION = ") {
+		t.Errorf("expected COLLATION to be rendered for a collatable subtype, got: %q", found.Body)
 	}
 }
 
@@ -230,6 +342,138 @@ func TestIntrospectEventTrigger(t *testing.T) {
 	}
 }
 
+// TestIntrospectOpaqueComments guards the introspection-side half of the
+// Comment fix: the earlier fix (see differ.go's commentOnOpaqueSQL) only
+// wired declare-in-source -> apply-to-live-DB for these 14 opaque kinds, but
+// never wired live-catalog -> reconstructed-IR for 11 of them, discovered
+// live testing a demo project (`dpg dump` silently dropped every comment
+// that was genuinely present in pg_description). Every kind below sets a
+// real COMMENT ON ... and asserts the introspected object's Comment field
+// round-trips it exactly, via the matching obj_description(oid, catalog)
+// call now added to each query. Tablespace/ForeignDataWrapper/ForeignServer/
+// Subscription are not covered here since they already had correct
+// obj_description/shobj_description wiring before this fix.
+func TestIntrospectOpaqueComments(t *testing.T) {
+	objects := setupOpaque(t,
+		`CREATE FUNCTION public.rt_cm_log_ddl() RETURNS event_trigger AS 'BEGIN END' LANGUAGE plpgsql`,
+		`CREATE EVENT TRIGGER rt_cm_et ON ddl_command_start EXECUTE FUNCTION public.rt_cm_log_ddl()`,
+		`COMMENT ON EVENT TRIGGER rt_cm_et IS 'et comment'`,
+
+		`CREATE COLLATION public.rt_cm_coll (LOCALE = 'C')`,
+		`COMMENT ON COLLATION public.rt_cm_coll IS 'coll comment'`,
+
+		`CREATE TYPE public.rt_cm_enum AS ENUM ('a', 'b')`,
+		`CREATE FUNCTION public.rt_cm_enum_to_int(public.rt_cm_enum) RETURNS integer AS 'SELECT 1' LANGUAGE sql IMMUTABLE`,
+		`CREATE CAST (public.rt_cm_enum AS integer) WITH FUNCTION public.rt_cm_enum_to_int(public.rt_cm_enum) AS ASSIGNMENT`,
+		`COMMENT ON CAST (public.rt_cm_enum AS integer) IS 'cast comment'`,
+
+		`CREATE TABLE public.rt_cm_st (a int, b int)`,
+		`CREATE STATISTICS public.rt_cm_stats (dependencies) ON a, b FROM public.rt_cm_st`,
+		`COMMENT ON STATISTICS public.rt_cm_stats IS 'stats comment'`,
+
+		`CREATE FUNCTION public.rt_cm_op_fn(integer, integer) RETURNS boolean AS 'SELECT $1 > $2' LANGUAGE sql IMMUTABLE`,
+		`CREATE OPERATOR public.=#> (LEFTARG = integer, RIGHTARG = integer, FUNCTION = rt_cm_op_fn)`,
+		`COMMENT ON OPERATOR public.=#> (integer, integer) IS 'operator comment'`,
+
+		`CREATE OPERATOR FAMILY public.rt_cm_fam USING btree`,
+		`CREATE OPERATOR CLASS public.rt_cm_class FOR TYPE integer USING btree FAMILY public.rt_cm_fam AS
+            OPERATOR 3 =, FUNCTION 1 btint4cmp(integer, integer)`,
+		`COMMENT ON OPERATOR FAMILY public.rt_cm_fam USING btree IS 'family comment'`,
+		`COMMENT ON OPERATOR CLASS public.rt_cm_class USING btree IS 'class comment'`,
+
+		`CREATE TEXT SEARCH PARSER public.rt_cm_parser (START = prsd_start, GETTOKEN = prsd_nexttoken, END = prsd_end, LEXTYPES = prsd_lextype)`,
+		`COMMENT ON TEXT SEARCH PARSER public.rt_cm_parser IS 'parser comment'`,
+
+		`CREATE TEXT SEARCH TEMPLATE public.rt_cm_tmpl (LEXIZE = dsimple_lexize)`,
+		`COMMENT ON TEXT SEARCH TEMPLATE public.rt_cm_tmpl IS 'template comment'`,
+
+		`CREATE TEXT SEARCH DICTIONARY public.rt_cm_dict (TEMPLATE = pg_catalog.simple)`,
+		`COMMENT ON TEXT SEARCH DICTIONARY public.rt_cm_dict IS 'dict comment'`,
+
+		`CREATE TEXT SEARCH CONFIGURATION public.rt_cm_cfg (PARSER = pg_catalog."default")`,
+		`COMMENT ON TEXT SEARCH CONFIGURATION public.rt_cm_cfg IS 'config comment'`,
+	)
+
+	want := map[string]string{
+		"EventTrigger":     "et comment",
+		"Collation":        "coll comment",
+		"Cast":             "cast comment",
+		"StatisticsObject": "stats comment",
+		"Operator":         "operator comment",
+		"OperatorFamily":   "family comment",
+		"OperatorClass":    "class comment",
+		"TSParser":         "parser comment",
+		"TSTemplate":       "template comment",
+		"TSDict":           "dict comment",
+		"TSConfig":         "config comment",
+	}
+	got := map[string]*string{}
+
+	for _, o := range objects {
+		switch v := o.(type) {
+		case *ir.EventTrigger:
+			if v.Name == "rt_cm_et" {
+				got["EventTrigger"] = v.Comment
+			}
+		case *ir.Collation:
+			if v.Name == "rt_cm_coll" {
+				got["Collation"] = v.Comment
+			}
+		case *ir.Cast:
+			if strings.Contains(v.SourceType.Name, "rt_cm_enum") {
+				got["Cast"] = v.Comment
+			}
+		case *ir.StatisticsObject:
+			if v.Name == "rt_cm_stats" {
+				got["StatisticsObject"] = v.Comment
+			}
+		case *ir.Operator:
+			if v.Name == "=#>" {
+				got["Operator"] = v.Comment
+			}
+		case *ir.OperatorFamily:
+			if v.Name == "rt_cm_fam" {
+				got["OperatorFamily"] = v.Comment
+			}
+		case *ir.OperatorClass:
+			if v.Name == "rt_cm_class" {
+				got["OperatorClass"] = v.Comment
+			}
+		case *ir.TSParser:
+			if v.Name == "rt_cm_parser" {
+				got["TSParser"] = v.Comment
+			}
+		case *ir.TSTemplate:
+			if v.Name == "rt_cm_tmpl" {
+				got["TSTemplate"] = v.Comment
+			}
+		case *ir.TSDict:
+			if v.Name == "rt_cm_dict" {
+				got["TSDict"] = v.Comment
+			}
+		case *ir.TSConfig:
+			if v.Name == "rt_cm_cfg" {
+				got["TSConfig"] = v.Comment
+			}
+		}
+	}
+
+	for kind, wantComment := range want {
+		c, found := got[kind]
+		if !found {
+			t.Errorf("%s: object not found in introspection results", kind)
+			continue
+		}
+		if c == nil {
+			t.Errorf("%s: Comment is nil, want %q", kind, wantComment)
+			continue
+		}
+		if *c != wantComment {
+			t.Errorf("%s: Comment = %q, want %q", kind, *c, wantComment)
+		}
+	}
+}
+
 func TestIntrospectForeignInfra(t *testing.T) {
 	objects := setupOpaque(t,
 		`CREATE FOREIGN DATA WRAPPER dummy_fdw`,
@@ -269,6 +513,51 @@ func TestIntrospectForeignInfra(t *testing.T) {
 	}
 }
 
+// TestIntrospectForeignTable guards a real, multi-layer bug found live-
+// testing a demo project: every table-related introspection query filtered
+// relkind IN ('r', 'p') — foreign tables (relkind 'f') were entirely
+// invisible to dpg dump/verify/plan --live, and even after being made
+// visible, SERVER/OPTIONS were never captured at all. This creates a real
+// (non-connectable, but catalog-valid) FDW/server/foreign-table stack and
+// confirms the introspected *ir.Table carries Foreign, ForeignServer, and
+// ForeignOptions correctly.
+func TestIntrospectForeignTable(t *testing.T) {
+	objects := setupOpaque(t,
+		`CREATE FOREIGN DATA WRAPPER dummy_fdw`,
+		`CREATE SERVER dummy_srv FOREIGN DATA WRAPPER dummy_fdw OPTIONS (host 'localhost')`,
+		`CREATE FOREIGN TABLE remote_events (id BIGINT, payload JSONB)
+            SERVER dummy_srv OPTIONS (table_name 'events', schema_name 'public')`,
+	)
+
+	var found *ir.Table
+	for _, obj := range objects {
+		if tb, ok := obj.(*ir.Table); ok && tb.Name == "remote_events" {
+			found = tb
+		}
+	}
+	if found == nil {
+		t.Fatal("foreign table public.remote_events not found (relkind 'f' excluded from introspection?)")
+	}
+	if !found.Foreign {
+		t.Error("expected Foreign = true")
+	}
+	if found.ForeignServer == nil || *found.ForeignServer != "dummy_srv" {
+		t.Errorf("ForeignServer: got %v", found.ForeignServer)
+	}
+	wantOpts := map[string]string{"table_name": "events", "schema_name": "public"}
+	if len(found.ForeignOptions) != len(wantOpts) {
+		t.Fatalf("ForeignOptions: expected %d entries, got %v", len(wantOpts), found.ForeignOptions)
+	}
+	for _, p := range found.ForeignOptions {
+		if wantOpts[p.Key] != p.Value {
+			t.Errorf("ForeignOptions[%q]: got %q, want %q", p.Key, p.Value, wantOpts[p.Key])
+		}
+	}
+	if len(found.Columns) != 2 {
+		t.Errorf("expected 2 columns, got %d: %v", len(found.Columns), found.Columns)
+	}
+}
+
 func TestIntrospectPublication(t *testing.T) {
 	objects := setupOpaque(t, `CREATE PUBLICATION my_pub FOR ALL TABLES`)
 	var found *ir.Publication
@@ -283,6 +572,32 @@ func TestIntrospectPublication(t *testing.T) {
 	}
 	if !strings.Contains(found.Body, "FOR ALL TABLES") {
 		t.Errorf("unexpected publication body: %q", found.Body)
+	}
+}
+
+// TestIntrospectPublicationComment guards a real bug found live-testing a
+// demo project: ir.Publication had no Comment field at all, despite real
+// PostgreSQL genuinely supporting COMMENT ON PUBLICATION (confirmed live
+// via \h COMMENT) — Publication was excluded from the original 14-kind
+// Comment/Grant fix on the mistaken assumption that it didn't apply, so
+// introspectPublications never called obj_description at all.
+func TestIntrospectPublicationComment(t *testing.T) {
+	objects := setupOpaque(t,
+		`CREATE PUBLICATION commented_pub FOR ALL TABLES`,
+		`COMMENT ON PUBLICATION commented_pub IS 'replication stream for all tables'`,
+	)
+	var found *ir.Publication
+	for _, obj := range objects {
+		if p, ok := obj.(*ir.Publication); ok && p.Name == "commented_pub" {
+			found = p
+			break
+		}
+	}
+	if found == nil {
+		t.Fatal("publication commented_pub not found")
+	}
+	if found.Comment == nil || *found.Comment != "replication stream for all tables" {
+		t.Errorf("Comment: got %v, want \"replication stream for all tables\"", found.Comment)
 	}
 }
 

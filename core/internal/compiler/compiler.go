@@ -126,6 +126,38 @@ func Compile(files []string, dbDir string, reg *pipeline.Registry) ([]pipeline.I
 	// Stages 2–3: Parse Part1 (PG SQL) + Part2 ({ } block) and build IR.
 	var irObjects []pipeline.IRObject
 	for _, raw := range rawObjects {
+		// DEFAULT PRIVILEGES never goes through PGSQLParser: real
+		// PostgreSQL's ALTER DEFAULT PRIVILEGES statement requires its
+		// GRANT/REVOKE action inline, so raw.Part1 ("[FOR ROLE x] [IN SCHEMA
+		// y]") is never valid standalone PG SQL on its own (confirmed live:
+		// "syntax error at end of input") — see pipeline.DefaultPrivilegesBlock.
+		// This applies whether the declaration is top-level or nested inside
+		// a SCHEMA block (the scanner emits both the same way, with
+		// raw.Schema set from the enclosing SCHEMA when nested).
+		if raw.Kind == pipeline.KindDefaultPrivileges {
+			dpBlock, dpErr := blockParser.ParseDefaultPrivileges(raw.Part1, raw.Part2, raw.Pos)
+			if dpErr != nil {
+				if ce, ok := dpErr.(*pipeline.CompilerError); ok {
+					diags = append(diags, ce)
+					continue
+				}
+				return nil, dpErr
+			}
+			if dpBlock.InSchema == nil && raw.Schema != "" {
+				dpBlock.InSchema = &pipeline.Identifier{Name: raw.Schema}
+			}
+			objs, buildErr := irBuilder.BuildDefaultPrivileges(dpBlock)
+			if buildErr != nil {
+				if ce, ok := buildErr.(*pipeline.CompilerError); ok {
+					diags = append(diags, ce)
+					continue
+				}
+				return nil, buildErr
+			}
+			irObjects = append(irObjects, objs...)
+			continue
+		}
+
 		pgResult, pgErr := pgParser.Parse(raw.Kind, raw.Part1, raw.Pos)
 		pgResult.SchemaContext = raw.Schema
 		if pgErr != nil {

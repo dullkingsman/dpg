@@ -14,6 +14,138 @@ import (
 	"github.com/dullkingsman/dpg/internal/testpg"
 )
 
+// TestIntrospectAggregate is the live-catalog guard for CREATE AGGREGATE
+// reconstruction: Args (previously would have been fine since introspection
+// never shared the builder's broken ds.Args parsing) and, more importantly,
+// Options/Body — previously always empty ("we cannot reconstruct DDL from
+// catalog"), which meant dpg dump could never round-trip a live aggregate at
+// all, and a --live apply of a brand-new aggregate had no SQL to emit.
+func TestIntrospectAggregate(t *testing.T) {
+	connStr := testpg.Start(t)
+	ctx := context.Background()
+
+	conn, err := executor.Connect(ctx, connStr)
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	defer conn.Close(ctx)
+
+	stmts := []string{
+		`CREATE AGGREGATE public.amount_product (numeric) (
+			SFUNC = numeric_mul, STYPE = numeric, INITCOND = '1'
+		)`,
+		`COMMENT ON AGGREGATE public.amount_product(numeric) IS 'multiplicative aggregate'`,
+	}
+	for _, stmt := range stmts {
+		if _, err := conn.Exec(ctx, stmt); err != nil {
+			t.Fatalf("exec %q: %v", stmt, err)
+		}
+	}
+
+	ci := introspect.New()
+	objects, err := ci.Introspect(ctx, conn)
+	if err != nil {
+		t.Fatalf("introspect: %v", err)
+	}
+
+	var found *ir.Aggregate
+	for _, obj := range objects {
+		if a, ok := obj.(*ir.Aggregate); ok && a.Name == "amount_product" && a.Schema == "public" {
+			found = a
+			break
+		}
+	}
+	if found == nil {
+		t.Fatal("introspect: aggregate public.amount_product not found in results")
+	}
+	if len(found.Args) != 1 || found.Args[0].Type.Name != "numeric" {
+		t.Fatalf("Args: got %+v, want 1 arg of type numeric", found.Args)
+	}
+	if found.Comment == nil || *found.Comment != "multiplicative aggregate" {
+		t.Errorf("Comment: got %v", found.Comment)
+	}
+
+	wantOpts := map[string]string{"sfunc": "numeric_mul", "stype": "numeric", "initcond": "'1'"}
+	if len(found.Options) != len(wantOpts) {
+		t.Fatalf("Options: got %d, want %d: %+v", len(found.Options), len(wantOpts), found.Options)
+	}
+	for _, p := range found.Options {
+		if want, ok := wantOpts[p.Key]; !ok || want != p.Value {
+			t.Errorf("Options[%s]: got %q, want %q", p.Key, p.Value, wantOpts[p.Key])
+		}
+	}
+	if !strings.Contains(found.Body, "CREATE AGGREGATE") || !strings.Contains(found.Body, "numeric_mul") {
+		t.Errorf("Body should reconstruct a usable CREATE AGGREGATE statement, got %q", found.Body)
+	}
+}
+
+// TestIntrospectDefaultPrivileges is the live-catalog guard for
+// pg_default_acl reconstruction — previously never queried at all, so
+// introspection always returned zero *ir.DefaultPrivileges objects
+// regardless of what was actually configured live. Declares default
+// privileges for a role across two object types (TABLES, FUNCTIONS) to
+// confirm pg_default_acl's real one-row-per-(role,schema,objtype) model is
+// correctly reconstructed as two independent objects, matching
+// Builder.BuildDefaultPrivileges's identical split on the compiled-source
+// side.
+func TestIntrospectDefaultPrivileges(t *testing.T) {
+	connStr := testpg.Start(t)
+	ctx := context.Background()
+
+	conn, err := executor.Connect(ctx, connStr)
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	defer conn.Close(ctx)
+
+	stmts := []string{
+		`CREATE ROLE dp_admin`,
+		`CREATE ROLE dp_reader`,
+		`ALTER DEFAULT PRIVILEGES FOR ROLE dp_admin IN SCHEMA public GRANT SELECT ON TABLES TO dp_reader`,
+		`ALTER DEFAULT PRIVILEGES FOR ROLE dp_admin IN SCHEMA public GRANT EXECUTE ON FUNCTIONS TO dp_reader`,
+	}
+	for _, stmt := range stmts {
+		if _, err := conn.Exec(ctx, stmt); err != nil {
+			t.Fatalf("exec %q: %v", stmt, err)
+		}
+	}
+
+	ci := introspect.New()
+	objects, err := ci.Introspect(ctx, conn)
+	if err != nil {
+		t.Fatalf("introspect: %v", err)
+	}
+
+	byType := map[string]*ir.DefaultPrivileges{}
+	for _, obj := range objects {
+		if dp, ok := obj.(*ir.DefaultPrivileges); ok && dp.ForRole != nil && *dp.ForRole == "dp_admin" {
+			byType[dp.ObjectType] = dp
+		}
+	}
+	if len(byType) != 2 {
+		t.Fatalf("expected 2 DefaultPrivileges objects (TABLES/FUNCTIONS) for dp_admin, got %d: %+v", len(byType), byType)
+	}
+
+	tables, ok := byType["TABLES"]
+	if !ok {
+		t.Fatal("missing DefaultPrivileges for TABLES")
+	}
+	if tables.InSchema == nil || *tables.InSchema != "public" {
+		t.Errorf("TABLES InSchema: got %v, want public", tables.InSchema)
+	}
+	if len(tables.Grants) != 1 || tables.Grants[0].Roles[0] != "dp_reader" || tables.Grants[0].Privileges[0] != "SELECT" {
+		t.Errorf("TABLES Grants: got %+v", tables.Grants)
+	}
+
+	funcs, ok := byType["FUNCTIONS"]
+	if !ok {
+		t.Fatal("missing DefaultPrivileges for FUNCTIONS")
+	}
+	if len(funcs.Grants) != 1 || funcs.Grants[0].Roles[0] != "dp_reader" || funcs.Grants[0].Privileges[0] != "EXECUTE" {
+		t.Errorf("FUNCTIONS Grants: got %+v", funcs.Grants)
+	}
+}
+
 func TestIntrospectTable(t *testing.T) {
 	connStr := testpg.Start(t)
 	ctx := context.Background()
@@ -454,5 +586,164 @@ func TestIntrospectView(t *testing.T) {
 	}
 	if found == nil {
 		t.Fatal("introspect: view public.product_names not found in results")
+	}
+}
+
+// TestIntrospectMaterializedViewIndex is the live-catalog guard for RFC
+// §8.2's matview-block INDICES support: real PostgreSQL only supports
+// indexes on a materialized view or a table, never a plain view — before
+// this, introspection never populated ir.View.Indexes at all (the field
+// didn't exist), so a materialized view's index was silently invisible to
+// dump/diff even though it existed live.
+func TestIntrospectMaterializedViewIndex(t *testing.T) {
+	connStr := testpg.Start(t)
+	ctx := context.Background()
+
+	conn, err := executor.Connect(ctx, connStr)
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	defer conn.Close(ctx)
+
+	stmts := []string{
+		`CREATE TABLE public.orders (id bigint PRIMARY KEY, status text)`,
+		`CREATE MATERIALIZED VIEW public.order_status_totals AS
+			SELECT status, count(*) AS c FROM public.orders GROUP BY status`,
+		`CREATE UNIQUE INDEX order_status_totals_status_uq ON public.order_status_totals (status)`,
+	}
+	for _, stmt := range stmts {
+		if _, err := conn.Exec(ctx, stmt); err != nil {
+			t.Fatalf("exec %q: %v", stmt, err)
+		}
+	}
+
+	ci := introspect.New()
+	objects, err := ci.Introspect(ctx, conn)
+	if err != nil {
+		t.Fatalf("introspect: %v", err)
+	}
+
+	var found *ir.View
+	for _, obj := range objects {
+		if v, ok := obj.(*ir.View); ok && v.Name == "order_status_totals" && v.Schema == "public" {
+			found = v
+			break
+		}
+	}
+	if found == nil {
+		t.Fatal("introspect: materialized view public.order_status_totals not found in results")
+	}
+	if !found.Materialized {
+		t.Error("expected Materialized = true")
+	}
+	if len(found.Indexes) != 1 {
+		t.Fatalf("expected 1 index, got %d: %+v", len(found.Indexes), found.Indexes)
+	}
+	idx := found.Indexes[0]
+	if idx.Name != "order_status_totals_status_uq" || !idx.Unique {
+		t.Errorf("index: got %+v", idx)
+	}
+}
+
+// TestIntrospectSubPartitionedTable is the live-catalog guard for RFC §7.13
+// sub-partitioning: a partition can itself carry a nested PARTITION BY and
+// its own child partitions (relkind 'p' again). Before this,
+// introspectPartitions only recorded ONE flat level — a partition that was
+// itself further partitioned would get a partition key of its own but no way
+// to attach ITS children, since the parent-lookup map only indexed top-level
+// tables.
+func TestIntrospectSubPartitionedTable(t *testing.T) {
+	connStr := testpg.Start(t)
+	ctx := context.Background()
+
+	conn, err := executor.Connect(ctx, connStr)
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	defer conn.Close(ctx)
+
+	stmts := []string{
+		`CREATE TABLE public.metrics (
+			id         bigint GENERATED ALWAYS AS IDENTITY,
+			created_at timestamptz NOT NULL,
+			channel    text NOT NULL
+		) PARTITION BY RANGE (created_at)`,
+		`CREATE TABLE public.metrics_2025 PARTITION OF public.metrics
+			FOR VALUES FROM ('2025-01-01') TO ('2026-01-01')`,
+		`CREATE TABLE public.metrics_2026 PARTITION OF public.metrics
+			FOR VALUES FROM ('2026-01-01') TO ('2027-01-01')
+			PARTITION BY LIST (channel)`,
+		`CREATE TABLE public.metrics_2026_web PARTITION OF public.metrics_2026
+			FOR VALUES IN ('web')`,
+		`CREATE TABLE public.metrics_2026_other PARTITION OF public.metrics_2026
+			FOR VALUES IN ('mobile', 'api')`,
+	}
+	for _, stmt := range stmts {
+		if _, err := conn.Exec(ctx, stmt); err != nil {
+			t.Fatalf("exec %q: %v", stmt, err)
+		}
+	}
+
+	ci := introspect.New()
+	objects, err := ci.Introspect(ctx, conn)
+	if err != nil {
+		t.Fatalf("introspect: %v", err)
+	}
+
+	var found *ir.Table
+	for _, obj := range objects {
+		if tbl, ok := obj.(*ir.Table); ok && tbl.Name == "metrics" && tbl.Schema == "public" {
+			found = tbl
+			break
+		}
+	}
+	if found == nil {
+		t.Fatal("introspect: table public.metrics not found in results")
+	}
+	if found.PartitionBy == nil || found.PartitionBy.Strategy != "RANGE" {
+		t.Fatalf("expected top-level PartitionBy RANGE, got %v", found.PartitionBy)
+	}
+	if len(found.Partitions) != 2 {
+		t.Fatalf("expected 2 partitions, got %d: %+v", len(found.Partitions), found.Partitions)
+	}
+
+	var leaf, sub *ir.Partition
+	for _, p := range found.Partitions {
+		switch p.Name {
+		case "metrics_2025":
+			leaf = p
+		case "metrics_2026":
+			sub = p
+		}
+	}
+	if leaf == nil {
+		t.Fatal("metrics_2025 partition not found")
+	}
+	if leaf.PartitionBy != nil || len(leaf.Partitions) != 0 {
+		t.Errorf("metrics_2025 should be a leaf, got %+v", leaf)
+	}
+
+	if sub == nil {
+		t.Fatal("metrics_2026 partition not found")
+	}
+	if sub.PartitionBy == nil || sub.PartitionBy.Strategy != "LIST" {
+		t.Fatalf("expected metrics_2026 PartitionBy LIST, got %v", sub.PartitionBy)
+	}
+	if len(sub.PartitionBy.Columns) != 1 || sub.PartitionBy.Columns[0] != "channel" {
+		t.Errorf("metrics_2026 partition columns: got %v", sub.PartitionBy.Columns)
+	}
+	if len(sub.Partitions) != 2 {
+		t.Fatalf("expected 2 nested sub-partitions under metrics_2026, got %d: %+v", len(sub.Partitions), sub.Partitions)
+	}
+
+	names := map[string]bool{}
+	for _, p := range sub.Partitions {
+		names[p.Name] = true
+		if p.PartitionBy != nil {
+			t.Errorf("sub-partition %s should be a leaf, got PartitionBy=%v", p.Name, p.PartitionBy)
+		}
+	}
+	if !names["metrics_2026_web"] || !names["metrics_2026_other"] {
+		t.Errorf("expected metrics_2026_web and metrics_2026_other, got %v", names)
 	}
 }

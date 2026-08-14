@@ -108,10 +108,11 @@ GRANT SELECT, INSERT, UPDATE ON TABLE "public"."users" TO "app_service";
 GRANT SELECT ON TABLE "public"."users" TO "app_readonly";
 REVOKE ALL PRIVILEGES ON TABLE "public"."users" FROM PUBLIC;
 
--- non-transactional:
-CREATE INDEX CONCURRENTLY "idx_email"  ON "public"."users" ("email");
-CREATE INDEX CONCURRENTLY "idx_status" ON "public"."users" ("status") WHERE (status != 'deleted');
+CREATE INDEX "idx_email"  ON "public"."users" ("email");
+CREATE INDEX "idx_status" ON "public"."users" ("status") WHERE (status != 'deleted');
 ```
+
+Both indexes are declared alongside the table's own creation, so they're emitted inside the same transaction, non-concurrently — PostgreSQL rejects `CREATE INDEX CONCURRENTLY` inside a transaction block.
 
 ## Inline vs. table-level constraints
 

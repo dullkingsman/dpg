@@ -256,7 +256,8 @@ ORDER  BY um.srvname, um.usename`
 func introspectEventTriggers(ctx context.Context, conn pipeline.Querier) ([]pipeline.IRObject, error) {
 	q := `
 SELECT e.evtname, e.evtevent, e.evttags,
-       n.nspname, p.proname
+       n.nspname, p.proname,
+       obj_description(e.oid, 'pg_event_trigger') AS comment
 FROM   pg_event_trigger e
 JOIN   pg_proc p      ON p.oid = e.evtfoid
 JOIN   pg_namespace n ON n.oid = p.pronamespace
@@ -273,7 +274,8 @@ ORDER  BY e.evtname`
 	for rs.Next() {
 		var name, event, fnSchema, fnName string
 		var tags []string
-		if err := rs.Scan(&name, &event, &tags, &fnSchema, &fnName); err != nil {
+		var comment *string
+		if err := rs.Scan(&name, &event, &tags, &fnSchema, &fnName, &comment); err != nil {
 			return nil, err
 		}
 		var sb strings.Builder
@@ -286,7 +288,7 @@ ORDER  BY e.evtname`
 			fmt.Fprintf(&sb, " WHEN TAG IN (%s)", strings.Join(quoted, ", "))
 		}
 		fmt.Fprintf(&sb, " EXECUTE FUNCTION %s()", qualIdentQ(fnSchema, fnName))
-		out = append(out, &ir.EventTrigger{Name: name, Body: canonicalDDL(sb.String()), Reconstructed: true})
+		out = append(out, &ir.EventTrigger{Name: name, Body: canonicalDDL(sb.String()), Comment: comment, Reconstructed: true})
 	}
 	return out, rs.Err()
 }
@@ -299,7 +301,8 @@ SELECT format_type(c.castsource, NULL) AS src,
        format_type(c.casttarget, NULL) AS tgt,
        c.castcontext::text, c.castmethod::text,
        n.nspname, p.proname,
-       pg_get_function_identity_arguments(p.oid) AS fn_args
+       pg_get_function_identity_arguments(p.oid) AS fn_args,
+       obj_description(c.oid, 'pg_cast') AS comment
 FROM   pg_cast c
 LEFT   JOIN pg_proc p      ON p.oid = c.castfunc
 LEFT   JOIN pg_namespace n ON n.oid = p.pronamespace
@@ -316,8 +319,8 @@ ORDER  BY src, tgt`
 	var out []pipeline.IRObject
 	for rs.Next() {
 		var src, tgt, context8, method string
-		var fnSchema, fnName, fnArgs *string
-		if err := rs.Scan(&src, &tgt, &context8, &method, &fnSchema, &fnName, &fnArgs); err != nil {
+		var fnSchema, fnName, fnArgs, comment *string
+		if err := rs.Scan(&src, &tgt, &context8, &method, &fnSchema, &fnName, &fnArgs, &comment); err != nil {
 			return nil, err
 		}
 		var sb strings.Builder
@@ -344,6 +347,7 @@ ORDER  BY src, tgt`
 			SourceType:    ir.TypeRef{Name: src},
 			TargetType:    ir.TypeRef{Name: tgt},
 			Body:          canonicalDDL(sb.String()),
+			Comment:       comment,
 			Reconstructed: true,
 		})
 	}
@@ -355,7 +359,8 @@ ORDER  BY src, tgt`
 func introspectPublications(ctx context.Context, conn pipeline.Querier) ([]pipeline.IRObject, error) {
 	q := `
 SELECT p.oid, p.pubname, p.puballtables,
-       p.pubinsert, p.pubupdate, p.pubdelete, p.pubtruncate
+       p.pubinsert, p.pubupdate, p.pubdelete, p.pubtruncate,
+       obj_description(p.oid, 'pg_publication') AS comment
 FROM   pg_publication p
 WHERE  ` + notExtensionOwned("pg_publication", "p.oid") + `
 ORDER  BY p.pubname`
@@ -370,11 +375,12 @@ ORDER  BY p.pubname`
 		oid                             uint32
 		name                            string
 		allTables, ins, upd, del, trunc bool
+		comment                         *string
 	}
 	var rows []pubRow
 	for rs.Next() {
 		var r pubRow
-		if err := rs.Scan(&r.oid, &r.name, &r.allTables, &r.ins, &r.upd, &r.del, &r.trunc); err != nil {
+		if err := rs.Scan(&r.oid, &r.name, &r.allTables, &r.ins, &r.upd, &r.del, &r.trunc, &r.comment); err != nil {
 			return nil, err
 		}
 		rows = append(rows, r)
@@ -402,7 +408,7 @@ ORDER  BY p.pubname`
 		if opt, ok := publishOption(r.ins, r.upd, r.del, r.trunc); ok {
 			fmt.Fprintf(&sb, " WITH (publish = %s)", quoteLit(opt))
 		}
-		out = append(out, &ir.Publication{Name: r.name, Body: canonicalDDL(sb.String()), Reconstructed: true})
+		out = append(out, &ir.Publication{Name: r.name, Body: canonicalDDL(sb.String()), Comment: r.comment, Reconstructed: true})
 	}
 	return out, rs.Err()
 }
@@ -663,7 +669,8 @@ func introspectCollations(ctx context.Context, conn pipeline.Querier) ([]pipelin
 	}
 	q := `
 SELECT n.nspname, c.collname, c.collprovider,
-       c.collcollate, c.collctype, c.collisdeterministic, ` + icuLocaleCol + `
+       c.collcollate, c.collctype, c.collisdeterministic, ` + icuLocaleCol + `,
+       obj_description(c.oid, 'pg_collation') AS comment
 FROM   pg_collation c
 JOIN   pg_namespace n ON n.oid = c.collnamespace
 WHERE  c.oid >= $1
@@ -681,9 +688,9 @@ ORDER  BY n.nspname, c.collname`
 	for rs.Next() {
 		var schema, name string
 		var provider byte
-		var collate, ctype, icuLocale *string
+		var collate, ctype, icuLocale, comment *string
 		var deterministic bool
-		if err := rs.Scan(&schema, &name, &provider, &collate, &ctype, &deterministic, &icuLocale); err != nil {
+		if err := rs.Scan(&schema, &name, &provider, &collate, &ctype, &deterministic, &icuLocale, &comment); err != nil {
 			return nil, err
 		}
 		var attrs []string
@@ -715,7 +722,7 @@ ORDER  BY n.nspname, c.collname`
 			continue // nothing reconstructable; skip rather than emit invalid DDL
 		}
 		body := fmt.Sprintf("CREATE COLLATION %s (%s)", qualIdentQ(schema, name), strings.Join(attrs, ", "))
-		out = append(out, &ir.Collation{Schema: schema, Name: name, Body: canonicalDDL(body), Reconstructed: true})
+		out = append(out, &ir.Collation{Schema: schema, Name: name, Body: canonicalDDL(body), Comment: comment, Reconstructed: true})
 	}
 	return out, rs.Err()
 }
@@ -754,7 +761,8 @@ func introspectStatistics(ctx context.Context, conn pipeline.Querier) ([]pipelin
 	// pg_get_statisticsobjdef reconstructs the full CREATE STATISTICS DDL,
 	// including the kinds list, column/expression list, and source table.
 	q := `
-SELECT n.nspname, s.stxname, pg_get_statisticsobjdef(s.oid)
+SELECT n.nspname, s.stxname, pg_get_statisticsobjdef(s.oid),
+       obj_description(s.oid, 'pg_statistic_ext') AS comment
 FROM   pg_statistic_ext s
 JOIN   pg_namespace n ON n.oid = s.stxnamespace
 WHERE  ` + notExtensionOwned("pg_statistic_ext", "s.oid") + `
@@ -769,10 +777,11 @@ ORDER  BY n.nspname, s.stxname`
 	var out []pipeline.IRObject
 	for rs.Next() {
 		var schema, name, def string
-		if err := rs.Scan(&schema, &name, &def); err != nil {
+		var comment *string
+		if err := rs.Scan(&schema, &name, &def, &comment); err != nil {
 			return nil, err
 		}
-		out = append(out, &ir.StatisticsObject{Schema: schema, Name: name, Body: canonicalDDL(def), Reconstructed: true})
+		out = append(out, &ir.StatisticsObject{Schema: schema, Name: name, Body: canonicalDDL(def), Comment: comment, Reconstructed: true})
 	}
 	return out, rs.Err()
 }
@@ -792,7 +801,8 @@ SELECT n.nspname, o.oprname,
        nn.nspname AS neg_schema, no.oprname AS neg_name,
        NULLIF(o.oprrest, 0)::regproc::text   AS restrict_fn,
        NULLIF(o.oprjoin, 0)::regproc::text   AS join_fn,
-       o.oprcanmerge, o.oprcanhash
+       o.oprcanmerge, o.oprcanhash,
+       obj_description(o.oid, 'pg_operator') AS comment
 FROM   pg_operator o
 JOIN   pg_namespace n  ON n.oid = o.oprnamespace
 LEFT   JOIN pg_operator co ON co.oid = o.oprcom
@@ -813,11 +823,11 @@ ORDER  BY n.nspname, o.oprname`
 	var out []pipeline.IRObject
 	for rs.Next() {
 		var schema, name, fn string
-		var leftArg, rightArg, comSchema, comName, negSchema, negName, restrictFn, joinFn *string
+		var leftArg, rightArg, comSchema, comName, negSchema, negName, restrictFn, joinFn, comment *string
 		var canMerge, canHash bool
 		if err := rs.Scan(&schema, &name, &leftArg, &rightArg, &fn,
 			&comSchema, &comName, &negSchema, &negName, &restrictFn, &joinFn,
-			&canMerge, &canHash); err != nil {
+			&canMerge, &canHash, &comment); err != nil {
 			return nil, err
 		}
 		var parts []string
@@ -847,7 +857,7 @@ ORDER  BY n.nspname, o.oprname`
 			parts = append(parts, "MERGES")
 		}
 		body := fmt.Sprintf("CREATE OPERATOR %s (%s)", operatorRef(schema, name), strings.Join(parts, ", "))
-		op := &ir.Operator{Schema: schema, Name: name, Body: canonicalDDL(body), Reconstructed: true}
+		op := &ir.Operator{Schema: schema, Name: name, Body: canonicalDDL(body), Comment: comment, Reconstructed: true}
 		if leftArg != nil {
 			t := ir.TypeRef{Name: *leftArg}
 			op.LeftType = &t
@@ -880,7 +890,8 @@ SELECT n.nspname, p.prsname,
        p.prstoken::regproc::text    AS token_fn,
        p.prsend::regproc::text      AS end_fn,
        p.prslextype::regproc::text  AS lextype_fn,
-       NULLIF(p.prsheadline, 0)::regproc::text AS headline_fn
+       NULLIF(p.prsheadline, 0)::regproc::text AS headline_fn,
+       obj_description(p.oid, 'pg_ts_parser') AS comment
 FROM   pg_ts_parser p
 JOIN   pg_namespace n ON n.oid = p.prsnamespace
 WHERE  p.oid >= $1
@@ -897,8 +908,8 @@ ORDER  BY n.nspname, p.prsname`
 	var out []pipeline.IRObject
 	for rs.Next() {
 		var schema, name, startFn, tokenFn, endFn, lextypeFn string
-		var headlineFn *string
-		if err := rs.Scan(&schema, &name, &startFn, &tokenFn, &endFn, &lextypeFn, &headlineFn); err != nil {
+		var headlineFn, comment *string
+		if err := rs.Scan(&schema, &name, &startFn, &tokenFn, &endFn, &lextypeFn, &headlineFn, &comment); err != nil {
 			return nil, err
 		}
 		parts := []string{
@@ -911,7 +922,7 @@ ORDER  BY n.nspname, p.prsname`
 			parts = append(parts, "HEADLINE = "+*headlineFn)
 		}
 		body := fmt.Sprintf("CREATE TEXT SEARCH PARSER %s (%s)", qualIdentQ(schema, name), strings.Join(parts, ", "))
-		out = append(out, &ir.TSParser{Schema: schema, Name: name, Body: canonicalDDL(body), Reconstructed: true})
+		out = append(out, &ir.TSParser{Schema: schema, Name: name, Body: canonicalDDL(body), Comment: comment, Reconstructed: true})
 	}
 	return out, rs.Err()
 }
@@ -922,7 +933,8 @@ func introspectTSTemplates(ctx context.Context, conn pipeline.Querier) ([]pipeli
 	q := `
 SELECT n.nspname, t.tmplname,
        NULLIF(t.tmplinit, 0)::regproc::text AS init_fn,
-       t.tmpllexize::regproc::text          AS lexize_fn
+       t.tmpllexize::regproc::text          AS lexize_fn,
+       obj_description(t.oid, 'pg_ts_template') AS comment
 FROM   pg_ts_template t
 JOIN   pg_namespace n ON n.oid = t.tmplnamespace
 WHERE  t.oid >= $1
@@ -939,8 +951,8 @@ ORDER  BY n.nspname, t.tmplname`
 	var out []pipeline.IRObject
 	for rs.Next() {
 		var schema, name, lexizeFn string
-		var initFn *string
-		if err := rs.Scan(&schema, &name, &initFn, &lexizeFn); err != nil {
+		var initFn, comment *string
+		if err := rs.Scan(&schema, &name, &initFn, &lexizeFn, &comment); err != nil {
 			return nil, err
 		}
 		var parts []string
@@ -949,7 +961,7 @@ ORDER  BY n.nspname, t.tmplname`
 		}
 		parts = append(parts, "LEXIZE = "+lexizeFn)
 		body := fmt.Sprintf("CREATE TEXT SEARCH TEMPLATE %s (%s)", qualIdentQ(schema, name), strings.Join(parts, ", "))
-		out = append(out, &ir.TSTemplate{Schema: schema, Name: name, Body: canonicalDDL(body), Reconstructed: true})
+		out = append(out, &ir.TSTemplate{Schema: schema, Name: name, Body: canonicalDDL(body), Comment: comment, Reconstructed: true})
 	}
 	return out, rs.Err()
 }
@@ -964,7 +976,8 @@ func introspectTSDicts(ctx context.Context, conn pipeline.Querier) ([]pipeline.I
 	q := `
 SELECT n.nspname, dict.dictname,
        tn.nspname AS tmpl_schema, t.tmplname AS tmpl_name,
-       dict.dictinitoption
+       dict.dictinitoption,
+       obj_description(dict.oid, 'pg_ts_dict') AS comment
 FROM   pg_ts_dict dict
 JOIN   pg_namespace n  ON n.oid = dict.dictnamespace
 JOIN   pg_ts_template t ON t.oid = dict.dicttemplate
@@ -983,8 +996,8 @@ ORDER  BY n.nspname, dict.dictname`
 	var out []pipeline.IRObject
 	for rs.Next() {
 		var schema, name, tmplSchema, tmplName string
-		var initOption *string
-		if err := rs.Scan(&schema, &name, &tmplSchema, &tmplName, &initOption); err != nil {
+		var initOption, comment *string
+		if err := rs.Scan(&schema, &name, &tmplSchema, &tmplName, &initOption, &comment); err != nil {
 			return nil, err
 		}
 		parts := []string{"TEMPLATE = " + qualIdentQ(tmplSchema, tmplName)}
@@ -995,7 +1008,7 @@ ORDER  BY n.nspname, dict.dictname`
 		out = append(out, &ir.TSDict{
 			Schema: schema, Name: name,
 			TemplateSchema: tmplSchema, TemplateName: tmplName,
-			Body: canonicalDDL(body), Reconstructed: true,
+			Body: canonicalDDL(body), Comment: comment, Reconstructed: true,
 		})
 	}
 	return out, rs.Err()
@@ -1009,7 +1022,8 @@ func introspectTSConfigs(ctx context.Context, conn pipeline.Querier) ([]pipeline
 	// and are not folded into the body.
 	q := `
 SELECT n.nspname, c.cfgname,
-       pn.nspname AS parser_schema, p.prsname AS parser_name
+       pn.nspname AS parser_schema, p.prsname AS parser_name,
+       obj_description(c.oid, 'pg_ts_config') AS comment
 FROM   pg_ts_config c
 JOIN   pg_namespace n  ON n.oid = c.cfgnamespace
 JOIN   pg_ts_parser p  ON p.oid = c.cfgparser
@@ -1026,20 +1040,124 @@ ORDER  BY n.nspname, c.cfgname`
 	defer rs.Close()
 
 	var out []pipeline.IRObject
+	idx := make(map[string]*ir.TSConfig)
 	for rs.Next() {
 		var schema, name, parserSchema, parserName string
-		if err := rs.Scan(&schema, &name, &parserSchema, &parserName); err != nil {
+		var comment *string
+		if err := rs.Scan(&schema, &name, &parserSchema, &parserName, &comment); err != nil {
 			return nil, err
 		}
 		body := fmt.Sprintf("CREATE TEXT SEARCH CONFIGURATION %s (PARSER = %s)",
 			qualIdentQ(schema, name), qualIdentQ(parserSchema, parserName))
-		out = append(out, &ir.TSConfig{
+		tc := &ir.TSConfig{
 			Schema: schema, Name: name,
 			ParserSchema: parserSchema, ParserName: parserName,
-			Body: canonicalDDL(body), Reconstructed: true,
-		})
+			Body: canonicalDDL(body), Comment: comment, Reconstructed: true,
+		}
+		idx[schema+"."+name] = tc
+		out = append(out, tc)
 	}
-	return out, rs.Err()
+	if err := rs.Err(); err != nil {
+		return nil, err
+	}
+	rs.Close()
+
+	if err := introspectTSConfigMappings(ctx, conn, idx); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// introspectTSConfigMappings populates Mappings (RFC §12.1) for every
+// TSConfig in idx from pg_ts_config_map — previously never queried at all
+// (a comment here even claimed mappings were "a separate IR concern",
+// implying somewhere else handled it, but nothing did: TSConfig.Mappings
+// was always empty from introspection). maptokentype is an integer that
+// only resolves to a name (e.g. "word", "hword") via ts_token_type(parser
+// oid) — there's no direct catalog column with the readable alias. Token
+// types are grouped into one MAPPING FOR entry per identical, ordered
+// dictionary chain (matching how a human naturally writes it and how a
+// live config's own \dF+ output groups them), not emitted one row per
+// token type.
+func introspectTSConfigMappings(ctx context.Context, conn pipeline.Querier, idx map[string]*ir.TSConfig) error {
+	if len(idx) == 0 {
+		return nil
+	}
+	const q = `
+SELECT n.nspname, c.cfgname, tt.alias, dn.nspname AS dict_schema, d.dictname, m.mapseqno
+FROM   pg_ts_config_map m
+JOIN   pg_ts_config c        ON c.oid = m.mapcfg
+JOIN   pg_namespace n        ON n.oid = c.cfgnamespace
+JOIN   pg_ts_dict d          ON d.oid = m.mapdict
+JOIN   pg_namespace dn       ON dn.oid = d.dictnamespace
+JOIN   ts_token_type(c.cfgparser) tt ON tt.tokid = m.maptokentype
+WHERE  n.nspname NOT IN ('pg_catalog', 'information_schema', 'pg_toast')
+ORDER  BY n.nspname, c.cfgname, tt.alias, m.mapseqno`
+
+	rs, err := conn.QueryRows(ctx, q)
+	if err != nil {
+		return fmt.Errorf("introspect text search config mappings: %w", err)
+	}
+	defer rs.Close()
+
+	// Per-config, per-token-type ordered dictionary chain, built up across
+	// rows (mapseqno order) before being grouped into MAPPING FOR entries.
+	type key struct{ schema, name string }
+	chains := make(map[key]map[string][]pipeline.Identifier)
+	var order []key
+	tokenOrder := make(map[key][]string)
+	for rs.Next() {
+		var schema, name, tokenAlias, dictSchema, dictName string
+		var mapseqno int
+		if err := rs.Scan(&schema, &name, &tokenAlias, &dictSchema, &dictName, &mapseqno); err != nil {
+			return err
+		}
+		k := key{schema, name}
+		if _, ok := idx[schema+"."+name]; !ok {
+			continue
+		}
+		if chains[k] == nil {
+			chains[k] = make(map[string][]pipeline.Identifier)
+			order = append(order, k)
+		}
+		if _, ok := chains[k][tokenAlias]; !ok {
+			tokenOrder[k] = append(tokenOrder[k], tokenAlias)
+		}
+		dictID := pipeline.Identifier{Name: dictName}
+		if dictSchema != "pg_catalog" {
+			dictID.Schema = dictSchema
+		}
+		chains[k][tokenAlias] = append(chains[k][tokenAlias], dictID)
+	}
+	if err := rs.Err(); err != nil {
+		return err
+	}
+
+	for _, k := range order {
+		tc := idx[k.schema+"."+k.name]
+		byChain := make(map[string][]string) // chain signature -> token types, in first-seen order
+		var chainOrder []string
+		chainDicts := make(map[string][]pipeline.Identifier)
+		for _, tok := range tokenOrder[k] {
+			dicts := chains[k][tok]
+			sig := ""
+			for _, d := range dicts {
+				sig += d.String() + ","
+			}
+			if _, ok := byChain[sig]; !ok {
+				chainOrder = append(chainOrder, sig)
+				chainDicts[sig] = dicts
+			}
+			byChain[sig] = append(byChain[sig], tok)
+		}
+		for _, sig := range chainOrder {
+			tc.Mappings = append(tc.Mappings, pipeline.TSMappingDef{
+				TokenTypes:   byChain[sig],
+				Dictionaries: chainDicts[sig],
+			})
+		}
+	}
+	return nil
 }
 
 // ── operator families ─────────────────────────────────────────────────────────
@@ -1069,7 +1187,8 @@ func introspectOperatorFamilies(ctx context.Context, conn pipeline.Querier) ([]p
 	// to guess, since the class always names its family explicitly, matching
 	// exactly how pg_dump avoids the same ambiguity.
 	q := `
-SELECT n.nspname, f.opfname, am.amname
+SELECT n.nspname, f.opfname, am.amname,
+       obj_description(f.oid, 'pg_opfamily') AS comment
 FROM   pg_opfamily f
 JOIN   pg_namespace n ON n.oid = f.opfnamespace
 JOIN   pg_am am       ON am.oid = f.opfmethod
@@ -1087,13 +1206,14 @@ ORDER  BY n.nspname, f.opfname`
 	var out []pipeline.IRObject
 	for rs.Next() {
 		var schema, name, am string
-		if err := rs.Scan(&schema, &name, &am); err != nil {
+		var comment *string
+		if err := rs.Scan(&schema, &name, &am, &comment); err != nil {
 			return nil, err
 		}
 		body := fmt.Sprintf("CREATE OPERATOR FAMILY %s USING %s", qualIdentQ(schema, name), quoteIdent(am))
 		out = append(out, &ir.OperatorFamily{
 			Schema: schema, Name: name, AccessMethod: am,
-			Body: canonicalDDL(body), Reconstructed: true,
+			Body: canonicalDDL(body), Comment: comment, Reconstructed: true,
 		})
 	}
 	return out, rs.Err()
@@ -1107,7 +1227,8 @@ SELECT c.oid, n.nspname, c.opcname, am.amname,
        c.opcintype::regtype::text AS intype,
        c.opcdefault,
        NULLIF(c.opckeytype, 0)::regtype::text AS storagetype,
-       fn.nspname AS fam_schema, f.opfname AS fam_name
+       fn.nspname AS fam_schema, f.opfname AS fam_name,
+       obj_description(c.oid, 'pg_opclass') AS comment
 FROM   pg_opclass c
 JOIN   pg_namespace n ON n.oid = c.opcnamespace
 JOIN   pg_am am       ON am.oid = c.opcmethod
@@ -1124,16 +1245,16 @@ ORDER  BY n.nspname, c.opcname`
 	}
 
 	type opcRow struct {
-		oid                             uint32
-		schema, name, am, intype        string
-		isDefault                       bool
-		storageType, famSchema, famName *string
+		oid                                      uint32
+		schema, name, am, intype                 string
+		isDefault                                bool
+		storageType, famSchema, famName, comment *string
 	}
 	var rows []opcRow
 	for rs.Next() {
 		var r opcRow
 		if err := rs.Scan(&r.oid, &r.schema, &r.name, &r.am, &r.intype, &r.isDefault,
-			&r.storageType, &r.famSchema, &r.famName); err != nil {
+			&r.storageType, &r.famSchema, &r.famName, &r.comment); err != nil {
 			rs.Close()
 			return nil, err
 		}
@@ -1182,7 +1303,7 @@ ORDER  BY n.nspname, c.opcname`
 		out = append(out, &ir.OperatorClass{
 			Schema: r.schema, Name: r.name, AccessMethod: r.am,
 			FamilySchema: famSchema, FamilyName: famName,
-			Body: canonicalDDL(sb.String()), Reconstructed: true,
+			Body: canonicalDDL(sb.String()), Comment: r.comment, Reconstructed: true,
 		})
 	}
 	return out, nil

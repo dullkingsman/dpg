@@ -474,7 +474,13 @@ func TestDiffCreateIndex(t *testing.T) {
 	}
 }
 
-func TestDiffConcurrentIndex(t *testing.T) {
+// TestDiffConcurrentIndexOnNewTableIsSuppressed guards a real correctness
+// rule, not just a preference: PostgreSQL rejects CREATE INDEX CONCURRENTLY
+// inside a transaction block, and an index on a brand-new table is always
+// emitted in the SAME transactional migration as its CREATE TABLE — so an
+// explicit CONCURRENTLY on a new table's index must be silently suppressed,
+// never honored. See createIndex's doc comment and createTable's index loop.
+func TestDiffConcurrentIndexOnNewTableIsSuppressed(t *testing.T) {
 	d := New()
 	desired := []pipeline.IRObject{
 		&ir.Table{
@@ -488,6 +494,42 @@ func TestDiffConcurrentIndex(t *testing.T) {
 		},
 	}
 	ops, err := d.Diff(desired, &pipeline.Snapshot{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, o := range ops {
+		if strings.Contains(o.SQL(), "CONCURRENTLY") {
+			t.Fatalf("new-table index must never be CONCURRENTLY (same-transaction PG restriction), got: %v", sqlList(ops))
+		}
+	}
+}
+
+// TestDiffConcurrentIndexOnExistingTableExplicit guards the case CONCURRENTLY
+// actually applies: an EXISTING table (already in the snapshot) gaining a new
+// index with an explicit CONCURRENTLY in source. There is no project-wide
+// default — CONCURRENTLY only ever fires when the source writes it, exactly
+// like real PostgreSQL's own bare CONCURRENTLY keyword.
+func TestDiffConcurrentIndexOnExistingTableExplicit(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.users", &snapshot.SnapObject{
+		Kind: "table",
+		Table: &snapshot.SnapTable{
+			Columns: []snapshot.SnapColumn{{Name: "email", Type: "text"}},
+		},
+	})
+	desired := []pipeline.IRObject{
+		&ir.Table{
+			Schema:  "public",
+			Name:    "users",
+			Columns: []*ir.Column{{Name: "email", Type: ir.TypeRef{Name: "text"}}},
+			Indexes: []*ir.Index{
+				{Name: "users_email_idx", Method: "btree", Concurrently: true,
+					Columns: []pipeline.IndexColumn{{Name: "email"}}},
+			},
+		},
+	}
+	ops, err := d.Diff(desired, snap)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -506,6 +548,39 @@ func TestDiffConcurrentIndex(t *testing.T) {
 	}
 	if idxOp.Transactional() {
 		t.Errorf("concurrent index must not be transactional")
+	}
+}
+
+// TestDiffIndexWithoutConcurrentlyIsNeverConcurrent guards the absence of any
+// implicit default: a new index on an existing table with no explicit
+// CONCURRENTLY in source must never emit CONCURRENTLY — there is nothing
+// (no project config, no other signal) that can turn it on.
+func TestDiffIndexWithoutConcurrentlyIsNeverConcurrent(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.users", &snapshot.SnapObject{
+		Kind: "table",
+		Table: &snapshot.SnapTable{
+			Columns: []snapshot.SnapColumn{{Name: "email", Type: "text"}},
+		},
+	})
+	desired := []pipeline.IRObject{
+		&ir.Table{
+			Schema:  "public",
+			Name:    "users",
+			Columns: []*ir.Column{{Name: "email", Type: ir.TypeRef{Name: "text"}}},
+			Indexes: []*ir.Index{
+				{Name: "users_email_idx", Method: "btree",
+					Columns: []pipeline.IndexColumn{{Name: "email"}}},
+			},
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(strings.Join(sqlList(ops), "\n"), "CONCURRENTLY") {
+		t.Errorf("expected no CONCURRENTLY without an explicit source keyword, got: %v", sqlList(ops))
 	}
 }
 
@@ -1296,6 +1371,242 @@ func TestDiffColumnRenamePostApplyIsNoop(t *testing.T) {
 // TestDiffColumnRenameKeepsConstraints verifies that a RENAMED FROM directive
 // doesn't manufacture a spurious drop+recreate of constraints whose snapshot
 // expression still references the pre-rename column name.
+// TestDiffValidateConstraintOnNotValidRemoval guards a real gap found live-
+// testing a demo project: the RFC's NOT VALID lifecycle (§7.3) documents
+// that removing NOT VALID from source must emit
+// ALTER TABLE ... VALIDATE CONSTRAINT ..., but diffConstraints' identity key
+// (name/type/expr only) never compared NotValid at all — a constraint
+// transitioning NotValid: true -> false was invisible to the differ and
+// silently produced "no changes" instead.
+func TestDiffValidateConstraintOnNotValidRemoval(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.orders", &snapshot.SnapObject{
+		Kind: "table",
+		Table: &snapshot.SnapTable{
+			Schema:  "public",
+			Name:    "orders",
+			Columns: []snapshot.SnapColumn{{Name: "amount", Type: "numeric"}},
+			Constraints: []snapshot.SnapConstraint{
+				{Name: "ck_amount_positive", Type: "CHECK", Expr: "CHECK (amount > 0)", NotValid: true},
+			},
+		},
+	})
+	desired := []pipeline.IRObject{
+		&ir.Table{
+			Schema:  "public",
+			Name:    "orders",
+			Columns: []*ir.Column{{Name: "amount", Type: ir.TypeRef{Name: "numeric"}}},
+			Constraints: []*ir.Constraint{
+				{Name: "ck_amount_positive", Type: "CHECK", Expr: "CHECK (amount > 0)"},
+			},
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var found bool
+	for _, o := range ops {
+		if strings.Contains(o.SQL(), "VALIDATE CONSTRAINT") {
+			found = true
+			if !strings.Contains(o.SQL(), `"ck_amount_positive"`) {
+				t.Errorf("VALIDATE CONSTRAINT does not name the constraint: %s", o.SQL())
+			}
+			if o.Safety() != pipeline.Caution {
+				t.Errorf("expected CAUTION safety for VALIDATE CONSTRAINT, got %v", o.Safety())
+			}
+		}
+		if strings.Contains(o.SQL(), "ADD CONSTRAINT") {
+			t.Errorf("did not expect a re-ADD of an already-existing constraint, got: %s", o.SQL())
+		}
+	}
+	if !found {
+		t.Fatalf("expected ALTER TABLE ... VALIDATE CONSTRAINT ..., got: %v", sqlList(ops))
+	}
+}
+
+// TestDiffNoValidateConstraintWhenAlreadyValid guards against a spurious
+// VALIDATE CONSTRAINT when the snapshot's constraint was never NOT VALID to
+// begin with — nothing to validate, so no-op.
+func TestDiffNoValidateConstraintWhenAlreadyValid(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.orders", &snapshot.SnapObject{
+		Kind: "table",
+		Table: &snapshot.SnapTable{
+			Schema:  "public",
+			Name:    "orders",
+			Columns: []snapshot.SnapColumn{{Name: "amount", Type: "numeric"}},
+			Constraints: []snapshot.SnapConstraint{
+				{Name: "ck_amount_positive", Type: "CHECK", Expr: "CHECK (amount > 0)", NotValid: false},
+			},
+		},
+	})
+	desired := []pipeline.IRObject{
+		&ir.Table{
+			Schema:  "public",
+			Name:    "orders",
+			Columns: []*ir.Column{{Name: "amount", Type: ir.TypeRef{Name: "numeric"}}},
+			Constraints: []*ir.Constraint{
+				{Name: "ck_amount_positive", Type: "CHECK", Expr: "CHECK (amount > 0)"},
+			},
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ops) != 0 {
+		t.Errorf("expected no ops for an already-valid constraint, got: %v", sqlList(ops))
+	}
+}
+
+// TestCreateForeignTableEmitsServerOptions guards a real bug found live-
+// testing a demo project: createTable wrote the "CREATE FOREIGN TABLE"
+// keyword but never appended SERVER/OPTIONS — not just incomplete, an
+// outright PostgreSQL syntax error, since SERVER is mandatory for a foreign
+// table. Confirmed live: applying the old output failed immediately.
+func TestCreateForeignTableEmitsServerOptions(t *testing.T) {
+	d := New()
+	server := "loopback_server"
+	desired := []pipeline.IRObject{
+		&ir.Table{
+			Schema:        "public",
+			Name:          "remote_users",
+			Foreign:       true,
+			ForeignServer: &server,
+			ForeignOptions: []pipeline.StorageParam{
+				{Key: "table_name", Value: "users"},
+				{Key: "schema_name", Value: "public"},
+			},
+			Columns: []*ir.Column{
+				{Name: "id", Type: ir.TypeRef{Name: "bigint"}},
+			},
+		},
+	}
+	ops, err := d.Diff(desired, &pipeline.Snapshot{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var createOp pipeline.DiffOp
+	for _, o := range ops {
+		if strings.Contains(o.SQL(), "CREATE FOREIGN TABLE") {
+			createOp = o
+			break
+		}
+	}
+	if createOp == nil {
+		t.Fatalf("expected a CREATE FOREIGN TABLE op, got: %v", sqlList(ops))
+	}
+	sql := createOp.SQL()
+	if !strings.Contains(sql, `SERVER "loopback_server"`) {
+		t.Errorf("CREATE FOREIGN TABLE missing SERVER clause: %s", sql)
+	}
+	if !strings.Contains(sql, "OPTIONS (table_name 'users', schema_name 'public')") {
+		t.Errorf("CREATE FOREIGN TABLE missing OPTIONS clause: %s", sql)
+	}
+}
+
+// TestDiffForeignTableServerChangeDropRecreate guards that a SERVER change
+// on an existing foreign table is DROP + CREATE — real PostgreSQL has no
+// ALTER FOREIGN TABLE clause to change the server.
+func TestDiffForeignTableServerChangeDropRecreate(t *testing.T) {
+	d := New()
+	oldServer := "server_a"
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.remote_users", &snapshot.SnapObject{
+		Kind: "table",
+		Table: &snapshot.SnapTable{
+			Schema: "public", Name: "remote_users",
+			Foreign: true, ForeignServer: &oldServer,
+			Columns: []snapshot.SnapColumn{{Name: "id", Type: "bigint"}},
+		},
+	})
+	newServer := "server_b"
+	desired := []pipeline.IRObject{
+		&ir.Table{
+			Schema: "public", Name: "remote_users",
+			Foreign: true, ForeignServer: &newServer,
+			Columns: []*ir.Column{{Name: "id", Type: ir.TypeRef{Name: "bigint"}}},
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var sawDrop, sawCreate bool
+	for _, o := range ops {
+		if strings.Contains(o.SQL(), "DROP FOREIGN TABLE") {
+			sawDrop = true
+			if o.Safety() != pipeline.Destructive {
+				t.Errorf("expected DESTRUCTIVE safety for DROP FOREIGN TABLE, got %v", o.Safety())
+			}
+		}
+		if strings.Contains(o.SQL(), "CREATE FOREIGN TABLE") && strings.Contains(o.SQL(), `SERVER "server_b"`) {
+			sawCreate = true
+		}
+	}
+	if !sawDrop || !sawCreate {
+		t.Fatalf("expected DROP FOREIGN TABLE + CREATE FOREIGN TABLE with new server, got: %v", sqlList(ops))
+	}
+}
+
+// TestDiffForeignTableOptionsChange guards that an OPTIONS-only change uses
+// real PostgreSQL's in-place ALTER FOREIGN TABLE ... OPTIONS (ADD/SET/DROP
+// ...) rather than a needless drop+recreate.
+func TestDiffForeignTableOptionsChange(t *testing.T) {
+	d := New()
+	server := "loopback_server"
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.remote_users", &snapshot.SnapObject{
+		Kind: "table",
+		Table: &snapshot.SnapTable{
+			Schema: "public", Name: "remote_users",
+			Foreign: true, ForeignServer: &server,
+			ForeignOptions: "table_name=users, stale_opt=x",
+			Columns:        []snapshot.SnapColumn{{Name: "id", Type: "bigint"}},
+		},
+	})
+	desired := []pipeline.IRObject{
+		&ir.Table{
+			Schema: "public", Name: "remote_users",
+			Foreign: true, ForeignServer: &server,
+			ForeignOptions: []pipeline.StorageParam{
+				{Key: "table_name", Value: "users_v2"}, // changed -> SET
+				{Key: "schema_name", Value: "public"},  // new -> ADD
+				// stale_opt absent -> DROP
+			},
+			Columns: []*ir.Column{{Name: "id", Type: ir.TypeRef{Name: "bigint"}}},
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var alterOp pipeline.DiffOp
+	for _, o := range ops {
+		if strings.Contains(o.SQL(), "ALTER FOREIGN TABLE") {
+			alterOp = o
+			break
+		}
+	}
+	if alterOp == nil {
+		t.Fatalf("expected ALTER FOREIGN TABLE ... OPTIONS, got: %v", sqlList(ops))
+	}
+	sql := alterOp.SQL()
+	for _, want := range []string{"SET table_name 'users_v2'", "ADD schema_name 'public'", "DROP stale_opt"} {
+		if !strings.Contains(sql, want) {
+			t.Errorf("ALTER FOREIGN TABLE missing %q: %s", want, sql)
+		}
+	}
+	for _, o := range ops {
+		if strings.Contains(o.SQL(), "DROP FOREIGN TABLE") {
+			t.Errorf("did not expect drop+recreate for an OPTIONS-only change, got: %v", sqlList(ops))
+		}
+	}
+}
+
 func TestDiffColumnRenameKeepsConstraints(t *testing.T) {
 	d := New()
 	snap := &pipeline.Snapshot{}
@@ -1344,6 +1655,272 @@ func TestDiffColumnRenameKeepsConstraints(t *testing.T) {
 		}
 		if strings.Contains(sql, "DROP CONSTRAINT") {
 			t.Errorf("did not expect DROP CONSTRAINT after RENAMED FROM, got: %s", sql)
+		}
+	}
+}
+
+// TestDiffColumnRenameKeepsIndex guards a real bug found live-testing a
+// demo project: diffIndexes compared the desired index against the
+// snapshot's SnapIndex verbatim, with no rename translation at all (unlike
+// diffConstraints, which already translates constraint expressions via
+// translateConstraintExpr) — so a same-named index whose column was renamed
+// always compared unequal (old name in the snapshot vs. new name in
+// desired) and got spuriously DROP + recreated, even though real
+// PostgreSQL's ALTER TABLE RENAME COLUMN keeps every dependent index
+// transparently, no rebuild needed at all.
+// TestDiffColumnDeprecatedEmitsComment guards a real, functionally-total
+// gap found live-testing a demo project: ir.Column.Deprecated was parsed,
+// stored in the snapshot, and used by the linter (which is why `dpg plan`
+// already printed a "deprecated" warning), but the differ never referenced
+// it at all anywhere — a DEPRECATED directive had zero effect on generated
+// SQL, despite the RFC documenting
+// `COMMENT ON COLUMN t.c IS '[DEPRECATED] msg'` as the expected output.
+func TestDiffColumnDeprecatedEmitsComment(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.room_bookings", &snapshot.SnapObject{
+		Kind: "table",
+		Table: &snapshot.SnapTable{
+			Schema: "public", Name: "room_bookings",
+			Columns: []snapshot.SnapColumn{
+				{Name: "id", Type: "bigint"},
+				{Name: "room", Type: "text"},
+			},
+		},
+	})
+	msg := "will be replaced by room_id"
+	desired := []pipeline.IRObject{
+		&ir.Table{
+			Schema: "public", Name: "room_bookings",
+			Columns: []*ir.Column{
+				{Name: "id", Type: ir.TypeRef{Name: "bigint"}},
+				{Name: "room", Type: ir.TypeRef{Name: "text"}, Deprecated: &msg},
+			},
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var found bool
+	for _, o := range ops {
+		if strings.Contains(o.SQL(), "COMMENT ON COLUMN") {
+			found = true
+			want := `IS '[DEPRECATED] will be replaced by room_id';`
+			if !strings.Contains(o.SQL(), want) {
+				t.Errorf("COMMENT ON COLUMN text: got %q, want substring %q", o.SQL(), want)
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("expected a COMMENT ON COLUMN op for DEPRECATED, got: %v", sqlList(ops))
+	}
+}
+
+// TestDiffColumnDeprecatedNoOpWhenUnchanged guards against re-emitting the
+// COMMENT ON COLUMN every plan once DEPRECATED has already been applied —
+// the snapshot's own Deprecated field (not just Comment) must be compared.
+func TestDiffColumnDeprecatedNoOpWhenUnchanged(t *testing.T) {
+	d := New()
+	msg := "will be replaced by room_id"
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.room_bookings", &snapshot.SnapObject{
+		Kind: "table",
+		Table: &snapshot.SnapTable{
+			Schema: "public", Name: "room_bookings",
+			Columns: []snapshot.SnapColumn{
+				{Name: "id", Type: "bigint"},
+				{Name: "room", Type: "text", Deprecated: &msg},
+			},
+		},
+	})
+	desired := []pipeline.IRObject{
+		&ir.Table{
+			Schema: "public", Name: "room_bookings",
+			Columns: []*ir.Column{
+				{Name: "id", Type: ir.TypeRef{Name: "bigint"}},
+				{Name: "room", Type: ir.TypeRef{Name: "text"}, Deprecated: &msg},
+			},
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, o := range ops {
+		if strings.Contains(o.SQL(), "COMMENT ON COLUMN") {
+			t.Errorf("expected no COMMENT ON COLUMN op when DEPRECATED is unchanged, got: %s", o.SQL())
+		}
+	}
+}
+
+// TestDiffTableDeprecatedEmitsComment, TestDiffViewDeprecatedEmitsComment,
+// and TestDiffFunctionDeprecatedEmitsComment guard the same gap as
+// TestDiffColumnDeprecatedEmitsComment, for the RFC's other three
+// DEPRECATED-bearing kinds (§19.1: "Applied to tables, columns, views,
+// functions"). ir.Table/View/Function.Deprecated was parsed, snapshotted
+// (for Table only — SnapView/SnapFunction didn't even have the field, a
+// deeper gap than Column's), and used by the linter, but never referenced
+// by the differ.
+func TestDiffTableDeprecatedEmitsComment(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.legacy_orders", &snapshot.SnapObject{
+		Kind: "table",
+		Table: &snapshot.SnapTable{
+			Schema: "public", Name: "legacy_orders",
+			Columns: []snapshot.SnapColumn{{Name: "id", Type: "bigint"}},
+		},
+	})
+	msg := "use orders instead"
+	desired := []pipeline.IRObject{
+		&ir.Table{
+			Schema: "public", Name: "legacy_orders",
+			Columns:    []*ir.Column{{Name: "id", Type: ir.TypeRef{Name: "bigint"}}},
+			Deprecated: &msg,
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var found bool
+	for _, o := range ops {
+		if strings.Contains(o.SQL(), "COMMENT ON TABLE") {
+			found = true
+			want := `IS '[DEPRECATED] use orders instead';`
+			if !strings.Contains(o.SQL(), want) {
+				t.Errorf("COMMENT ON TABLE text: got %q, want substring %q", o.SQL(), want)
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("expected a COMMENT ON TABLE op for DEPRECATED, got: %v", sqlList(ops))
+	}
+}
+
+func TestDiffViewDeprecatedEmitsComment(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.legacy_summary", &snapshot.SnapObject{
+		Kind: "view",
+		View: &snapshot.SnapView{
+			Schema: "public", Name: "legacy_summary",
+			Query: "SELECT 1",
+		},
+	})
+	msg := "use order_summary instead"
+	desired := []pipeline.IRObject{
+		&ir.View{
+			Schema: "public", Name: "legacy_summary",
+			Query:      "SELECT 1",
+			Deprecated: &msg,
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var found bool
+	for _, o := range ops {
+		if strings.Contains(o.SQL(), "COMMENT ON VIEW") {
+			found = true
+			want := `IS '[DEPRECATED] use order_summary instead';`
+			if !strings.Contains(o.SQL(), want) {
+				t.Errorf("COMMENT ON VIEW text: got %q, want substring %q", o.SQL(), want)
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("expected a COMMENT ON VIEW op for DEPRECATED, got: %v", sqlList(ops))
+	}
+}
+
+func TestDiffFunctionDeprecatedEmitsComment(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.legacy_calc()", &snapshot.SnapObject{
+		Kind: "function",
+		Function: &snapshot.SnapFunction{
+			Schema: "public", Name: "legacy_calc",
+			ReturnType: "void",
+			Language:   "plpgsql",
+			Volatility: "VOLATILE",
+			BodyHash:   "hash1",
+		},
+	})
+	msg := "use calc_v2 instead"
+	desired := []pipeline.IRObject{
+		&ir.Function{
+			Schema:     "public",
+			Name:       "legacy_calc",
+			ReturnType: ir.TypeRef{Name: "void"},
+			BodyHash:   "hash1",
+			Deprecated: &msg,
+			Attrs: ir.FuncAttrs{
+				Language:   "plpgsql",
+				Volatility: "VOLATILE",
+				Body:       "BEGIN END;",
+			},
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var found bool
+	for _, o := range ops {
+		if strings.Contains(o.SQL(), "COMMENT ON FUNCTION") {
+			found = true
+			want := `IS '[DEPRECATED] use calc_v2 instead';`
+			if !strings.Contains(o.SQL(), want) {
+				t.Errorf("COMMENT ON FUNCTION text: got %q, want substring %q", o.SQL(), want)
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("expected a COMMENT ON FUNCTION op for DEPRECATED, got: %v", sqlList(ops))
+	}
+}
+
+func TestDiffColumnRenameKeepsIndex(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.orders", &snapshot.SnapObject{
+		Kind: "table",
+		Table: &snapshot.SnapTable{
+			Schema: "public", Name: "orders",
+			Columns: []snapshot.SnapColumn{
+				{Name: "id", Type: "bigint"},
+				{Name: "metadata", Type: "jsonb"},
+			},
+			Indexes: []snapshot.SnapIndex{
+				{Name: "orders_metadata_gin_idx", Method: "gin", Columns: "metadata"},
+			},
+		},
+	})
+
+	old := "metadata"
+	desired := []pipeline.IRObject{
+		&ir.Table{
+			Schema: "public", Name: "orders",
+			Columns: []*ir.Column{
+				{Name: "id", Type: ir.TypeRef{Name: "bigint"}},
+				{Name: "extra_data", Type: ir.TypeRef{Name: "jsonb"}, RenamedFrom: &old},
+			},
+			Indexes: []*ir.Index{
+				{Name: "orders_metadata_gin_idx", Method: "gin", Columns: []pipeline.IndexColumn{{Name: "extra_data"}}},
+			},
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, o := range ops {
+		sql := o.SQL()
+		if strings.Contains(sql, "DROP INDEX") || strings.Contains(sql, "CREATE INDEX") {
+			t.Errorf("did not expect the index to be dropped/recreated after a plain column rename, got: %s", sql)
 		}
 	}
 }
@@ -3186,6 +3763,55 @@ func TestDiffTableGrantRemoved(t *testing.T) {
 	}
 }
 
+// TestRoleListPublicNotQuoted guards a real bug found live-testing a demo
+// project: roleList quoted every role name unconditionally, including the
+// PostgreSQL pseudo-role keyword PUBLIC. Quoting it makes PG look up an
+// actual role literally named "PUBLIC" (which never exists), erroring with
+// `role "PUBLIC" does not exist` — hit live via introspection's grant
+// queries, which emit the literal string "PUBLIC" as the grantee for PG's
+// own implicit default EXECUTE-to-PUBLIC grant on a new function/aggregate.
+func TestRoleListPublicNotQuoted(t *testing.T) {
+	got := roleList([]string{"PUBLIC", "app_service", "public"})
+	want := `PUBLIC, "app_service", PUBLIC`
+	if got != want {
+		t.Errorf("roleList: got %q, want %q", got, want)
+	}
+}
+
+// TestDiffTableGrantRemovedFromPublic is TestDiffTableGrantRemoved's
+// PUBLIC-specific sibling: the emitted REVOKE must not quote PUBLIC.
+func TestDiffTableGrantRemovedFromPublic(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.orders", &snapshot.SnapObject{
+		Kind: "table",
+		Table: &snapshot.SnapTable{
+			Schema:  "public",
+			Name:    "orders",
+			Columns: []snapshot.SnapColumn{{Name: "id", Type: "bigint"}},
+			Grants:  []snapshot.SnapGrant{{Privileges: []string{"SELECT"}, Roles: []string{"PUBLIC"}}},
+		},
+	})
+	desired := []pipeline.IRObject{
+		&ir.Table{
+			Schema:  "public",
+			Name:    "orders",
+			Columns: []*ir.Column{{Name: "id", Type: ir.TypeRef{Name: "bigint"}}},
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := `REVOKE SELECT ON TABLE "public"."orders" FROM PUBLIC;`
+	if !containsSQL(ops, want) {
+		t.Errorf("expected %q (PUBLIC unquoted), got: %v", want, sqlList(ops))
+	}
+	if containsSQL(ops, `"PUBLIC"`) {
+		t.Errorf("PUBLIC must not be quoted, got: %v", sqlList(ops))
+	}
+}
+
 func TestDiffTableGrantUnchangedIsNoop(t *testing.T) {
 	d := New()
 	snap := &pipeline.Snapshot{}
@@ -3450,6 +4076,187 @@ func TestDiffCreateViewEmitsRevocation(t *testing.T) {
 	}
 	if !containsSQL(ops, "REVOKE SELECT ON TABLE") {
 		t.Errorf("expected REVOKE SELECT ON TABLE for a new view, got: %v", sqlList(ops))
+	}
+}
+
+// TestDiffCreateViewEmitsOwner guards a real bug found live-testing a demo
+// project: ir.View.Owner (and snapshot.SnapView.Owner) both existed and were
+// populated by the builder, but createView/diffView never referenced Owner
+// at all — an OWNER directive on a VIEW, RECURSIVE VIEW, or MATERIALIZED
+// VIEW silently vanished with no error, no diff, nothing. Unlike TABLE's
+// createTable (which always emits ALTER TABLE ... OWNER TO), createView had
+// no equivalent statement whatsoever.
+func TestDiffCreateViewEmitsOwner(t *testing.T) {
+	d := New()
+	owner := "app_role"
+	desired := []pipeline.IRObject{
+		&ir.View{Schema: "public", Name: "v_active", Query: "SELECT id FROM users", Owner: &owner},
+	}
+	ops, err := d.Diff(desired, &pipeline.Snapshot{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := `ALTER VIEW "public"."v_active" OWNER TO "app_role";`
+	if !containsSQL(ops, want) {
+		t.Errorf("expected %q, got: %v", want, sqlList(ops))
+	}
+}
+
+// TestDiffCreateMaterializedViewEmitsOwner is the materialized-view sibling
+// of TestDiffCreateViewEmitsOwner — real PG uses "ALTER MATERIALIZED VIEW",
+// not "ALTER VIEW", for a materialized view's owner.
+func TestDiffCreateMaterializedViewEmitsOwner(t *testing.T) {
+	d := New()
+	owner := "app_role"
+	desired := []pipeline.IRObject{
+		&ir.View{Schema: "public", Name: "mv_totals", Materialized: true, Query: "SELECT 1", Owner: &owner},
+	}
+	ops, err := d.Diff(desired, &pipeline.Snapshot{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := `ALTER MATERIALIZED VIEW "public"."mv_totals" OWNER TO "app_role";`
+	if !containsSQL(ops, want) {
+		t.Errorf("expected %q, got: %v", want, sqlList(ops))
+	}
+}
+
+// TestDiffCreateMaterializedViewEmitsIndex guards RFC §8.2's matview-block
+// INDICES support: a new materialized view's indexes must be created
+// alongside it, non-concurrently (it doesn't exist yet — same reasoning as
+// createTable's brand-new-table indexes).
+func TestDiffCreateMaterializedViewEmitsIndex(t *testing.T) {
+	d := New()
+	desired := []pipeline.IRObject{
+		&ir.View{
+			Schema: "public", Name: "mv_totals", Materialized: true, Query: "SELECT status FROM orders",
+			Indexes: []*ir.Index{
+				{Name: "mv_totals_status_uq", Unique: true, Columns: []pipeline.IndexColumn{{Name: "status"}}},
+			},
+		},
+	}
+	ops, err := d.Diff(desired, &pipeline.Snapshot{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := `CREATE UNIQUE INDEX "mv_totals_status_uq" ON "public"."mv_totals" ("status");`
+	if !containsSQL(ops, want) {
+		t.Errorf("expected %q, got: %v", want, sqlList(ops))
+	}
+}
+
+// TestDiffMaterializedViewIndexAddedToExisting guards diffView's index diff
+// path (not just create): adding an INDICES entry to an already-applied
+// materialized view must emit a CREATE INDEX without disturbing the view
+// itself.
+func TestDiffMaterializedViewIndexAddedToExisting(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.mv_totals", &snapshot.SnapObject{
+		Kind: "view",
+		View: &snapshot.SnapView{
+			Schema: "public", Name: "mv_totals", Query: "SELECT status FROM orders",
+		},
+	})
+	desired := []pipeline.IRObject{
+		&ir.View{
+			Schema: "public", Name: "mv_totals", Materialized: true, Query: "SELECT status FROM orders",
+			Indexes: []*ir.Index{
+				{Name: "mv_totals_status_uq", Unique: true, Columns: []pipeline.IndexColumn{{Name: "status"}}},
+			},
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := `CREATE UNIQUE INDEX "mv_totals_status_uq" ON "public"."mv_totals" ("status");`
+	if !containsSQL(ops, want) {
+		t.Errorf("expected %q, got: %v", want, sqlList(ops))
+	}
+	if containsSQL(ops, "DROP MATERIALIZED VIEW") || containsSQL(ops, "CREATE MATERIALIZED VIEW") {
+		t.Errorf("adding an index should not recreate the view itself, got: %v", sqlList(ops))
+	}
+}
+
+// TestDiffMaterializedViewIndexRemoved is the removal-side sibling.
+func TestDiffMaterializedViewIndexRemoved(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.mv_totals", &snapshot.SnapObject{
+		Kind: "view",
+		View: &snapshot.SnapView{
+			Schema: "public", Name: "mv_totals", Query: "SELECT status FROM orders",
+			Indexes: []snapshot.SnapIndex{
+				{Name: "mv_totals_status_uq", Unique: true, Method: "btree", Columns: "status"},
+			},
+		},
+	})
+	desired := []pipeline.IRObject{
+		&ir.View{Schema: "public", Name: "mv_totals", Materialized: true, Query: "SELECT status FROM orders"},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsSQL(ops, `DROP INDEX IF EXISTS "mv_totals_status_uq";`) {
+		t.Errorf("expected DROP INDEX for removed matview index, got: %v", sqlList(ops))
+	}
+}
+
+// TestDiffViewOwnerChanged guards the diff-existing-view path (not just
+// create): changing OWNER on an already-applied view must also be detected.
+func TestDiffViewOwnerChanged(t *testing.T) {
+	d := New()
+	oldOwner := "old_role"
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.v_active", &snapshot.SnapObject{
+		Kind: "view",
+		View: &snapshot.SnapView{
+			Schema: "public",
+			Name:   "v_active",
+			Query:  "SELECT id FROM users",
+			Owner:  &oldOwner,
+		},
+	})
+	newOwner := "new_role"
+	desired := []pipeline.IRObject{
+		&ir.View{Schema: "public", Name: "v_active", Query: "SELECT id FROM users", Owner: &newOwner},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := `ALTER VIEW "public"."v_active" OWNER TO "new_role";`
+	if !containsSQL(ops, want) {
+		t.Errorf("expected %q, got: %v", want, sqlList(ops))
+	}
+}
+
+// TestDiffViewOwnerUnchangedIsNoop is the negative case: identical Owner
+// must not produce a spurious ALTER on every plan.
+func TestDiffViewOwnerUnchangedIsNoop(t *testing.T) {
+	d := New()
+	owner := "app_role"
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.v_active", &snapshot.SnapObject{
+		Kind: "view",
+		View: &snapshot.SnapView{
+			Schema: "public",
+			Name:   "v_active",
+			Query:  "SELECT id FROM users",
+			Owner:  &owner,
+		},
+	})
+	desired := []pipeline.IRObject{
+		&ir.View{Schema: "public", Name: "v_active", Query: "SELECT id FROM users", Owner: &owner},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if containsSQL(ops, "OWNER TO") {
+		t.Errorf("expected no OWNER TO op for unchanged owner, got: %v", sqlList(ops))
 	}
 }
 
@@ -4194,6 +5001,167 @@ func TestDiffPartitionBoundChangedDropsAndRecreates(t *testing.T) {
 	want := `CREATE TABLE "public"."events_2024" PARTITION OF "public"."events" FOR VALUES FROM ('2024-01-01') TO ('2024-07-01');`
 	if !containsSQL(ops, want) {
 		t.Errorf("expected exact partition CREATE statement %q, got: %v", want, sqlList(ops))
+	}
+}
+
+// TestDiffCreateTableWithSubPartitions guards RFC §7.13 sub-partitioning:
+// a partition entry may itself be PARTITION BY'd, in which case its CREATE
+// TABLE ... PARTITION OF statement carries a trailing PARTITION BY clause,
+// and each of ITS partitions is created as PARTITION OF the sub-partitioned
+// child (not the top-level table).
+func TestDiffCreateTableWithSubPartitions(t *testing.T) {
+	d := New()
+	desired := []pipeline.IRObject{
+		&ir.Table{
+			Schema: "public",
+			Name:   "metrics",
+			Columns: []*ir.Column{
+				{Name: "id", Type: ir.TypeRef{Name: "bigint"}, NotNull: true},
+				{Name: "channel", Type: ir.TypeRef{Name: "text"}, NotNull: true},
+			},
+			PartitionBy: &ir.PartitionSpec{Strategy: "RANGE", Columns: []string{"created_at"}},
+			Partitions: []*ir.Partition{
+				{
+					Name:        "metrics_2026",
+					Bounds:      "FOR VALUES FROM ('2026-01-01') TO ('2027-01-01')",
+					PartitionBy: &ir.PartitionSpec{Strategy: "LIST", Columns: []string{"channel"}},
+					Partitions: []*ir.Partition{
+						{Name: "metrics_2026_web", Bounds: "FOR VALUES IN ('web')"},
+					},
+				},
+			},
+		},
+	}
+	ops, err := d.Diff(desired, &pipeline.Snapshot{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantParent := `CREATE TABLE "public"."metrics_2026" PARTITION OF "public"."metrics" FOR VALUES FROM ('2026-01-01') TO ('2027-01-01') PARTITION BY LIST (channel);`
+	if !containsSQL(ops, wantParent) {
+		t.Errorf("expected sub-partitioned CREATE statement %q, got: %v", wantParent, sqlList(ops))
+	}
+	wantChild := `CREATE TABLE "public"."metrics_2026_web" PARTITION OF "public"."metrics_2026" FOR VALUES IN ('web');`
+	if !containsSQL(ops, wantChild) {
+		t.Errorf("expected nested partition CREATE statement %q, got: %v", wantChild, sqlList(ops))
+	}
+}
+
+// TestDiffSubPartitionAdded guards adding a new leaf under an EXISTING
+// sub-partitioned partition (the common ongoing-maintenance case, e.g.
+// adding next quarter's channel partition).
+func TestDiffSubPartitionAdded(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.metrics", &snapshot.SnapObject{
+		Kind: "table",
+		Table: &snapshot.SnapTable{
+			Schema:      "public",
+			Name:        "metrics",
+			PartitionBy: "RANGE (created_at)",
+			Columns:     []snapshot.SnapColumn{{Name: "id", Type: "bigint"}},
+			Partitions: []snapshot.SnapPartition{
+				{
+					Schema:      "public",
+					Name:        "metrics_2026",
+					Bound:       "FOR VALUES FROM ('2026-01-01') TO ('2027-01-01')",
+					PartitionBy: "LIST (channel)",
+					Partitions: []snapshot.SnapPartition{
+						{Schema: "public", Name: "metrics_2026_web", Bound: "FOR VALUES IN ('web')"},
+					},
+				},
+			},
+		},
+	})
+	desired := []pipeline.IRObject{
+		&ir.Table{
+			Schema:      "public",
+			Name:        "metrics",
+			PartitionBy: &ir.PartitionSpec{Strategy: "RANGE", Columns: []string{"created_at"}},
+			Columns:     []*ir.Column{{Name: "id", Type: ir.TypeRef{Name: "bigint"}}},
+			Partitions: []*ir.Partition{
+				{
+					Name:        "metrics_2026",
+					Bounds:      "FOR VALUES FROM ('2026-01-01') TO ('2027-01-01')",
+					PartitionBy: &ir.PartitionSpec{Strategy: "LIST", Columns: []string{"channel"}},
+					Partitions: []*ir.Partition{
+						{Name: "metrics_2026_web", Bounds: "FOR VALUES IN ('web')"},
+						{Name: "metrics_2026_other", Bounds: "FOR VALUES IN ('mobile', 'api')"},
+					},
+				},
+			},
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Only the new leaf should be created — the existing "metrics_2026" and
+	// "metrics_2026_web" partitions must NOT be dropped/recreated.
+	want := `CREATE TABLE "public"."metrics_2026_other" PARTITION OF "public"."metrics_2026" FOR VALUES IN ('mobile', 'api');`
+	if !containsSQL(ops, want) {
+		t.Errorf("expected exact new-leaf CREATE statement %q, got: %v", want, sqlList(ops))
+	}
+	if containsSQL(ops, `DROP TABLE "public"."metrics_2026"`) {
+		t.Errorf("existing sub-partitioned parent should not be dropped, got: %v", sqlList(ops))
+	}
+	if containsSQL(ops, `DROP TABLE "public"."metrics_2026_web"`) {
+		t.Errorf("existing leaf should not be dropped, got: %v", sqlList(ops))
+	}
+}
+
+// TestDiffSubPartitionStrategyChangedIsManual mirrors
+// TestDiffPartitionStrategyChangedIsManual one level down: a sub-partition's
+// OWN PARTITION BY strategy also cannot be altered in place.
+func TestDiffSubPartitionStrategyChangedIsManual(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.metrics", &snapshot.SnapObject{
+		Kind: "table",
+		Table: &snapshot.SnapTable{
+			Schema:      "public",
+			Name:        "metrics",
+			PartitionBy: "RANGE (created_at)",
+			Columns:     []snapshot.SnapColumn{{Name: "id", Type: "bigint"}},
+			Partitions: []snapshot.SnapPartition{
+				{
+					Schema:      "public",
+					Name:        "metrics_2026",
+					Bound:       "FOR VALUES FROM ('2026-01-01') TO ('2027-01-01')",
+					PartitionBy: "LIST (channel)",
+				},
+			},
+		},
+	})
+	desired := []pipeline.IRObject{
+		&ir.Table{
+			Schema:      "public",
+			Name:        "metrics",
+			PartitionBy: &ir.PartitionSpec{Strategy: "RANGE", Columns: []string{"created_at"}},
+			Columns:     []*ir.Column{{Name: "id", Type: ir.TypeRef{Name: "bigint"}}},
+			Partitions: []*ir.Partition{
+				{
+					Name:        "metrics_2026",
+					Bounds:      "FOR VALUES FROM ('2026-01-01') TO ('2027-01-01')",
+					PartitionBy: &ir.PartitionSpec{Strategy: "HASH", Columns: []string{"id"}},
+				},
+			},
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hasManual := false
+	for _, o := range ops {
+		if o.Safety() == pipeline.Manual {
+			hasManual = true
+		}
+	}
+	if !hasManual {
+		t.Errorf("expected a Manual op for sub-partition strategy change, got: %v", sqlList(ops))
+	}
+	if containsSQL(ops, "DROP TABLE") {
+		t.Errorf("strategy change should not auto-drop, got: %v", sqlList(ops))
 	}
 }
 
@@ -5375,7 +6343,7 @@ func TestDiffDefaultPrivilegesGrantAdded(t *testing.T) {
 		ObjectType: "TABLES",
 		Grants:     []snapshot.SnapGrant{{Privileges: []string{"SELECT"}, Roles: []string{"app_readonly"}}},
 	}
-	_ = snap.SetObject("DEFAULT PRIVILEGES", &snapshot.SnapObject{
+	_ = snap.SetObject("DEFAULT PRIVILEGES TABLES", &snapshot.SnapObject{
 		Kind:              "default_privileges",
 		DefaultPrivileges: dp,
 	})
@@ -5410,7 +6378,7 @@ func TestDiffDefaultPrivilegesGrantRemoved(t *testing.T) {
 			{Privileges: []string{"INSERT"}, Roles: []string{"app_writer"}},
 		},
 	}
-	_ = snap.SetObject("DEFAULT PRIVILEGES", &snapshot.SnapObject{
+	_ = snap.SetObject("DEFAULT PRIVILEGES TABLES", &snapshot.SnapObject{
 		Kind:              "default_privileges",
 		DefaultPrivileges: dp,
 	})
@@ -5427,6 +6395,9 @@ func TestDiffDefaultPrivilegesGrantRemoved(t *testing.T) {
 	if !containsSQL(ops, "REVOKE INSERT") || !containsSQL(ops, "app_writer") {
 		t.Errorf("expected REVOKE for removed grant, got: %v", sqlList(ops))
 	}
+	if containsSQL(ops, "REVOKE SELECT") {
+		t.Errorf("unchanged SELECT grant should not be revoked, got: %v", sqlList(ops))
+	}
 }
 
 func TestDiffDefaultPrivilegesUnchangedIsNoop(t *testing.T) {
@@ -5436,7 +6407,7 @@ func TestDiffDefaultPrivilegesUnchangedIsNoop(t *testing.T) {
 		ObjectType: "TABLES",
 		Grants:     []snapshot.SnapGrant{{Privileges: []string{"SELECT"}, Roles: []string{"app_readonly"}}},
 	}
-	_ = snap.SetObject("DEFAULT PRIVILEGES", &snapshot.SnapObject{
+	_ = snap.SetObject("DEFAULT PRIVILEGES TABLES", &snapshot.SnapObject{
 		Kind:              "default_privileges",
 		DefaultPrivileges: dp,
 	})
@@ -5636,6 +6607,81 @@ func TestDiffCollationNoSpuriousBodyDrift(t *testing.T) {
 	}
 }
 
+// TestCommentOnOpaqueSQL guards a real bug found live-testing a demo
+// project: PostgreSQL genuinely supports COMMENT ON for all 14 of these
+// opaque kinds (confirmed via \h COMMENT against a real server), but the
+// blockparser's generic { COMMENT '...'; } was silently discarded for
+// every one of them — 9 had no Comment field at all, and the other 5
+// (tablespace/fdw/server/ts_config/ts_dict) captured it but never emitted
+// it anywhere. Table-driven across all 14 kinds, exercising every distinct
+// identity shape dropObject already established: plain quoteIdent
+// (tablespace/fdw/server/event_trigger), qualIdent (collation/statistics/
+// the 4 TS kinds), and the 3 kinds with non-trivial COMMENT ON syntax
+// (operator's operand-type suffix, operator class/family's USING method,
+// cast's parenthesized source/target pair — none of which are simple
+// identifiers).
+func TestCommentOnOpaqueSQL(t *testing.T) {
+	comment := "a comment"
+	cases := []struct {
+		name                               string
+		kind, schema, objName, args, using string
+		want                               string
+	}{
+		{"tablespace", "tablespace", "", "fast_ssd", "", "", `COMMENT ON TABLESPACE "fast_ssd" IS 'a comment';`},
+		{"fdw", "fdw", "", "my_fdw", "", "", `COMMENT ON FOREIGN DATA WRAPPER "my_fdw" IS 'a comment';`},
+		{"server", "server", "", "my_srv", "", "", `COMMENT ON SERVER "my_srv" IS 'a comment';`},
+		{"publication", "publication", "", "order_changes", "", "", `COMMENT ON PUBLICATION "order_changes" IS 'a comment';`},
+		{"event_trigger", "event_trigger", "", "log_ddl", "", "", `COMMENT ON EVENT TRIGGER "log_ddl" IS 'a comment';`},
+		{"collation", "collation", "public", "case_insensitive", "", "", `COMMENT ON COLLATION "public"."case_insensitive" IS 'a comment';`},
+		{"operator", "operator", "public", "<<<", "order_status, order_status", "", `COMMENT ON OPERATOR "public".<<<(order_status, order_status) IS 'a comment';`},
+		{"operator_class", "operator_class", "public", "text_ci_ops", "", "btree", `COMMENT ON OPERATOR CLASS "public"."text_ci_ops" USING btree IS 'a comment';`},
+		{"operator_family", "operator_family", "public", "text_ci_ops", "", "btree", `COMMENT ON OPERATOR FAMILY "public"."text_ci_ops" USING btree IS 'a comment';`},
+		{"cast", "cast", "", "order_status->integer", "", "", `COMMENT ON CAST (order_status AS integer) IS 'a comment';`},
+		{"statistics", "statistics", "public", "orders_stats", "", "", `COMMENT ON STATISTICS "public"."orders_stats" IS 'a comment';`},
+		{"ts_config", "ts_config", "public", "my_cfg", "", "", `COMMENT ON TEXT SEARCH CONFIGURATION "public"."my_cfg" IS 'a comment';`},
+		{"ts_dict", "ts_dict", "public", "my_dict", "", "", `COMMENT ON TEXT SEARCH DICTIONARY "public"."my_dict" IS 'a comment';`},
+		{"ts_parser", "ts_parser", "public", "my_prs", "", "", `COMMENT ON TEXT SEARCH PARSER "public"."my_prs" IS 'a comment';`},
+		{"ts_template", "ts_template", "public", "my_tmpl", "", "", `COMMENT ON TEXT SEARCH TEMPLATE "public"."my_tmpl" IS 'a comment';`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := commentOnOpaqueSQL(tc.kind, tc.schema, tc.objName, tc.args, tc.using, &comment)
+			if got != tc.want {
+				t.Errorf("got %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestCommentOnOpaqueSQLNull guards the comment-removal case (comment set
+// to nil emits IS NULL, not an empty/quoted string).
+func TestCommentOnOpaqueSQLNull(t *testing.T) {
+	got := commentOnOpaqueSQL("statistics", "public", "orders_stats", "", "", nil)
+	want := `COMMENT ON STATISTICS "public"."orders_stats" IS NULL;`
+	if got != want {
+		t.Errorf("got %q, want %q", got, want)
+	}
+}
+
+// TestCommentOnOpaqueSQLUnknownKind guards user_mapping and subscription
+// (both genuinely have no Comment field/COMMENT ON support at the DPG
+// level) and any other unrecognized kind: must return "", not a malformed
+// statement — appendCommentOp relies on this to silently skip kinds that
+// don't support COMMENT ON at all. Publication used to be the canonical
+// example here (it had no Comment field), until it was found live-testing
+// a demo project that real PostgreSQL genuinely supports
+// COMMENT ON PUBLICATION (confirmed via \h COMMENT) — see
+// TestCommentOnOpaqueSQL's "publication" case for its now-real support.
+func TestCommentOnOpaqueSQLUnknownKind(t *testing.T) {
+	comment := "x"
+	if got := commentOnOpaqueSQL("user_mapping", "", "alice@my_srv", "", "", &comment); got != "" {
+		t.Errorf("got %q, want empty string for user_mapping (no Comment field)", got)
+	}
+	if got := commentOnOpaqueSQL("nonexistent_kind", "", "whatever", "", "", &comment); got != "" {
+		t.Errorf("got %q, want empty string for a genuinely unrecognized kind", got)
+	}
+}
+
 func TestDiffStatisticsNoSpuriousBodyDrift(t *testing.T) {
 	d := New()
 	snap := &pipeline.Snapshot{}
@@ -5653,6 +6699,163 @@ func TestDiffStatisticsNoSpuriousBodyDrift(t *testing.T) {
 	}
 	if len(ops) != 0 {
 		t.Fatalf("spurious drift for equivalent statistics spelling: %d ops: %v", len(ops), ops)
+	}
+}
+
+// TestCreateStatisticsEmitsCommentAfterCreate guards the CREATE-time half of
+// the comment fix through the real Diff() pipeline (not just the SQL-string
+// helper): a brand-new opaque object with Comment set must get both the
+// CREATE and a following COMMENT ON, in that order (COMMENT ON a
+// not-yet-existing object would itself error).
+// TestCreatePublicationEmitsCommentAfterCreate and
+// TestDiffPublicationCommentOnlyChangeNoDestroy guard the real gap found
+// live-testing a demo project: ir.Publication had no Comment field at all,
+// despite real PostgreSQL genuinely supporting COMMENT ON PUBLICATION
+// (confirmed live via \h COMMENT) — Publication was excluded from the
+// original 14-kind Comment/Grant fix on the mistaken assumption that it
+// didn't apply.
+func TestCreatePublicationEmitsCommentAfterCreate(t *testing.T) {
+	d := New()
+	comment := "large order inserts"
+	desired := []pipeline.IRObject{
+		&ir.Publication{
+			Name:    "order_changes",
+			Body:    "CREATE PUBLICATION order_changes FOR ALL TABLES",
+			Comment: &comment,
+		},
+	}
+	ops, err := d.Diff(desired, &pipeline.Snapshot{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ops) != 2 {
+		t.Fatalf("expected 2 ops (CREATE + COMMENT), got %d: %v", len(ops), sqlList(ops))
+	}
+	if !strings.Contains(ops[0].SQL(), "CREATE PUBLICATION") {
+		t.Errorf("expected CREATE PUBLICATION first, got: %s", ops[0].SQL())
+	}
+	want := `COMMENT ON PUBLICATION "order_changes" IS 'large order inserts';`
+	if ops[1].SQL() != want {
+		t.Errorf("got %q, want %q", ops[1].SQL(), want)
+	}
+}
+
+func TestDiffPublicationCommentOnlyChangeNoDestroy(t *testing.T) {
+	d := New()
+	oldComment := "old comment"
+	newComment := "new comment"
+	body := "CREATE PUBLICATION order_changes FOR ALL TABLES"
+	snap := &pipeline.Snapshot{}
+	if err := snapshot.Populate(snap, []pipeline.IRObject{
+		&ir.Publication{Name: "order_changes", Body: body, Comment: &oldComment},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	desired := []pipeline.IRObject{
+		&ir.Publication{Name: "order_changes", Body: body, Comment: &newComment},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ops) != 1 {
+		t.Fatalf("expected exactly 1 op (COMMENT ON only), got %d: %v", len(ops), sqlList(ops))
+	}
+	want := `COMMENT ON PUBLICATION "order_changes" IS 'new comment';`
+	if ops[0].SQL() != want {
+		t.Errorf("got %q, want %q", ops[0].SQL(), want)
+	}
+}
+
+func TestCreateStatisticsEmitsCommentAfterCreate(t *testing.T) {
+	d := New()
+	comment := "order status correlation"
+	desired := []pipeline.IRObject{
+		&ir.StatisticsObject{
+			Schema: "public", Name: "orders_stats",
+			Body:    "CREATE STATISTICS public.orders_stats ON a, b FROM orders",
+			Comment: &comment,
+		},
+	}
+	ops, err := d.Diff(desired, &pipeline.Snapshot{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ops) != 2 {
+		t.Fatalf("expected 2 ops (CREATE + COMMENT), got %d: %v", len(ops), sqlList(ops))
+	}
+	if !strings.Contains(ops[0].SQL(), "CREATE STATISTICS") {
+		t.Errorf("expected CREATE STATISTICS first, got: %s", ops[0].SQL())
+	}
+	want := `COMMENT ON STATISTICS "public"."orders_stats" IS 'order status correlation';`
+	if ops[1].SQL() != want {
+		t.Errorf("got %q, want %q", ops[1].SQL(), want)
+	}
+}
+
+// TestDiffOpaqueCommentOnlyChangeNoDestroy guards the UPDATE-time half: a
+// comment-only edit (body unchanged) must emit a bare COMMENT ON, never the
+// DROP+CREATE a real body change requires — needlessly dropping and
+// recreating a STATISTICS object (or worse, a COLLATION/OPERATOR CLASS)
+// just to change its comment would be actively destructive for no reason.
+func TestDiffOpaqueCommentOnlyChangeNoDestroy(t *testing.T) {
+	d := New()
+	oldComment := "old comment"
+	newComment := "new comment"
+	body := "CREATE STATISTICS public.orders_stats ON a, b FROM orders"
+	snap := &pipeline.Snapshot{}
+	if err := snapshot.Populate(snap, []pipeline.IRObject{
+		&ir.StatisticsObject{Schema: "public", Name: "orders_stats", Body: body, Comment: &oldComment},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	desired := []pipeline.IRObject{
+		&ir.StatisticsObject{Schema: "public", Name: "orders_stats", Body: body, Comment: &newComment},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ops) != 1 {
+		t.Fatalf("expected exactly 1 op (COMMENT ON only), got %d: %v", len(ops), sqlList(ops))
+	}
+	for _, o := range ops {
+		if strings.Contains(o.SQL(), "DROP") || strings.Contains(o.SQL(), "CREATE STATISTICS") {
+			t.Errorf("comment-only change must not DROP/CREATE, got: %s", o.SQL())
+		}
+	}
+	want := `COMMENT ON STATISTICS "public"."orders_stats" IS 'new comment';`
+	if ops[0].SQL() != want {
+		t.Errorf("got %q, want %q", ops[0].SQL(), want)
+	}
+}
+
+// TestDiffOpaqueCommentRemovalEmitsNull guards removing a comment entirely
+// (desired.Comment nil, snapshot had one set) — must emit IS NULL, and must
+// not be silently skipped just because the new value is nil.
+func TestDiffOpaqueCommentRemovalEmitsNull(t *testing.T) {
+	d := New()
+	oldComment := "old comment"
+	body := "CREATE STATISTICS public.orders_stats ON a, b FROM orders"
+	snap := &pipeline.Snapshot{}
+	if err := snapshot.Populate(snap, []pipeline.IRObject{
+		&ir.StatisticsObject{Schema: "public", Name: "orders_stats", Body: body, Comment: &oldComment},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	desired := []pipeline.IRObject{
+		&ir.StatisticsObject{Schema: "public", Name: "orders_stats", Body: body}, // Comment nil
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ops) != 1 {
+		t.Fatalf("expected exactly 1 op, got %d: %v", len(ops), sqlList(ops))
+	}
+	want := `COMMENT ON STATISTICS "public"."orders_stats" IS NULL;`
+	if ops[0].SQL() != want {
+		t.Errorf("got %q, want %q", ops[0].SQL(), want)
 	}
 }
 
@@ -6328,6 +7531,11 @@ func TestDiffOpaqueOfflineEditEmitsStructuredDropRecreate(t *testing.T) {
 			newObj:         &ir.Tablespace{Name: "ts", Body: "CREATE TABLESPACE ts LOCATION '/data/ts2'"},
 			wantDropSubstr: `DROP TABLESPACE IF EXISTS "ts";`,
 			wantNewInBody:  "/data/ts2",
+			// Manual (non-transactional), not Safe like every other opaque
+			// kind: CREATE TABLESPACE cannot run inside a transaction block
+			// (confirmed live: "ERROR: CREATE TABLESPACE cannot run inside
+			// a transaction block") — see createOpaque's doc comment.
+			wantCreateSafety: pipeline.Manual,
 		},
 		{
 			name:           "fdw",
@@ -6485,6 +7693,177 @@ func TestDiffOpaqueOfflineEditEmitsStructuredDropRecreate(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// ── TSConfig MAPPING FOR (RFC §12.1) ──────────────────────────────────────────
+// tc.Mappings was parsed by the blockparser and copied onto ir.TSConfig by
+// the builder, but never read by the differ at all — a declared MAPPING FOR
+// entry silently produced no ALTER TEXT SEARCH CONFIGURATION statement
+// whatsoever, found live-testing a demo project.
+
+func TestDiffCreateTSConfigEmitsMapping(t *testing.T) {
+	d := New()
+	desired := []pipeline.IRObject{
+		&ir.TSConfig{
+			Schema: "public", Name: "demo_search",
+			ParserSchema: "pg_catalog", ParserName: "default",
+			Body: "CREATE TEXT SEARCH CONFIGURATION public.demo_search (PARSER = pg_catalog.default)",
+			Mappings: []pipeline.TSMappingDef{
+				{TokenTypes: []string{"word", "hword"}, Dictionaries: []pipeline.Identifier{{Name: "english_stem"}}},
+			},
+		},
+	}
+	ops, err := d.Diff(desired, &pipeline.Snapshot{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := `ALTER TEXT SEARCH CONFIGURATION "public"."demo_search" ALTER MAPPING FOR word, hword WITH english_stem;`
+	if !containsSQL(ops, want) {
+		t.Errorf("expected %q, got: %v", want, sqlList(ops))
+	}
+}
+
+// TestDiffCreateTSConfigEmitsMappingFallbackChain guards the real
+// multi-dictionary PG feature (WITH dict1, dict2 — a fallback chain).
+func TestDiffCreateTSConfigEmitsMappingFallbackChain(t *testing.T) {
+	d := New()
+	desired := []pipeline.IRObject{
+		&ir.TSConfig{
+			Schema: "public", Name: "demo_search",
+			ParserSchema: "pg_catalog", ParserName: "default",
+			Body: "CREATE TEXT SEARCH CONFIGURATION public.demo_search (PARSER = pg_catalog.default)",
+			Mappings: []pipeline.TSMappingDef{
+				{TokenTypes: []string{"word"}, Dictionaries: []pipeline.Identifier{{Name: "unaccent"}, {Name: "english_stem"}}},
+			},
+		},
+	}
+	ops, err := d.Diff(desired, &pipeline.Snapshot{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := `ALTER TEXT SEARCH CONFIGURATION "public"."demo_search" ALTER MAPPING FOR word WITH unaccent, english_stem;`
+	if !containsSQL(ops, want) {
+		t.Errorf("expected %q, got: %v", want, sqlList(ops))
+	}
+}
+
+func snapTSConfig(schema, name string, mappings []snapshot.SnapTSMapping) *pipeline.Snapshot {
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject(schema+"."+name, &snapshot.SnapObject{
+		Kind: "ts_config",
+		Opaque: &snapshot.SnapOpaque{
+			Kind: "ts_config", Schema: schema, Name: name,
+			BodyHash: "", // Reconstructed-equivalent: no body-hash comparison
+			Mappings: mappings,
+		},
+	})
+	return snap
+}
+
+// TestDiffTSConfigMappingAdded guards the diff-existing-config path (not
+// just create): adding a MAPPING FOR entry to an already-applied config.
+func TestDiffTSConfigMappingAdded(t *testing.T) {
+	d := New()
+	snap := snapTSConfig("public", "demo_search", nil)
+	desired := []pipeline.IRObject{
+		&ir.TSConfig{
+			Schema: "public", Name: "demo_search",
+			ParserSchema: "pg_catalog", ParserName: "default",
+			Reconstructed: true, // skip body-hash recreate; only diffing mappings here
+			Mappings: []pipeline.TSMappingDef{
+				{TokenTypes: []string{"word"}, Dictionaries: []pipeline.Identifier{{Name: "english_stem"}}},
+			},
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := `ALTER TEXT SEARCH CONFIGURATION "public"."demo_search" ALTER MAPPING FOR word WITH english_stem;`
+	if !containsSQL(ops, want) {
+		t.Errorf("expected %q, got: %v", want, sqlList(ops))
+	}
+}
+
+// TestDiffTSConfigMappingChanged guards changing an existing token type's
+// dictionary chain.
+func TestDiffTSConfigMappingChanged(t *testing.T) {
+	d := New()
+	snap := snapTSConfig("public", "demo_search", []snapshot.SnapTSMapping{
+		{TokenTypes: []string{"word"}, Dictionaries: []string{"simple"}},
+	})
+	desired := []pipeline.IRObject{
+		&ir.TSConfig{
+			Schema: "public", Name: "demo_search",
+			ParserSchema: "pg_catalog", ParserName: "default",
+			Reconstructed: true,
+			Mappings: []pipeline.TSMappingDef{
+				{TokenTypes: []string{"word"}, Dictionaries: []pipeline.Identifier{{Name: "english_stem"}}},
+			},
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := `ALTER TEXT SEARCH CONFIGURATION "public"."demo_search" ALTER MAPPING FOR word WITH english_stem;`
+	if !containsSQL(ops, want) {
+		t.Errorf("expected %q, got: %v", want, sqlList(ops))
+	}
+}
+
+// TestDiffTSConfigMappingRemoved guards the removal path: DROP MAPPING FOR.
+func TestDiffTSConfigMappingRemoved(t *testing.T) {
+	d := New()
+	snap := snapTSConfig("public", "demo_search", []snapshot.SnapTSMapping{
+		{TokenTypes: []string{"word"}, Dictionaries: []string{"english_stem"}},
+	})
+	desired := []pipeline.IRObject{
+		&ir.TSConfig{
+			Schema: "public", Name: "demo_search",
+			ParserSchema: "pg_catalog", ParserName: "default",
+			Reconstructed: true,
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := `ALTER TEXT SEARCH CONFIGURATION "public"."demo_search" DROP MAPPING FOR word;`
+	if !containsSQL(ops, want) {
+		t.Errorf("expected %q, got: %v", want, sqlList(ops))
+	}
+}
+
+// TestDiffTSConfigMappingUnchangedIsNoop is the negative case: identical
+// mappings (even if grouped differently across MAPPING FOR entries in
+// source vs the flattened snapshot) must not produce a spurious ALTER on
+// every plan.
+func TestDiffTSConfigMappingUnchangedIsNoop(t *testing.T) {
+	d := New()
+	snap := snapTSConfig("public", "demo_search", []snapshot.SnapTSMapping{
+		{TokenTypes: []string{"word", "hword"}, Dictionaries: []string{"english_stem"}},
+	})
+	desired := []pipeline.IRObject{
+		&ir.TSConfig{
+			Schema: "public", Name: "demo_search",
+			ParserSchema: "pg_catalog", ParserName: "default",
+			Reconstructed: true,
+			Mappings: []pipeline.TSMappingDef{
+				// Declared as two separate entries covering the same token
+				// types with the same dictionary — must flatten identically.
+				{TokenTypes: []string{"word"}, Dictionaries: []pipeline.Identifier{{Name: "english_stem"}}},
+				{TokenTypes: []string{"hword"}, Dictionaries: []pipeline.Identifier{{Name: "english_stem"}}},
+			},
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if containsSQL(ops, "MAPPING") {
+		t.Errorf("expected no MAPPING ops for unchanged mappings, got: %v", sqlList(ops))
 	}
 }
 
@@ -6947,6 +8326,230 @@ func TestDiffProcedureCommentAdded(t *testing.T) {
 	}
 }
 
+// ── FUNCTION/PROCEDURE Revocations (RFC §11.3) ────────────────────────────────
+// Regression guard for a real bug found live-testing REVOCATIONS against a
+// demo project: ir.Function/ir.Procedure had no Revocations field at all, so
+// a declared REVOCATIONS block was parsed but silently dropped everywhere
+// downstream (build, snapshot, diff, dump) — only the GRANT half ever took
+// effect. Mirrors the Table/View Revocations test suite above.
+
+func TestDiffCreateProcedureEmitsRevocation(t *testing.T) {
+	d := New()
+	desired := []pipeline.IRObject{
+		&ir.Procedure{
+			Schema:      "public",
+			Name:        "recalc_totals",
+			Args:        []ir.FuncArg{{Type: ir.TypeRef{Name: "integer"}}},
+			Attrs:       ir.FuncAttrs{Language: "plpgsql", Body: "BEGIN NULL; END;"},
+			BodyHash:    ir.HashBody("BEGIN NULL; END;"),
+			Revocations: []ir.Revocation{{Privileges: []string{"EXECUTE"}, Roles: []string{"PUBLIC"}}},
+		},
+	}
+	ops, err := d.Diff(desired, &pipeline.Snapshot{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsSQL(ops, "REVOKE EXECUTE ON PROCEDURE") {
+		t.Errorf("expected REVOKE EXECUTE ON PROCEDURE at create time, got: %v", sqlList(ops))
+	}
+	if containsSQL(ops, `"PUBLIC"`) {
+		t.Errorf("PUBLIC must not be quoted, got: %v", sqlList(ops))
+	}
+}
+
+func TestDiffProcedureRevocationAdded(t *testing.T) {
+	d := New()
+	body := "BEGIN NULL; END;"
+	hash := ir.HashBody(body)
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.recalc_totals(integer)", &snapshot.SnapObject{
+		Kind: "procedure",
+		Opaque: &snapshot.SnapOpaque{
+			Kind: "procedure", Schema: "public", Name: "recalc_totals", Args: "integer", BodyHash: hash,
+		},
+	})
+	desired := []pipeline.IRObject{
+		&ir.Procedure{
+			Schema:      "public",
+			Name:        "recalc_totals",
+			Args:        []ir.FuncArg{{Type: ir.TypeRef{Name: "integer"}}},
+			Attrs:       ir.FuncAttrs{Language: "plpgsql", Body: body},
+			BodyHash:    hash,
+			Revocations: []ir.Revocation{{Privileges: []string{"EXECUTE"}, Roles: []string{"PUBLIC"}}},
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var found bool
+	for _, o := range ops {
+		if strings.Contains(o.SQL(), "REVOKE EXECUTE ON PROCEDURE") {
+			found = true
+			if o.Safety() != pipeline.Caution {
+				t.Errorf("explicit revocation safety = %v, want Caution: %s", o.Safety(), o.SQL())
+			}
+		}
+	}
+	if !found {
+		t.Errorf("expected REVOKE EXECUTE ON PROCEDURE, got: %v", sqlList(ops))
+	}
+}
+
+func TestDiffProcedureRevocationRemoved(t *testing.T) {
+	d := New()
+	body := "BEGIN NULL; END;"
+	hash := ir.HashBody(body)
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.recalc_totals(integer)", &snapshot.SnapObject{
+		Kind: "procedure",
+		Opaque: &snapshot.SnapOpaque{
+			Kind: "procedure", Schema: "public", Name: "recalc_totals", Args: "integer", BodyHash: hash,
+			Revocations: []snapshot.SnapGrant{{Privileges: []string{"EXECUTE"}, Roles: []string{"PUBLIC"}}},
+		},
+	})
+	desired := []pipeline.IRObject{
+		&ir.Procedure{
+			Schema:   "public",
+			Name:     "recalc_totals",
+			Args:     []ir.FuncArg{{Type: ir.TypeRef{Name: "integer"}}},
+			Attrs:    ir.FuncAttrs{Language: "plpgsql", Body: body},
+			BodyHash: hash,
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsSQL(ops, "GRANT EXECUTE ON PROCEDURE") {
+		t.Errorf("expected GRANT EXECUTE ON PROCEDURE to restore the revoked privilege, got: %v", sqlList(ops))
+	}
+	if containsSQL(ops, "REVOKE") {
+		t.Errorf("must not also emit REVOKE when the revocation itself was removed: %v", sqlList(ops))
+	}
+}
+
+func TestDiffProcedureRevocationUnchangedIsNoop(t *testing.T) {
+	d := New()
+	body := "BEGIN NULL; END;"
+	hash := ir.HashBody(body)
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.recalc_totals(integer)", &snapshot.SnapObject{
+		Kind: "procedure",
+		Opaque: &snapshot.SnapOpaque{
+			Kind: "procedure", Schema: "public", Name: "recalc_totals", Args: "integer", BodyHash: hash,
+			Revocations: []snapshot.SnapGrant{{Privileges: []string{"EXECUTE"}, Roles: []string{"PUBLIC"}}},
+		},
+	})
+	desired := []pipeline.IRObject{
+		&ir.Procedure{
+			Schema:      "public",
+			Name:        "recalc_totals",
+			Args:        []ir.FuncArg{{Type: ir.TypeRef{Name: "integer"}}},
+			Attrs:       ir.FuncAttrs{Language: "plpgsql", Body: body},
+			BodyHash:    hash,
+			Revocations: []ir.Revocation{{Privileges: []string{"EXECUTE"}, Roles: []string{"PUBLIC"}}},
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if containsSQL(ops, "GRANT") || containsSQL(ops, "REVOKE") {
+		t.Errorf("expected no GRANT/REVOKE for unchanged revocation, got: %v", sqlList(ops))
+	}
+}
+
+func TestDiffCreateFunctionEmitsRevocation(t *testing.T) {
+	d := New()
+	desired := []pipeline.IRObject{
+		&ir.Function{
+			Schema:      "public",
+			Name:        "do_work",
+			ReturnType:  ir.TypeRef{Name: "void"},
+			BodyHash:    "h",
+			Attrs:       ir.FuncAttrs{Language: "plpgsql", Body: "BEGIN END;"},
+			Revocations: []ir.Revocation{{Privileges: []string{"EXECUTE"}, Roles: []string{"PUBLIC"}}},
+		},
+	}
+	ops, err := d.Diff(desired, &pipeline.Snapshot{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsSQL(ops, "REVOKE EXECUTE ON FUNCTION") {
+		t.Errorf("expected REVOKE EXECUTE ON FUNCTION at create time, got: %v", sqlList(ops))
+	}
+}
+
+func TestDiffFunctionRevocationAdded(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.get_user()", &snapshot.SnapObject{
+		Kind: "function",
+		Function: &snapshot.SnapFunction{
+			Schema:     "public",
+			Name:       "get_user",
+			ReturnType: "void",
+			Language:   "plpgsql",
+			Volatility: "VOLATILE",
+			BodyHash:   "abc",
+		},
+	})
+	desired := []pipeline.IRObject{
+		&ir.Function{
+			Schema:      "public",
+			Name:        "get_user",
+			ReturnType:  ir.TypeRef{Name: "void"},
+			BodyHash:    "abc",
+			Attrs:       ir.FuncAttrs{Language: "plpgsql", Volatility: "VOLATILE", Body: "BEGIN END;"},
+			Revocations: []ir.Revocation{{Privileges: []string{"EXECUTE"}, Roles: []string{"PUBLIC"}}},
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsSQL(ops, "REVOKE EXECUTE ON FUNCTION") {
+		t.Errorf("expected REVOKE EXECUTE ON FUNCTION, got: %v", sqlList(ops))
+	}
+}
+
+func TestDiffFunctionRevocationRemoved(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.get_user()", &snapshot.SnapObject{
+		Kind: "function",
+		Function: &snapshot.SnapFunction{
+			Schema:      "public",
+			Name:        "get_user",
+			ReturnType:  "void",
+			Language:    "plpgsql",
+			Volatility:  "VOLATILE",
+			BodyHash:    "abc",
+			Revocations: []snapshot.SnapGrant{{Privileges: []string{"EXECUTE"}, Roles: []string{"PUBLIC"}}},
+		},
+	})
+	desired := []pipeline.IRObject{
+		&ir.Function{
+			Schema:     "public",
+			Name:       "get_user",
+			ReturnType: ir.TypeRef{Name: "void"},
+			BodyHash:   "abc",
+			Attrs:      ir.FuncAttrs{Language: "plpgsql", Volatility: "VOLATILE", Body: "BEGIN END;"},
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsSQL(ops, "GRANT EXECUTE ON FUNCTION") {
+		t.Errorf("expected GRANT EXECUTE ON FUNCTION to restore the revoked privilege, got: %v", sqlList(ops))
+	}
+	if containsSQL(ops, "REVOKE") {
+		t.Errorf("must not also emit REVOKE when the revocation itself was removed: %v", sqlList(ops))
+	}
+}
+
 // ── Table-level policy + grant emission at CREATE time ───────────────────────
 // createPolicy and tableGrantOp (used for a GRANT declared inline on a new
 // table) had zero unit coverage — only proven live via integration tests.
@@ -6976,6 +8579,33 @@ func TestDiffCreateTableWithPolicyAndGrant(t *testing.T) {
 	}
 	if !containsSQL(ops, "GRANT SELECT") || !containsSQL(ops, "app_readonly") {
 		t.Errorf("expected inline GRANT on new table, got: %v", sqlList(ops))
+	}
+}
+
+// TestDiffCreatePolicyToPublicNotQuoted is createPolicy's PUBLIC-role
+// sibling: a POLICY's TO clause used its own inline quoting loop (not
+// roleList), carrying the same bug — PUBLIC must render bare.
+func TestDiffCreatePolicyToPublicNotQuoted(t *testing.T) {
+	d := New()
+	desired := []pipeline.IRObject{
+		&ir.Table{
+			Schema:  "public",
+			Name:    "t",
+			Columns: []*ir.Column{{Name: "id", Type: ir.TypeRef{Name: "integer"}}},
+			Policies: []*ir.Policy{
+				{Name: "p_all", Permissive: true, Command: "SELECT", Roles: []string{"PUBLIC"}},
+			},
+		},
+	}
+	ops, err := d.Diff(desired, &pipeline.Snapshot{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsSQL(ops, "TO PUBLIC") {
+		t.Errorf("expected unquoted TO PUBLIC, got: %v", sqlList(ops))
+	}
+	if containsSQL(ops, `"PUBLIC"`) {
+		t.Errorf("PUBLIC must not be quoted, got: %v", sqlList(ops))
 	}
 }
 

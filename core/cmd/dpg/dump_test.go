@@ -14,6 +14,498 @@ import (
 	"github.com/dullkingsman/dpg/internal/pipeline"
 )
 
+// TestRenderIndexUsingMethodCompiles guards a real bug found live-testing a
+// demo project: the RFC's ABNF and every one of its worked examples
+// (rfc/dpg-1.md §7.7, e.g. "idx_location USING gist (location);") place
+// USING before the column list, matching real PostgreSQL's own
+// CREATE INDEX ... USING method (columns) order — but the blockparser used
+// to accept USING only AFTER the columns, silently rejecting the RFC's own
+// syntax. This guards both halves of the round-trip: renderIndex must emit
+// USING before the columns (matching the parser's corrected grammar), and
+// the result must actually recompile.
+func TestRenderIndexUsingMethodCompiles(t *testing.T) {
+	fmtOpts := format.Options{IndentSize: 4, KeywordCase: "upper"}
+	tbl := &ir.Table{
+		Schema: "public", Name: "t",
+		Columns: []*ir.Column{{Name: "tags", Type: ir.TypeRef{Name: "jsonb"}}},
+		Indexes: []*ir.Index{
+			{Name: "t_tags_gin", Method: "gin", Columns: []pipeline.IndexColumn{{Name: "tags"}}},
+		},
+	}
+
+	var b strings.Builder
+	renderObjectDPG(&b, tbl, fmtOpts)
+	rendered := b.String()
+
+	if !strings.Contains(rendered, "USING gin (") {
+		t.Errorf("rendered index does not place USING before the column list: %q", rendered)
+	}
+
+	dir := t.TempDir()
+	f := filepath.Join(dir, "objects.dpg")
+	if err := os.WriteFile(f, []byte(rendered), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := compiler.Compile([]string{f}, dir, pipeline.Default); err != nil {
+		t.Fatalf("dumped table with a USING-method index failed to recompile: %v\n---\n%s", err, rendered)
+	}
+}
+
+// TestRenderIndexUniqueConcurrentlyPrefixCompiles guards the CONCURRENTLY
+// grammar fix: real PostgreSQL's CONCURRENTLY is a bare presence keyword
+// (CREATE [UNIQUE] INDEX [CONCURRENTLY] name), never a boolean toggle — DPG
+// used to accept a trailing "CONCURRENTLY <bool>;" clause with no PG
+// equivalent. renderIndex must emit both UNIQUE and CONCURRENTLY as prefix
+// keywords before the name, in that order, matching real PG exactly, and
+// the result must recompile.
+// TestRenderForeignTableCompiles guards a real bug found live-testing a
+// demo project: renderObjectDPG's *ir.Table case hardcoded the "TABLE"
+// keyword regardless of Foreign, and never emitted SERVER/OPTIONS at all —
+// dump would silently turn a foreign table into a (broken, unrecompilable)
+// plain table declaration. Also covers Unlogged's keyword, found broken the
+// same way while fixing this.
+func TestRenderForeignTableCompiles(t *testing.T) {
+	fmtOpts := format.Options{IndentSize: 4, KeywordCase: "upper"}
+	server := "loopback_server"
+	tbl := &ir.Table{
+		Schema: "public", Name: "remote_users",
+		Foreign: true, ForeignServer: &server,
+		ForeignOptions: []pipeline.StorageParam{
+			{Key: "table_name", Value: "users"},
+			{Key: "schema_name", Value: "public"},
+		},
+		Columns: []*ir.Column{
+			{Name: "id", Type: ir.TypeRef{Name: "bigint"}},
+			{Name: "email", Type: ir.TypeRef{Name: "text"}},
+		},
+	}
+
+	var b strings.Builder
+	renderObjectDPG(&b, tbl, fmtOpts)
+	rendered := b.String()
+
+	if !strings.Contains(rendered, "FOREIGN TABLE remote_users") {
+		t.Errorf("rendered table does not use the FOREIGN TABLE keyword: %q", rendered)
+	}
+	if !strings.Contains(rendered, `SERVER loopback_server`) {
+		t.Errorf("rendered table missing SERVER clause: %q", rendered)
+	}
+	if !strings.Contains(rendered, "OPTIONS (table_name 'users', schema_name 'public')") {
+		t.Errorf("rendered table missing OPTIONS clause: %q", rendered)
+	}
+
+	dir := t.TempDir()
+	f := filepath.Join(dir, "objects.dpg")
+	if err := os.WriteFile(f, []byte(rendered), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	compiled, err := compiler.Compile([]string{f}, dir, pipeline.Default)
+	if err != nil {
+		t.Fatalf("dumped foreign table failed to recompile: %v\n---\n%s", err, rendered)
+	}
+	var found *ir.Table
+	for _, o := range compiled {
+		if tb, ok := o.(*ir.Table); ok && tb.Name == "remote_users" {
+			found = tb
+		}
+	}
+	if found == nil {
+		t.Fatal("remote_users missing after recompile")
+	}
+	if !found.Foreign || found.ForeignServer == nil || *found.ForeignServer != "loopback_server" {
+		t.Errorf("Foreign/ForeignServer did not round-trip: Foreign=%v ForeignServer=%v", found.Foreign, found.ForeignServer)
+	}
+	if len(found.ForeignOptions) != 2 {
+		t.Errorf("ForeignOptions did not round-trip: got %v", found.ForeignOptions)
+	}
+}
+
+// TestRenderUnloggedTableCompiles guards the UNLOGGED keyword gap found
+// alongside the FOREIGN TABLE one: dump's table renderer never checked
+// o.Unlogged either.
+func TestRenderUnloggedTableCompiles(t *testing.T) {
+	fmtOpts := format.Options{IndentSize: 4, KeywordCase: "upper"}
+	tbl := &ir.Table{
+		Schema: "public", Name: "sessions",
+		Unlogged: true,
+		Columns:  []*ir.Column{{Name: "id", Type: ir.TypeRef{Name: "bigint"}}},
+	}
+
+	var b strings.Builder
+	renderObjectDPG(&b, tbl, fmtOpts)
+	rendered := b.String()
+
+	if !strings.Contains(rendered, "UNLOGGED TABLE sessions") {
+		t.Errorf("rendered table does not use the UNLOGGED TABLE keyword: %q", rendered)
+	}
+
+	dir := t.TempDir()
+	f := filepath.Join(dir, "objects.dpg")
+	if err := os.WriteFile(f, []byte(rendered), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	compiled, err := compiler.Compile([]string{f}, dir, pipeline.Default)
+	if err != nil {
+		t.Fatalf("dumped unlogged table failed to recompile: %v\n---\n%s", err, rendered)
+	}
+	var found *ir.Table
+	for _, o := range compiled {
+		if tb, ok := o.(*ir.Table); ok && tb.Name == "sessions" {
+			found = tb
+		}
+	}
+	if found == nil || !found.Unlogged {
+		t.Errorf("Unlogged did not round-trip: %+v", found)
+	}
+}
+
+// TestRenderTableGrantsAndRevocationsCompiles guards a real bug found live-
+// testing REVOCATIONS against a demo project: case *ir.Table in
+// renderObjectDPG had NO Grants/Revocations rendering at all — neither
+// table-level nor per-column — even though both are fully diffed and applied
+// correctly. A dumped table silently lost every GRANT/REVOCATION declaration,
+// so a dumped project could never detect drift on them. Uses the flat Mode B
+// GRANT/REVOCATION style (matching writeViewBlock's existing convention),
+// both at the table level and nested inside a per-column COLUMNS entry —
+// mirroring the RFC §7.5 worked example's "COLUMN ssn { GRANTS {...}
+// REVOCATIONS {...} }" shape.
+func TestRenderTableGrantsAndRevocationsCompiles(t *testing.T) {
+	fmtOpts := format.Options{IndentSize: 4, KeywordCase: "upper"}
+	tbl := &ir.Table{
+		Schema: "public", Name: "users",
+		Columns: []*ir.Column{
+			{Name: "id", Type: ir.TypeRef{Name: "bigint"}},
+			{
+				Name: "email", Type: ir.TypeRef{Name: "text"},
+				Grants:      []ir.Grant{{Privileges: []string{"SELECT"}, Roles: []string{"app_service"}}},
+				Revocations: []ir.Revocation{{Privileges: nil, Roles: []string{"PUBLIC"}}},
+			},
+		},
+		Grants:      []ir.Grant{{Privileges: []string{"SELECT"}, Roles: []string{"app_service"}}},
+		Revocations: []ir.Revocation{{Privileges: nil, Roles: []string{"PUBLIC"}}},
+	}
+
+	var b strings.Builder
+	renderObjectDPG(&b, tbl, fmtOpts)
+	rendered := b.String()
+
+	if !strings.Contains(rendered, "GRANT SELECT TO app_service;") {
+		t.Errorf("expected table-level GRANT, got:\n%s", rendered)
+	}
+	if !strings.Contains(rendered, "REVOCATION ALL FROM PUBLIC;") {
+		t.Errorf("expected table-level REVOCATION, got:\n%s", rendered)
+	}
+	if strings.Count(rendered, "GRANT SELECT TO app_service;") != 2 {
+		t.Errorf("expected both table-level and column-level GRANT, got:\n%s", rendered)
+	}
+	if strings.Count(rendered, "REVOCATION ALL FROM PUBLIC;") != 2 {
+		t.Errorf("expected both table-level and column-level REVOCATION, got:\n%s", rendered)
+	}
+
+	dir := t.TempDir()
+	f := filepath.Join(dir, "objects.dpg")
+	if err := os.WriteFile(f, []byte(rendered), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	compiled, err := compiler.Compile([]string{f}, dir, pipeline.Default)
+	if err != nil {
+		t.Fatalf("dumped table grants/revocations failed to recompile: %v\n---\n%s", err, rendered)
+	}
+	var found *ir.Table
+	for _, o := range compiled {
+		if tb, ok := o.(*ir.Table); ok && tb.Name == "users" {
+			found = tb
+		}
+	}
+	if found == nil {
+		t.Fatalf("table users missing after recompile\n---\n%s", rendered)
+	}
+	if len(found.Grants) != 1 || found.Grants[0].Roles[0] != "app_service" {
+		t.Errorf("table Grants did not round-trip: %+v", found.Grants)
+	}
+	if len(found.Revocations) != 1 || found.Revocations[0].Roles[0] != "PUBLIC" {
+		t.Errorf("table Revocations did not round-trip: %+v", found.Revocations)
+	}
+	var emailCol *ir.Column
+	for _, c := range found.Columns {
+		if c.Name == "email" {
+			emailCol = c
+		}
+	}
+	if emailCol == nil {
+		t.Fatal("email column missing after recompile")
+	}
+	if len(emailCol.Grants) != 1 || emailCol.Grants[0].Roles[0] != "app_service" {
+		t.Errorf("column Grants did not round-trip: %+v", emailCol.Grants)
+	}
+	if len(emailCol.Revocations) != 1 || emailCol.Revocations[0].Roles[0] != "PUBLIC" {
+		t.Errorf("column Revocations did not round-trip: %+v", emailCol.Revocations)
+	}
+}
+
+// TestRenderSubPartitionedTableCompiles guards a real, pre-existing gap
+// found while implementing RFC §7.13 sub-partitioning: dump had NO support
+// for rendering PARTITION BY or PARTITIONS { } at all (not even the flat,
+// non-nested case) — a dumped partitioned table silently lost its entire
+// partition structure. This exercises both the top-level PARTITION BY clause
+// and a nested sub-partition (a partition with its own PARTITION BY and
+// PARTITIONS block), round-tripped through the real compiler.
+func TestRenderSubPartitionedTableCompiles(t *testing.T) {
+	fmtOpts := format.Options{IndentSize: 4, KeywordCase: "upper"}
+	tbl := &ir.Table{
+		Schema: "public", Name: "metrics",
+		Columns: []*ir.Column{
+			{Name: "id", Type: ir.TypeRef{Name: "bigint"}},
+			{Name: "created_at", Type: ir.TypeRef{Name: "timestamptz"}, NotNull: true},
+			{Name: "channel", Type: ir.TypeRef{Name: "text"}, NotNull: true},
+		},
+		PartitionBy: &ir.PartitionSpec{Strategy: "RANGE", Columns: []string{"created_at"}},
+		Partitions: []*ir.Partition{
+			{Name: "metrics_2025", Bounds: "FOR VALUES FROM ('2025-01-01') TO ('2026-01-01')"},
+			{
+				Name:        "metrics_2026",
+				Bounds:      "FOR VALUES FROM ('2026-01-01') TO ('2027-01-01')",
+				PartitionBy: &ir.PartitionSpec{Strategy: "LIST", Columns: []string{"channel"}},
+				Partitions: []*ir.Partition{
+					{Name: "metrics_2026_web", Bounds: "FOR VALUES IN ('web')"},
+					{Name: "metrics_2026_other", Bounds: "FOR VALUES IN ('mobile', 'api')"},
+				},
+			},
+		},
+	}
+
+	var b strings.Builder
+	renderObjectDPG(&b, tbl, fmtOpts)
+	rendered := b.String()
+
+	if !strings.Contains(rendered, "PARTITION BY RANGE (created_at)") {
+		t.Errorf("rendered table missing top-level PARTITION BY: %q", rendered)
+	}
+	if !strings.Contains(rendered, "PARTITION BY LIST (channel)") {
+		t.Errorf("rendered table missing nested PARTITION BY: %q", rendered)
+	}
+
+	dir := t.TempDir()
+	f := filepath.Join(dir, "objects.dpg")
+	if err := os.WriteFile(f, []byte(rendered), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	compiled, err := compiler.Compile([]string{f}, dir, pipeline.Default)
+	if err != nil {
+		t.Fatalf("dumped sub-partitioned table failed to recompile: %v\n---\n%s", err, rendered)
+	}
+	var found *ir.Table
+	for _, o := range compiled {
+		if tb, ok := o.(*ir.Table); ok && tb.Name == "metrics" {
+			found = tb
+		}
+	}
+	if found == nil {
+		t.Fatalf("table metrics missing after recompile\n---\n%s", rendered)
+	}
+	if found.PartitionBy == nil || found.PartitionBy.Strategy != "RANGE" {
+		t.Errorf("top-level PartitionBy did not round-trip: %+v", found.PartitionBy)
+	}
+	if len(found.Partitions) != 2 {
+		t.Fatalf("expected 2 partitions after round-trip, got %d\n---\n%s", len(found.Partitions), rendered)
+	}
+	var sub *ir.Partition
+	for _, p := range found.Partitions {
+		if p.Name == "metrics_2026" {
+			sub = p
+		}
+	}
+	if sub == nil {
+		t.Fatal("metrics_2026 partition missing after round-trip")
+	}
+	if sub.PartitionBy == nil || sub.PartitionBy.Strategy != "LIST" {
+		t.Fatalf("metrics_2026 sub-partition PartitionBy did not round-trip: %+v", sub.PartitionBy)
+	}
+	if len(sub.Partitions) != 2 {
+		t.Fatalf("expected 2 nested sub-partitions after round-trip, got %d", len(sub.Partitions))
+	}
+}
+
+// TestRenderMaterializedViewCompiles guards a real bug found live-testing a
+// demo project: renderObjectDPG's View case always emitted the bare "VIEW"
+// keyword regardless of o.Materialized, and never rendered Owner, Comment,
+// Grants, Revocations, or WITH NO DATA at all — a live MATERIALIZED VIEW
+// round-tripped through dump as a plain VIEW, silently losing the object
+// kind (confirmed against a real demo database: introspection correctly set
+// Materialized=true, but the rendered source dropped it entirely).
+func TestRenderMaterializedViewCompiles(t *testing.T) {
+	fmtOpts := format.Options{IndentSize: 4, KeywordCase: "upper"}
+	owner := "app_role"
+	comment := "precomputed totals"
+	mv := &ir.View{
+		Schema:       "public",
+		Name:         "order_status_totals",
+		Materialized: true,
+		Query:        "SELECT status, count(*) AS c FROM orders GROUP BY status",
+		Owner:        &owner,
+		Comment:      &comment,
+		Grants:       []ir.Grant{{Privileges: []string{"SELECT"}, Roles: []string{"app_readonly"}}},
+		Revocations:  []ir.Revocation{{Privileges: []string{"SELECT"}, Roles: []string{"PUBLIC"}}},
+		Indexes: []*ir.Index{
+			{Name: "order_status_totals_status_uq", Unique: true, Columns: []pipeline.IndexColumn{{Name: "status"}}},
+		},
+	}
+
+	var b strings.Builder
+	renderObjectDPG(&b, mv, fmtOpts)
+	rendered := b.String()
+
+	if !strings.Contains(rendered, "MATERIALIZED VIEW order_status_totals") {
+		t.Errorf("rendered materialized view does not use the MATERIALIZED VIEW keyword: %q", rendered)
+	}
+	if !strings.Contains(rendered, "OWNER app_role") {
+		t.Errorf("rendered materialized view missing OWNER: %q", rendered)
+	}
+	if !strings.Contains(rendered, "GRANT SELECT TO app_readonly") {
+		t.Errorf("rendered materialized view missing GRANT: %q", rendered)
+	}
+	if !strings.Contains(rendered, "REVOCATION SELECT FROM PUBLIC") {
+		t.Errorf("rendered materialized view missing REVOCATION (RFC §11.3 Mode B singular keyword — not REVOKE, which the block parser doesn't recognize): %q", rendered)
+	}
+	if !strings.Contains(rendered, "INDICES") || !strings.Contains(rendered, "order_status_totals_status_uq") {
+		t.Errorf("rendered materialized view missing INDICES block: %q", rendered)
+	}
+
+	dir := t.TempDir()
+	f := filepath.Join(dir, "objects.dpg")
+	if err := os.WriteFile(f, []byte(rendered), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	compiled, err := compiler.Compile([]string{f}, dir, pipeline.Default)
+	if err != nil {
+		t.Fatalf("dumped materialized view failed to recompile: %v\n---\n%s", err, rendered)
+	}
+	var found *ir.View
+	for _, o := range compiled {
+		if v, ok := o.(*ir.View); ok && v.Name == "order_status_totals" {
+			found = v
+		}
+	}
+	if found == nil {
+		t.Fatalf("view order_status_totals missing after recompile\n---\n%s", rendered)
+	}
+	if !found.Materialized {
+		t.Error("Materialized did not round-trip")
+	}
+	if found.Owner == nil || *found.Owner != "app_role" {
+		t.Errorf("Owner did not round-trip: %v", found.Owner)
+	}
+	if found.Comment == nil || *found.Comment != "precomputed totals" {
+		t.Errorf("Comment did not round-trip: %v", found.Comment)
+	}
+	if len(found.Grants) != 1 {
+		t.Errorf("Grants did not round-trip: %v", found.Grants)
+	}
+	if len(found.Revocations) != 1 || found.Revocations[0].Roles[0] != "PUBLIC" {
+		t.Errorf("Revocations did not round-trip: %v", found.Revocations)
+	}
+	if len(found.Indexes) != 1 || found.Indexes[0].Name != "order_status_totals_status_uq" || !found.Indexes[0].Unique {
+		t.Errorf("Indexes did not round-trip: %v", found.Indexes)
+	}
+}
+
+// TestRenderRecursiveViewRendersAsPlainViewCompiles guards a self-recursive
+// view's dump output: it must NOT reuse the special "RECURSIVE VIEW (cols)
+// AS ..." PG syntax, because that requires an explicit column list DPG
+// doesn't track and dump only ever sees introspected objects, whose Query
+// (from pg_get_viewdef) already comes back as a self-contained "WITH
+// RECURSIVE ..." CTE — which is already valid and self-recursive under a
+// plain CREATE VIEW (the same reconstruction pg_dump itself uses). Emitting
+// "RECURSIVE VIEW" with that query shape is a PG syntax error.
+func TestRenderRecursiveViewRendersAsPlainViewCompiles(t *testing.T) {
+	fmtOpts := format.Options{IndentSize: 4, KeywordCase: "upper"}
+	v := &ir.View{
+		Schema:    "public",
+		Name:      "category_tree",
+		Recursive: true,
+		Query: "WITH RECURSIVE category_tree AS (" +
+			"SELECT id FROM categories WHERE parent_id IS NULL " +
+			"UNION ALL " +
+			"SELECT c.id FROM categories c JOIN category_tree t ON c.parent_id = t.id" +
+			") SELECT id FROM category_tree",
+	}
+
+	var b strings.Builder
+	renderObjectDPG(&b, v, fmtOpts)
+	rendered := b.String()
+
+	if strings.Contains(rendered, "RECURSIVE VIEW") {
+		t.Errorf("rendered view must not use the RECURSIVE VIEW keyword (query already self-contains WITH RECURSIVE): %q", rendered)
+	}
+	if !strings.Contains(rendered, "VIEW category_tree AS WITH RECURSIVE") {
+		t.Errorf("rendered view should be a plain VIEW wrapping the WITH RECURSIVE query: %q", rendered)
+	}
+
+	dir := t.TempDir()
+	f := filepath.Join(dir, "objects.dpg")
+	if err := os.WriteFile(f, []byte(rendered), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	compiled, err := compiler.Compile([]string{f}, dir, pipeline.Default)
+	if err != nil {
+		t.Fatalf("dumped recursive view failed to recompile: %v\n---\n%s", err, rendered)
+	}
+	var found *ir.View
+	for _, o := range compiled {
+		if vv, ok := o.(*ir.View); ok && vv.Name == "category_tree" {
+			found = vv
+		}
+	}
+	if found == nil {
+		t.Fatalf("view category_tree missing after recompile\n---\n%s", rendered)
+	}
+}
+
+func TestRenderIndexUniqueConcurrentlyPrefixCompiles(t *testing.T) {
+	fmtOpts := format.Options{IndentSize: 4, KeywordCase: "upper"}
+	tbl := &ir.Table{
+		Schema: "public", Name: "t",
+		Columns: []*ir.Column{{Name: "email", Type: ir.TypeRef{Name: "text"}}},
+		Indexes: []*ir.Index{
+			{Name: "t_email_uc", Unique: true, Concurrently: true, Columns: []pipeline.IndexColumn{{Name: "email"}}},
+		},
+	}
+
+	var b strings.Builder
+	renderObjectDPG(&b, tbl, fmtOpts)
+	rendered := b.String()
+
+	if !strings.Contains(rendered, "UNIQUE CONCURRENTLY t_email_uc (") {
+		t.Errorf("rendered index does not place UNIQUE then CONCURRENTLY before the name: %q", rendered)
+	}
+
+	dir := t.TempDir()
+	f := filepath.Join(dir, "objects.dpg")
+	if err := os.WriteFile(f, []byte(rendered), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	compiled, err := compiler.Compile([]string{f}, dir, pipeline.Default)
+	if err != nil {
+		t.Fatalf("dumped table with a UNIQUE CONCURRENTLY index failed to recompile: %v\n---\n%s", err, rendered)
+	}
+	var found *ir.Index
+	for _, o := range compiled {
+		if tb, ok := o.(*ir.Table); ok {
+			for _, idx := range tb.Indexes {
+				if idx.Name == "t_email_uc" {
+					found = idx
+				}
+			}
+		}
+	}
+	if found == nil {
+		t.Fatal("index t_email_uc missing after recompile")
+	}
+	if !found.Unique || !found.Concurrently {
+		t.Errorf("Unique/Concurrently did not round-trip: got Unique=%v Concurrently=%v", found.Unique, found.Concurrently)
+	}
+}
+
 func TestObjectSchema(t *testing.T) {
 	cases := []struct {
 		obj  pipeline.IRObject
@@ -125,6 +617,269 @@ func TestRenderOpaqueObjectsCompile(t *testing.T) {
 	// an empty snapshot exercises createOpaque for each object.
 	if _, err := diff.New().Diff(compiled, &pipeline.Snapshot{}); err != nil {
 		t.Fatalf("diffing dumped opaque objects failed (empty body?): %v", err)
+	}
+}
+
+// TestRenderOpaqueObjectsWithCommentCompile guards a real bug found live-
+// testing a demo project: renderOpaqueBody unconditionally terminated every
+// opaque declaration with a bare ";", regardless of the object's Comment
+// field — so a Comment correctly populated by introspection (see
+// internal/introspect/opaque.go) was silently dropped by dump, never even
+// reaching a "{ COMMENT ...; }" block, though the analogous FUNCTION/
+// PROCEDURE path (writeFuncBlock) already did this correctly. This is
+// TestRenderOpaqueObjectsCompile's exact object set, but with Comment set on
+// every kind that has the field (all but UserMapping/Publication, which
+// don't support COMMENT ON in PostgreSQL) — the prior test's all-nil
+// Comments never exercised the "{ }" branch at all, which is exactly how
+// this gap went unnoticed.
+func TestRenderOpaqueObjectsWithCommentCompile(t *testing.T) {
+	fmtOpts := format.Options{IndentSize: 4, KeywordCase: "upper"}
+	c := func(s string) *string { return &s }
+
+	objs := []pipeline.IRObject{
+		&ir.ForeignDataWrapper{Name: "dummy_fdw", Body: "CREATE FOREIGN DATA WRAPPER dummy_fdw", Comment: c("fdw comment")},
+		&ir.ForeignServer{Name: "dummy_srv", Body: "CREATE SERVER dummy_srv FOREIGN DATA WRAPPER dummy_fdw", Comment: c("srv comment")},
+		&ir.Subscription{Name: "my_sub", Body: "CREATE SUBSCRIPTION my_sub CONNECTION 'host=x' PUBLICATION my_pub", Comment: c("sub comment")},
+		&ir.EventTrigger{Name: "et", Body: "CREATE EVENT TRIGGER et ON ddl_command_start EXECUTE FUNCTION f()", Comment: c("et comment")},
+		&ir.Collation{Schema: "public", Name: "my_coll", Body: "CREATE COLLATION public.my_coll (locale = 'C')", Comment: c("coll comment")},
+		&ir.Cast{SourceType: ir.TypeRef{Name: "int4"}, TargetType: ir.TypeRef{Name: "bool"},
+			Body: "CREATE CAST (integer AS boolean) WITHOUT FUNCTION", Comment: c("cast comment")},
+		&ir.StatisticsObject{Schema: "public", Name: "st",
+			Body: "CREATE STATISTICS public.st (dependencies) ON a, b FROM public.t", Comment: c("stats comment")},
+		&ir.Tablespace{Name: "ts", Body: "CREATE TABLESPACE ts LOCATION '/tmp/x'", Comment: c("ts comment")},
+		&ir.Operator{Schema: "public", Name: "===",
+			Body: "CREATE OPERATOR public.=== (FUNCTION = int4eq, LEFTARG = integer, RIGHTARG = integer)", Comment: c("op comment")},
+		&ir.OperatorClass{Schema: "public", Name: "my_opc", AccessMethod: "btree",
+			Body: "CREATE OPERATOR CLASS public.my_opc FOR TYPE integer USING btree AS OPERATOR 3 =, FUNCTION 1 btint4cmp(integer, integer)", Comment: c("opc comment")},
+		&ir.OperatorFamily{Schema: "public", Name: "my_fam", AccessMethod: "btree",
+			Body: "CREATE OPERATOR FAMILY public.my_fam USING btree", Comment: c("opf comment")},
+		&ir.TSConfig{Schema: "public", Name: "my_cfg",
+			Body: `CREATE TEXT SEARCH CONFIGURATION public.my_cfg (PARSER = pg_catalog."default")`, Comment: c("cfg comment")},
+		&ir.TSDict{Schema: "public", Name: "my_dict",
+			Body: "CREATE TEXT SEARCH DICTIONARY public.my_dict (TEMPLATE = pg_catalog.simple)", Comment: c("dict comment")},
+		&ir.TSParser{Schema: "public", Name: "my_prs",
+			Body: "CREATE TEXT SEARCH PARSER public.my_prs (START = prsd_start, GETTOKEN = prsd_nexttoken, END = prsd_end, LEXTYPES = prsd_lextype)", Comment: c("prs comment")},
+		&ir.TSTemplate{Schema: "public", Name: "my_tmpl",
+			Body: "CREATE TEXT SEARCH TEMPLATE public.my_tmpl (LEXIZE = dsimple_lexize)", Comment: c("tmpl comment")},
+	}
+
+	var b strings.Builder
+	for _, o := range objs {
+		renderObjectDPG(&b, o, fmtOpts)
+	}
+	rendered := b.String()
+
+	if !strings.Contains(rendered, "{\n    COMMENT 'fdw comment';\n}") {
+		t.Errorf("rendered output does not carry an expected COMMENT block:\n%s", rendered)
+	}
+
+	dir := t.TempDir()
+	f := filepath.Join(dir, "objects.dpg")
+	if err := os.WriteFile(f, []byte(rendered), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	compiled, err := compiler.Compile([]string{f}, dir, pipeline.Default)
+	if err != nil {
+		t.Fatalf("dumped .dpg (with comments) failed to recompile: %v\n---\n%s", err, rendered)
+	}
+
+	wantComments := map[string]string{
+		"my_coll": "coll comment",
+		"st":      "stats comment",
+		"ts":      "ts comment",
+		"my_opc":  "opc comment",
+		"my_fam":  "opf comment",
+		"my_cfg":  "cfg comment",
+		"my_dict": "dict comment",
+		"my_prs":  "prs comment",
+		"my_tmpl": "tmpl comment",
+	}
+	found := map[string]bool{}
+	for _, o := range compiled {
+		var name string
+		var comment *string
+		switch v := o.(type) {
+		case *ir.Collation:
+			name, comment = v.Name, v.Comment
+		case *ir.StatisticsObject:
+			name, comment = v.Name, v.Comment
+		case *ir.Tablespace:
+			name, comment = v.Name, v.Comment
+		case *ir.OperatorClass:
+			name, comment = v.Name, v.Comment
+		case *ir.OperatorFamily:
+			name, comment = v.Name, v.Comment
+		case *ir.TSConfig:
+			name, comment = v.Name, v.Comment
+		case *ir.TSDict:
+			name, comment = v.Name, v.Comment
+		case *ir.TSParser:
+			name, comment = v.Name, v.Comment
+		case *ir.TSTemplate:
+			name, comment = v.Name, v.Comment
+		default:
+			continue
+		}
+		want, ok := wantComments[name]
+		if !ok {
+			continue
+		}
+		found[name] = true
+		if comment == nil {
+			t.Errorf("%s: Comment is nil after round-trip, want %q", name, want)
+			continue
+		}
+		if *comment != want {
+			t.Errorf("%s: Comment = %q after round-trip, want %q", name, *comment, want)
+		}
+	}
+	for name := range wantComments {
+		if !found[name] {
+			t.Errorf("%s: object missing after round-trip compile", name)
+		}
+	}
+}
+
+// TestRenderTSConfigMappingCompiles guards RFC §12.1's MAPPING FOR block on
+// a TEXT SEARCH CONFIGURATION — previously dropped entirely: renderOpaqueBody
+// only ever knew about Comment/Grants, with no path at all for
+// o.Mappings, so a declared (or introspected) mapping never round-tripped
+// through dump. Covers both a single-dictionary mapping and the real PG
+// multi-dictionary fallback-chain syntax (WITH dict1, dict2).
+func TestRenderTSConfigMappingCompiles(t *testing.T) {
+	fmtOpts := format.Options{IndentSize: 4, KeywordCase: "upper"}
+	comment := "demo search config"
+	tc := &ir.TSConfig{
+		Schema: "public", Name: "demo_search",
+		ParserSchema: "pg_catalog", ParserName: "default",
+		Body:    `CREATE TEXT SEARCH CONFIGURATION public.demo_search (PARSER = pg_catalog."default")`,
+		Comment: &comment,
+		Mappings: []pipeline.TSMappingDef{
+			{TokenTypes: []string{"word", "hword"}, Dictionaries: []pipeline.Identifier{{Name: "unaccent"}, {Name: "english_stem"}}},
+			{TokenTypes: []string{"asciiword"}, Dictionaries: []pipeline.Identifier{{Name: "english_stem"}}},
+		},
+	}
+
+	var b strings.Builder
+	renderObjectDPG(&b, tc, fmtOpts)
+	rendered := b.String()
+
+	if strings.Contains(rendered, "CREATE TEXT SEARCH CONFIGURATION") {
+		t.Errorf("DPG source must not begin a declaration with CREATE, got:\n%s", rendered)
+	}
+	if !strings.Contains(rendered, "MAPPING FOR word, hword WITH unaccent, english_stem;") {
+		t.Errorf("expected the fallback-chain mapping, got:\n%s", rendered)
+	}
+	if !strings.Contains(rendered, "MAPPING FOR asciiword WITH english_stem;") {
+		t.Errorf("expected the single-dictionary mapping, got:\n%s", rendered)
+	}
+
+	dir := t.TempDir()
+	f := filepath.Join(dir, "objects.dpg")
+	if err := os.WriteFile(f, []byte(rendered), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	compiled, err := compiler.Compile([]string{f}, dir, pipeline.Default)
+	if err != nil {
+		t.Fatalf("dumped ts config failed to recompile: %v\n---\n%s", err, rendered)
+	}
+	var found *ir.TSConfig
+	for _, o := range compiled {
+		if c, ok := o.(*ir.TSConfig); ok && c.Name == "demo_search" {
+			found = c
+		}
+	}
+	if found == nil {
+		t.Fatalf("ts config demo_search missing after recompile\n---\n%s", rendered)
+	}
+	if len(found.Mappings) != 2 {
+		t.Fatalf("Mappings did not round-trip: got %d, want 2: %+v", len(found.Mappings), found.Mappings)
+	}
+	var sawChain, sawSingle bool
+	for _, m := range found.Mappings {
+		if len(m.Dictionaries) == 2 && m.Dictionaries[0].Name == "unaccent" && m.Dictionaries[1].Name == "english_stem" {
+			sawChain = true
+		}
+		if len(m.TokenTypes) == 1 && m.TokenTypes[0] == "asciiword" && len(m.Dictionaries) == 1 {
+			sawSingle = true
+		}
+	}
+	if !sawChain {
+		t.Errorf("fallback-chain mapping did not round-trip: %+v", found.Mappings)
+	}
+	if !sawSingle {
+		t.Errorf("single-dictionary mapping did not round-trip: %+v", found.Mappings)
+	}
+}
+
+// TestRenderCompositeAndRangeTypesCompile guards a real bug found
+// live-testing a demo project: renderObjectDPG's *ir.Type switch only ever
+// had cases for "ENUM" and "DOMAIN" — COMPOSITE and RANGE both fell through
+// to a "-- type X (VARIANT) omitted" comment instead of real DPG source,
+// even though introspection already fully captured COMPOSITE (via
+// CompositeAttrs) and, after the matching introspectRangeBodies fix, RANGE
+// too. Same discipline as TestRenderOpaqueObjectsCompile: render, write to
+// a real file, recompile, and diff the recompiled object against an empty
+// snapshot to prove createType actually succeeds for it, not just that the
+// rendered text looks plausible.
+func TestRenderCompositeAndRangeTypesCompile(t *testing.T) {
+	fmtOpts := format.Options{IndentSize: 4, KeywordCase: "upper"}
+
+	objs := []pipeline.IRObject{
+		&ir.Type{
+			Schema: "public", Name: "address", Variant: "COMPOSITE",
+			CompositeAttrs: []*ir.Column{
+				{Name: "street", Type: ir.TypeRef{Name: "text"}},
+				{Name: "city", Type: ir.TypeRef{Name: "text"}},
+			},
+		},
+		&ir.Type{
+			Schema: "public", Name: "price_range", Variant: "RANGE",
+			Body: "SUBTYPE = numeric",
+		},
+	}
+
+	var b strings.Builder
+	for _, o := range objs {
+		renderObjectDPG(&b, o, fmtOpts)
+	}
+	rendered := b.String()
+
+	if strings.Contains(rendered, "omitted") {
+		t.Fatalf("rendered output still contains an omitted-type comment:\n%s", rendered)
+	}
+	for line := range strings.SplitSeq(rendered, "\n") {
+		if strings.HasPrefix(strings.TrimSpace(line), "CREATE ") {
+			t.Errorf("rendered declaration begins with CREATE (violates no-verb mandate): %q", line)
+		}
+	}
+
+	dir := t.TempDir()
+	f := filepath.Join(dir, "objects.dpg")
+	if err := os.WriteFile(f, []byte(rendered), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	compiled, err := compiler.Compile([]string{f}, dir, pipeline.Default)
+	if err != nil {
+		t.Fatalf("dumped .dpg failed to recompile: %v\n---\n%s", err, rendered)
+	}
+
+	wantVariants := map[string]bool{"COMPOSITE": false, "RANGE": false}
+	for _, o := range compiled {
+		if tp, ok := o.(*ir.Type); ok {
+			if _, tracked := wantVariants[tp.Variant]; tracked {
+				wantVariants[tp.Variant] = true
+			}
+		}
+	}
+	for v, seen := range wantVariants {
+		if !seen {
+			t.Errorf("variant %s missing after recompile", v)
+		}
+	}
+
+	if _, err := diff.New().Diff(compiled, &pipeline.Snapshot{}); err != nil {
+		t.Fatalf("diffing dumped composite/range types failed: %v", err)
 	}
 }
 
@@ -527,14 +1282,16 @@ func TestRenderFunctionAndProcedureBody(t *testing.T) {
 				{Name: "a", Type: ir.TypeRef{Name: "integer"}},
 				{Name: "b", Type: ir.TypeRef{Name: "integer"}},
 			},
-			ReturnType: ir.TypeRef{Name: "integer"},
-			Attrs:      ir.FuncAttrs{Language: "plpgsql", Volatility: "IMMUTABLE", Strict: true, Body: fnBody},
-			Comment:    &fnComment,
-			Grants:     []ir.Grant{{Privileges: []string{"EXECUTE"}, Roles: []string{"app_user"}}},
+			ReturnType:  ir.TypeRef{Name: "integer"},
+			Attrs:       ir.FuncAttrs{Language: "plpgsql", Volatility: "IMMUTABLE", Strict: true, Body: fnBody},
+			Comment:     &fnComment,
+			Grants:      []ir.Grant{{Privileges: []string{"EXECUTE"}, Roles: []string{"app_user"}}},
+			Revocations: []ir.Revocation{{Privileges: []string{"EXECUTE"}, Roles: []string{"PUBLIC"}}},
 		},
 		&ir.Procedure{
 			Schema: "public", Name: "recalc",
-			Attrs: ir.FuncAttrs{Language: "plpgsql", Body: procBody},
+			Attrs:       ir.FuncAttrs{Language: "plpgsql", Body: procBody},
+			Revocations: []ir.Revocation{{Privileges: []string{"EXECUTE"}, Roles: []string{"PUBLIC"}}},
 		},
 	}
 	var b strings.Builder
@@ -561,11 +1318,17 @@ func TestRenderFunctionAndProcedureBody(t *testing.T) {
 	if !strings.Contains(rendered, "GRANT EXECUTE TO app_user;") {
 		t.Errorf("expected function GRANT, got:\n%s", rendered)
 	}
+	if !strings.Contains(rendered, "REVOCATION EXECUTE FROM PUBLIC;") {
+		t.Errorf("expected function REVOCATION (RFC §11.3 REVOCATIONS, Mode B singular keyword), got:\n%s", rendered)
+	}
 	if !strings.Contains(rendered, "PROCEDURE recalc(") {
 		t.Errorf("expected a PROCEDURE declaration (previously dropped entirely), got:\n%s", rendered)
 	}
 	if !strings.Contains(rendered, "NULL;") {
 		t.Errorf("expected the real procedure body rendered, got:\n%s", rendered)
+	}
+	if strings.Count(rendered, "REVOCATION EXECUTE FROM PUBLIC;") != 2 {
+		t.Errorf("expected both function and procedure REVOCATION, got:\n%s", rendered)
 	}
 
 	dir := t.TempDir()
@@ -583,19 +1346,157 @@ func TestRenderFunctionAndProcedureBody(t *testing.T) {
 		case *ir.Function:
 			if v.Name == "add_ints" {
 				sawFunc = v.BodyHash == ir.HashBody(fnBody) && v.Comment != nil && *v.Comment == fnComment &&
-					len(v.Grants) == 1 && v.Attrs.Volatility == "IMMUTABLE" && v.Attrs.Strict
+					len(v.Grants) == 1 && v.Attrs.Volatility == "IMMUTABLE" && v.Attrs.Strict &&
+					len(v.Revocations) == 1 && v.Revocations[0].Roles[0] == "PUBLIC"
 			}
 		case *ir.Procedure:
 			if v.Name == "recalc" {
-				sawProc = v.BodyHash == ir.HashBody(procBody)
+				sawProc = v.BodyHash == ir.HashBody(procBody) &&
+					len(v.Revocations) == 1 && v.Revocations[0].Roles[0] == "PUBLIC"
 			}
 		}
 	}
 	if !sawFunc {
-		t.Error("recompile missing function body/comment/grant/attrs fidelity")
+		t.Error("recompile missing function body/comment/grant/revocation/attrs fidelity")
 	}
 	if !sawProc {
-		t.Error("recompile missing procedure body fidelity")
+		t.Error("recompile missing procedure body/revocation fidelity")
+	}
+}
+
+// TestRenderAggregateCompiles guards a real bug found live-testing a demo
+// project: renderObjectDPG had NO case at all for *ir.Aggregate — an
+// AGGREGATE object silently produced no output whatsoever (not even a wrong
+// stub, unlike the earlier VIEW bug). Uses o.Options (structured
+// SFUNC/STYPE/INITCOND list) rather than o.Body, since Body is the full
+// "CREATE AGGREGATE ..." SQL text — a different, invalid shape for DPG
+// source, which never starts a declaration with CREATE.
+// TestRenderDefaultPrivilegesCompiles guards a real bug found live-testing a
+// demo project: renderObjectDPG had no case at all for *ir.DefaultPrivileges
+// (silent, total drop — same class as the earlier Aggregate bug), and
+// introspection never populated the object in the first place. o.ObjectType
+// is single-valued per object (Builder.BuildDefaultPrivileges splits a
+// multi-type declaration into one object per type; introspectDefaultPrivileges
+// does the same from pg_default_acl), so this renders one full DEFAULT
+// PRIVILEGES declaration per object, each with its own ON <type> clause on
+// every grant/revoke entry — matching real PostgreSQL's actual ALTER
+// DEFAULT PRIVILEGES grammar (confirmed live via \h ALTER DEFAULT
+// PRIVILEGES), not a DPG-invented whole-declaration wrapper.
+func TestRenderDefaultPrivilegesCompiles(t *testing.T) {
+	fmtOpts := format.Options{IndentSize: 4, KeywordCase: "upper"}
+	forRole := "app_admin"
+	inSchema := "public"
+	dp := &ir.DefaultPrivileges{
+		ForRole:    &forRole,
+		InSchema:   &inSchema,
+		ObjectType: "TABLES",
+		Grants:     []ir.Grant{{Privileges: []string{"SELECT"}, Roles: []string{"app_readonly"}}},
+		Revocations: []ir.Revocation{
+			{Privileges: []string{"INSERT"}, Roles: []string{"app_writer"}, Cascade: true},
+		},
+	}
+
+	var b strings.Builder
+	renderObjectDPG(&b, dp, fmtOpts)
+	rendered := b.String()
+
+	if !strings.Contains(rendered, "DEFAULT PRIVILEGES FOR ROLE app_admin IN SCHEMA public {") {
+		t.Errorf("expected DEFAULT PRIVILEGES header, got:\n%s", rendered)
+	}
+	if !strings.Contains(rendered, "SELECT ON TABLES TO app_readonly;") {
+		t.Errorf("expected GRANT entry with ON TABLES, got:\n%s", rendered)
+	}
+	if !strings.Contains(rendered, "INSERT ON TABLES FROM app_writer CASCADE;") {
+		t.Errorf("expected REVOCATION entry with ON TABLES and CASCADE, got:\n%s", rendered)
+	}
+
+	dir := t.TempDir()
+	f := filepath.Join(dir, "objects.dpg")
+	if err := os.WriteFile(f, []byte(rendered), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	compiled, err := compiler.Compile([]string{f}, dir, pipeline.Default)
+	if err != nil {
+		t.Fatalf("dumped default privileges failed to recompile: %v\n---\n%s", err, rendered)
+	}
+	var found *ir.DefaultPrivileges
+	for _, o := range compiled {
+		if d, ok := o.(*ir.DefaultPrivileges); ok {
+			found = d
+		}
+	}
+	if found == nil {
+		t.Fatalf("default privileges object missing after recompile\n---\n%s", rendered)
+	}
+	if found.ForRole == nil || *found.ForRole != "app_admin" {
+		t.Errorf("ForRole did not round-trip: %v", found.ForRole)
+	}
+	if found.InSchema == nil || *found.InSchema != "public" {
+		t.Errorf("InSchema did not round-trip: %v", found.InSchema)
+	}
+	if len(found.Grants) != 1 || found.Grants[0].Privileges[0] != "SELECT" {
+		t.Errorf("Grants did not round-trip: %+v", found.Grants)
+	}
+	if len(found.Revocations) != 1 || !found.Revocations[0].Cascade {
+		t.Errorf("Revocations (incl. CASCADE) did not round-trip: %+v", found.Revocations)
+	}
+}
+
+func TestRenderAggregateCompiles(t *testing.T) {
+	fmtOpts := format.Options{IndentSize: 4, KeywordCase: "upper"}
+	comment := "multiplicative aggregate"
+	agg := &ir.Aggregate{
+		Schema: "public", Name: "amount_product",
+		Args: []ir.FuncArg{{Type: ir.TypeRef{Name: "numeric"}}},
+		Options: []pipeline.StorageParam{
+			{Key: "sfunc", Value: "numeric_mul"},
+			{Key: "stype", Value: "numeric"},
+			{Key: "initcond", Value: "'1'"},
+		},
+		Comment: &comment,
+		Grants:  []ir.Grant{{Privileges: []string{"EXECUTE"}, Roles: []string{"app_service"}}},
+	}
+
+	var b strings.Builder
+	renderObjectDPG(&b, agg, fmtOpts)
+	rendered := b.String()
+
+	if strings.Contains(rendered, "CREATE AGGREGATE") {
+		t.Errorf("DPG source must not begin a declaration with CREATE, got:\n%s", rendered)
+	}
+	if !strings.Contains(rendered, "AGGREGATE amount_product(numeric) (SFUNC = numeric_mul, STYPE = numeric, INITCOND = '1')") {
+		t.Errorf("expected the AGGREGATE declaration with its options, got:\n%s", rendered)
+	}
+
+	dir := t.TempDir()
+	f := filepath.Join(dir, "schema.dpg")
+	if err := os.WriteFile(f, []byte(rendered), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	compiled, err := compiler.Compile([]string{f}, dir, pipeline.Default)
+	if err != nil {
+		t.Fatalf("dumped aggregate failed to recompile: %v\n---\n%s", err, rendered)
+	}
+	var found *ir.Aggregate
+	for _, o := range compiled {
+		if a, ok := o.(*ir.Aggregate); ok && a.Name == "amount_product" {
+			found = a
+		}
+	}
+	if found == nil {
+		t.Fatalf("aggregate amount_product missing after recompile\n---\n%s", rendered)
+	}
+	if len(found.Args) != 1 || found.Args[0].Type.Name != "numeric" {
+		t.Errorf("Args did not round-trip: %+v", found.Args)
+	}
+	if found.Comment == nil || *found.Comment != comment {
+		t.Errorf("Comment did not round-trip: %v", found.Comment)
+	}
+	if len(found.Grants) != 1 {
+		t.Errorf("Grants did not round-trip: %v", found.Grants)
+	}
+	if !strings.Contains(found.Body, "sfunc = numeric_mul") || !strings.Contains(found.Body, "stype = numeric") {
+		t.Errorf("Body should carry the recompiled options, got %q", found.Body)
 	}
 }
 
@@ -871,6 +1772,104 @@ func TestRenderIndexVariantsRoundtrip(t *testing.T) {
 		for _, w := range wants {
 			if !strings.Contains(sql, w) {
 				t.Errorf("%s: missing %q in: %s", name, w, sql)
+			}
+		}
+	}
+}
+
+// TestRenderPolicyAndTriggerRoundtrip guards a real bug found live-testing a
+// demo project: renderObjectDPG's Table case had no rendering path at all
+// for POLICIES/TRIGGERS — despite both being genuinely diffed
+// (diffPolicies/diffTriggers) and correctly introspected
+// (introspectPolicies/introspectTriggers), a live table's RLS policy and
+// trigger silently vanished from a dumped project entirely (confirmed
+// against a real demo table: orders.owner_only / orders.set_updated_at).
+func TestRenderPolicyAndTriggerRoundtrip(t *testing.T) {
+	fmtOpts := format.Options{IndentSize: 4, KeywordCase: "upper"}
+	using := "user_id = current_setting('app.current_user_id', true)::bigint"
+	withCheck := "user_id = current_setting('app.current_user_id', true)::bigint"
+	whenCond := "OLD.status IS DISTINCT FROM NEW.status"
+	tbl := &ir.Table{
+		Schema: "public", Name: "orders",
+		Columns: []*ir.Column{
+			{Name: "id", Type: ir.TypeRef{Name: "bigint"}},
+			{Name: "user_id", Type: ir.TypeRef{Name: "bigint"}},
+			{Name: "status", Type: ir.TypeRef{Name: "text"}},
+		},
+		Policies: []*ir.Policy{
+			{Name: "owner_only", Command: "ALL", Permissive: true, Using: &using},
+			{Name: "admin_write", Command: "INSERT", Permissive: false, Roles: []string{"admin_role"}, WithCheck: &withCheck},
+		},
+		Triggers: []*ir.Trigger{
+			{Name: "set_updated_at", When: "BEFORE", Events: []string{"UPDATE"}, ForEach: "ROW", Function: "touch_updated_at"},
+			{Name: "audit_status", When: "AFTER", Events: []string{"UPDATE"}, ForEach: "ROW", Condition: &whenCond, Function: "audit_status_change", Args: []string{"'orders'"}},
+		},
+	}
+
+	var b strings.Builder
+	renderObjectDPG(&b, tbl, fmtOpts)
+	rendered := b.String()
+
+	if !strings.Contains(rendered, "POLICIES {") || !strings.Contains(rendered, "TRIGGERS {") {
+		t.Fatalf("expected POLICIES and TRIGGERS blocks, got:\n%s", rendered)
+	}
+	if !strings.Contains(rendered, "owner_only FOR ALL USING") {
+		t.Errorf("expected permissive ALL policy without AS clause, got:\n%s", rendered)
+	}
+	if !strings.Contains(rendered, "admin_write AS RESTRICTIVE FOR INSERT TO admin_role WITH CHECK") {
+		t.Errorf("expected restrictive policy with TO/WITH CHECK, got:\n%s", rendered)
+	}
+	if !strings.Contains(rendered, "set_updated_at BEFORE UPDATE FOR EACH ROW EXECUTE FUNCTION touch_updated_at();") {
+		t.Errorf("expected simple trigger, got:\n%s", rendered)
+	}
+	if !strings.Contains(rendered, "audit_status AFTER UPDATE FOR EACH ROW WHEN") || !strings.Contains(rendered, "EXECUTE FUNCTION audit_status_change('orders');") {
+		t.Errorf("expected WHEN-conditioned trigger with args, got:\n%s", rendered)
+	}
+
+	dir := t.TempDir()
+	f := filepath.Join(dir, "schema.dpg")
+	if err := os.WriteFile(f, []byte(rendered), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	compiled, err := compiler.Compile([]string{f}, dir, pipeline.Default)
+	if err != nil {
+		t.Fatalf("dumped policies/triggers failed to recompile: %v\n---\n%s", err, rendered)
+	}
+	var found *ir.Table
+	for _, o := range compiled {
+		if tb, ok := o.(*ir.Table); ok && tb.Name == "orders" {
+			found = tb
+		}
+	}
+	if found == nil {
+		t.Fatalf("table orders missing after recompile\n---\n%s", rendered)
+	}
+	if len(found.Policies) != 2 {
+		t.Fatalf("Policies did not round-trip: got %d, want 2", len(found.Policies))
+	}
+	if len(found.Triggers) != 2 {
+		t.Fatalf("Triggers did not round-trip: got %d, want 2", len(found.Triggers))
+	}
+	for _, p := range found.Policies {
+		if p.Name == "admin_write" {
+			if p.Permissive {
+				t.Error("admin_write: Permissive did not round-trip (should be RESTRICTIVE)")
+			}
+			if len(p.Roles) != 1 || p.Roles[0] != "admin_role" {
+				t.Errorf("admin_write: Roles did not round-trip: %v", p.Roles)
+			}
+			if p.WithCheck == nil {
+				t.Error("admin_write: WithCheck did not round-trip")
+			}
+		}
+	}
+	for _, trg := range found.Triggers {
+		if trg.Name == "audit_status" {
+			if trg.Condition == nil {
+				t.Error("audit_status: Condition (WHEN) did not round-trip")
+			}
+			if len(trg.Args) != 1 || trg.Args[0] != "'orders'" {
+				t.Errorf("audit_status: Args did not round-trip: %v", trg.Args)
 			}
 		}
 	}

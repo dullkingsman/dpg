@@ -120,11 +120,18 @@ type ConstraintDef struct {
 	Pos      SourcePos
 }
 
-// PartitionBound describes a single partition's bounds.
+// PartitionBound describes a single partition's bounds, optionally with its
+// own nested PARTITION BY clause and PARTITIONS block (sub-partitioning,
+// RFC §7.13). SubStrategy is "" for a leaf partition; when non-empty,
+// SubColumns/SubPartitions describe that partition's own partitioning —
+// recursively, since a sub-partition may itself be further sub-partitioned.
 type PartitionBound struct {
-	Name   Identifier
-	Bounds RawExpr
-	Pos    SourcePos
+	Name          Identifier
+	Bounds        RawExpr
+	SubStrategy   string // "RANGE"/"LIST"/"HASH"; "" means no sub-partitioning
+	SubColumns    []string
+	SubPartitions []PartitionBound
+	Pos           SourcePos
 }
 
 // PartitionDef is the PARTITIONS { } directive.
@@ -140,21 +147,53 @@ type MigrateRemoveBlock struct {
 	Pos    SourcePos
 }
 
-// DefaultPrivilegesBlock is a DEFAULT PRIVILEGES { } entry.
+// DefaultPrivilegeGrant is one GRANTS { } entry inside a DEFAULT PRIVILEGES
+// block. Unlike a regular GrantEntry, real PostgreSQL's ALTER DEFAULT
+// PRIVILEGES grammar requires an "ON <object-type>" clause per grant — the
+// object type isn't implicit from an enclosing table/view the way it is for
+// every other GRANTS block: "GRANT priv[, ...] ON {TABLES|SEQUENCES|
+// FUNCTIONS|TYPES|SCHEMAS} TO role[, ...] [WITH GRANT OPTION]".
+type DefaultPrivilegeGrant struct {
+	ObjectType string // "TABLES", "SEQUENCES", "FUNCTIONS", "TYPES", "SCHEMAS"
+	Privileges []string
+	Roles      []Identifier
+	WithGrant  bool
+	Pos        SourcePos
+}
+
+// DefaultPrivilegeRevocation is REVOCATIONS { } entry's DefaultPrivileges sibling.
+type DefaultPrivilegeRevocation struct {
+	ObjectType string
+	Privileges []string
+	Roles      []Identifier
+	Cascade    bool
+	Pos        SourcePos
+}
+
+// DefaultPrivilegesBlock is a DEFAULT PRIVILEGES { } entry. Real PostgreSQL's
+// ALTER DEFAULT PRIVILEGES statement can never be complete without its
+// GRANT/REVOKE action inline — a "[FOR ROLE x] [IN SCHEMA y]" header alone
+// is not valid PG SQL on its own (confirmed live) — so, unlike every other
+// DPG object kind, this is never split into a pg_query-parsed Part 1 and a
+// blockparser-parsed Part 2; the whole declaration (header + block) is
+// parsed here, with zero pg_query involvement. See
+// blockparser.Parser.ParseDefaultPrivileges.
 type DefaultPrivilegesBlock struct {
 	InSchema    *Identifier
 	ForRole     *Identifier
-	ObjectType  string // "TABLES", "SEQUENCES", "FUNCTIONS", etc.
-	Grants      []GrantEntry
-	Revocations []RevocationEntry
+	Grants      []DefaultPrivilegeGrant
+	Revocations []DefaultPrivilegeRevocation
 	Pos         SourcePos
 }
 
 // TSMappingDef is a MAPPING FOR { } entry (TEXT SEARCH CONFIGURATION).
+// Dictionaries is a fallback chain (real PG syntax: "WITH dict1, dict2, ...";
+// dictionaries are tried in order until one recognizes the token) — a single
+// entry is the common case, but the RFC's own worked example uses two.
 type TSMappingDef struct {
-	TokenTypes []string
-	Dictionary Identifier
-	Pos        SourcePos
+	TokenTypes   []string
+	Dictionaries []Identifier
+	Pos          SourcePos
 }
 
 // NameMapEntry is a single NAME MAP directive inside a { } block.

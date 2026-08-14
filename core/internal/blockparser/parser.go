@@ -5,6 +5,7 @@ package blockparser
 
 import (
 	"fmt"
+	"regexp"
 	"strconv"
 	"strings"
 
@@ -35,6 +36,11 @@ func (p *Parser) Parse(kind pipeline.ObjectKind, part2 string, pos pipeline.Sour
 		col:  pos.Col,
 	}
 	return bp.parseBlock(pos)
+}
+
+// ParseDefaultPrivileges implements pipeline.BlockParser.
+func (p *Parser) ParseDefaultPrivileges(header, body string, pos pipeline.SourcePos) (pipeline.DefaultPrivilegesBlock, error) {
+	return ParseDefaultPrivileges(header, body, pos)
 }
 
 // ── internal parser ───────────────────────────────────────────────────────────
@@ -425,7 +431,23 @@ func (b *blockParser) parseBlock(pos pipeline.SourcePos) (pipeline.BlockAST, err
 			// a single entry outside a plural block, so unlike INDICES this must
 			// not consume a wrapping '{ }'.
 			var idx pipeline.IndexDef
-			idx, err = b.parseOneIndex()
+			idx, err = b.parseOneIndex(false)
+			ast.Indices = append(ast.Indices, idx)
+		case "UNIQUE":
+			// Mode B's "UNIQUE INDEX name (...)" form, mirroring real
+			// PostgreSQL's CREATE UNIQUE INDEX order exactly (UNIQUE has no
+			// other meaning as a bare top-level block directive). presetUnique
+			// tells parseOneIndex UNIQUE was already consumed here, so it
+			// doesn't try to read it again.
+			b.skipWS()
+			c := b.cur()
+			w2 := strings.ToUpper(b.readWord())
+			if w2 != "INDEX" {
+				b.restore(c)
+				return ast, b.errorf("expected INDEX after UNIQUE, got %q", w2)
+			}
+			var idx pipeline.IndexDef
+			idx, err = b.parseOneIndex(true)
 			ast.Indices = append(ast.Indices, idx)
 		case "COLUMN":
 			var col pipeline.ColumnBlock
@@ -687,7 +709,7 @@ func (b *blockParser) parseIndices(pos pipeline.SourcePos) ([]pipeline.IndexDef,
 		if b.eof() || b.peek() == '}' {
 			break
 		}
-		idx, err := b.parseOneIndex()
+		idx, err := b.parseOneIndex(false)
 		if err != nil {
 			return nil, err
 		}
@@ -701,20 +723,68 @@ func (b *blockParser) parseIndices(pos pipeline.SourcePos) ([]pipeline.IndexDef,
 	return indices, nil
 }
 
-func (b *blockParser) parseOneIndex() (pipeline.IndexDef, error) {
+// parseOneIndex parses one index declaration. presetUnique is true when the
+// caller (Mode B's top-level "UNIQUE INDEX ..." dispatch) already consumed a
+// leading UNIQUE keyword itself — Mode A (an entry inside INDICES { }, with
+// no INDEX keyword) has parseOneIndex consume its own leading UNIQUE.
+func (b *blockParser) parseOneIndex(presetUnique bool) (pipeline.IndexDef, error) {
 	pos := b.srcPos()
+
+	unique := presetUnique
+	if !presetUnique {
+		b.skipWS()
+		c := b.cur()
+		w := strings.ToUpper(b.readWord())
+		if w == "UNIQUE" {
+			unique = true
+		} else {
+			b.restore(c)
+		}
+	}
+
+	// [CONCURRENTLY] is a bare presence keyword, mirroring real PostgreSQL's
+	// own CREATE [UNIQUE] INDEX [CONCURRENTLY] name — CONCURRENTLY has no
+	// boolean value in real PG (it's either written or it isn't), so DPG
+	// must not invent one either. This used to be a trailing
+	// "CONCURRENTLY <bool>;" clause with no PG equivalent; presence here
+	// means "explicitly concurrent", absence means "let the compiler apply
+	// the project's concurrent_indexes default" (see internal/diff
+	// createIndex), not "explicitly non-concurrent" — PG has no way to
+	// spell that either.
+	b.skipWS()
+	c := b.cur()
+	w := strings.ToUpper(b.readWord())
+	concurrently := false
+	if w == "CONCURRENTLY" {
+		concurrently = true
+	} else {
+		b.restore(c)
+	}
+
 	name, err := b.readIdentifier()
 	if err != nil {
 		return pipeline.IndexDef{}, err
 	}
-	idx := pipeline.IndexDef{Name: name, Pos: pos}
+	idx := pipeline.IndexDef{Name: name, Unique: unique, Concurrently: concurrently, Pos: pos}
 
+	// Check optional USING method — mirrors real PostgreSQL's own
+	// CREATE INDEX name ON table USING method (columns) order, and matches
+	// the RFC's ABNF and every one of its worked examples (e.g.
+	// "idx_location USING gist (location);"). This used to be parsed only
+	// after the column list, which silently rejected the RFC's own
+	// examples — confirmed live: `idx USING gin (tags);` failed to parse
+	// with "expected '(' for index columns after index name idx" until
+	// this fix.
 	b.skipWS()
-	// Check optional UNIQUE keyword
-	c := b.cur()
-	w := strings.ToUpper(b.readWord())
-	if w == "UNIQUE" {
-		idx.Unique = true
+	c = b.cur()
+	w = strings.ToUpper(b.readWord())
+	if w == "USING" {
+		b.skipWS()
+		method, err2 := b.readIdentifier()
+		if err2 != nil {
+			return idx, err2
+		}
+		idx.Method = &method
 	} else {
 		b.restore(c)
 	}
@@ -738,14 +808,6 @@ func (b *blockParser) parseOneIndex() (pipeline.IndexDef, error) {
 		c := b.cur()
 		kw := strings.ToUpper(b.peekWord())
 		switch kw {
-		case "USING":
-			b.readWord()
-			b.skipWS()
-			method, err2 := b.readIdentifier()
-			if err2 != nil {
-				return idx, err2
-			}
-			idx.Method = &method
 		case "WHERE":
 			b.readWord()
 			b.skipWS()
@@ -813,11 +875,6 @@ func (b *blockParser) parseOneIndex() (pipeline.IndexDef, error) {
 				return idx, err2
 			}
 			idx.Tablespace = &ts
-		case "CONCURRENTLY":
-			b.readWord()
-			b.skipWS()
-			boolWord := strings.ToUpper(b.readWord())
-			idx.Concurrently = boolWord != "FALSE" && boolWord != "0"
 		default:
 			b.restore(c)
 			goto doneIndexClauses
@@ -1655,28 +1712,75 @@ func (b *blockParser) parsePartitionsBlock(pos pipeline.SourcePos) (*pipeline.Pa
 	return pd, nil
 }
 
-// parseOnePartitionBound parses a single "name bounds;" entry, shared by
-// parsePartitionsBlock (Mode A, inside a PARTITIONS { } block) and the
-// PARTITION singular-keyword dispatch case (Mode B).
+// subPartitionByRe matches a trailing "PARTITION BY <strategy> (<cols>)" clause
+// at the end of a partition entry's raw bounds text, i.e. RFC §7.13
+// sub-partitioning. Bounds-clause literals never contain the word PARTITION,
+// so a plain trailing match is unambiguous.
+var subPartitionByRe = regexp.MustCompile(`(?is)^(.*?)\bPARTITION\s+BY\s+(RANGE|LIST|HASH)\s*\(([^)]*)\)\s*$`)
+
+// parseOnePartitionBound parses a single "name bounds [PARTITION BY strategy
+// (cols) { PARTITIONS {...} }];" entry, shared by parsePartitionsBlock
+// (Mode A, inside a PARTITIONS { } block) and the PARTITION singular-keyword
+// dispatch case (Mode B). The trailing PARTITION BY clause is optional and
+// describes sub-partitioning (RFC §7.13): a partition entry may itself be
+// further partitioned, recursively.
 func (b *blockParser) parseOnePartitionBound() (pipeline.PartitionBound, error) {
 	pPos := b.srcPos()
 	name, err := b.readIdentifier()
 	if err != nil {
 		return pipeline.PartitionBound{}, err
 	}
-	// Read everything up to ';' or end of block as bounds
-	raw, err := b.readRawUntil(";}")
+	// Read everything up to ';', a nested sub-partition '{', or end of block.
+	raw, err := b.readRawUntil(";{}")
 	if err != nil {
 		return pipeline.PartitionBound{}, err
 	}
+
+	bound := pipeline.PartitionBound{Name: name, Pos: pPos}
+
+	if m := subPartitionByRe.FindStringSubmatch(raw); m != nil {
+		if b.peek() != '{' {
+			return pipeline.PartitionBound{}, b.errorf("expected '{' after PARTITION BY %s clause", m[2])
+		}
+		bound.Bounds = pipeline.RawExpr{Text: strings.TrimSpace(m[1]), Pos: pPos}
+		bound.SubStrategy = strings.ToUpper(m[2])
+		for _, c := range splitTopLevel(m[3], ',') {
+			c = strings.TrimSpace(c)
+			if c != "" {
+				bound.SubColumns = append(bound.SubColumns, c)
+			}
+		}
+
+		if err := b.consumeBrace(); err != nil {
+			return pipeline.PartitionBound{}, err
+		}
+		b.skipWS()
+		if err := b.expect("PARTITIONS"); err != nil {
+			return pipeline.PartitionBound{}, err
+		}
+		nestedPos := b.srcPos()
+		nested, err := b.parsePartitionsBlock(nestedPos)
+		if err != nil {
+			return pipeline.PartitionBound{}, err
+		}
+		bound.SubPartitions = nested.Partitions
+		b.skipWS()
+		if b.peek() != '}' {
+			return pipeline.PartitionBound{}, b.errorf("expected '}' to close nested PARTITION BY block")
+		}
+		b.advance()
+	} else {
+		if b.peek() == '{' {
+			return pipeline.PartitionBound{}, b.errorf("unexpected '{' in partition bounds (missing PARTITION BY clause?)")
+		}
+		bound.Bounds = pipeline.RawExpr{Text: strings.TrimSpace(raw), Pos: pPos}
+	}
+
+	b.skipWS()
 	if b.peek() == ';' {
 		b.advance()
 	}
-	return pipeline.PartitionBound{
-		Name:   name,
-		Bounds: pipeline.RawExpr{Text: strings.TrimSpace(raw), Pos: pPos},
-		Pos:    pPos,
-	}, nil
+	return bound, nil
 }
 
 // ── MIGRATE REMOVE ────────────────────────────────────────────────────────────
@@ -1714,95 +1818,54 @@ func (b *blockParser) parseMigrateRemove(pos pipeline.SourcePos) (*pipeline.Migr
 
 // ── DEFAULT PRIVILEGES ────────────────────────────────────────────────────────
 
+// parseDefaultPrivileges is the nested-directive entry point (dispatched
+// from parseBlock's "DEFAULT" case when DEFAULT PRIVILEGES appears inside
+// an enclosing object's block, e.g. nested inside SCHEMA — the caller has
+// already consumed "DEFAULT").
 func (b *blockParser) parseDefaultPrivileges(pos pipeline.SourcePos) (pipeline.DefaultPrivilegesBlock, error) {
 	if err := b.expect("PRIVILEGES"); err != nil {
 		return pipeline.DefaultPrivilegesBlock{}, err
 	}
-	dp := pipeline.DefaultPrivilegesBlock{Pos: pos}
-	// Optional IN SCHEMA name
-	b.skipWS()
-	c := b.cur()
-	if strings.ToUpper(b.peekWord()) == "IN" {
-		b.readWord()
-		if err := b.expect("SCHEMA"); err != nil {
-			return dp, err
-		}
-		b.skipWS()
-		s, err := b.readIdentifier()
-		if err != nil {
-			return dp, err
-		}
-		dp.InSchema = &s
-	} else {
-		b.restore(c)
+	return b.parseDefaultPrivilegesBody(pos)
+}
+
+// ParseDefaultPrivileges is the top-level entry point for a DEFAULT
+// PRIVILEGES declaration that is NOT nested inside another object's block.
+// Unlike every other DPG object kind, DEFAULT PRIVILEGES is never split into
+// a pg_query-parsed Part 1 and a blockparser-parsed Part 2: real
+// PostgreSQL's ALTER DEFAULT PRIVILEGES statement requires its GRANT/REVOKE
+// action inline in the same statement, so a header-only fragment like
+// "FOR ROLE x IN SCHEMA y" is never valid PG SQL on its own (confirmed live:
+// "syntax error at end of input"). header is the raw text between "DEFAULT
+// PRIVILEGES" and the opening '{' (e.g. "FOR ROLE x IN SCHEMA y"); body is
+// the text inside that '{ }' (matching pipeline.BlockParser.Parse's own
+// part2 convention — braces excluded).
+func ParseDefaultPrivileges(header, body string, pos pipeline.SourcePos) (pipeline.DefaultPrivilegesBlock, error) {
+	hp := &blockParser{src: []byte(header), file: pos.File, line: pos.Line, col: pos.Col}
+	dp, err := hp.parseDefaultPrivilegesHeader(pos)
+	if err != nil {
+		return dp, err
 	}
-	// Optional FOR ROLE name
-	b.skipWS()
-	c = b.cur()
-	if strings.ToUpper(b.peekWord()) == "FOR" {
-		b.readWord()
-		b.skipWS()
-		_ = b.readWord() // ROLE keyword
-		b.skipWS()
-		r, err := b.readIdentifier()
-		if err != nil {
-			return dp, err
-		}
-		dp.ForRole = &r
-	} else {
-		b.restore(c)
+	bp := &blockParser{src: []byte(body), file: pos.File, line: pos.Line, col: pos.Col}
+	if err := bp.parseDefaultPrivilegesEntries(&dp); err != nil {
+		return dp, err
 	}
-	// FOR object_type
-	b.skipWS()
-	c = b.cur()
-	if strings.ToUpper(b.peekWord()) == "FOR" {
-		b.readWord()
-		b.skipWS()
-		dp.ObjectType = strings.ToUpper(b.readWord())
-	} else {
-		b.restore(c)
+	return dp, nil
+}
+
+// parseDefaultPrivilegesBody parses "[IN SCHEMA x] [FOR ROLE y] { entries }"
+// from a single source (the nested-directive case, where header and braces
+// all come from the same enclosing block's text).
+func (b *blockParser) parseDefaultPrivilegesBody(pos pipeline.SourcePos) (pipeline.DefaultPrivilegesBlock, error) {
+	dp, err := b.parseDefaultPrivilegesHeader(pos)
+	if err != nil {
+		return dp, err
 	}
-	// { grants/revocations }
 	if err := b.consumeBrace(); err != nil {
 		return dp, err
 	}
-	for {
-		b.skipWS()
-		if b.eof() || b.peek() == '}' {
-			break
-		}
-		dirPos := b.srcPos()
-		word := strings.ToUpper(b.readWord())
-		switch word {
-		case "GRANTS":
-			grants, err := b.parseGrantsBlock(dirPos)
-			if err != nil {
-				return dp, err
-			}
-			dp.Grants = append(dp.Grants, grants...)
-		case "GRANT":
-			// Mode B (§4.8 Dual Definition Modes): singular entry, no wrapping '{ }'.
-			g, err := b.parseOneGrant(dirPos)
-			if err != nil {
-				return dp, err
-			}
-			dp.Grants = append(dp.Grants, g)
-		case "REVOCATIONS":
-			revs, err := b.parseRevocationsBlock(dirPos)
-			if err != nil {
-				return dp, err
-			}
-			dp.Revocations = append(dp.Revocations, revs...)
-		case "REVOCATION":
-			// Mode B: singular entry, no wrapping '{ }'.
-			r, err := b.parseOneRevocation(dirPos)
-			if err != nil {
-				return dp, err
-			}
-			dp.Revocations = append(dp.Revocations, r)
-		default:
-			return dp, fmt.Errorf("%s: unexpected directive %q in DEFAULT PRIVILEGES block", dirPos, word)
-		}
+	if err := b.parseDefaultPrivilegesEntries(&dp); err != nil {
+		return dp, err
 	}
 	b.skipWS()
 	if b.peek() != '}' {
@@ -1810,6 +1873,311 @@ func (b *blockParser) parseDefaultPrivileges(pos pipeline.SourcePos) (pipeline.D
 	}
 	b.advance()
 	return dp, nil
+}
+
+// parseDefaultPrivilegesHeader parses the optional "[IN SCHEMA x] [FOR ROLE
+// y]" clauses, in either order, consuming nothing past them (no brace).
+func (b *blockParser) parseDefaultPrivilegesHeader(pos pipeline.SourcePos) (pipeline.DefaultPrivilegesBlock, error) {
+	dp := pipeline.DefaultPrivilegesBlock{Pos: pos}
+	for {
+		b.skipWS()
+		c := b.cur()
+		word := strings.ToUpper(b.peekWord())
+		switch word {
+		case "IN":
+			if dp.InSchema != nil {
+				return dp, b.errorf("IN SCHEMA specified more than once")
+			}
+			b.readWord()
+			if err := b.expect("SCHEMA"); err != nil {
+				return dp, err
+			}
+			b.skipWS()
+			s, err := b.readIdentifier()
+			if err != nil {
+				return dp, err
+			}
+			dp.InSchema = &s
+		case "FOR":
+			if dp.ForRole != nil {
+				return dp, b.errorf("FOR ROLE specified more than once")
+			}
+			b.readWord()
+			b.skipWS()
+			_ = b.readWord() // ROLE keyword
+			b.skipWS()
+			r, err := b.readIdentifier()
+			if err != nil {
+				return dp, err
+			}
+			dp.ForRole = &r
+		default:
+			b.restore(c)
+			return dp, nil
+		}
+	}
+}
+
+// parseDefaultPrivilegesEntries parses zero or more GRANTS/GRANT/
+// REVOCATIONS/REVOCATION directives (Mode A/B, same dual-definition
+// convention as every other block) until EOF or an unconsumed '}'.
+func (b *blockParser) parseDefaultPrivilegesEntries(dp *pipeline.DefaultPrivilegesBlock) error {
+	for {
+		b.skipWS()
+		if b.eof() || b.peek() == '}' {
+			return nil
+		}
+		dirPos := b.srcPos()
+		word := strings.ToUpper(b.readWord())
+		switch word {
+		case "GRANTS":
+			grants, err := b.parseDefaultPrivilegeGrantsBlock(dirPos)
+			if err != nil {
+				return err
+			}
+			dp.Grants = append(dp.Grants, grants...)
+		case "GRANT":
+			// Mode B (§4.8 Dual Definition Modes): singular entry, no wrapping '{ }'.
+			g, err := b.parseOneDefaultPrivilegeGrant(dirPos)
+			if err != nil {
+				return err
+			}
+			dp.Grants = append(dp.Grants, g)
+		case "REVOCATIONS":
+			revs, err := b.parseDefaultPrivilegeRevocationsBlock(dirPos)
+			if err != nil {
+				return err
+			}
+			dp.Revocations = append(dp.Revocations, revs...)
+		case "REVOCATION":
+			// Mode B: singular entry, no wrapping '{ }'.
+			r, err := b.parseOneDefaultPrivilegeRevocation(dirPos)
+			if err != nil {
+				return err
+			}
+			dp.Revocations = append(dp.Revocations, r)
+		default:
+			return fmt.Errorf("%s: unexpected directive %q in DEFAULT PRIVILEGES block", dirPos, word)
+		}
+	}
+}
+
+func (b *blockParser) parseDefaultPrivilegeGrantsBlock(pos pipeline.SourcePos) ([]pipeline.DefaultPrivilegeGrant, error) {
+	if err := b.consumeBrace(); err != nil {
+		return nil, err
+	}
+	var grants []pipeline.DefaultPrivilegeGrant
+	for {
+		b.skipWS()
+		if b.eof() || b.peek() == '}' {
+			break
+		}
+		g, err := b.parseOneDefaultPrivilegeGrant(b.srcPos())
+		if err != nil {
+			return nil, err
+		}
+		grants = append(grants, g)
+	}
+	b.skipWS()
+	if b.peek() != '}' {
+		return nil, b.errorf("expected '}' to close GRANTS block")
+	}
+	b.advance()
+	return grants, nil
+}
+
+// parseOneDefaultPrivilegeGrant parses "priv[, ...] ON objtype TO role[, ...]
+// [WITH GRANT OPTION];" — real PostgreSQL's own ALTER DEFAULT PRIVILEGES
+// grant-clause grammar, confirmed against real PG (not a DPG invention):
+// the object type is part of the GRANT clause itself, unlike a regular
+// table/view GRANTS block where the object is implicit from the enclosing
+// declaration.
+func (b *blockParser) parseOneDefaultPrivilegeGrant(pos pipeline.SourcePos) (pipeline.DefaultPrivilegeGrant, error) {
+	g := pipeline.DefaultPrivilegeGrant{Pos: pos}
+	b.skipWS()
+	c := b.cur()
+	first := strings.ToUpper(b.readWord())
+	if first == "ALL" {
+		b.skipWS()
+		c2 := b.cur()
+		if strings.ToUpper(b.peekWord()) == "PRIVILEGES" {
+			b.readWord()
+		} else {
+			b.restore(c2)
+		}
+		g.Privileges = nil // nil = ALL
+	} else {
+		b.restore(c)
+		for {
+			b.skipWS()
+			priv := strings.ToUpper(b.readWord())
+			if priv == "" {
+				break
+			}
+			g.Privileges = append(g.Privileges, priv)
+			b.skipWS()
+			if b.peek() != ',' {
+				break
+			}
+			b.advance()
+			b.skipWS()
+			if strings.ToUpper(b.peekWord()) == "ON" {
+				break
+			}
+		}
+	}
+	if err := b.expect("ON"); err != nil {
+		return g, err
+	}
+	b.skipWS()
+	g.ObjectType = strings.ToUpper(b.readWord())
+	if g.ObjectType == "" {
+		return g, b.errorf("expected an object type (TABLES/SEQUENCES/FUNCTIONS/TYPES/SCHEMAS) after ON")
+	}
+	if err := b.expect("TO"); err != nil {
+		return g, err
+	}
+	for {
+		b.skipWS()
+		r, err := b.readIdentifier()
+		if err != nil {
+			return g, err
+		}
+		g.Roles = append(g.Roles, r)
+		b.skipWS()
+		if b.peek() != ',' {
+			break
+		}
+		b.advance()
+		b.skipWS()
+		if strings.ToUpper(b.peekWord()) == "WITH" {
+			break
+		}
+	}
+	b.skipWS()
+	c = b.cur()
+	if strings.ToUpper(b.peekWord()) == "WITH" {
+		b.readWord()
+		b.skipWS()
+		if strings.ToUpper(b.peekWord()) == "GRANT" {
+			b.readWord()
+			if err := b.expect("OPTION"); err != nil {
+				return g, err
+			}
+			g.WithGrant = true
+		} else {
+			b.restore(c)
+		}
+	}
+	b.skipWS()
+	if b.peek() == ';' {
+		b.advance()
+	}
+	return g, nil
+}
+
+func (b *blockParser) parseDefaultPrivilegeRevocationsBlock(pos pipeline.SourcePos) ([]pipeline.DefaultPrivilegeRevocation, error) {
+	if err := b.consumeBrace(); err != nil {
+		return nil, err
+	}
+	var revs []pipeline.DefaultPrivilegeRevocation
+	for {
+		b.skipWS()
+		if b.eof() || b.peek() == '}' {
+			break
+		}
+		r, err := b.parseOneDefaultPrivilegeRevocation(b.srcPos())
+		if err != nil {
+			return nil, err
+		}
+		revs = append(revs, r)
+	}
+	b.skipWS()
+	if b.peek() != '}' {
+		return nil, b.errorf("expected '}' to close REVOCATIONS block")
+	}
+	b.advance()
+	return revs, nil
+}
+
+// parseOneDefaultPrivilegeRevocation mirrors parseOneDefaultPrivilegeGrant —
+// real PostgreSQL's ALTER DEFAULT PRIVILEGES ... REVOKE clause: "priv[, ...]
+// ON objtype FROM role[, ...] [CASCADE];".
+func (b *blockParser) parseOneDefaultPrivilegeRevocation(pos pipeline.SourcePos) (pipeline.DefaultPrivilegeRevocation, error) {
+	r := pipeline.DefaultPrivilegeRevocation{Pos: pos}
+	b.skipWS()
+	c := b.cur()
+	first := strings.ToUpper(b.readWord())
+	if first == "ALL" {
+		b.skipWS()
+		c2 := b.cur()
+		if strings.ToUpper(b.peekWord()) == "PRIVILEGES" {
+			b.readWord()
+		} else {
+			b.restore(c2)
+		}
+		r.Privileges = nil
+	} else {
+		b.restore(c)
+		for {
+			b.skipWS()
+			priv := strings.ToUpper(b.readWord())
+			if priv == "" {
+				break
+			}
+			r.Privileges = append(r.Privileges, priv)
+			b.skipWS()
+			if b.peek() != ',' {
+				break
+			}
+			b.advance()
+			b.skipWS()
+			if strings.ToUpper(b.peekWord()) == "ON" {
+				break
+			}
+		}
+	}
+	if err := b.expect("ON"); err != nil {
+		return r, err
+	}
+	b.skipWS()
+	r.ObjectType = strings.ToUpper(b.readWord())
+	if r.ObjectType == "" {
+		return r, b.errorf("expected an object type (TABLES/SEQUENCES/FUNCTIONS/TYPES/SCHEMAS) after ON")
+	}
+	if err := b.expect("FROM"); err != nil {
+		return r, err
+	}
+	for {
+		b.skipWS()
+		role, err := b.readIdentifier()
+		if err != nil {
+			return r, err
+		}
+		r.Roles = append(r.Roles, role)
+		b.skipWS()
+		if b.peek() != ',' {
+			break
+		}
+		b.advance()
+		b.skipWS()
+		if strings.ToUpper(b.peekWord()) == "CASCADE" {
+			break
+		}
+	}
+	b.skipWS()
+	c = b.cur()
+	if strings.ToUpper(b.peekWord()) == "CASCADE" {
+		b.readWord()
+		r.Cascade = true
+	} else {
+		b.restore(c)
+	}
+	b.skipWS()
+	if b.peek() == ';' {
+		b.advance()
+	}
+	return r, nil
 }
 
 // ── NAME MAP / NAME MAPS ──────────────────────────────────────────────────────
@@ -1923,12 +2291,19 @@ func (b *blockParser) parseTSMapping(pos pipeline.SourcePos) (pipeline.TSMapping
 	if err := b.expect("WITH"); err != nil {
 		return m, err
 	}
-	b.skipWS()
-	dict, err := b.readIdentifier()
-	if err != nil {
-		return m, err
+	for {
+		b.skipWS()
+		dict, err := b.readIdentifier()
+		if err != nil {
+			return m, err
+		}
+		m.Dictionaries = append(m.Dictionaries, dict)
+		b.skipWS()
+		if b.peek() != ',' {
+			break
+		}
+		b.advance()
 	}
-	m.Dictionary = dict
 	if err := b.expectSemi(); err != nil {
 		return m, err
 	}

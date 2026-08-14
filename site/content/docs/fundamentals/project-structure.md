@@ -50,7 +50,6 @@ myproject/
 ```toml
 [compiler]
 default_drop_behavior = "restrict"   # restrict | cascade
-concurrent_indexes    = true
 
 [linter]
 warn_on_deprecated            = true
