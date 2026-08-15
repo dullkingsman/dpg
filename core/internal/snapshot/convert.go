@@ -206,7 +206,11 @@ func toSnapObject(obj pipeline.IRObject) *SnapObject {
 		}}
 	case *ir.Collation:
 		return &SnapObject{Kind: "collation", Opaque: &SnapOpaque{
-			Kind: "collation", Schema: o.Schema, Name: o.Name, BodyHash: sourceBodyHash(o.Body, o.Reconstructed), Comment: o.Comment,
+			Kind: "collation", Schema: o.Schema, Name: o.Name,
+			CollationStructured: true, CollationProvider: o.Provider,
+			CollationCollate: o.Collate, CollationCtype: o.Ctype, CollationICULocale: o.ICULocale,
+			CollationDeterministic: o.Deterministic,
+			BodyHash:               sourceBodyHash(o.Body, o.Reconstructed), Comment: o.Comment,
 		}}
 	case *ir.Operator:
 		return &SnapObject{Kind: "operator", Opaque: &SnapOpaque{

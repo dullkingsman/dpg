@@ -6533,6 +6533,15 @@ func TestDiffDropOperatorClassLegacyFallsBackToBtree(t *testing.T) {
 // An introspected opaque object (used as the baseline by `plan --live`) may have
 // no body hash; comparing a real body against an empty snapshot hash must NOT
 // report spurious drift.
+// TestDiffOpaqueNoSpuriousDriftWhenSnapHashEmpty predates Collation's
+// structured diffing (RFC §14.2): originally asserted exactly 0 ops for a
+// snap.BodyHash == "" scenario. diffCollation's own stale-snapshot guard
+// (CollationStructured == false here, since this snap predates the field)
+// now deliberately emits one harmless refresh-metadata comment op instead
+// of staying silently stale forever — same self-healing pattern as
+// DOMAIN/Tablespace/Cast/etc. (see diffCollation's doc comment) — so the
+// real invariant this test protects (no spurious DESTRUCTIVE drift) is
+// checked directly rather than asserting a literal op count.
 func TestDiffOpaqueNoSpuriousDriftWhenSnapHashEmpty(t *testing.T) {
 	d := New()
 	snap := &pipeline.Snapshot{}
@@ -6549,8 +6558,10 @@ func TestDiffOpaqueNoSpuriousDriftWhenSnapHashEmpty(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(ops) != 0 {
-		t.Fatalf("want 0 ops (no spurious drift), got %d: %v", len(ops), ops)
+	for _, op := range ops {
+		if op.Safety() == pipeline.Destructive {
+			t.Fatalf("want no spurious destructive drift, got: %v", sqlList(ops))
+		}
 	}
 }
 
@@ -6585,18 +6596,33 @@ func TestDiffDropUserMappingForPublic(t *testing.T) {
 // won't byte-match equivalent hand-written source; against a reconstructed
 // baseline (plan --live) the differ must not report spurious "body changed"
 // drift (regression: capturing Body activated this).
+// TestDiffCollationNoSpuriousBodyDrift is the actual regression guard for
+// the risk diffCollation's design was built to avoid (see its doc
+// comment): LOCALE and LC_COLLATE/LC_CTYPE are two different DPG source
+// spellings that PostgreSQL resolves to the identical collcollate/collctype
+// pair (confirmed live) — Collate/Ctype are populated with those REAL
+// resolved values on both sides (not left as Go zero values, which would
+// make this test pass for the wrong reason — both sides merely
+// "unpopulated," not "genuinely equivalent").
 func TestDiffCollationNoSpuriousBodyDrift(t *testing.T) {
 	d := New()
 	snap := &pipeline.Snapshot{}
 	// Baseline as introspection produces it (qualified, LOCALE form; Reconstructed).
 	if err := snapshot.Populate(snap, []pipeline.IRObject{
-		&ir.Collation{Schema: "public", Name: "c", Body: "CREATE COLLATION public.c (LOCALE = 'C')", Reconstructed: true},
+		&ir.Collation{
+			Schema: "public", Name: "c", Provider: "c", Collate: strPtr("C"), Ctype: strPtr("C"), Deterministic: true,
+			Body: "CREATE COLLATION public.c (LOCALE = 'C')", Reconstructed: true,
+		},
 	}); err != nil {
 		t.Fatal(err)
 	}
-	// Desired from hand-written source (unqualified, LC_* form) — semantically equal.
+	// Desired from hand-written source (unqualified, LC_* form) — resolves
+	// to the same Collate/Ctype PostgreSQL would actually store.
 	desired := []pipeline.IRObject{
-		&ir.Collation{Schema: "public", Name: "c", Body: "CREATE COLLATION c (LC_COLLATE = 'C', LC_CTYPE = 'C')"},
+		&ir.Collation{
+			Schema: "public", Name: "c", Provider: "c", Collate: strPtr("C"), Ctype: strPtr("C"), Deterministic: true,
+			Body: "CREATE COLLATION c (LC_COLLATE = 'C', LC_CTYPE = 'C')",
+		},
 	}
 	ops, err := d.Diff(desired, snap)
 	if err != nil {
@@ -6947,14 +6973,15 @@ func TestCreateOpaqueNonSchemaScopedKindNoSearchPath(t *testing.T) {
 // over-broad fix silently dropped this).
 func TestDiffCollationOfflineDetectsEdit(t *testing.T) {
 	d := New()
+	cLocale, posixLocale := "C", "POSIX"
 	snap := &pipeline.Snapshot{}
 	if err := snapshot.Populate(snap, []pipeline.IRObject{
-		&ir.Collation{Schema: "public", Name: "c", Body: "CREATE COLLATION public.c (LOCALE = 'C')"},
+		&ir.Collation{Schema: "public", Name: "c", Provider: "c", Collate: &cLocale, Ctype: &cLocale, Deterministic: true, Body: "CREATE COLLATION public.c (LOCALE = 'C')"},
 	}); err != nil {
 		t.Fatal(err)
 	}
 	desired := []pipeline.IRObject{
-		&ir.Collation{Schema: "public", Name: "c", Body: "CREATE COLLATION public.c (LOCALE = 'POSIX')"},
+		&ir.Collation{Schema: "public", Name: "c", Provider: "c", Collate: &posixLocale, Ctype: &posixLocale, Deterministic: true, Body: "CREATE COLLATION public.c (LOCALE = 'POSIX')"},
 	}
 	ops, err := d.Diff(desired, snap)
 	if err != nil {
@@ -7617,9 +7644,15 @@ func TestDiffOpaqueOfflineEditEmitsStructuredDropRecreate(t *testing.T) {
 			dropIsSafe: true,
 		},
 		{
-			name:           "collation",
-			oldObj:         &ir.Collation{Schema: "public", Name: "c", Body: "CREATE COLLATION public.c (LOCALE = 'C')"},
-			newObj:         &ir.Collation{Schema: "public", Name: "c", Body: "CREATE COLLATION public.c (LOCALE = 'POSIX')"},
+			name: "collation",
+			oldObj: &ir.Collation{
+				Schema: "public", Name: "c", Provider: "c", Collate: strPtr("C"), Ctype: strPtr("C"), Deterministic: true,
+				Body: "CREATE COLLATION public.c (LOCALE = 'C')",
+			},
+			newObj: &ir.Collation{
+				Schema: "public", Name: "c", Provider: "c", Collate: strPtr("POSIX"), Ctype: strPtr("POSIX"), Deterministic: true,
+				Body: "CREATE COLLATION public.c (LOCALE = 'POSIX')",
+			},
 			wantDropSubstr: `DROP COLLATION IF EXISTS "public"."c";`,
 			wantNewInBody:  "POSIX",
 		},
@@ -7952,13 +7985,19 @@ func TestDiffCollationVerifyNoSpuriousDrift(t *testing.T) {
 	snap := &pipeline.Snapshot{}
 	// Stored snapshot from source apply (has a hash).
 	if err := snapshot.Populate(snap, []pipeline.IRObject{
-		&ir.Collation{Schema: "public", Name: "c", Body: "CREATE COLLATION c (LC_COLLATE = 'C', LC_CTYPE = 'C')"},
+		&ir.Collation{
+			Schema: "public", Name: "c", Provider: "c", Collate: strPtr("C"), Ctype: strPtr("C"), Deterministic: true,
+			Body: "CREATE COLLATION c (LC_COLLATE = 'C', LC_CTYPE = 'C')",
+		},
 	}); err != nil {
 		t.Fatal(err)
 	}
 	// Introspected desired side: canonical reconstruction, marked Reconstructed.
 	desired := []pipeline.IRObject{
-		&ir.Collation{Schema: "public", Name: "c", Body: "CREATE COLLATION public.c (LOCALE = 'C')", Reconstructed: true},
+		&ir.Collation{
+			Schema: "public", Name: "c", Provider: "c", Collate: strPtr("C"), Ctype: strPtr("C"), Deterministic: true,
+			Body: "CREATE COLLATION public.c (LOCALE = 'C')", Reconstructed: true,
+		},
 	}
 	ops, err := d.Diff(desired, snap)
 	if err != nil {
@@ -7976,12 +8015,18 @@ func TestDiffCollationPlanLiveNoSpuriousDrift(t *testing.T) {
 	snap := &pipeline.Snapshot{}
 	// Live baseline built from introspection (Reconstructed → BodyHash omitted).
 	if err := snapshot.Populate(snap, []pipeline.IRObject{
-		&ir.Collation{Schema: "public", Name: "c", Body: "CREATE COLLATION public.c (LOCALE = 'C')", Reconstructed: true},
+		&ir.Collation{
+			Schema: "public", Name: "c", Provider: "c", Collate: strPtr("C"), Ctype: strPtr("C"), Deterministic: true,
+			Body: "CREATE COLLATION public.c (LOCALE = 'C')", Reconstructed: true,
+		},
 	}); err != nil {
 		t.Fatal(err)
 	}
 	desired := []pipeline.IRObject{
-		&ir.Collation{Schema: "public", Name: "c", Body: "CREATE COLLATION c (LC_COLLATE = 'C', LC_CTYPE = 'C')"},
+		&ir.Collation{
+			Schema: "public", Name: "c", Provider: "c", Collate: strPtr("C"), Ctype: strPtr("C"), Deterministic: true,
+			Body: "CREATE COLLATION c (LC_COLLATE = 'C', LC_CTYPE = 'C')",
+		},
 	}
 	ops, err := d.Diff(desired, snap)
 	if err != nil {
@@ -9953,6 +9998,115 @@ func TestDiffPublicationFilteredTableChangeFallsBackToDropCreate(t *testing.T) {
 	}
 	if !containsSQL(ops, "line_items") {
 		t.Errorf("expected the recreate to include the new table, got: %v", sqlList(ops))
+	}
+}
+
+// ── Collation structured diffing (G-live Tier 4) ───────────────────────────────
+// Same G-live gap as Tiers 1-3: Reconstructed forced BodyHash to "" on the
+// live side, silently disabling diffOpaqueIR's comparison on verify/
+// plan --live. diffCollation replaces that with field-level comparison,
+// gated by the explicit CollationStructured sentinel (Provider "c" is
+// itself PostgreSQL's real default, not a reliable "unpopulated" signal).
+
+func TestDiffCollationLocaleChangeRecreates(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.c", &snapshot.SnapObject{
+		Kind: "collation",
+		Opaque: &snapshot.SnapOpaque{
+			Kind: "collation", Schema: "public", Name: "c", CollationStructured: true,
+			CollationProvider: "c", CollationCollate: strPtr("C"), CollationCtype: strPtr("C"), CollationDeterministic: true,
+		},
+	})
+	desired := []pipeline.IRObject{
+		&ir.Collation{
+			Schema: "public", Name: "c", Provider: "c", Collate: strPtr("POSIX"), Ctype: strPtr("POSIX"), Deterministic: true,
+			Body: "CREATE COLLATION public.c (LOCALE = 'POSIX')",
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsSQL(ops, `DROP COLLATION IF EXISTS "public"."c"`) {
+		t.Errorf("expected DROP COLLATION, got: %v", sqlList(ops))
+	}
+	for _, op := range ops {
+		if strings.Contains(op.SQL(), "DROP COLLATION") && op.Safety() != pipeline.Destructive {
+			t.Errorf("expected DROP COLLATION to be Destructive (RFC §14.2), got %v: %s", op.Safety(), op.SQL())
+		}
+	}
+}
+
+func TestDiffCollationDeterministicChangeRecreates(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.c", &snapshot.SnapObject{
+		Kind: "collation",
+		Opaque: &snapshot.SnapOpaque{
+			Kind: "collation", Schema: "public", Name: "c", CollationStructured: true,
+			CollationProvider: "i", CollationICULocale: strPtr("und-u-ks-level2"), CollationDeterministic: true,
+		},
+	})
+	desired := []pipeline.IRObject{
+		&ir.Collation{
+			Schema: "public", Name: "c", Provider: "i", ICULocale: strPtr("und-u-ks-level2"), Deterministic: false,
+			Body: "CREATE COLLATION public.c (PROVIDER = icu, LOCALE = 'und-u-ks-level2', DETERMINISTIC = false)",
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsSQL(ops, `DROP COLLATION IF EXISTS "public"."c"`) {
+		t.Errorf("expected DROP COLLATION for a DETERMINISTIC change, got: %v", sqlList(ops))
+	}
+}
+
+func TestDiffCollationUnchangedIsNoop(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.c", &snapshot.SnapObject{
+		Kind: "collation",
+		Opaque: &snapshot.SnapOpaque{
+			Kind: "collation", Schema: "public", Name: "c", CollationStructured: true,
+			CollationProvider: "c", CollationCollate: strPtr("C"), CollationCtype: strPtr("C"), CollationDeterministic: true,
+		},
+	})
+	desired := []pipeline.IRObject{
+		&ir.Collation{
+			Schema: "public", Name: "c", Provider: "c", Collate: strPtr("C"), Ctype: strPtr("C"), Deterministic: true,
+			Body: "CREATE COLLATION public.c (LOCALE = 'C')",
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ops) != 0 {
+		t.Errorf("expected zero ops for an unchanged collation, got: %v", sqlList(ops))
+	}
+}
+
+func TestDiffCollationStaleSnapshotDoesNotRecreate(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.c", &snapshot.SnapObject{
+		Kind:   "collation",
+		Opaque: &snapshot.SnapOpaque{Kind: "collation", Schema: "public", Name: "c"},
+	})
+	desired := []pipeline.IRObject{
+		&ir.Collation{
+			Schema: "public", Name: "c", Provider: "c", Collate: strPtr("C"), Ctype: strPtr("C"), Deterministic: true,
+			Body: "CREATE COLLATION public.c (LOCALE = 'C')",
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if containsSQL(ops, "DROP COLLATION") {
+		t.Errorf("stale snapshot must not trigger DROP COLLATION, got: %v", sqlList(ops))
 	}
 }
 

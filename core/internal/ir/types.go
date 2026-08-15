@@ -762,12 +762,36 @@ func (e *EventTrigger) irObject()               {}
 
 // Collation is a CREATE COLLATION declaration.
 type Collation struct {
-	Schema        string
-	Name          string
-	Comment       *string // see EventTrigger.Comment
-	Body          string
-	Reconstructed bool // Body rebuilt from the catalog; see Tablespace.Reconstructed
-	SrcPos        pipeline.SourcePos
+	Schema string
+	Name   string
+	// Provider/Collate/Ctype/ICULocale/Deterministic are RFC §14.2's
+	// structured diffing inputs: "any property change requires DROP
+	// COLLATION + CREATE COLLATION" (real PostgreSQL's ALTER COLLATION
+	// supports only REFRESH VERSION/OWNER TO/RENAME TO/SET SCHEMA, none
+	// of these five), so this is a single "did anything change"
+	// comparison, same shape as ForeignDataWrapper. Comparing these
+	// resolved fields directly — rather than the LOCALE-vs-LC_COLLATE/
+	// LC_CTYPE shorthand text — is what actually closes the gap
+	// convert.go's sourceBodyHash doc comment names as the reason
+	// Collation needed Reconstructed's hash-exclusion in the first place:
+	// PostgreSQL always resolves LOCALE into concrete collcollate/
+	// collctype (libc/default/builtin providers) or colllocale (icu)
+	// values regardless of which shorthand the source used (confirmed
+	// live against a real PostgreSQL 17 server), so comparing the
+	// resolved values sidesteps the shorthand-equivalence problem
+	// entirely rather than needing a text-normalization function.
+	// Provider is PostgreSQL's own single-letter catalog code ("c" =
+	// libc, the default when PROVIDER is omitted; "i" = icu; "b" =
+	// builtin). Deterministic defaults true (PostgreSQL's own default
+	// when DETERMINISTIC is omitted), not a DPG-invented default.
+	Provider       string
+	Collate, Ctype *string
+	ICULocale      *string
+	Deterministic  bool
+	Comment        *string // see EventTrigger.Comment
+	Body           string
+	Reconstructed  bool // Body rebuilt from the catalog; see Tablespace.Reconstructed
+	SrcPos         pipeline.SourcePos
 }
 
 func (c *Collation) QualifiedName() string   { return qualName(c.Schema, c.Name) }

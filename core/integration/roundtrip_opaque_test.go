@@ -899,6 +899,78 @@ PUBLICATION gl_filtered_pub
 	}
 }
 
+func TestGLiveCollationLocaleChangeDetected(t *testing.T) {
+	connStr := testpg.Start(t)
+	ctx := context.Background()
+
+	differ := diff.New()
+	emitter := emit.New()
+	applyExec := executor.New()
+	ci := introspect.New()
+	store := newMemStore()
+
+	conn, err := executor.Connect(ctx, connStr)
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	defer conn.Close(ctx)
+
+	dir := t.TempDir()
+	f := filepath.Join(dir, "schema.dpg")
+	fixture := `COLLATION gl_coll (LOCALE = 'C');`
+	if err := os.WriteFile(f, []byte(fixture), 0o644); err != nil {
+		t.Fatalf("write schema: %v", err)
+	}
+	applyFixture(t, ctx, conn, []string{f}, dir, differ, emitter, applyExec, store)
+
+	desired, err := compiler.Compile([]string{f}, dir, pipeline.Default)
+	if err != nil {
+		t.Fatalf("compile: %v", err)
+	}
+
+	// Mutate directly via raw SQL: real PostgreSQL's ALTER COLLATION has
+	// no locale-changing form at all (only REFRESH VERSION/OWNER TO/
+	// RENAME TO/SET SCHEMA) — DROP + CREATE, matching a hand-run
+	// migration outside DPG.
+	if _, err := conn.Exec(ctx, `DROP COLLATION gl_coll;`); err != nil {
+		t.Fatalf("drop collation: %v", err)
+	}
+	if _, err := conn.Exec(ctx, `CREATE COLLATION gl_coll (LOCALE = 'POSIX');`); err != nil {
+		t.Fatalf("recreate collation with a different locale: %v", err)
+	}
+
+	liveObjects, err := ci.Introspect(ctx, conn)
+	if err != nil {
+		t.Fatalf("introspect: %v", err)
+	}
+	snap, _ := store.Load("test", "dpgtest")
+	var managedLive []pipeline.IRObject
+	for _, obj := range liveObjects {
+		if _, ok := snap.Objects[obj.QualifiedName()]; ok {
+			managedLive = append(managedLive, obj)
+		}
+	}
+	liveSnap := &pipeline.Snapshot{}
+	if err := snapshot.Populate(liveSnap, managedLive); err != nil {
+		t.Fatalf("populate live snapshot: %v", err)
+	}
+
+	driftOps, err := differ.Diff(desired, liveSnap)
+	if err != nil {
+		t.Fatalf("drift diff: %v", err)
+	}
+	var sql string
+	for _, op := range driftOps {
+		sql += op.SQL()
+	}
+	if !strings.Contains(sql, "DROP COLLATION") {
+		t.Fatalf("G-live gap not closed: expected plan --live to detect the live-catalog-only locale change, got %d ops: %q", len(driftOps), sql)
+	}
+	if !strings.Contains(sql, "'C'") {
+		t.Errorf("expected recreate to restore the declared locale 'C', got: %s", sql)
+	}
+}
+
 // TestRoundtripOpaqueBodyEditAppliesLive is the live-catalog guard for #3
 // (real update path for opaque objects, internal/diff/differ.go diffOpaqueIR):
 // previously an offline body edit to an opaque object (here, a COLLATION's

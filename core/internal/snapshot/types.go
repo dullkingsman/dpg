@@ -98,6 +98,18 @@ type SnapOpaque struct {
 	PublicationDelete            bool     `json:"publication_delete,omitempty"`
 	PublicationTruncate          bool     `json:"publication_truncate,omitempty"`
 	PublicationHasFilteredTables bool     `json:"publication_has_filtered_tables,omitempty"`
+	// CollationStructured/CollationProvider/CollationCollate/
+	// CollationCtype/CollationICULocale/CollationDeterministic are RFC
+	// §14.2's structured diffing inputs — see ir.Collation.Provider's doc
+	// comment. CollationStructured is the same explicit-sentinel pattern
+	// as OptionsStructured above (Provider "c" is itself PostgreSQL's real
+	// default, not a reliable "unpopulated" signal).
+	CollationStructured    bool    `json:"collation_structured,omitempty"`
+	CollationProvider      string  `json:"collation_provider,omitempty"`
+	CollationCollate       *string `json:"collation_collate,omitempty"`
+	CollationCtype         *string `json:"collation_ctype,omitempty"`
+	CollationICULocale     *string `json:"collation_icu_locale,omitempty"`
+	CollationDeterministic bool    `json:"collation_deterministic,omitempty"`
 }
 
 // SnapOptionKV is one OPTIONS (...) key/value entry, used by the

@@ -949,7 +949,11 @@ ORDER  BY n.nspname, c.collname`
 			continue // nothing reconstructable; skip rather than emit invalid DDL
 		}
 		body := fmt.Sprintf("CREATE COLLATION %s (%s)", qualIdentQ(schema, name), strings.Join(attrs, ", "))
-		out = append(out, &ir.Collation{Schema: schema, Name: name, Body: canonicalDDL(body), Comment: comment, Reconstructed: true})
+		out = append(out, &ir.Collation{
+			Schema: schema, Name: name,
+			Provider: string(provider), Collate: collate, Ctype: ctype, ICULocale: icuLocale, Deterministic: deterministic,
+			Body: canonicalDDL(body), Comment: comment, Reconstructed: true,
+		})
 	}
 	return out, rs.Err()
 }

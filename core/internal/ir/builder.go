@@ -2014,6 +2014,66 @@ func (b *Builder) buildDefineStmt(ds *pg_query.DefineStmt, block pipeline.BlockA
 
 	case pg_query.ObjectType_OBJECT_COLLATION:
 		col := &Collation{Schema: schema, Name: name, Body: rawBody, SrcPos: pos}
+		col.Provider = "c"       // PostgreSQL's own default when PROVIDER is omitted
+		col.Deterministic = true // PostgreSQL's own default when DETERMINISTIC is omitted
+		var locale *string
+		for _, d := range ds.Definition {
+			de := d.GetDefElem()
+			if de == nil {
+				continue
+			}
+			switch de.Defname {
+			case "provider":
+				// PROVIDER's arg is a TypeName node (bare identifier
+				// "icu"/"libc"/"builtin"), not a string literal —
+				// confirmed via pg_query.Parse probe against real
+				// CREATE COLLATION syntax.
+				if tn := de.GetArg().GetTypeName(); tn != nil && len(tn.Names) > 0 {
+					switch tn.Names[len(tn.Names)-1].GetString_().GetSval() {
+					case "icu":
+						col.Provider = "i"
+					case "builtin":
+						col.Provider = "b"
+					default:
+						col.Provider = "c"
+					}
+				}
+			case "locale":
+				if sv := de.GetArg().GetString_(); sv != nil {
+					v := sv.Sval
+					locale = &v
+				}
+			case "lc_collate":
+				if sv := de.GetArg().GetString_(); sv != nil {
+					v := sv.Sval
+					col.Collate = &v
+				}
+			case "lc_ctype":
+				if sv := de.GetArg().GetString_(); sv != nil {
+					v := sv.Sval
+					col.Ctype = &v
+				}
+			case "deterministic":
+				// Confirmed via probe: DETERMINISTIC's arg is a plain
+				// string "true"/"false", not a Boolean node.
+				if sv := de.GetArg().GetString_(); sv != nil {
+					col.Deterministic = sv.Sval == "true"
+				}
+			}
+		}
+		if locale != nil {
+			// LOCALE resolves differently per provider — confirmed live
+			// against a real PostgreSQL 17 server: for libc/default/
+			// builtin it sets BOTH collcollate and collctype to the same
+			// value; for icu it sets colllocale only (collcollate/
+			// collctype stay unset).
+			if col.Provider == "i" {
+				col.ICULocale = locale
+			} else {
+				col.Collate = locale
+				col.Ctype = locale
+			}
+		}
 		if block.Comment != nil {
 			col.Comment = &block.Comment.Value
 		}

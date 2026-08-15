@@ -1365,6 +1365,50 @@ func alterOptionsSQL(desired, live []snapshot.SnapOptionKV) string {
 	return strings.Join(parts, ", ")
 }
 
+// diffCollation implements RFC §14.2's structured diffing: "any property
+// change requires DROP COLLATION + CREATE COLLATION" (real PostgreSQL's
+// ALTER COLLATION supports only REFRESH VERSION/OWNER TO/RENAME TO/SET
+// SCHEMA, none of Provider/Collate/Ctype/ICULocale/Deterministic), so this
+// is a single "did anything change" comparison, same shape as diffFDW.
+// Comparing the resolved Collate/Ctype/ICULocale fields directly (rather
+// than the LOCALE-vs-LC_COLLATE/LC_CTYPE shorthand text) is what actually
+// closes the gap — see ir.Collation's doc comment. Replaces diffOpaqueIR's
+// generic Reconstructed-gated body-hash compare (silently unset on every
+// live path).
+func diffCollation(o *ir.Collation, snap *snapshot.SnapOpaque) ([]pipeline.DiffOp, error) {
+	pos := o.SrcPos
+	ident := qualIdent(o.Schema, o.Name)
+	if !snap.CollationStructured {
+		var ops []pipeline.DiffOp
+		if !ptrEq(o.Comment, snap.Comment) {
+			if sql := commentOnOpaqueSQL("collation", o.Schema, o.Name, "", "", o.Comment); sql != "" {
+				ops = append(ops, safeOp(sql, pos))
+			}
+		}
+		if len(ops) == 0 {
+			ops = append(ops, safeOp(fmt.Sprintf("-- refresh snapshot metadata for collation %s", ident), pos))
+		}
+		return ops, nil
+	}
+	if o.Provider != snap.CollationProvider ||
+		!ptrEq(o.Collate, snap.CollationCollate) || !ptrEq(o.Ctype, snap.CollationCtype) || !ptrEq(o.ICULocale, snap.CollationICULocale) ||
+		o.Deterministic != snap.CollationDeterministic {
+		ops := dropObject(&snapshot.SnapObject{Kind: snap.Kind, Opaque: snap})
+		createOps, err := createOpaque(o.QualifiedName(), o.Body, "COLLATION", o.Schema, pos)
+		if err != nil {
+			return nil, err
+		}
+		ops = append(ops, createOps...)
+		return appendCommentOp(ops, nil, "collation", o.Schema, o.Name, "", "", o.Comment, pos)
+	}
+	if !ptrEq(o.Comment, snap.Comment) {
+		if sql := commentOnOpaqueSQL("collation", o.Schema, o.Name, "", "", o.Comment); sql != "" {
+			return []pipeline.DiffOp{safeOp(sql, pos)}, nil
+		}
+	}
+	return nil, nil
+}
+
 // diffFDW implements RFC §14.8's structured diffing: "any change to a FDW
 // requires drop + recreate" is the RFC's own explicit semantics (no
 // ALTER FOREIGN DATA WRAPPER path modeled, even though real PostgreSQL has
@@ -2908,7 +2952,7 @@ func diffObject(desired pipeline.IRObject, snap *snapshot.SnapObject, fullSnap *
 		if snap.Opaque == nil {
 			return nil, nil
 		}
-		return diffOpaqueIR(o.QualifiedName(), o.Body, o.Reconstructed, o.Comment, snap.Opaque, o.SrcPos)
+		return diffCollation(o, snap.Opaque)
 	case *ir.Operator:
 		if snap.Opaque == nil {
 			return nil, nil

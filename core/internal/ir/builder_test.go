@@ -2336,3 +2336,61 @@ func TestBuildOpaqueCommentSupport(t *testing.T) {
 		})
 	}
 }
+
+// ── Collation structured diffing inputs (RFC §14.2) ────────────────────────────
+// Regression guards for diffCollation's actual risk (see its doc comment):
+// LOCALE and LC_COLLATE/LC_CTYPE are different DPG source spellings that
+// must resolve to the SAME Collate/Ctype fields — proven here at the
+// builder level (not just with hand-set differ_test.go fixtures), matching
+// what real PostgreSQL does (confirmed live against a real server).
+
+func TestBuildCollationLocaleShorthandResolvesCollateAndCtype(t *testing.T) {
+	obj := buildObject(t, pipeline.KindCollation, `c1 (LOCALE = 'en_US.utf8')`, ``)
+	col := obj.(*ir.Collation)
+	if col.Provider != "c" {
+		t.Errorf("Provider: got %q, want \"c\" (libc default)", col.Provider)
+	}
+	if col.Collate == nil || *col.Collate != "en_US.utf8" {
+		t.Errorf("Collate: got %v, want \"en_US.utf8\"", col.Collate)
+	}
+	if col.Ctype == nil || *col.Ctype != "en_US.utf8" {
+		t.Errorf("Ctype: got %v, want \"en_US.utf8\"", col.Ctype)
+	}
+	if !col.Deterministic {
+		t.Error("Deterministic: got false, want true (PostgreSQL's own default)")
+	}
+}
+
+func TestBuildCollationExplicitLcCollateCtypeMatchesLocaleShorthand(t *testing.T) {
+	shorthand := buildObject(t, pipeline.KindCollation, `c1 (LOCALE = 'en_US.utf8')`, ``).(*ir.Collation)
+	explicit := buildObject(t, pipeline.KindCollation, `c2 (LC_COLLATE = 'en_US.utf8', LC_CTYPE = 'en_US.utf8')`, ``).(*ir.Collation)
+	if shorthand.Provider != explicit.Provider {
+		t.Errorf("Provider mismatch: LOCALE=%q vs LC_COLLATE/LC_CTYPE=%q", shorthand.Provider, explicit.Provider)
+	}
+	if *shorthand.Collate != *explicit.Collate {
+		t.Errorf("Collate mismatch: LOCALE=%q vs LC_COLLATE/LC_CTYPE=%q", *shorthand.Collate, *explicit.Collate)
+	}
+	if *shorthand.Ctype != *explicit.Ctype {
+		t.Errorf("Ctype mismatch: LOCALE=%q vs LC_COLLATE/LC_CTYPE=%q", *shorthand.Ctype, *explicit.Ctype)
+	}
+}
+
+func TestBuildCollationICUProviderLocaleSetsICULocaleOnly(t *testing.T) {
+	obj := buildObject(t, pipeline.KindCollation, `c1 (PROVIDER = icu, LOCALE = 'en-US-u-ks-level2', DETERMINISTIC = false)`, ``)
+	col := obj.(*ir.Collation)
+	if col.Provider != "i" {
+		t.Errorf("Provider: got %q, want \"i\" (icu)", col.Provider)
+	}
+	if col.ICULocale == nil || *col.ICULocale != "en-US-u-ks-level2" {
+		t.Errorf("ICULocale: got %v, want \"en-US-u-ks-level2\"", col.ICULocale)
+	}
+	if col.Collate != nil {
+		t.Errorf("Collate: got %v, want nil (LOCALE with PROVIDER=icu sets ICULocale, not Collate/Ctype)", col.Collate)
+	}
+	if col.Ctype != nil {
+		t.Errorf("Ctype: got %v, want nil (LOCALE with PROVIDER=icu sets ICULocale, not Collate/Ctype)", col.Ctype)
+	}
+	if col.Deterministic {
+		t.Error("Deterministic: got true, want false (explicitly declared)")
+	}
+}
