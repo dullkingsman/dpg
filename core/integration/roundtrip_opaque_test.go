@@ -2849,6 +2849,125 @@ TABLE t4 (
 	}
 }
 
+// TestRoundtripUnnamedExcludeBareExpressionElementNoLiveDrift closes the one
+// EXCLUDE element shape none of the other roundtrip tests above cover: a
+// bare, uncast operator expression (e.g. "a + b"), which FigureIndexColname
+// can't derive a name from at all. This was previously believed to need a
+// live catalog connection to resolve (PostgreSQL's ChooseIndexExpressionName
+// needs a fully analyzed, OID-resolved tree for THAT algorithm) — but that's
+// the wrong algorithm: EXCLUDE's own constraint-naming path goes through
+// ChooseIndexColumnNames instead, which falls back to the literal string
+// "expr" (deduplicated like any other repeated element name) purely
+// syntactically, no catalog access needed. Confirmed live against PG 17:
+// EXCLUDE USING btree ((a + b) WITH =) really does generate "t1_expr_excl",
+// and two such elements dedup to "expr"/"expr1" exactly like two same-named
+// function-call elements already do.
+func TestRoundtripUnnamedExcludeBareExpressionElementNoLiveDrift(t *testing.T) {
+	connStr := testpg.Start(t)
+	ctx := context.Background()
+
+	differ := diff.New()
+	emitter := emit.New()
+	applyExec := executor.New()
+	ci := introspect.New()
+	store := newMemStore()
+
+	conn, err := executor.Connect(ctx, connStr)
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	defer conn.Close(ctx)
+
+	dir := t.TempDir()
+	f := filepath.Join(dir, "schema.dpg")
+	fixture := `TABLE t1 (
+    a integer,
+    b integer,
+    EXCLUDE ((a + b) WITH =)
+);
+
+TABLE t2 (
+    a integer,
+    b integer,
+    c integer,
+    d integer,
+    EXCLUDE ((a + b) WITH =, (c * d) WITH =)
+);
+
+TABLE t3 (
+    room integer,
+    a integer,
+    EXCLUDE (room WITH =, (a + 1) WITH =)
+);`
+	if err := os.WriteFile(f, []byte(fixture), 0o644); err != nil {
+		t.Fatalf("write schema: %v", err)
+	}
+	applyFixture(t, ctx, conn, []string{f}, dir, differ, emitter, applyExec, store)
+
+	desired, err := compiler.Compile([]string{f}, dir, pipeline.Default)
+	if err != nil {
+		t.Fatalf("compile: %v", err)
+	}
+	appliedSnap := &pipeline.Snapshot{}
+	if err := snapshot.Populate(appliedSnap, desired); err != nil {
+		t.Fatalf("populate snapshot: %v", err)
+	}
+
+	liveObjects, err := ci.Introspect(ctx, conn)
+	if err != nil {
+		t.Fatalf("introspect: %v", err)
+	}
+	var managedLive []pipeline.IRObject
+	for _, obj := range liveObjects {
+		if _, ok := appliedSnap.Objects[obj.QualifiedName()]; ok {
+			managedLive = append(managedLive, obj)
+		}
+	}
+	liveSnap := &pipeline.Snapshot{}
+	if err := snapshot.Populate(liveSnap, managedLive); err != nil {
+		t.Fatalf("populate live snapshot: %v", err)
+	}
+
+	// Confirm PG actually generated the names this test's rationale claims —
+	// a guard against the zero-drift check below passing for the wrong
+	// reason (e.g. the constraints silently missing).
+	rs, err := conn.QueryRows(ctx, `SELECT conname FROM pg_constraint WHERE contype = 'x' ORDER BY conname`)
+	if err != nil {
+		t.Fatalf("query pg_constraint: %v", err)
+	}
+	defer rs.Close()
+	wantNames := map[string]bool{
+		"t1_expr_excl":       false,
+		"t2_expr_expr1_excl": false,
+		"t3_room_expr_excl":  false,
+	}
+	for rs.Next() {
+		var name string
+		if err := rs.Scan(&name); err != nil {
+			t.Fatalf("scan: %v", err)
+		}
+		if _, ok := wantNames[name]; ok {
+			wantNames[name] = true
+		}
+	}
+	for name, found := range wantNames {
+		if !found {
+			t.Errorf("expected live-generated constraint name %q, not found in pg_constraint", name)
+		}
+	}
+
+	driftOps, err := differ.Diff(desired, liveSnap)
+	if err != nil {
+		t.Fatalf("drift diff: %v", err)
+	}
+	if len(driftOps) != 0 {
+		t.Errorf("expected zero drift for bare-expression EXCLUDE elements against a live catalog, got %d ops:", len(driftOps))
+		for _, op := range driftOps {
+			t.Errorf("  [%s] %s", op.Safety(), op.SQL())
+		}
+	}
+}
+
 // TestRoundtripFunctionParallelCostRows covers PARALLEL/COST/ROWS fidelity
 // end to end: a scalar function that explicitly declares PARALLEL/COST, and
 // a plain function that declares neither (the common case, which must not

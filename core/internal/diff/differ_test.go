@@ -2935,16 +2935,18 @@ func TestDiffUnnamedExcludeRemovalStillDetected(t *testing.T) {
 	}
 }
 
-// TestDiffUnnamedExcludeExpressionElementNotPredicted proves an EXCLUDE with
-// an expression-based element (not a plain column) is correctly NOT given a
-// predicted name — PostgreSQL's own ChooseIndexExpressionName needs a fully
-// analyzed, OID-resolved expression tree that pg_query's raw parse never
-// has, so guessing would risk a FALSE match (silently hiding a real
-// definition change) rather than just a missed one. This must fall back to
-// the structural-signature-only strategy (still correct offline; only
-// verify/plan --live loses reconciliation for this specific EXCLUDE) rather
-// than silently predicting a wrong name.
-func TestDiffUnnamedExcludeExpressionElementNotPredicted(t *testing.T) {
+// TestDiffUnnamedExcludeExpressionElementMatchesLiveGeneratedName proves an
+// EXCLUDE with a bare, uncast operator-expression element (not a plain
+// column, function call, or cast) is still correctly matched against
+// PostgreSQL's real generated name. PredictedName is empty at the IR layer
+// for this shape (a syntax-only pass can't derive anything from "a + b"),
+// but PostgreSQL's own ChooseIndexColumnNames (indexcmds.c) falls back to
+// the literal string "expr" whenever an element's indexcolname is unset —
+// confirmed live against PG 17: EXCLUDE USING btree ((a + b) WITH =) on
+// table "t" really does generate "t_expr_excl". predictName's "excl" case
+// reconstructs that same literal fallback, so this is no longer an
+// unpredictable shape.
+func TestDiffUnnamedExcludeExpressionElementMatchesLiveGeneratedName(t *testing.T) {
 	d := New()
 	snap := &pipeline.Snapshot{}
 	_ = snap.SetObject("public.t", &snapshot.SnapObject{
@@ -2954,12 +2956,6 @@ func TestDiffUnnamedExcludeExpressionElementNotPredicted(t *testing.T) {
 			Name:    "t",
 			Columns: []snapshot.SnapColumn{{Name: "a", Type: "integer"}, {Name: "b", Type: "integer"}},
 			Constraints: []snapshot.SnapConstraint{
-				// A live-generated name for an operator-based expression
-				// element — confirmed live that PostgreSQL's real algorithm
-				// produces the literal "expr" here (unlike a bare function
-				// call, which gets its own name — see
-				// TestDiffUnnamedExcludeFuncCallElementMatchesLiveGeneratedName),
-				// which this tool does not attempt to replicate.
 				{Name: "t_expr_excl", Type: "EXCLUDE", Expr: `EXCLUDE USING btree ((a + b) WITH =)`},
 			},
 		},
@@ -2986,17 +2982,60 @@ func TestDiffUnnamedExcludeExpressionElementNotPredicted(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Not predicted, so the unnamed desired side and the named snapshot side
-	// don't match by name — but the desired side's structural signature also
-	// doesn't match the snapshot's (named) key, so this correctly falls
-	// through to "genuinely different constraint": a DROP of the old name
-	// plus an ADD of the new (unnamed) one. This is the documented, accepted
-	// limitation — not silence, and not a false match.
-	if !containsSQL(ops, "DROP CONSTRAINT") || !containsSQL(ops, "t_expr_excl") {
-		t.Errorf("expected DROP CONSTRAINT t_expr_excl (no false match), got: %v", sqlList(ops))
+	if len(ops) != 0 {
+		t.Errorf("expected zero ops (unnamed EXCLUDE must match live-generated t_expr_excl), got: %v", sqlList(ops))
 	}
-	if !containsSQL(ops, "ADD") {
-		t.Errorf("expected the unnamed EXCLUDE to be (re-)added, got: %v", sqlList(ops))
+}
+
+// TestDiffUnnamedExcludeExpressionElementsDeduped proves two bare-expression
+// elements on the same unnamed EXCLUDE dedup exactly like two same-named
+// function-call elements do (TestDiffUnnamedExcludeSameFuncNameElementsDeduped)
+// — confirmed live: EXCLUDE USING gist ((a + b) WITH =, (c * d) WITH =) on
+// table "t2" generates "t2_expr_expr1_excl".
+func TestDiffUnnamedExcludeExpressionElementsDeduped(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.t2", &snapshot.SnapObject{
+		Kind: "table",
+		Table: &snapshot.SnapTable{
+			Schema: "public",
+			Name:   "t2",
+			Columns: []snapshot.SnapColumn{
+				{Name: "a", Type: "integer"}, {Name: "b", Type: "integer"},
+				{Name: "c", Type: "integer"}, {Name: "d", Type: "integer"},
+			},
+			Constraints: []snapshot.SnapConstraint{
+				{Name: "t2_expr_expr1_excl", Type: "EXCLUDE", Expr: `EXCLUDE USING gist ((a + b) WITH =, (c * d) WITH =)`},
+			},
+		},
+	})
+	desired := []pipeline.IRObject{
+		&ir.Table{
+			Schema: "public", Name: "t2",
+			Columns: []*ir.Column{
+				{Name: "a", Type: ir.TypeRef{Name: "integer"}}, {Name: "b", Type: ir.TypeRef{Name: "integer"}},
+				{Name: "c", Type: ir.TypeRef{Name: "integer"}}, {Name: "d", Type: ir.TypeRef{Name: "integer"}},
+			},
+			Constraints: []*ir.Constraint{
+				{Type: "EXCLUDE",
+					Exclude: &ir.ExcludeSpec{
+						AccessMethod: "gist",
+						Elements: []ir.ExcludeElement{
+							{Expr: "a + b", Operator: "="},
+							{Expr: "c * d", Operator: "="},
+						},
+					},
+					Expr: `EXCLUDE USING gist ((a + b) WITH =, (c * d) WITH =)`,
+				},
+			},
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ops) != 0 {
+		t.Errorf("expected zero ops (must predict deduped t2_expr_expr1_excl), got: %v", sqlList(ops))
 	}
 }
 

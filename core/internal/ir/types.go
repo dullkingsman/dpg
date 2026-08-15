@@ -180,12 +180,17 @@ type ExcludeElement struct {
 	// argument's own PredictedName if that one is itself "strong" —
 	// ColumnRef or FuncCall — else the cast's OWN target type name, e.g.
 	// "(a + b)::text" -> "text", confirmed live). "" for any other
-	// expression shape (a bare, uncast operator expression — PostgreSQL's
-	// own algorithm produces no usable name for that shape at all, confirmed
-	// live). Used solely to reconstruct PostgreSQL's own auto-generated
-	// constraint name (see pgAutoConstraintName's "excl" case in
-	// internal/diff) — extracted directly from the parsed tree, never by
-	// re-parsing Expr's rendered text.
+	// expression shape (a bare, uncast operator expression, e.g. "a + b" —
+	// this syntax-only pass genuinely can't derive anything from it, matching
+	// real PostgreSQL's own FigureIndexColname). This is NOT PostgreSQL's
+	// final answer for such a shape, though: ChooseIndexColumnNames
+	// (indexcmds.c) falls back to the literal string "expr" (deduplicated
+	// like any other repeated element name) whenever indexcolname is unset —
+	// confirmed live against PG 17 — so an empty PredictedName here is
+	// deliberately picked up downstream by pgAutoConstraintName's "excl" case
+	// (internal/diff), not left unpredictable. Used solely to reconstruct
+	// PostgreSQL's own auto-generated constraint name — extracted directly
+	// from the parsed tree, never by re-parsing Expr's rendered text.
 	PredictedName string
 	Collation     string // optional COLLATE target; "" if unspecified
 	OpClass       string // optional operator class; "" if unspecified (uses the type's default)

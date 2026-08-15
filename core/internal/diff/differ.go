@@ -4471,14 +4471,12 @@ func diffConstraints(tbl string, o *ir.Table, snap *snapshot.SnapTable, fullSnap
 	//      name (e.g. "t_pkey") even when the user wrote none, so without
 	//      this an unnamed inline PK/UNIQUE/FK/CHECK/EXCLUDE produced a
 	//      self-inconsistent DROP+ADD pair on every single run. Covers
-	//      PRIMARY KEY/UNIQUE/FOREIGN KEY/CHECK/EXCLUDE — with one
-	//      narrower carve-out for EXCLUDE specifically: an element that's
-	//      an expression rather than a plain column can't be predicted
-	//      offline at all (see predictName's "excl" case for why), so an
-	//      EXCLUDE with at least one expression-based element falls back
-	//      to strategy 1 only (still correct for the offline plan/apply
-	//      path; only verify/plan --live loses the reconciliation for that
-	//      specific EXCLUDE).
+	//      PRIMARY KEY/UNIQUE/FOREIGN KEY/CHECK/EXCLUDE, including EXCLUDE
+	//      elements that are expressions rather than plain columns — see
+	//      predictName's "excl" case, which reconstructs PostgreSQL's own
+	//      "expr"/"expr1" literal-fallback naming for any element shape its
+	//      syntax-only PredictedName rules don't otherwise cover, so this
+	//      strategy applies uniformly with no narrower EXCLUDE carve-out.
 	// Note both matching strategies are identity-only, never full-definition
 	// equality — this is a pre-existing property of this function (a named
 	// constraint whose definition changes while keeping the same name was
@@ -4527,8 +4525,10 @@ func diffConstraints(tbl string, o *ir.Table, snap *snapshot.SnapTable, fullSnap
 	// predictName returns PostgreSQL's predicted auto-generated name for an
 	// unnamed constraint, and whether a prediction was possible at all —
 	// distinct from CHECK's cols==nil case (still a real, valid PG-generated
-	// name, "tab_check" with no name2), EXCLUDE can be genuinely
-	// unpredictable: see the "excl" case below.
+	// name, "tab_check" with no name2). The only case predictName cannot
+	// predict is a malformed EXCLUDE with zero elements (see the "excl" case
+	// below) — every real element shape, including a bare uncast expression,
+	// is now predictable.
 	predictName := func(c *ir.Constraint, label string) (string, bool) {
 		existing := maps.Clone(otherTableNames)
 		if label == "pkey" || label == "key" || label == "excl" {
@@ -4565,13 +4565,21 @@ func diffConstraints(tbl string, o *ir.Table, snap *snapshot.SnapTable, fullSnap
 			// literal "nullif"), and a type cast (recursing into its
 			// argument, falling back to the cast's own target type name
 			// only when the argument isn't itself a column or function
-			// call). A genuinely unpredictable shape — a bare, uncast
+			// call). A shape none of those rules cover — a bare, uncast
 			// operator expression, e.g. "a + b" — leaves PredictedName
-			// empty, since PostgreSQL's own algorithm produces no usable
-			// name for it either (confirmed live). This returns false
-			// rather than guessing for that case: a false "match" would
-			// silently hide a real definition change, worse than the
-			// spurious-but-visible DROP+ADD it would replace.
+			// empty at the IR layer (see its doc comment), but this is
+			// NOT the end of PostgreSQL's own algorithm: ChooseIndexColumnNames
+			// (indexcmds.c) falls back to the literal string "expr" for any
+			// element whose indexcolname AND simple-column name are both
+			// unset — previously misdiagnosed in this codebase as
+			// "unpredictable" and left as a false/false return, corrected
+			// after live-verifying against PG 17 that
+			// EXCLUDE USING gist ((a + b) WITH =) really does generate
+			// "<table>_expr_excl", and two such elements on one constraint
+			// dedup to "expr"/"expr1" as expected (dedupIndexColNames below
+			// already handles that generically). This makes EXCLUDE naming
+			// fully offline-predictable for every element shape; there is
+			// no remaining case that needs a live catalog connection.
 			if c.Exclude == nil || len(c.Exclude.Elements) == 0 {
 				return "", false
 			}
@@ -4583,7 +4591,7 @@ func diffConstraints(tbl string, o *ir.Table, snap *snapshot.SnapTable, fullSnap
 				case el.PredictedName != "":
 					raw = append(raw, el.PredictedName)
 				default:
-					return "", false
+					raw = append(raw, "expr")
 				}
 			}
 			// PostgreSQL also deduplicates same-derived-name elements
