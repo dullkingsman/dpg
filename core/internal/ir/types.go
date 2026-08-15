@@ -953,12 +953,41 @@ func (c *Cast) irObject()               {}
 
 // StatisticsObject is a CREATE STATISTICS declaration.
 type StatisticsObject struct {
-	Schema        string
-	Name          string
-	Comment       *string // see EventTrigger.Comment
-	Body          string
-	Reconstructed bool // Body rebuilt from the catalog; see Tablespace.Reconstructed
-	SrcPos        pipeline.SourcePos
+	Schema string
+	Name   string
+	// Table/Kinds/Columns/StatisticsTarget are RFC §14.6's structured
+	// diffing inputs: real PostgreSQL's ALTER STATISTICS supports only
+	// OWNER TO/RENAME TO/SET SCHEMA/SET STATISTICS (confirmed live via
+	// `\h ALTER STATISTICS` against a real PostgreSQL 17 server), so a
+	// Table, Kinds, or Columns change decides DROP+CREATE (RFC's own
+	// "Column list or kinds changed" row, DESTRUCTIVE — Table isn't
+	// separately named in the RFC's table but requires the identical
+	// treatment, since there's no ALTER STATISTICS ... FROM either), while
+	// a StatisticsTarget-only change gets a real, targeted
+	// ALTER STATISTICS ... SET STATISTICS (RFC: SAFE). Kinds uses DPG's
+	// own source spelling ("ndistinct"/"dependencies"/"mcv"), converted
+	// to/from PostgreSQL's single-letter stxkind codes ('d'/'f'/'m') at
+	// the introspection/builder boundary — pg_statistic_ext's 'e' code
+	// (has-expressions) is an internal marker PostgreSQL adds
+	// automatically, never a user-requested kind, and is excluded.
+	// Columns holds both plain column names and expression text exactly
+	// as pg_get_statisticsobjdef_expressions renders it (canonical
+	// deparse form, confirmed live) — the builder canonicalizes
+	// expressions the same way (via nodeToText's existing deparse
+	// wrapping) so both sides compare equal regardless of source
+	// formatting. Both Kinds and Columns are compared as sets
+	// (order-independent). StatisticsTarget is nil when unset (matches
+	// Column.Statistics' existing *int nil-means-default precedent) —
+	// pg_statistic_ext.stxstattarget is genuinely NULL in this case,
+	// confirmed live, not a sentinel value.
+	Table            string
+	Kinds            []string
+	Columns          []string
+	StatisticsTarget *int
+	Comment          *string // see EventTrigger.Comment
+	Body             string
+	Reconstructed    bool // Body rebuilt from the catalog; see Tablespace.Reconstructed
+	SrcPos           pipeline.SourcePos
 }
 
 func (s *StatisticsObject) QualifiedName() string   { return qualName(s.Schema, s.Name) }

@@ -7687,9 +7687,15 @@ func TestDiffOpaqueOfflineEditEmitsStructuredDropRecreate(t *testing.T) {
 			wantNewInBody:  "f2(int4)",
 		},
 		{
-			name:           "statistics",
-			oldObj:         &ir.StatisticsObject{Schema: "public", Name: "st", Body: "CREATE STATISTICS public.st (ndistinct) ON a, b FROM t"},
-			newObj:         &ir.StatisticsObject{Schema: "public", Name: "st", Body: "CREATE STATISTICS public.st (dependencies) ON a, b FROM t"},
+			name: "statistics",
+			oldObj: &ir.StatisticsObject{
+				Schema: "public", Name: "st", Table: "public.t", Kinds: []string{"ndistinct"}, Columns: []string{"a", "b"},
+				Body: "CREATE STATISTICS public.st (ndistinct) ON a, b FROM t",
+			},
+			newObj: &ir.StatisticsObject{
+				Schema: "public", Name: "st", Table: "public.t", Kinds: []string{"dependencies"}, Columns: []string{"a", "b"},
+				Body: "CREATE STATISTICS public.st (dependencies) ON a, b FROM t",
+			},
 			wantDropSubstr: `DROP STATISTICS IF EXISTS "public"."st";`,
 			wantNewInBody:  "dependencies",
 		},
@@ -10107,6 +10113,204 @@ func TestDiffCollationStaleSnapshotDoesNotRecreate(t *testing.T) {
 	}
 	if containsSQL(ops, "DROP COLLATION") {
 		t.Errorf("stale snapshot must not trigger DROP COLLATION, got: %v", sqlList(ops))
+	}
+}
+
+// ── StatisticsObject structured diffing (G-live Tier 4, closing) ──────────────
+// Same G-live gap as every kind before it in this tier: Reconstructed
+// forced BodyHash to "" on the live side, silently disabling diffOpaqueIR's
+// comparison on verify/plan --live. diffStatisticsObject replaces that with
+// field-level comparison, gated by the explicit StatisticsStructured
+// sentinel (an empty Kinds/Columns list is not itself a reliable
+// "unpopulated" signal).
+
+func TestDiffStatisticsObjectKindsChangeRecreates(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.st", &snapshot.SnapObject{
+		Kind: "statistics",
+		Opaque: &snapshot.SnapOpaque{
+			Kind: "statistics", Schema: "public", Name: "st", StatisticsStructured: true,
+			StatisticsTable: "public.orders", StatisticsKinds: []string{"ndistinct"}, StatisticsColumns: []string{"a", "b"},
+		},
+	})
+	desired := []pipeline.IRObject{
+		&ir.StatisticsObject{
+			Schema: "public", Name: "st", Table: "public.orders", Kinds: []string{"ndistinct", "dependencies"}, Columns: []string{"a", "b"},
+			Body: "CREATE STATISTICS public.st (ndistinct, dependencies) ON a, b FROM orders",
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsSQL(ops, `DROP STATISTICS IF EXISTS "public"."st"`) {
+		t.Errorf("expected DROP STATISTICS for a kinds change, got: %v", sqlList(ops))
+	}
+	for _, op := range ops {
+		if strings.Contains(op.SQL(), "DROP STATISTICS") && op.Safety() != pipeline.Destructive {
+			t.Errorf("expected DROP STATISTICS to be Destructive (RFC §14.6), got %v: %s", op.Safety(), op.SQL())
+		}
+	}
+}
+
+func TestDiffStatisticsObjectColumnsChangeRecreates(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.st", &snapshot.SnapObject{
+		Kind: "statistics",
+		Opaque: &snapshot.SnapOpaque{
+			Kind: "statistics", Schema: "public", Name: "st", StatisticsStructured: true,
+			StatisticsTable: "public.orders", StatisticsKinds: []string{"ndistinct"}, StatisticsColumns: []string{"a", "b"},
+		},
+	})
+	desired := []pipeline.IRObject{
+		&ir.StatisticsObject{
+			Schema: "public", Name: "st", Table: "public.orders", Kinds: []string{"ndistinct"}, Columns: []string{"a", "b", "c"},
+			Body: "CREATE STATISTICS public.st (ndistinct) ON a, b, c FROM orders",
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsSQL(ops, `DROP STATISTICS IF EXISTS "public"."st"`) {
+		t.Errorf("expected DROP STATISTICS for a columns change, got: %v", sqlList(ops))
+	}
+}
+
+func TestDiffStatisticsObjectUnqualifiedTableMatchesQualifiedNoOp(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.st", &snapshot.SnapObject{
+		Kind: "statistics",
+		Opaque: &snapshot.SnapOpaque{
+			Kind: "statistics", Schema: "public", Name: "st", StatisticsStructured: true,
+			StatisticsTable: "public.orders", StatisticsKinds: []string{"ndistinct"}, StatisticsColumns: []string{"a", "b"},
+		},
+	})
+	desired := []pipeline.IRObject{
+		&ir.StatisticsObject{
+			Schema: "public", Name: "st", Table: "orders", Kinds: []string{"ndistinct"}, Columns: []string{"a", "b"},
+			Body: "CREATE STATISTICS public.st (ndistinct) ON a, b FROM orders",
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ops) != 0 {
+		t.Errorf("expected zero ops for a schema-unqualified-vs-qualified table match, got: %v", sqlList(ops))
+	}
+}
+
+func TestDiffStatisticsObjectTargetChangeIsSafeAlter(t *testing.T) {
+	d := New()
+	oldTarget := 100
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.st", &snapshot.SnapObject{
+		Kind: "statistics",
+		Opaque: &snapshot.SnapOpaque{
+			Kind: "statistics", Schema: "public", Name: "st", StatisticsStructured: true,
+			StatisticsTable: "public.orders", StatisticsKinds: []string{"ndistinct"}, StatisticsColumns: []string{"a", "b"},
+			StatisticsTarget: &oldTarget,
+		},
+	})
+	newTarget := 500
+	desired := []pipeline.IRObject{
+		&ir.StatisticsObject{
+			Schema: "public", Name: "st", Table: "public.orders", Kinds: []string{"ndistinct"}, Columns: []string{"a", "b"},
+			StatisticsTarget: &newTarget,
+			Body:             "CREATE STATISTICS public.st (ndistinct) ON a, b FROM orders",
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ops) != 1 {
+		t.Fatalf("expected exactly 1 op (targeted ALTER STATISTICS SET STATISTICS), got %d: %v", len(ops), sqlList(ops))
+	}
+	sql := ops[0].SQL()
+	if !strings.HasPrefix(sql, "ALTER STATISTICS") || !strings.Contains(sql, "SET STATISTICS 500") {
+		t.Errorf("expected ALTER STATISTICS ... SET STATISTICS 500, got: %s", sql)
+	}
+	if ops[0].Safety() != pipeline.Safe {
+		t.Errorf("expected ALTER STATISTICS SET STATISTICS to be Safe (RFC §14.6), got %v: %s", ops[0].Safety(), sql)
+	}
+}
+
+func TestDiffStatisticsObjectTargetResetToDefault(t *testing.T) {
+	d := New()
+	oldTarget := 100
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.st", &snapshot.SnapObject{
+		Kind: "statistics",
+		Opaque: &snapshot.SnapOpaque{
+			Kind: "statistics", Schema: "public", Name: "st", StatisticsStructured: true,
+			StatisticsTable: "public.orders", StatisticsKinds: []string{"ndistinct"}, StatisticsColumns: []string{"a", "b"},
+			StatisticsTarget: &oldTarget,
+		},
+	})
+	desired := []pipeline.IRObject{
+		&ir.StatisticsObject{
+			Schema: "public", Name: "st", Table: "public.orders", Kinds: []string{"ndistinct"}, Columns: []string{"a", "b"},
+			Body: "CREATE STATISTICS public.st (ndistinct) ON a, b FROM orders",
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ops) != 1 || !strings.Contains(ops[0].SQL(), "SET STATISTICS DEFAULT") {
+		t.Errorf("expected ALTER STATISTICS ... SET STATISTICS DEFAULT, got: %v", sqlList(ops))
+	}
+}
+
+func TestDiffStatisticsObjectUnchangedIsNoop(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.st", &snapshot.SnapObject{
+		Kind: "statistics",
+		Opaque: &snapshot.SnapOpaque{
+			Kind: "statistics", Schema: "public", Name: "st", StatisticsStructured: true,
+			StatisticsTable: "public.orders", StatisticsKinds: []string{"ndistinct"}, StatisticsColumns: []string{"a", "b"},
+		},
+	})
+	desired := []pipeline.IRObject{
+		&ir.StatisticsObject{
+			Schema: "public", Name: "st", Table: "public.orders", Kinds: []string{"ndistinct"}, Columns: []string{"a", "b"},
+			Body: "CREATE STATISTICS public.st (ndistinct) ON a, b FROM orders",
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ops) != 0 {
+		t.Errorf("expected zero ops for an unchanged statistics object, got: %v", sqlList(ops))
+	}
+}
+
+func TestDiffStatisticsObjectStaleSnapshotDoesNotRecreate(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.st", &snapshot.SnapObject{
+		Kind:   "statistics",
+		Opaque: &snapshot.SnapOpaque{Kind: "statistics", Schema: "public", Name: "st"},
+	})
+	desired := []pipeline.IRObject{
+		&ir.StatisticsObject{
+			Schema: "public", Name: "st", Table: "public.orders", Kinds: []string{"ndistinct"}, Columns: []string{"a", "b"},
+			Body: "CREATE STATISTICS public.st (ndistinct) ON a, b FROM orders",
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if containsSQL(ops, "DROP STATISTICS") {
+		t.Errorf("stale snapshot must not trigger DROP STATISTICS, got: %v", sqlList(ops))
 	}
 }
 

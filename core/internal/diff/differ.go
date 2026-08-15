@@ -1375,6 +1375,67 @@ func alterOptionsSQL(desired, live []snapshot.SnapOptionKV) string {
 // closes the gap — see ir.Collation's doc comment. Replaces diffOpaqueIR's
 // generic Reconstructed-gated body-hash compare (silently unset on every
 // live path).
+// diffStatisticsObject implements RFC §14.6's structured diffing table:
+// real PostgreSQL's ALTER STATISTICS supports only OWNER TO/RENAME TO/
+// SET SCHEMA/SET STATISTICS (confirmed live via `\h ALTER STATISTICS`
+// against a real PostgreSQL 17 server), so a Table, Kinds, or Columns
+// change decides DROP+CREATE (RFC's "Column list or kinds changed" row,
+// DESTRUCTIVE), while a StatisticsTarget-only change gets a real, targeted
+// ALTER STATISTICS ... SET STATISTICS (RFC: SAFE). Table is compared via
+// qualifyTableForCompare (same helper Publication's Tables use): a
+// statistics object's FROM table may be left unqualified in source,
+// relying on the default "public" schema, while introspection always
+// returns a fully schema-qualified name. Replaces diffOpaqueIR's generic
+// Reconstructed-gated body-hash compare (silently unset on every live
+// path).
+func diffStatisticsObject(o *ir.StatisticsObject, snap *snapshot.SnapOpaque) ([]pipeline.DiffOp, error) {
+	pos := o.SrcPos
+	ident := qualIdent(o.Schema, o.Name)
+	if !snap.StatisticsStructured {
+		// Stale snapshot predating these structured fields — same
+		// self-healing pattern as diffCollation/diffFDW. An empty
+		// Kinds/Columns list is not itself a reliable "unpopulated"
+		// signal (a freshly-populated object could legitimately have
+		// neither yet, e.g. mid-edit), hence the explicit sentinel.
+		var ops []pipeline.DiffOp
+		if !ptrEq(o.Comment, snap.Comment) {
+			if sql := commentOnOpaqueSQL("statistics", o.Schema, o.Name, "", "", o.Comment); sql != "" {
+				ops = append(ops, safeOp(sql, pos))
+			}
+		}
+		if len(ops) == 0 {
+			ops = append(ops, safeOp(fmt.Sprintf("-- refresh snapshot metadata for statistics %s", ident), pos))
+		}
+		return ops, nil
+	}
+	tableChanged := qualifyTableForCompare(o.Table) != qualifyTableForCompare(snap.StatisticsTable)
+	kindsChanged := !stringSetEqual(o.Kinds, snap.StatisticsKinds)
+	columnsChanged := !stringSetEqual(o.Columns, snap.StatisticsColumns)
+	if tableChanged || kindsChanged || columnsChanged {
+		ops := dropObject(&snapshot.SnapObject{Kind: snap.Kind, Opaque: snap})
+		createOps, err := createOpaque(o.QualifiedName(), o.Body, "STATISTICS", o.Schema, pos)
+		if err != nil {
+			return nil, err
+		}
+		ops = append(ops, createOps...)
+		return appendCommentOp(ops, nil, "statistics", o.Schema, o.Name, "", "", o.Comment, pos)
+	}
+	var ops []pipeline.DiffOp
+	if !intPtrEq(o.StatisticsTarget, snap.StatisticsTarget) {
+		if o.StatisticsTarget != nil {
+			ops = append(ops, safeOp(fmt.Sprintf("ALTER STATISTICS %s SET STATISTICS %d;", ident, *o.StatisticsTarget), pos))
+		} else {
+			ops = append(ops, safeOp(fmt.Sprintf("ALTER STATISTICS %s SET STATISTICS DEFAULT;", ident), pos))
+		}
+	}
+	if !ptrEq(o.Comment, snap.Comment) {
+		if sql := commentOnOpaqueSQL("statistics", o.Schema, o.Name, "", "", o.Comment); sql != "" {
+			ops = append(ops, safeOp(sql, pos))
+		}
+	}
+	return ops, nil
+}
+
 func diffCollation(o *ir.Collation, snap *snapshot.SnapOpaque) ([]pipeline.DiffOp, error) {
 	pos := o.SrcPos
 	ident := qualIdent(o.Schema, o.Name)
@@ -2977,7 +3038,7 @@ func diffObject(desired pipeline.IRObject, snap *snapshot.SnapObject, fullSnap *
 		if snap.Opaque == nil {
 			return nil, nil
 		}
-		return diffOpaqueIR(o.QualifiedName(), o.Body, o.Reconstructed, o.Comment, snap.Opaque, o.SrcPos)
+		return diffStatisticsObject(o, snap.Opaque)
 	case *ir.TSConfig:
 		if snap.Opaque == nil {
 			return nil, nil

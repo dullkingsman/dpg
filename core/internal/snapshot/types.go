@@ -110,6 +110,18 @@ type SnapOpaque struct {
 	CollationCtype         *string `json:"collation_ctype,omitempty"`
 	CollationICULocale     *string `json:"collation_icu_locale,omitempty"`
 	CollationDeterministic bool    `json:"collation_deterministic,omitempty"`
+	// StatisticsStructured/StatisticsTable/StatisticsKinds/
+	// StatisticsColumns/StatisticsTarget are RFC §14.6's structured
+	// diffing inputs — see ir.StatisticsObject.Table's doc comment.
+	// StatisticsStructured is the same explicit-sentinel pattern as
+	// OptionsStructured above (an empty Kinds/Columns list is not itself
+	// a reliable "unpopulated" signal, since a stale snapshot and a
+	// freshly-populated-but-genuinely-empty one would look identical).
+	StatisticsStructured bool     `json:"statistics_structured,omitempty"`
+	StatisticsTable      string   `json:"statistics_table,omitempty"`
+	StatisticsKinds      []string `json:"statistics_kinds,omitempty"`
+	StatisticsColumns    []string `json:"statistics_columns,omitempty"`
+	StatisticsTarget     *int     `json:"statistics_target,omitempty"`
 }
 
 // SnapOptionKV is one OPTIONS (...) key/value entry, used by the

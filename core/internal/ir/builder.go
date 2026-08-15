@@ -1878,6 +1878,40 @@ func (b *Builder) buildStatistics(cs *pg_query.CreateStatsStmt, block pipeline.B
 	if len(cs.Defnames) > 0 {
 		s.Schema, s.Name = extractTypeName(cs.Defnames)
 	}
+	for _, t := range cs.StatTypes {
+		if sv := t.GetString_(); sv != nil {
+			s.Kinds = append(s.Kinds, sv.Sval)
+		}
+	}
+	if len(s.Kinds) == 0 {
+		// PostgreSQL's own default when no kind list is given at all
+		// (bare "ON col1, col2 FROM t", no "(kind, ...)" clause): all
+		// three supported kinds are created — confirmed live via a real
+		// PostgreSQL 17 server (pg_statistic_ext.stxkind = {d,f,m}), not
+		// an empty Kinds list, which would otherwise spuriously diff
+		// against a live introspected object that has all three.
+		s.Kinds = []string{"ndistinct", "dependencies", "mcv"}
+	}
+	for _, e := range cs.Exprs {
+		el := e.GetStatsElem()
+		if el == nil {
+			continue
+		}
+		if el.Name != "" {
+			s.Columns = append(s.Columns, el.Name)
+		} else if el.Expr != nil {
+			// Canonicalized via the same pg_query deparse nodeToText
+			// already uses elsewhere, so this matches
+			// pg_get_statisticsobjdef_expressions' own canonical
+			// rendering (confirmed live) regardless of source formatting.
+			s.Columns = append(s.Columns, nodeToText(el.Expr))
+		}
+	}
+	if len(cs.Relations) > 0 {
+		if rv := cs.Relations[0].GetRangeVar(); rv != nil {
+			s.Table = qualName(rv.Schemaname, rv.Relname)
+		}
+	}
 	if block.Comment != nil {
 		s.Comment = &block.Comment.Value
 	}

@@ -2394,3 +2394,88 @@ func TestBuildCollationICUProviderLocaleSetsICULocaleOnly(t *testing.T) {
 		t.Error("Deterministic: got true, want false (explicitly declared)")
 	}
 }
+
+// ── StatisticsObject structured diffing inputs (RFC §14.6) ─────────────────────
+
+func TestBuildStatisticsObjectFields(t *testing.T) {
+	obj := buildObject(t, pipeline.KindStatisticsObject,
+		`orders_stats (dependencies, ndistinct) ON customer_id, created_at FROM orders`, ``)
+	st := obj.(*ir.StatisticsObject)
+	if st.Table != "orders" {
+		t.Errorf("Table: got %q, want \"orders\"", st.Table)
+	}
+	wantKinds := map[string]bool{"dependencies": true, "ndistinct": true}
+	if len(st.Kinds) != len(wantKinds) {
+		t.Fatalf("Kinds: got %v, want %v", st.Kinds, wantKinds)
+	}
+	for _, k := range st.Kinds {
+		if !wantKinds[k] {
+			t.Errorf("Kinds: unexpected kind %q", k)
+		}
+	}
+	wantCols := map[string]bool{"customer_id": true, "created_at": true}
+	if len(st.Columns) != len(wantCols) {
+		t.Fatalf("Columns: got %v, want %v", st.Columns, wantCols)
+	}
+	for _, c := range st.Columns {
+		if !wantCols[c] {
+			t.Errorf("Columns: unexpected column %q", c)
+		}
+	}
+}
+
+// TestBuildStatisticsObjectExpressionColumn proves an expression element
+// (not just a plain column) is captured, canonicalized the same way
+// PostgreSQL's own pg_get_statisticsobjdef_expressions renders it
+// (confirmed live) — see ir.StatisticsObject.Table's doc comment.
+func TestBuildStatisticsObjectExpressionColumn(t *testing.T) {
+	obj := buildObject(t, pipeline.KindStatisticsObject,
+		`s1 (ndistinct) ON a, (lower(b)) FROM t`, ``)
+	st := obj.(*ir.StatisticsObject)
+	foundPlain, foundExpr := false, false
+	for _, c := range st.Columns {
+		if c == "a" {
+			foundPlain = true
+		}
+		if c == "lower(b)" {
+			foundExpr = true
+		}
+	}
+	if !foundPlain {
+		t.Errorf("Columns: missing plain column \"a\", got %v", st.Columns)
+	}
+	if !foundExpr {
+		t.Errorf("Columns: missing expression \"lower(b)\", got %v", st.Columns)
+	}
+}
+
+func TestBuildStatisticsObjectUnqualifiedTable(t *testing.T) {
+	obj := buildObject(t, pipeline.KindStatisticsObject, `s1 (ndistinct) ON a, b FROM myschema.t`, ``)
+	st := obj.(*ir.StatisticsObject)
+	if st.Table != "myschema.t" {
+		t.Errorf("Table: got %q, want \"myschema.t\"", st.Table)
+	}
+}
+
+// TestBuildStatisticsObjectNoKindListDefaultsToAllThree is a real-bug
+// regression guard, found live-testing against the demo project's own
+// orders_user_status_stats (declared with no "(kind, ...)" clause at all):
+// PostgreSQL's own default for a bare "ON col1, col2 FROM t" with no kind
+// list is to enable all three supported kinds (confirmed live:
+// pg_statistic_ext.stxkind = {d,f,m}), not an empty list — an empty Kinds
+// here would have spuriously diffed against a live introspected object
+// that has all three, DROP+CREATE-ing the demo's own real statistics
+// object on every plan --live.
+func TestBuildStatisticsObjectNoKindListDefaultsToAllThree(t *testing.T) {
+	obj := buildObject(t, pipeline.KindStatisticsObject, `s1 ON a, b FROM t`, ``)
+	st := obj.(*ir.StatisticsObject)
+	want := map[string]bool{"ndistinct": true, "dependencies": true, "mcv": true}
+	if len(st.Kinds) != len(want) {
+		t.Fatalf("Kinds: got %v, want all three (ndistinct, dependencies, mcv)", st.Kinds)
+	}
+	for _, k := range st.Kinds {
+		if !want[k] {
+			t.Errorf("Kinds: unexpected kind %q", k)
+		}
+	}
+}

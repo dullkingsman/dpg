@@ -239,7 +239,9 @@ func toSnapObject(obj pipeline.IRObject) *SnapObject {
 		}}
 	case *ir.StatisticsObject:
 		return &SnapObject{Kind: "statistics", Opaque: &SnapOpaque{
-			Kind: "statistics", Schema: o.Schema, Name: o.Name, BodyHash: sourceBodyHash(o.Body, o.Reconstructed), Comment: o.Comment,
+			Kind: "statistics", Schema: o.Schema, Name: o.Name,
+			StatisticsStructured: true, StatisticsTable: o.Table, StatisticsKinds: o.Kinds, StatisticsColumns: o.Columns, StatisticsTarget: o.StatisticsTarget,
+			BodyHash: sourceBodyHash(o.Body, o.Reconstructed), Comment: o.Comment,
 		}}
 	case *ir.TSConfig:
 		opaque := &SnapOpaque{

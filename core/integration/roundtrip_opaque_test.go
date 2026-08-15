@@ -971,6 +971,184 @@ func TestGLiveCollationLocaleChangeDetected(t *testing.T) {
 	}
 }
 
+// TestGLiveStatisticsObjectTargetChangeDetectedAsAlter is the live-catalog
+// proof for StatisticsObject's new capability, not just the G-live gap
+// closure: a live-only STATISTICS target change is detected as a real,
+// targeted ALTER STATISTICS (RFC §14.6), not a spurious DROP+CREATE.
+func TestGLiveStatisticsObjectTargetChangeDetectedAsAlter(t *testing.T) {
+	connStr := testpg.Start(t)
+	ctx := context.Background()
+
+	differ := diff.New()
+	emitter := emit.New()
+	applyExec := executor.New()
+	ci := introspect.New()
+	store := newMemStore()
+
+	conn, err := executor.Connect(ctx, connStr)
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	defer conn.Close(ctx)
+
+	dir := t.TempDir()
+	f := filepath.Join(dir, "schema.dpg")
+	fixture := `TABLE gl_stats_t (id integer, val integer) {}
+
+STATISTICS gl_stats (ndistinct) ON id, val FROM gl_stats_t;`
+	if err := os.WriteFile(f, []byte(fixture), 0o644); err != nil {
+		t.Fatalf("write schema: %v", err)
+	}
+	applyFixture(t, ctx, conn, []string{f}, dir, differ, emitter, applyExec, store)
+
+	desired, err := compiler.Compile([]string{f}, dir, pipeline.Default)
+	if err != nil {
+		t.Fatalf("compile: %v", err)
+	}
+
+	// Mutate directly via raw SQL: a real ALTER STATISTICS, exactly as a
+	// hand-run migration outside DPG would issue.
+	if _, err := conn.Exec(ctx, `ALTER STATISTICS gl_stats SET STATISTICS 300;`); err != nil {
+		t.Fatalf("alter statistics: %v", err)
+	}
+
+	liveObjects, err := ci.Introspect(ctx, conn)
+	if err != nil {
+		t.Fatalf("introspect: %v", err)
+	}
+	snap, _ := store.Load("test", "dpgtest")
+	var managedLive []pipeline.IRObject
+	for _, obj := range liveObjects {
+		if _, ok := snap.Objects[obj.QualifiedName()]; ok {
+			managedLive = append(managedLive, obj)
+		}
+	}
+	liveSnap := &pipeline.Snapshot{}
+	if err := snapshot.Populate(liveSnap, managedLive); err != nil {
+		t.Fatalf("populate live snapshot: %v", err)
+	}
+
+	driftOps, err := differ.Diff(desired, liveSnap)
+	if err != nil {
+		t.Fatalf("drift diff: %v", err)
+	}
+	if len(driftOps) != 1 {
+		t.Fatalf("G-live gap not closed: expected exactly 1 op (targeted ALTER STATISTICS) detecting the live-only target change, got %d: %v", len(driftOps), driftOps)
+	}
+	sql := driftOps[0].SQL()
+	if !strings.HasPrefix(sql, "ALTER STATISTICS") {
+		t.Errorf("expected a targeted ALTER STATISTICS, not DROP+CREATE, got: %s", sql)
+	}
+	if driftOps[0].Safety() != pipeline.Safe {
+		t.Errorf("expected ALTER STATISTICS SET STATISTICS to be Safe, got %v: %s", driftOps[0].Safety(), sql)
+	}
+	if !strings.Contains(sql, "SET STATISTICS DEFAULT") {
+		t.Errorf("expected recreate to restore the declared (unset/default) target, got: %s", sql)
+	}
+
+	// Apply the correction and confirm zero drift remains — proves the
+	// generated ALTER STATISTICS is valid SQL a real server accepts, not
+	// just well-formed text.
+	migration, err := emitter.Emit(driftOps, pipeline.MigrationMeta{Cluster: "test", Database: "dpgtest"})
+	if err != nil {
+		t.Fatalf("emit: %v", err)
+	}
+	if err := applyExec.Apply(ctx, migration, conn); err != nil {
+		t.Fatalf("apply corrective ALTER STATISTICS: %v", err)
+	}
+	liveObjects2, err := ci.Introspect(ctx, conn)
+	if err != nil {
+		t.Fatalf("re-introspect: %v", err)
+	}
+	var managedLive2 []pipeline.IRObject
+	for _, obj := range liveObjects2 {
+		if _, ok := snap.Objects[obj.QualifiedName()]; ok {
+			managedLive2 = append(managedLive2, obj)
+		}
+	}
+	liveSnap2 := &pipeline.Snapshot{}
+	if err := snapshot.Populate(liveSnap2, managedLive2); err != nil {
+		t.Fatalf("populate live snapshot 2: %v", err)
+	}
+	finalOps, err := differ.Diff(desired, liveSnap2)
+	if err != nil {
+		t.Fatalf("final drift diff: %v", err)
+	}
+	if len(finalOps) != 0 {
+		t.Errorf("expected zero drift after applying the corrective ALTER STATISTICS, got: %v", finalOps)
+	}
+}
+
+func TestGLiveStatisticsObjectColumnsChangeDetected(t *testing.T) {
+	connStr := testpg.Start(t)
+	ctx := context.Background()
+
+	differ := diff.New()
+	emitter := emit.New()
+	applyExec := executor.New()
+	ci := introspect.New()
+	store := newMemStore()
+
+	conn, err := executor.Connect(ctx, connStr)
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	defer conn.Close(ctx)
+
+	dir := t.TempDir()
+	f := filepath.Join(dir, "schema.dpg")
+	fixture := `TABLE gl_stats_t2 (id integer, val integer, extra integer) {}
+
+STATISTICS gl_stats2 (ndistinct) ON id, val FROM gl_stats_t2;`
+	if err := os.WriteFile(f, []byte(fixture), 0o644); err != nil {
+		t.Fatalf("write schema: %v", err)
+	}
+	applyFixture(t, ctx, conn, []string{f}, dir, differ, emitter, applyExec, store)
+
+	desired, err := compiler.Compile([]string{f}, dir, pipeline.Default)
+	if err != nil {
+		t.Fatalf("compile: %v", err)
+	}
+
+	// Mutate directly via raw SQL: real PostgreSQL's ALTER STATISTICS has
+	// no column-list-changing form at all — DROP + CREATE with a
+	// different column list, matching a hand-run migration outside DPG.
+	if _, err := conn.Exec(ctx, `DROP STATISTICS gl_stats2;`); err != nil {
+		t.Fatalf("drop statistics: %v", err)
+	}
+	if _, err := conn.Exec(ctx, `CREATE STATISTICS gl_stats2 (ndistinct) ON id, val, extra FROM gl_stats_t2;`); err != nil {
+		t.Fatalf("recreate statistics with an extra column: %v", err)
+	}
+
+	liveObjects, err := ci.Introspect(ctx, conn)
+	if err != nil {
+		t.Fatalf("introspect: %v", err)
+	}
+	snap, _ := store.Load("test", "dpgtest")
+	var managedLive []pipeline.IRObject
+	for _, obj := range liveObjects {
+		if _, ok := snap.Objects[obj.QualifiedName()]; ok {
+			managedLive = append(managedLive, obj)
+		}
+	}
+	liveSnap := &pipeline.Snapshot{}
+	if err := snapshot.Populate(liveSnap, managedLive); err != nil {
+		t.Fatalf("populate live snapshot: %v", err)
+	}
+
+	driftOps, err := differ.Diff(desired, liveSnap)
+	if err != nil {
+		t.Fatalf("drift diff: %v", err)
+	}
+	var sql string
+	for _, op := range driftOps {
+		sql += op.SQL()
+	}
+	if !strings.Contains(sql, "DROP STATISTICS") {
+		t.Fatalf("G-live gap not closed: expected plan --live to detect the live-catalog-only column-list change, got %d ops: %q", len(driftOps), sql)
+	}
+}
+
 // TestRoundtripOpaqueBodyEditAppliesLive is the live-catalog guard for #3
 // (real update path for opaque objects, internal/diff/differ.go diffOpaqueIR):
 // previously an offline body edit to an opaque object (here, a COLLATION's

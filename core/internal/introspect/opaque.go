@@ -988,14 +988,27 @@ func firstNonEmpty(ptrs ...*string) string {
 
 // ── extended statistics ───────────────────────────────────────────────────────
 
+// statsKindNames maps pg_statistic_ext.stxkind's single-letter catalog
+// codes to DPG's own source spelling — confirmed live against a real
+// PostgreSQL 17 server (three throwaway single-kind statistics objects,
+// one per keyword, each checked individually against its resulting
+// stxkind). 'e' (has-expressions) is deliberately excluded: it's an
+// internal marker PostgreSQL adds automatically whenever any element is an
+// expression, never a kind the user can request — confirmed live: `CREATE
+// STATISTICS s (ndistinct) ON a, (b+1) FROM t` yields stxkind = {d,e}, not
+// {d} alone.
+var statsKindNames = map[string]string{"d": "ndistinct", "f": "dependencies", "m": "mcv"}
+
 func introspectStatistics(ctx context.Context, conn pipeline.Querier) ([]pipeline.IRObject, error) {
-	// pg_get_statisticsobjdef reconstructs the full CREATE STATISTICS DDL,
-	// including the kinds list, column/expression list, and source table.
 	q := `
-SELECT n.nspname, s.stxname, pg_get_statisticsobjdef(s.oid),
+SELECT s.oid, n.nspname, s.stxname, s.stxkind::text[], s.stxstattarget,
+       tn.nspname, c.relname,
+       pg_get_statisticsobjdef(s.oid),
        obj_description(s.oid, 'pg_statistic_ext') AS comment
 FROM   pg_statistic_ext s
-JOIN   pg_namespace n ON n.oid = s.stxnamespace
+JOIN   pg_namespace n  ON n.oid = s.stxnamespace
+JOIN   pg_class c      ON c.oid = s.stxrelid
+JOIN   pg_namespace tn ON tn.oid = c.relnamespace
 WHERE  ` + notExtensionOwned("pg_statistic_ext", "s.oid") + `
 ORDER  BY n.nspname, s.stxname`
 
@@ -1003,18 +1016,85 @@ ORDER  BY n.nspname, s.stxname`
 	if err != nil {
 		return nil, fmt.Errorf("introspect statistics: %w", err)
 	}
-	defer rs.Close()
-
-	var out []pipeline.IRObject
+	type statRow struct {
+		oid                uint32
+		schema, name       string
+		kind               []string
+		target             *int
+		tblSchema, tblName string
+		def                string
+		comment            *string
+	}
+	var rows []statRow
 	for rs.Next() {
-		var schema, name, def string
-		var comment *string
-		if err := rs.Scan(&schema, &name, &def, &comment); err != nil {
+		var r statRow
+		if err := rs.Scan(&r.oid, &r.schema, &r.name, &r.kind, &r.target, &r.tblSchema, &r.tblName, &r.def, &r.comment); err != nil {
+			rs.Close()
 			return nil, err
 		}
-		out = append(out, &ir.StatisticsObject{Schema: schema, Name: name, Body: canonicalDDL(def), Comment: comment, Reconstructed: true})
+		rows = append(rows, r)
 	}
-	return out, rs.Err()
+	if err := rs.Err(); err != nil {
+		rs.Close()
+		return nil, err
+	}
+	rs.Close()
+
+	var out []pipeline.IRObject
+	for _, r := range rows {
+		var kinds []string
+		for _, k := range r.kind {
+			if name, ok := statsKindNames[k]; ok {
+				kinds = append(kinds, name)
+			}
+		}
+		columns, err := statisticsObjectColumns(ctx, conn, r.oid)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, &ir.StatisticsObject{
+			Schema: r.schema, Name: r.name,
+			Table: qualifiedFuncRef(r.tblSchema, r.tblName), Kinds: kinds, Columns: columns, StatisticsTarget: r.target,
+			Body: canonicalDDL(r.def), Comment: r.comment, Reconstructed: true,
+		})
+	}
+	return out, nil
+}
+
+// statisticsObjectColumns resolves a statistics object's plain column names
+// (via stxkeys → pg_attribute, since stxkeys is only an attnum list) and
+// expressions (via pg_get_statisticsobjdef_expressions, a dedicated
+// PostgreSQL convenience function returning already-canonicalized
+// expression text — confirmed live to match the same deparse form the
+// builder produces via nodeToText, so both sides compare equal regardless
+// of source formatting). Order is not preserved across the two sources
+// (plain columns and expressions are fetched independently); Columns is
+// compared as a set in the differ, so this doesn't affect correctness.
+func statisticsObjectColumns(ctx context.Context, conn pipeline.Querier, statOID uint32) ([]string, error) {
+	names, err := scanNames(ctx, conn, `
+SELECT a.attname
+FROM   pg_statistic_ext s
+JOIN   pg_attribute a ON a.attrelid = s.stxrelid AND a.attnum = ANY(s.stxkeys)
+WHERE  s.oid = $1
+ORDER  BY array_position(s.stxkeys, a.attnum)`, statOID)
+	if err != nil {
+		return nil, err
+	}
+	exprRows, err := conn.QueryRows(ctx, `SELECT pg_get_statisticsobjdef_expressions($1)`, statOID)
+	if err != nil {
+		return nil, err
+	}
+	defer exprRows.Close()
+	var exprs []string
+	if exprRows.Next() {
+		if err := exprRows.Scan(&exprs); err != nil {
+			return nil, err
+		}
+	}
+	if err := exprRows.Err(); err != nil {
+		return nil, err
+	}
+	return append(names, exprs...), nil
 }
 
 // ── operators ─────────────────────────────────────────────────────────────────
