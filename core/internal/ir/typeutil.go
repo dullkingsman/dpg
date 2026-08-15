@@ -170,6 +170,53 @@ func HashBody(body string) string {
 	return fmt.Sprintf("%x", sum)
 }
 
+// HashFunctionBody is HashBody's language-aware variant: for a LANGUAGE SQL
+// body (case-insensitive), it canonicalises via pg_query.Parse/Deparse
+// before hashing — the same trick internal/introspect/opaque.go's
+// canonicalDDL already uses for whole-statement reconstruction of the
+// opaque-tier object kinds — so whitespace, quote-style, and clause-order
+// differences no longer cause a spurious CREATE OR REPLACE. On any
+// parse/deparse failure it falls back to HashBody(body) unchanged; a
+// hashing nicety must never block a build or introspection.
+//
+// Every other language (plpgsql above all — the common case) is NOT
+// canonicalised and behaves exactly as HashBody always has: plpgsql is not
+// parseable by pg_query's SQL grammar, and an unverified structural
+// canonicalisation risks a false negative (two genuinely different bodies
+// hashing equal), which is strictly worse than today's false positive since
+// it would silently drop a real change from plan/verify output. See RFC
+// §9.5.
+func HashFunctionBody(language, body string) string {
+	if strings.EqualFold(language, "sql") {
+		if canon, ok := canonicalizeSQLBody(body); ok {
+			return HashBody(canon)
+		}
+	}
+	return HashBody(body)
+}
+
+// canonicalizeSQLBody parses body as one or more SQL statements and
+// deparses them back — the same approach as internal/introspect/opaque.go's
+// canonicalDDL, reimplemented locally here rather than imported: introspect
+// already depends on ir, not the reverse, so ir must not import introspect.
+// Returns ok=false on any parse/deparse failure so the caller falls back to
+// raw-text hashing.
+func canonicalizeSQLBody(body string) (string, bool) {
+	trimmed := strings.TrimSpace(body)
+	if trimmed == "" {
+		return "", false
+	}
+	res, err := pg_query.Parse(trimmed)
+	if err != nil || len(res.Stmts) == 0 {
+		return "", false
+	}
+	out, err := pg_query.Deparse(res)
+	if err != nil {
+		return "", false
+	}
+	return out, true
+}
+
 // extractFuncBody extracts the dollar-quoted body text from a function's
 // Part1 string (which includes the body). Returns the text between the
 // outermost dollar-quote delimiters, or "" if not found.

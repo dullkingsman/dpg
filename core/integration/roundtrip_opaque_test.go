@@ -1971,6 +1971,90 @@ $$ {}`
 	}
 }
 
+// TestRoundtripFunctionSQLBodyReformattingNoSpuriousDrift proves
+// ir.HashFunctionBody's LANGUAGE SQL canonicalisation (RFC §9.5) actually
+// closes the spurious-drift gap end to end: a LANGUAGE SQL function is
+// applied, then its source is edited to a cosmetically-reformatted (case,
+// whitespace) but semantically identical body — re-diffing against the
+// snapshot from the first apply must show zero ops, not a spurious
+// CREATE OR REPLACE FUNCTION. A genuinely different body must still be
+// detected, proving the fix doesn't just suppress every function diff.
+func TestRoundtripFunctionSQLBodyReformattingNoSpuriousDrift(t *testing.T) {
+	connStr := testpg.Start(t)
+	ctx := context.Background()
+
+	differ := diff.New()
+	emitter := emit.New()
+	applyExec := executor.New()
+	store := newMemStore()
+
+	conn, err := executor.Connect(ctx, connStr)
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	defer conn.Close(ctx)
+
+	dir := t.TempDir()
+	f := filepath.Join(dir, "schema.dpg")
+	original := `FUNCTION f_sql(n integer) RETURNS integer
+LANGUAGE sql AS $$
+    SELECT   n + 1;
+$$ {}`
+	if err := os.WriteFile(f, []byte(original), 0o644); err != nil {
+		t.Fatalf("write schema: %v", err)
+	}
+	applyFixture(t, ctx, conn, []string{f}, dir, differ, emitter, applyExec, store)
+
+	// Cosmetically reformatted (case, whitespace) but semantically identical.
+	reformatted := `FUNCTION f_sql(n integer) RETURNS integer
+LANGUAGE sql AS $$
+select n+1;
+$$ {}`
+	if err := os.WriteFile(f, []byte(reformatted), 0o644); err != nil {
+		t.Fatalf("write reformatted: %v", err)
+	}
+	desired, err := compiler.Compile([]string{f}, dir, pipeline.Default)
+	if err != nil {
+		t.Fatalf("compile reformatted: %v", err)
+	}
+	base, _ := store.Load("test", "dpgtest")
+	ops, err := differ.Diff(desired, base)
+	if err != nil {
+		t.Fatalf("diff (reformatted): %v", err)
+	}
+	if len(ops) != 0 {
+		t.Errorf("expected zero ops for a cosmetically-reformatted-but-equivalent LANGUAGE SQL body, got %d:", len(ops))
+		for _, op := range ops {
+			t.Errorf("  [%s] %s", op.Safety(), op.SQL())
+		}
+	}
+
+	// Genuinely different body (even though also reformatted) must still be
+	// detected — the canonicalisation must not blind the differ entirely.
+	changed := `FUNCTION f_sql(n integer) RETURNS integer
+LANGUAGE sql AS $$
+select n+2;
+$$ {}`
+	if err := os.WriteFile(f, []byte(changed), 0o644); err != nil {
+		t.Fatalf("write changed: %v", err)
+	}
+	desired2, err := compiler.Compile([]string{f}, dir, pipeline.Default)
+	if err != nil {
+		t.Fatalf("compile changed: %v", err)
+	}
+	base2, _ := store.Load("test", "dpgtest")
+	changeOps, err := differ.Diff(desired2, base2)
+	if err != nil {
+		t.Fatalf("diff (changed): %v", err)
+	}
+	if len(changeOps) == 0 {
+		t.Fatal("expected a CREATE OR REPLACE FUNCTION op for a genuine body change, got none")
+	}
+	if !strings.Contains(changeOps[0].SQL(), "CREATE OR REPLACE FUNCTION") {
+		t.Errorf("expected CREATE OR REPLACE FUNCTION, got: %s", changeOps[0].SQL())
+	}
+}
+
 // TestRoundtripFunctionSetOf covers RETURNS SETOF fidelity end to end: a
 // set-returning function (also declaring ROWS, only valid together with
 // SETOF — closing the gap TestRoundtripFunctionParallelCostRows had to

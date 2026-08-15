@@ -1167,7 +1167,7 @@ func (b *Builder) buildFunction(cfs *pg_query.CreateFunctionStmt, pg pipeline.PG
 
 	// Body hash from the Part1 raw text (we can recover it via deparse or from raw).
 	body := fn.Attrs.Body
-	fn.BodyHash = HashBody(body)
+	fn.BodyHash = HashFunctionBody(fn.Attrs.Language, body)
 
 	if block.Comment != nil {
 		fn.Comment = &block.Comment.Value
@@ -1199,7 +1199,7 @@ func (b *Builder) buildProcedure(cfs *pg_query.CreateFunctionStmt, _ *pg_query.P
 		}
 	}
 	proc.Attrs = extractFuncAttrs(cfs.Options)
-	proc.BodyHash = HashBody(proc.Attrs.Body)
+	proc.BodyHash = HashFunctionBody(proc.Attrs.Language, proc.Attrs.Body)
 	if block.Comment != nil {
 		proc.Comment = &block.Comment.Value
 	}

@@ -2646,22 +2646,53 @@ SCHEMA public {
 ### 9.5. Function Body Diffing Semantics
 
    The compiler stores a SHA-256 hash of the normalised function body
-   in the snapshot (see Section 16.3).  Normalisation consists of:
+   in the snapshot (see Section 16.3).  Normalisation depends on the
+   function's `LANGUAGE`:
 
-   1.  Stripping leading and trailing whitespace from the body text.
-   2.  Collapsing all internal runs of whitespace (spaces, tabs,
-       newlines) to a single space character.
+   -   **`LANGUAGE SQL`:** the body is parsed and re-deparsed via the
+       same PostgreSQL-grammar parser the compiler uses for every other
+       statement, then hashed. This canonicalisation absorbs whitespace,
+       quote-style, and clause-formatting differences — the same
+       mechanism already relied on for reconstructing the opaque-tier
+       object kinds (Tablespace, FDW, Collation, etc. — see Section 25).
+       On any parse failure (a body the parser rejects for any reason),
+       the compiler falls back to the plain normalisation below rather
+       than erroring.
+   -   **Every other language** (`plpgsql` — the common case — `c`,
+       `internal`, and any procedural-language extension): plain text
+       normalisation only —
+       1.  Stripping leading and trailing whitespace from the body text.
+       2.  Collapsing all internal runs of whitespace (spaces, tabs,
+           newlines) to a single space character.
 
-   Any change to the body — including whitespace-only changes after
-   normalisation — changes the hash and causes the compiler to emit:
+   Any change to the body that survives normalisation — including,
+   for non-SQL languages, changes that are cosmetic but not reducible to
+   whitespace alone (comment wording, quote style, capitalisation) —
+   changes the hash and causes the compiler to emit:
 
    ```sql
    CREATE OR REPLACE FUNCTION schema.name(...) RETURNS ... AS $$...$$;
    ```
 
-   No semantic analysis of procedural code is performed.  The compiler
-   does not detect semantically equivalent reformulations.  This is a
-   known, accepted limitation.
+   No semantic analysis of procedural code is performed for any
+   language. For `LANGUAGE SQL`, syntactic reformulations that
+   re-deparse identically are absorbed by the canonicalisation above;
+   genuinely equivalent but differently-*structured* SQL (e.g. a
+   rewritten join order) is still detected as changed, by design — this
+   is syntactic canonicalisation, not semantic equivalence. For every
+   other language, including `plpgsql`, no canonicalisation is performed
+   at all: the compiler does not detect semantically (or even
+   cosmetically, beyond whitespace) equivalent reformulations. This
+   narrower, language-scoped limitation is deliberate — an earlier
+   design considered canonicalising `plpgsql` bodies via a separate
+   PL/pgSQL-specific parse, but rejected it for this pass: unlike
+   `LANGUAGE SQL`, the safety of stripping/normalising a `plpgsql`
+   parse's volatile internal fields (e.g. source positions) has not
+   been empirically verified, and an incorrect canonicalisation would
+   risk two *genuinely different* bodies hashing equal — a silent
+   false negative, strictly worse than the false positive it would be
+   fixing, since it would drop a real change from `plan`/`verify`
+   output entirely instead of merely showing a redundant one.
 
    **Function signature changes** (argument types, return type,
    language, `SECURITY DEFINER`, `STRICT`, any attribute) are handled

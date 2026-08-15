@@ -1209,7 +1209,7 @@ ORDER  BY n.nspname, p.proname, args`
 				Schema:   schema,
 				Name:     name,
 				Comment:  comment,
-				BodyHash: ir.HashBody(prosrc),
+				BodyHash: ir.HashFunctionBody(lang, prosrc),
 				Attrs: ir.FuncAttrs{
 					Language: lang,
 					Body:     prosrc,
@@ -1264,7 +1264,7 @@ ORDER  BY n.nspname, p.proname, args`
 				Name:       name,
 				ReturnType: ir.TypeRef{Name: retType, SetOf: retset},
 				Comment:    comment,
-				BodyHash:   ir.HashBody(prosrc),
+				BodyHash:   ir.HashFunctionBody(lang, prosrc),
 				Attrs:      attrs,
 			}
 			// Use argTypes (type-only) so QualifiedName matches argsKey() in IR builder.
