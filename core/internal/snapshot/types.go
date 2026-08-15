@@ -63,6 +63,32 @@ type SnapOpaque struct {
 	EventTriggerEvent    string   `json:"event_trigger_event,omitempty"`
 	EventTriggerTags     []string `json:"event_trigger_tags,omitempty"`
 	EventTriggerFunction string   `json:"event_trigger_function,omitempty"`
+	// OptionsStructured/FDWHandler/FDWValidator/FDWOptions/ServerFDWName/
+	// ServerType/ServerVersion/ServerOptions/UserMappingOptions are RFC
+	// §14.8/§14.9/§14.10's structured diffing inputs for fdw/server/
+	// user_mapping respectively. Unlike Tablespace/Cast/EventTrigger
+	// (Tier 1), none of these three kinds has a field guaranteed non-empty
+	// on every real object (a bare FOREIGN DATA WRAPPER with no HANDLER/
+	// VALIDATOR/OPTIONS is valid), so the usual "Go zero value means
+	// stale snapshot" guard doesn't work here — OptionsStructured is an
+	// explicit sentinel instead, set true only by current code, so its
+	// absence unambiguously means "snapshot predates this feature."
+	OptionsStructured  bool           `json:"options_structured,omitempty"`
+	FDWHandler         string         `json:"fdw_handler,omitempty"`
+	FDWValidator       string         `json:"fdw_validator,omitempty"`
+	FDWOptions         []SnapOptionKV `json:"fdw_options,omitempty"`
+	ServerFDWName      string         `json:"server_fdw_name,omitempty"`
+	ServerType         *string        `json:"server_type,omitempty"`
+	ServerVersion      *string        `json:"server_version,omitempty"`
+	ServerOptions      []SnapOptionKV `json:"server_options,omitempty"`
+	UserMappingOptions []SnapOptionKV `json:"user_mapping_options,omitempty"`
+}
+
+// SnapOptionKV is one OPTIONS (...) key/value entry, used by the
+// fdw/server/user_mapping kinds above.
+type SnapOptionKV struct {
+	Key   string `json:"key"`
+	Value string `json:"value"`
 }
 
 // SnapTSMapping is one MAPPING FOR entry (RFC §12.1) on a text search

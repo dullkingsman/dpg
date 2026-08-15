@@ -1677,8 +1677,60 @@ func (b *Builder) buildTablespace(cs *pg_query.CreateTableSpaceStmt, block pipel
 
 // ── FDW / Server / User Mapping ───────────────────────────────────────────────
 
+// defElemOptionsToStorageParams converts an OPTIONS (...) clause's DefElem
+// list (CreateFdwStmt.Options/CreateForeignServerStmt.Options/
+// CreateUserMappingStmt.Options — confirmed identical shape via
+// pg_query.Parse probe: each entry is a DefElem whose Arg is a plain String,
+// not a List, unlike HANDLER/VALIDATOR below) into StorageParams.
+func defElemOptionsToStorageParams(opts []*pg_query.Node) []pipeline.StorageParam {
+	var out []pipeline.StorageParam
+	for _, o := range opts {
+		de := o.GetDefElem()
+		if de == nil {
+			continue
+		}
+		sv := de.GetArg().GetString_()
+		if sv == nil {
+			continue
+		}
+		out = append(out, pipeline.StorageParam{Key: de.Defname, Value: sv.Sval})
+	}
+	return out
+}
+
+// defElemFuncName extracts a HANDLER/VALIDATOR function name from
+// CreateFdwStmt.FuncOptions — each is a DefElem (Defname "handler" or
+// "validator") whose Arg is a List of String nodes (the possibly-qualified
+// function name, one item per name part), confirmed via pg_query.Parse
+// probe. Returns "" if defname isn't present (NO HANDLER/NO VALIDATOR or
+// omitted — indistinguishable to PostgreSQL, both mean "none").
+func defElemFuncName(opts []*pg_query.Node, defname string) string {
+	for _, o := range opts {
+		de := o.GetDefElem()
+		if de == nil || de.Defname != defname {
+			continue
+		}
+		lst := de.GetArg().GetList()
+		if lst == nil {
+			continue
+		}
+		schema, name := extractTypeName(lst.Items)
+		if schema != "" {
+			return schema + "." + name
+		}
+		return name
+	}
+	return ""
+}
+
 func (b *Builder) buildFDW(cs *pg_query.CreateFdwStmt, block pipeline.BlockAST, pos pipeline.SourcePos, body string) (pipeline.IRObject, error) {
-	f := &ForeignDataWrapper{Name: cs.Fdwname, Body: body, SrcPos: pos}
+	f := &ForeignDataWrapper{
+		Name:      cs.Fdwname,
+		Handler:   defElemFuncName(cs.FuncOptions, "handler"),
+		Validator: defElemFuncName(cs.FuncOptions, "validator"),
+		Options:   defElemOptionsToStorageParams(cs.Options),
+		Body:      body, SrcPos: pos,
+	}
 	if block.Comment != nil {
 		f.Comment = &block.Comment.Value
 	}
@@ -1686,7 +1738,19 @@ func (b *Builder) buildFDW(cs *pg_query.CreateFdwStmt, block pipeline.BlockAST, 
 }
 
 func (b *Builder) buildServer(cs *pg_query.CreateForeignServerStmt, block pipeline.BlockAST, pos pipeline.SourcePos, body string) (pipeline.IRObject, error) {
-	s := &ForeignServer{Name: cs.Servername, Body: body, SrcPos: pos}
+	s := &ForeignServer{
+		Name: cs.Servername, FDWName: cs.Fdwname,
+		Options: defElemOptionsToStorageParams(cs.Options),
+		Body:    body, SrcPos: pos,
+	}
+	if cs.Servertype != "" {
+		srvType := cs.Servertype
+		s.Type = &srvType
+	}
+	if cs.Version != "" {
+		version := cs.Version
+		s.Version = &version
+	}
 	if block.Comment != nil {
 		s.Comment = &block.Comment.Value
 	}
@@ -1699,10 +1763,11 @@ func (b *Builder) buildUserMapping(cs *pg_query.CreateUserMappingStmt, block pip
 		user = cs.User.Rolename
 	}
 	return &UserMapping{
-		User:   user,
-		Server: cs.Servername,
-		Body:   body,
-		SrcPos: pos,
+		User:    user,
+		Server:  cs.Servername,
+		Options: defElemOptionsToStorageParams(cs.Options),
+		Body:    body,
+		SrcPos:  pos,
 	}, nil
 }
 

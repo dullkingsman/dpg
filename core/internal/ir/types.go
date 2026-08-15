@@ -553,7 +553,20 @@ func (ts *Tablespace) irObject()               {}
 
 // ForeignDataWrapper is a CREATE FOREIGN DATA WRAPPER declaration.
 type ForeignDataWrapper struct {
-	Name          string
+	Name string
+	// Handler/Validator/Options are RFC §14.8's structured diffing inputs:
+	// "any change to a FDW requires drop + recreate" is the RFC's own
+	// documented semantics (no ALTER FOREIGN DATA WRAPPER path, even
+	// though real PostgreSQL has one — a deliberate DPG simplification),
+	// so this drives a single "did anything change" comparison rather
+	// than field-level ALTER clauses. Previously only Body's opaque hash
+	// decided this, which (via Reconstructed, below) went silently unset
+	// on every live path, missing any live-catalog change to a FDW's
+	// definition. Handler/Validator are "" for NO HANDLER/NO VALIDATOR or
+	// when omitted (both mean the same thing to PostgreSQL).
+	Handler       string
+	Validator     string
+	Options       []pipeline.StorageParam
 	Body          string
 	Comment       *string
 	Reconstructed bool // Body rebuilt from the catalog; see Tablespace.Reconstructed
@@ -566,7 +579,19 @@ func (f *ForeignDataWrapper) irObject()               {}
 
 // ForeignServer is a CREATE SERVER declaration.
 type ForeignServer struct {
-	Name          string
+	Name string
+	// FDWName/Type/Options are RFC §14.9's structured diffing inputs: a
+	// FDW-wrapper change or a TYPE change (real PostgreSQL has no
+	// ALTER SERVER ... TYPE) decides DROP+CREATE, same reasoning as
+	// ForeignDataWrapper.Handler/Validator/Options above; a VERSION or
+	// OPTIONS change gets a real, targeted ALTER SERVER per RFC §14.9's
+	// own diffing table ("OPTIONS changed" -> SAFE). Previously only
+	// Body's opaque hash decided any of this, which (via Reconstructed,
+	// below) went silently unset on every live path.
+	FDWName       string
+	Type          *string
+	Version       *string
+	Options       []pipeline.StorageParam
 	Body          string
 	Comment       *string
 	Reconstructed bool // Body rebuilt from the catalog; see Tablespace.Reconstructed
@@ -579,8 +604,23 @@ func (f *ForeignServer) irObject()               {}
 
 // UserMapping is a CREATE USER MAPPING declaration.
 type UserMapping struct {
-	User          string
-	Server        string
+	User   string
+	Server string
+	// Options is RFC §14.10's structured diffing input: "any change to
+	// the mapping is a full DROP USER MAPPING + CREATE USER MAPPING, not
+	// a targeted ALTER USER MAPPING" is the RFC's own explicit,
+	// deliberately-corrected semantics (§14.10's text notes an earlier
+	// draft described a targeted ALTER that was never implemented), so —
+	// same as ForeignDataWrapper — this drives a single "did anything
+	// change" comparison, not field-level ALTER clauses. Previously only
+	// Body's opaque hash decided this, which (via Reconstructed, below)
+	// went silently unset on every live path. Password-like keys are
+	// deliberately excluded from the diff comparison (see
+	// introspect.UserMappingRedactedPlaceholder): the live side never
+	// exposes the real value, only a fixed redaction placeholder, so
+	// comparing it against the desired side's real declared value would
+	// otherwise show permanent, spurious drift on every plan.
+	Options       []pipeline.StorageParam
 	Body          string
 	Reconstructed bool // Body rebuilt from the catalog; see Tablespace.Reconstructed
 	SrcPos        pipeline.SourcePos

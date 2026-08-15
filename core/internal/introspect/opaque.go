@@ -107,6 +107,51 @@ func formatOptions(opts []string) string {
 	return " OPTIONS (" + strings.Join(parts, ", ") + ")"
 }
 
+// qualifiedFuncRef builds a "schema.name" reference, or bare "name" when
+// schema is empty — same format ir's builder-side Function fields use, so
+// diff.qualifyFuncForCompare's normalization applies identically regardless
+// of which side (introspected or source-parsed) a comparison value came
+// from.
+func qualifiedFuncRef(schema, name string) string {
+	if schema == "" {
+		return name
+	}
+	return schema + "." + name
+}
+
+// optionsToStorageParams parses the same catalog options array formatOptions
+// renders (text[] of "key=value" entries) into ir.ForeignDataWrapper/
+// ForeignServer/UserMapping's structured Options field.
+func optionsToStorageParams(opts []string) []pipeline.StorageParam {
+	var out []pipeline.StorageParam
+	for _, o := range opts {
+		k, v, found := strings.Cut(o, "=")
+		if !found {
+			continue
+		}
+		out = append(out, pipeline.StorageParam{Key: k, Value: v})
+	}
+	return out
+}
+
+// nonSensitiveOptionsToStorageParams is optionsToStorageParams for
+// UserMapping specifically: password-like keys are skipped entirely (not
+// just redacted) so they never enter the structural diff comparison at
+// all — see ir.UserMapping.Options' doc comment for why comparing a fixed
+// redaction placeholder against the desired side's real declared value
+// would otherwise show permanent, spurious drift on every plan.
+func nonSensitiveOptionsToStorageParams(opts []string) []pipeline.StorageParam {
+	var out []pipeline.StorageParam
+	for _, o := range opts {
+		k, v, found := strings.Cut(o, "=")
+		if !found || isUserMappingPasswordKey(k) {
+			continue
+		}
+		out = append(out, pipeline.StorageParam{Key: k, Value: v})
+	}
+	return out
+}
+
 // userMappingPasswordKeys mirrors internal/linter's passwordColNames — kept
 // as a local duplicate (5 strings) rather than a cross-package import, since
 // internal/introspect must not depend on internal/linter (introspect sits
@@ -228,14 +273,20 @@ ORDER  BY f.fdwname`
 		// Emit HANDLER/VALIDATOR only when present. Their absence is the default,
 		// so omitting them (rather than writing NO HANDLER/NO VALIDATOR) keeps the
 		// reconstruction's canonical deparse identical to a minimal source form.
+		handler, validator := "", ""
 		if hName != nil {
 			fmt.Fprintf(&sb, " HANDLER %s", qualIdentQ(deref(hSchema), *hName))
+			handler = qualifiedFuncRef(deref(hSchema), *hName)
 		}
 		if vName != nil {
 			fmt.Fprintf(&sb, " VALIDATOR %s", qualIdentQ(deref(vSchema), *vName))
+			validator = qualifiedFuncRef(deref(vSchema), *vName)
 		}
 		sb.WriteString(formatOptions(options))
-		out = append(out, &ir.ForeignDataWrapper{Name: name, Body: canonicalDDL(sb.String()), Comment: comment, Reconstructed: true})
+		out = append(out, &ir.ForeignDataWrapper{
+			Name: name, Handler: handler, Validator: validator, Options: optionsToStorageParams(options),
+			Body: canonicalDDL(sb.String()), Comment: comment, Reconstructed: true,
+		})
 	}
 	return out, rs.Err()
 }
@@ -276,7 +327,19 @@ ORDER  BY s.srvname`
 		}
 		fmt.Fprintf(&sb, " FOREIGN DATA WRAPPER %s", quoteIdent(fdw))
 		sb.WriteString(formatOptions(options))
-		out = append(out, &ir.ForeignServer{Name: name, Body: canonicalDDL(sb.String()), Comment: comment, Reconstructed: true})
+		srv := &ir.ForeignServer{
+			Name: name, FDWName: fdw, Options: optionsToStorageParams(options),
+			Body: canonicalDDL(sb.String()), Comment: comment, Reconstructed: true,
+		}
+		if srvType != nil && *srvType != "" {
+			t := *srvType
+			srv.Type = &t
+		}
+		if srvVersion != nil && *srvVersion != "" {
+			v := *srvVersion
+			srv.Version = &v
+		}
+		out = append(out, srv)
 	}
 	return out, rs.Err()
 }
@@ -317,7 +380,10 @@ ORDER  BY um.srvname, um.usename`
 		}
 		body := fmt.Sprintf("CREATE USER MAPPING FOR %s SERVER %s%s",
 			forClause, quoteIdent(server), formatUserMappingOptions(options))
-		out = append(out, &ir.UserMapping{User: irUser, Server: server, Body: canonicalDDL(body), Reconstructed: true})
+		out = append(out, &ir.UserMapping{
+			User: irUser, Server: server, Options: nonSensitiveOptionsToStorageParams(options),
+			Body: canonicalDDL(body), Reconstructed: true,
+		})
 	}
 	return out, rs.Err()
 }

@@ -25,6 +25,50 @@ func toSnapNameMaps(entries []pipeline.NameMapEntry) []SnapNameMapEntry {
 	return out
 }
 
+// toSnapOptions converts an OPTIONS (...) list to its snapshot form.
+func toSnapOptions(opts []pipeline.StorageParam) []SnapOptionKV {
+	if len(opts) == 0 {
+		return nil
+	}
+	out := make([]SnapOptionKV, len(opts))
+	for i, o := range opts {
+		out[i] = SnapOptionKV{Key: o.Key, Value: o.Value}
+	}
+	return out
+}
+
+// userMappingPasswordKeys mirrors internal/introspect's own copy of the same
+// list (which itself mirrors internal/linter's passwordColNames) — kept as
+// a local duplicate rather than a cross-package import, following this
+// codebase's established pattern for this exact recurring 5-string need
+// (see internal/introspect/opaque.go's identical comment).
+var userMappingPasswordKeys = []string{"password", "passwd", "pwd", "secret", "passphrase"}
+
+func isUserMappingPasswordKey(key string) bool {
+	lower := strings.ToLower(key)
+	for _, kw := range userMappingPasswordKeys {
+		if strings.Contains(lower, kw) {
+			return true
+		}
+	}
+	return false
+}
+
+// toSnapNonSensitiveOptions is toSnapOptions for UserMapping specifically:
+// password-like keys are skipped entirely (not just redacted) so they
+// never enter the structural diff comparison — see
+// ir.UserMapping.Options' doc comment.
+func toSnapNonSensitiveOptions(opts []pipeline.StorageParam) []SnapOptionKV {
+	var out []SnapOptionKV
+	for _, o := range opts {
+		if isUserMappingPasswordKey(o.Key) {
+			continue
+		}
+		out = append(out, SnapOptionKV{Key: o.Key, Value: o.Value})
+	}
+	return out
+}
+
 // hashBodyStr returns a SHA-256 hex digest of the body string (trimmed).
 // Returns "" for empty strings.
 func hashBodyStr(s string) string {
@@ -118,15 +162,21 @@ func toSnapObject(obj pipeline.IRObject) *SnapObject {
 		}}
 	case *ir.ForeignDataWrapper:
 		return &SnapObject{Kind: "fdw", Opaque: &SnapOpaque{
-			Kind: "fdw", Name: o.Name, BodyHash: sourceBodyHash(o.Body, o.Reconstructed), Comment: o.Comment,
+			Kind: "fdw", Name: o.Name,
+			OptionsStructured: true, FDWHandler: o.Handler, FDWValidator: o.Validator, FDWOptions: toSnapOptions(o.Options),
+			BodyHash: sourceBodyHash(o.Body, o.Reconstructed), Comment: o.Comment,
 		}}
 	case *ir.ForeignServer:
 		return &SnapObject{Kind: "server", Opaque: &SnapOpaque{
-			Kind: "server", Name: o.Name, BodyHash: sourceBodyHash(o.Body, o.Reconstructed), Comment: o.Comment,
+			Kind: "server", Name: o.Name,
+			OptionsStructured: true, ServerFDWName: o.FDWName, ServerType: o.Type, ServerVersion: o.Version, ServerOptions: toSnapOptions(o.Options),
+			BodyHash: sourceBodyHash(o.Body, o.Reconstructed), Comment: o.Comment,
 		}}
 	case *ir.UserMapping:
 		return &SnapObject{Kind: "user_mapping", Opaque: &SnapOpaque{
-			Kind: "user_mapping", Name: o.User + "@" + o.Server, BodyHash: sourceBodyHash(o.Body, o.Reconstructed),
+			Kind: "user_mapping", Name: o.User + "@" + o.Server,
+			OptionsStructured: true, UserMappingOptions: toSnapNonSensitiveOptions(o.Options),
+			BodyHash: sourceBodyHash(o.Body, o.Reconstructed),
 		}}
 	case *ir.Publication:
 		return &SnapObject{Kind: "publication", Opaque: &SnapOpaque{

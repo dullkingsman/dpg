@@ -988,12 +988,58 @@ func createUserMapping(o *ir.UserMapping) ([]pipeline.DiffOp, error) {
 // CREATE side must produce a userMappingCreateOp, not a generic createOpaque
 // op, so any {{...}} reference in OPTIONS is resolved only immediately
 // before execution, never during diff.
+// diffUserMapping implements RFC §14.10's structured diffing: "any change
+// to the mapping is a full DROP USER MAPPING + CREATE USER MAPPING, not a
+// targeted ALTER USER MAPPING" is the RFC's own explicit, deliberately-
+// corrected semantics, so this is a single "did the non-sensitive OPTIONS
+// change" comparison, in place of the previous offline-only body-hash
+// compare (o.Reconstructed==true — always false for a desired/source-side
+// object — meant the *snap* side going Reconstructed on any live path
+// forced snap.BodyHash to "", so this never fired against live catalog
+// drift). Password-like OPTIONS keys are excluded from the comparison
+// entirely (toComparableOptions' excludeSensitive=true): the live side
+// never carries the real value, only a fixed redaction placeholder (see
+// ir.UserMapping.Options' doc comment), so comparing it would show
+// permanent, spurious drift on every plan.
 func diffUserMapping(o *ir.UserMapping, snap *snapshot.SnapOpaque) ([]pipeline.DiffOp, error) {
-	if o.Body == "" || o.Reconstructed {
+	if o.Body == "" {
 		return nil, nil
 	}
-	newHash := hashText(o.Body)
-	if snap.BodyHash == "" || newHash == snap.BodyHash {
+	// Offline path: snap.BodyHash is only ever populated when the snap
+	// side is NOT Reconstructed (see sourceBodyHash) — i.e. both sides
+	// came from source, so a real, comparable password/secret-reference
+	// value exists on both. Preserve the original full-body hash compare
+	// here unchanged: it's the only way to detect a declared {{secret-uri}}
+	// reference change (e.g. rotating to a different vault path) at all,
+	// and password-like keys must stay fully in scope for it.
+	if snap.BodyHash != "" {
+		newHash := hashText(o.Body)
+		if newHash == snap.BodyHash {
+			return nil, nil
+		}
+		ops := dropObject(&snapshot.SnapObject{Kind: snap.Kind, Opaque: snap})
+		createOps, err := createUserMapping(o)
+		if err != nil {
+			return nil, err
+		}
+		return append(ops, createOps...), nil
+	}
+	// Live path (snap.BodyHash == "", i.e. Reconstructed): the live side
+	// can never expose a real, comparable password value (see
+	// ir.UserMapping.Options' doc comment) — RFC §14.10's structured
+	// diffing input, per-field OPTIONS comparison excluding password-like
+	// keys entirely, closes G-live for the non-sensitive subset. Detecting
+	// a live-only password/secret-reference change remains genuinely
+	// inherent (same PostgreSQL-imposed limit RFC §24 already documents
+	// for Subscription's subconninfo), not a gap this can close.
+	if !snap.OptionsStructured {
+		// Stale snapshot predating this structured field — same
+		// self-healing pattern as diffFDW/diffForeignServer. UserMapping
+		// has no Comment field (real PostgreSQL has no COMMENT ON USER
+		// MAPPING), so there's nothing to fall back to but the refresh op.
+		return []pipeline.DiffOp{safeOp(fmt.Sprintf("-- refresh snapshot metadata for user mapping %s", o.QualifiedName()), o.SrcPos)}, nil
+	}
+	if optionsEqual(toComparableOptions(o.Options, true), snap.UserMappingOptions) {
 		return nil, nil
 	}
 	ops := dropObject(&snapshot.SnapObject{Kind: snap.Kind, Opaque: snap})
@@ -1233,6 +1279,193 @@ func diffEventTrigger(o *ir.EventTrigger, snap *snapshot.SnapOpaque) ([]pipeline
 		}
 	}
 	return nil, nil
+}
+
+// userMappingPasswordKeys mirrors internal/introspect's and
+// internal/snapshot's own copies of the same list (which itself mirrors
+// internal/linter's passwordColNames) — kept as a local duplicate rather
+// than a cross-package import, following this codebase's established
+// pattern for this exact recurring 5-string need.
+var userMappingPasswordKeys = []string{"password", "passwd", "pwd", "secret", "passphrase"}
+
+func isUserMappingPasswordKey(key string) bool {
+	lower := strings.ToLower(key)
+	for _, kw := range userMappingPasswordKeys {
+		if strings.Contains(lower, kw) {
+			return true
+		}
+	}
+	return false
+}
+
+// toComparableOptions converts a desired-side Options list to the snapshot
+// comparison shape, optionally excluding password-like keys — used for
+// UserMapping (excludeSensitive=true, since the live side never carries a
+// real password value to compare against, only a fixed redaction
+// placeholder) and reused as a plain passthrough (excludeSensitive=false)
+// for FDW/ForeignServer, which have no sensitive-key concept.
+func toComparableOptions(opts []pipeline.StorageParam, excludeSensitive bool) []snapshot.SnapOptionKV {
+	var out []snapshot.SnapOptionKV
+	for _, o := range opts {
+		if excludeSensitive && isUserMappingPasswordKey(o.Key) {
+			continue
+		}
+		out = append(out, snapshot.SnapOptionKV{Key: o.Key, Value: o.Value})
+	}
+	return out
+}
+
+// optionsEqual compares two OPTIONS lists as sets (order-independent, since
+// PostgreSQL's own OPTIONS have no meaningful order).
+func optionsEqual(a, b []snapshot.SnapOptionKV) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	m := make(map[string]string, len(a))
+	for _, kv := range a {
+		m[kv.Key] = kv.Value
+	}
+	for _, kv := range b {
+		v, ok := m[kv.Key]
+		if !ok || v != kv.Value {
+			return false
+		}
+	}
+	return true
+}
+
+// alterOptionsSQL builds an ALTER ... OPTIONS (ADD/SET/DROP ...) clause's
+// entry list comparing desired against live — confirmed live against a
+// real PostgreSQL 17 server: OPTIONS keys need no identifier quoting (even
+// reserved words like "user" parse fine unquoted; formatOptions elsewhere
+// in this codebase already relies on the same). Returns "" when nothing
+// changed.
+func alterOptionsSQL(desired, live []snapshot.SnapOptionKV) string {
+	liveByKey := make(map[string]string, len(live))
+	for _, kv := range live {
+		liveByKey[kv.Key] = kv.Value
+	}
+	desiredByKey := make(map[string]string, len(desired))
+	for _, kv := range desired {
+		desiredByKey[kv.Key] = kv.Value
+	}
+	var parts []string
+	for _, kv := range desired {
+		if lv, ok := liveByKey[kv.Key]; !ok {
+			parts = append(parts, fmt.Sprintf("ADD %s %s", kv.Key, quoteLit(kv.Value)))
+		} else if lv != kv.Value {
+			parts = append(parts, fmt.Sprintf("SET %s %s", kv.Key, quoteLit(kv.Value)))
+		}
+	}
+	for _, kv := range live {
+		if _, ok := desiredByKey[kv.Key]; !ok {
+			parts = append(parts, fmt.Sprintf("DROP %s", kv.Key))
+		}
+	}
+	return strings.Join(parts, ", ")
+}
+
+// diffFDW implements RFC §14.8's structured diffing: "any change to a FDW
+// requires drop + recreate" is the RFC's own explicit semantics (no
+// ALTER FOREIGN DATA WRAPPER path modeled, even though real PostgreSQL has
+// one — a deliberate DPG simplification), so this is a single "did
+// anything change" comparison across Handler/Validator/Options, in place
+// of diffOpaqueIR's generic Reconstructed-gated body-hash compare (silently
+// unset on every live path — see diffTablespace's doc comment for the same
+// root cause).
+func diffFDW(o *ir.ForeignDataWrapper, snap *snapshot.SnapOpaque) ([]pipeline.DiffOp, error) {
+	pos := o.SrcPos
+	// Stale snapshot predating these structured fields: unlike Tablespace/
+	// Cast/EventTrigger, no single field is guaranteed non-empty on a real
+	// FDW (a bare FOREIGN DATA WRAPPER with no HANDLER/VALIDATOR/OPTIONS
+	// is valid), so OptionsStructured is an explicit sentinel instead.
+	if !snap.OptionsStructured {
+		var ops []pipeline.DiffOp
+		if !ptrEq(o.Comment, snap.Comment) {
+			if sql := commentOnOpaqueSQL("fdw", "", o.Name, "", "", o.Comment); sql != "" {
+				ops = append(ops, safeOp(sql, pos))
+			}
+		}
+		if len(ops) == 0 {
+			ops = append(ops, safeOp(fmt.Sprintf("-- refresh snapshot metadata for foreign data wrapper %s", quoteIdent(o.Name)), pos))
+		}
+		return ops, nil
+	}
+	if qualifyFuncForCompare(o.Handler) != qualifyFuncForCompare(snap.FDWHandler) ||
+		qualifyFuncForCompare(o.Validator) != qualifyFuncForCompare(snap.FDWValidator) ||
+		!optionsEqual(toComparableOptions(o.Options, false), snap.FDWOptions) {
+		ops := dropObject(&snapshot.SnapObject{Kind: snap.Kind, Opaque: snap})
+		createOps, err := createOpaque(o.Name, o.Body, "FOREIGN DATA WRAPPER", "", pos)
+		if err != nil {
+			return nil, err
+		}
+		ops = append(ops, createOps...)
+		return appendCommentOp(ops, nil, "fdw", "", o.Name, "", "", o.Comment, pos)
+	}
+	if !ptrEq(o.Comment, snap.Comment) {
+		if sql := commentOnOpaqueSQL("fdw", "", o.Name, "", "", o.Comment); sql != "" {
+			return []pipeline.DiffOp{safeOp(sql, pos)}, nil
+		}
+	}
+	return nil, nil
+}
+
+// diffForeignServer implements RFC §14.9's structured diffing table: a
+// FDW-wrapper change decides DROP+CREATE (DESTRUCTIVE) — same for a TYPE
+// change, since real PostgreSQL's ALTER SERVER has no TYPE clause
+// (confirmed via `\h ALTER SERVER` against a live PostgreSQL 17 server:
+// only VERSION and OPTIONS are alterable in place) — while a VERSION or
+// OPTIONS change gets a real, targeted ALTER SERVER (SAFE, per the RFC's
+// own "OPTIONS changed" row; VERSION follows the identical reasoning since
+// PostgreSQL supports altering it the same way). Replaces diffOpaqueIR's
+// generic Reconstructed-gated body-hash compare (silently unset on every
+// live path).
+func diffForeignServer(o *ir.ForeignServer, snap *snapshot.SnapOpaque) ([]pipeline.DiffOp, error) {
+	pos := o.SrcPos
+	ident := quoteIdent(o.Name)
+	if !snap.OptionsStructured {
+		var ops []pipeline.DiffOp
+		if !ptrEq(o.Comment, snap.Comment) {
+			if sql := commentOnOpaqueSQL("server", "", o.Name, "", "", o.Comment); sql != "" {
+				ops = append(ops, safeOp(sql, pos))
+			}
+		}
+		if len(ops) == 0 {
+			ops = append(ops, safeOp(fmt.Sprintf("-- refresh snapshot metadata for server %s", ident), pos))
+		}
+		return ops, nil
+	}
+	if o.FDWName != snap.ServerFDWName || !ptrEq(o.Type, snap.ServerType) {
+		ops := dropObject(&snapshot.SnapObject{Kind: snap.Kind, Opaque: snap})
+		createOps, err := createOpaque(o.Name, o.Body, "SERVER", "", pos)
+		if err != nil {
+			return nil, err
+		}
+		ops = append(ops, createOps...)
+		return appendCommentOp(ops, nil, "server", "", o.Name, "", "", o.Comment, pos)
+	}
+	var ops []pipeline.DiffOp
+	desiredOptions := toComparableOptions(o.Options, false)
+	versionChanged := !ptrEq(o.Version, snap.ServerVersion)
+	optionsChanged := !optionsEqual(desiredOptions, snap.ServerOptions)
+	if versionChanged || optionsChanged {
+		var sb strings.Builder
+		fmt.Fprintf(&sb, "ALTER SERVER %s", ident)
+		if versionChanged && o.Version != nil {
+			fmt.Fprintf(&sb, " VERSION %s", quoteLit(*o.Version))
+		}
+		if optionsChanged {
+			fmt.Fprintf(&sb, " OPTIONS (%s)", alterOptionsSQL(desiredOptions, snap.ServerOptions))
+		}
+		sb.WriteString(";")
+		ops = append(ops, safeOp(sb.String(), pos))
+	}
+	if !ptrEq(o.Comment, snap.Comment) {
+		if sql := commentOnOpaqueSQL("server", "", o.Name, "", "", o.Comment); sql != "" {
+			ops = append(ops, safeOp(sql, pos))
+		}
+	}
+	return ops, nil
 }
 
 // diffSubscription mirrors diffOpaqueIR's shape (offline body-hash compare,
@@ -2510,12 +2743,12 @@ func diffObject(desired pipeline.IRObject, snap *snapshot.SnapObject, fullSnap *
 		if snap.Opaque == nil {
 			return nil, nil
 		}
-		return diffOpaqueIR(o.Name, o.Body, o.Reconstructed, o.Comment, snap.Opaque, o.SrcPos)
+		return diffFDW(o, snap.Opaque)
 	case *ir.ForeignServer:
 		if snap.Opaque == nil {
 			return nil, nil
 		}
-		return diffOpaqueIR(o.Name, o.Body, o.Reconstructed, o.Comment, snap.Opaque, o.SrcPos)
+		return diffForeignServer(o, snap.Opaque)
 	case *ir.UserMapping:
 		if snap.Opaque == nil {
 			return nil, nil

@@ -353,6 +353,267 @@ func TestGLiveTablespaceLocationChangeDetected(t *testing.T) {
 	}
 }
 
+func TestGLiveFDWHandlerChangeDetected(t *testing.T) {
+	connStr := testpg.Start(t)
+	ctx := context.Background()
+
+	differ := diff.New()
+	emitter := emit.New()
+	applyExec := executor.New()
+	ci := introspect.New()
+	store := newMemStore()
+
+	conn, err := executor.Connect(ctx, connStr)
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	defer conn.Close(ctx)
+
+	// file_fdw is a standard PostgreSQL contrib extension bundled with the
+	// official image, giving a real, always-available HANDLER function
+	// (file_fdw_handler) without depending on postgres_fdw or any other
+	// specific extension's semantics.
+	if _, err := conn.Exec(ctx, `CREATE EXTENSION file_fdw;`); err != nil {
+		t.Fatalf("create file_fdw extension: %v", err)
+	}
+
+	dir := t.TempDir()
+	f := filepath.Join(dir, "schema.dpg")
+	fixture := `FOREIGN DATA WRAPPER gl_fdw HANDLER file_fdw_handler;`
+	if err := os.WriteFile(f, []byte(fixture), 0o644); err != nil {
+		t.Fatalf("write schema: %v", err)
+	}
+	applyFixture(t, ctx, conn, []string{f}, dir, differ, emitter, applyExec, store)
+
+	desired, err := compiler.Compile([]string{f}, dir, pipeline.Default)
+	if err != nil {
+		t.Fatalf("compile: %v", err)
+	}
+
+	// Mutate directly via raw SQL: real PostgreSQL does support
+	// ALTER FOREIGN DATA WRAPPER, but RFC §14.8 deliberately treats any
+	// change as DROP+CREATE — so the live-catalog-only mutation here still
+	// uses DROP+CREATE, matching a hand-run migration outside DPG.
+	if _, err := conn.Exec(ctx, `DROP FOREIGN DATA WRAPPER gl_fdw;`); err != nil {
+		t.Fatalf("drop fdw: %v", err)
+	}
+	if _, err := conn.Exec(ctx, `CREATE FOREIGN DATA WRAPPER gl_fdw;`); err != nil {
+		t.Fatalf("recreate fdw without handler: %v", err)
+	}
+
+	liveObjects, err := ci.Introspect(ctx, conn)
+	if err != nil {
+		t.Fatalf("introspect: %v", err)
+	}
+	snap, _ := store.Load("test", "dpgtest")
+	var managedLive []pipeline.IRObject
+	for _, obj := range liveObjects {
+		if _, ok := snap.Objects[obj.QualifiedName()]; ok {
+			managedLive = append(managedLive, obj)
+		}
+	}
+	liveSnap := &pipeline.Snapshot{}
+	if err := snapshot.Populate(liveSnap, managedLive); err != nil {
+		t.Fatalf("populate live snapshot: %v", err)
+	}
+
+	driftOps, err := differ.Diff(desired, liveSnap)
+	if err != nil {
+		t.Fatalf("drift diff: %v", err)
+	}
+	var sql string
+	for _, op := range driftOps {
+		sql += op.SQL()
+	}
+	if !strings.Contains(sql, "DROP FOREIGN DATA WRAPPER") {
+		t.Fatalf("G-live gap not closed: expected plan --live to detect the live-catalog-only handler change, got %d ops: %q", len(driftOps), sql)
+	}
+	if !strings.Contains(sql, "file_fdw_handler") {
+		t.Errorf("expected recreate to restore the declared HANDLER, got: %s", sql)
+	}
+}
+
+// TestGLiveForeignServerOptionsChangeDetectedAsAlter is the live-catalog
+// proof for the new capability, not just the G-live gap closure: a
+// live-only OPTIONS change is not just detected, it's detected as a real,
+// targeted ALTER SERVER (RFC §14.9), not a spurious DROP+CREATE — the
+// generic diffOpaqueIR path this replaces could only ever have produced
+// DROP+CREATE once un-blinded, never the correct minimal-diff ALTER.
+func TestGLiveForeignServerOptionsChangeDetectedAsAlter(t *testing.T) {
+	connStr := testpg.Start(t)
+	ctx := context.Background()
+
+	differ := diff.New()
+	emitter := emit.New()
+	applyExec := executor.New()
+	ci := introspect.New()
+	store := newMemStore()
+
+	conn, err := executor.Connect(ctx, connStr)
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	defer conn.Close(ctx)
+
+	dir := t.TempDir()
+	f := filepath.Join(dir, "schema.dpg")
+	fixture := `FOREIGN DATA WRAPPER gl_fdw2;
+SERVER gl_srv FOREIGN DATA WRAPPER gl_fdw2 OPTIONS (host 'a');`
+	if err := os.WriteFile(f, []byte(fixture), 0o644); err != nil {
+		t.Fatalf("write schema: %v", err)
+	}
+	applyFixture(t, ctx, conn, []string{f}, dir, differ, emitter, applyExec, store)
+
+	desired, err := compiler.Compile([]string{f}, dir, pipeline.Default)
+	if err != nil {
+		t.Fatalf("compile: %v", err)
+	}
+
+	// Mutate directly via raw SQL: a real ALTER SERVER, exactly as a
+	// hand-run migration outside DPG would do.
+	if _, err := conn.Exec(ctx, `ALTER SERVER gl_srv OPTIONS (SET host 'b');`); err != nil {
+		t.Fatalf("alter server options: %v", err)
+	}
+
+	liveObjects, err := ci.Introspect(ctx, conn)
+	if err != nil {
+		t.Fatalf("introspect: %v", err)
+	}
+	snap, _ := store.Load("test", "dpgtest")
+	var managedLive []pipeline.IRObject
+	for _, obj := range liveObjects {
+		if _, ok := snap.Objects[obj.QualifiedName()]; ok {
+			managedLive = append(managedLive, obj)
+		}
+	}
+	liveSnap := &pipeline.Snapshot{}
+	if err := snapshot.Populate(liveSnap, managedLive); err != nil {
+		t.Fatalf("populate live snapshot: %v", err)
+	}
+
+	driftOps, err := differ.Diff(desired, liveSnap)
+	if err != nil {
+		t.Fatalf("drift diff: %v", err)
+	}
+	if len(driftOps) != 1 {
+		t.Fatalf("G-live gap not closed: expected exactly 1 op (targeted ALTER SERVER) detecting the live-only OPTIONS change, got %d: %v", len(driftOps), driftOps)
+	}
+	sql := driftOps[0].SQL()
+	if !strings.HasPrefix(sql, "ALTER SERVER") {
+		t.Errorf("expected a targeted ALTER SERVER, not DROP+CREATE, got: %s", sql)
+	}
+	if driftOps[0].Safety() != pipeline.Safe {
+		t.Errorf("expected ALTER SERVER OPTIONS to be Safe, got %v: %s", driftOps[0].Safety(), sql)
+	}
+	if !strings.Contains(sql, "SET host 'a'") {
+		t.Errorf("expected recreate to restore the declared host 'a', got: %s", sql)
+	}
+
+	// Apply the correction and confirm zero drift remains — proves the
+	// generated ALTER SERVER is valid SQL a real server accepts, not just
+	// well-formed text.
+	migration, err := emitter.Emit(driftOps, pipeline.MigrationMeta{Cluster: "test", Database: "dpgtest"})
+	if err != nil {
+		t.Fatalf("emit: %v", err)
+	}
+	if err := applyExec.Apply(ctx, migration, conn); err != nil {
+		t.Fatalf("apply corrective ALTER SERVER: %v", err)
+	}
+	liveObjects2, err := ci.Introspect(ctx, conn)
+	if err != nil {
+		t.Fatalf("re-introspect: %v", err)
+	}
+	var managedLive2 []pipeline.IRObject
+	for _, obj := range liveObjects2 {
+		if _, ok := snap.Objects[obj.QualifiedName()]; ok {
+			managedLive2 = append(managedLive2, obj)
+		}
+	}
+	liveSnap2 := &pipeline.Snapshot{}
+	if err := snapshot.Populate(liveSnap2, managedLive2); err != nil {
+		t.Fatalf("populate live snapshot 2: %v", err)
+	}
+	finalOps, err := differ.Diff(desired, liveSnap2)
+	if err != nil {
+		t.Fatalf("final drift diff: %v", err)
+	}
+	if len(finalOps) != 0 {
+		t.Errorf("expected zero drift after applying the corrective ALTER SERVER, got: %v", finalOps)
+	}
+}
+
+func TestGLiveUserMappingNonSensitiveOptionsChangeDetected(t *testing.T) {
+	connStr := testpg.Start(t)
+	ctx := context.Background()
+
+	differ := diff.New()
+	emitter := emit.New()
+	applyExec := executor.New()
+	ci := introspect.New()
+	store := newMemStore()
+
+	conn, err := executor.Connect(ctx, connStr)
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	defer conn.Close(ctx)
+
+	dir := t.TempDir()
+	f := filepath.Join(dir, "schema.dpg")
+	fixture := `FOREIGN DATA WRAPPER gl_fdw3;
+SERVER gl_srv3 FOREIGN DATA WRAPPER gl_fdw3;
+USER MAPPING FOR PUBLIC SERVER gl_srv3 OPTIONS (user 'app_v1');`
+	if err := os.WriteFile(f, []byte(fixture), 0o644); err != nil {
+		t.Fatalf("write schema: %v", err)
+	}
+	applyFixture(t, ctx, conn, []string{f}, dir, differ, emitter, applyExec, store)
+
+	desired, err := compiler.Compile([]string{f}, dir, pipeline.Default)
+	if err != nil {
+		t.Fatalf("compile: %v", err)
+	}
+
+	// Mutate directly via raw SQL: RFC §14.10 gives UserMapping no ALTER
+	// path (DROP+CREATE only), matching a hand-run migration outside DPG.
+	if _, err := conn.Exec(ctx, `DROP USER MAPPING FOR PUBLIC SERVER gl_srv3;`); err != nil {
+		t.Fatalf("drop user mapping: %v", err)
+	}
+	if _, err := conn.Exec(ctx, `CREATE USER MAPPING FOR PUBLIC SERVER gl_srv3 OPTIONS (user 'app_v2');`); err != nil {
+		t.Fatalf("recreate user mapping with a different user option: %v", err)
+	}
+
+	liveObjects, err := ci.Introspect(ctx, conn)
+	if err != nil {
+		t.Fatalf("introspect: %v", err)
+	}
+	snap, _ := store.Load("test", "dpgtest")
+	var managedLive []pipeline.IRObject
+	for _, obj := range liveObjects {
+		if _, ok := snap.Objects[obj.QualifiedName()]; ok {
+			managedLive = append(managedLive, obj)
+		}
+	}
+	liveSnap := &pipeline.Snapshot{}
+	if err := snapshot.Populate(liveSnap, managedLive); err != nil {
+		t.Fatalf("populate live snapshot: %v", err)
+	}
+
+	driftOps, err := differ.Diff(desired, liveSnap)
+	if err != nil {
+		t.Fatalf("drift diff: %v", err)
+	}
+	var sql string
+	for _, op := range driftOps {
+		sql += op.SQL()
+	}
+	if !strings.Contains(sql, "DROP USER MAPPING") {
+		t.Fatalf("G-live gap not closed: expected plan --live to detect the live-only non-sensitive OPTIONS change, got %d ops: %q", len(driftOps), sql)
+	}
+	if !strings.Contains(sql, "app_v1") {
+		t.Errorf("expected recreate to restore the declared user 'app_v1', got: %s", sql)
+	}
+}
+
 // TestRoundtripOpaqueBodyEditAppliesLive is the live-catalog guard for #3
 // (real update path for opaque objects, internal/diff/differ.go diffOpaqueIR):
 // previously an offline body edit to an opaque object (here, a COLLATION's

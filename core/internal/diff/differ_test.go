@@ -7540,17 +7540,22 @@ func TestDiffOpaqueOfflineEditEmitsStructuredDropRecreate(t *testing.T) {
 		},
 		{
 			name:           "fdw",
-			oldObj:         &ir.ForeignDataWrapper{Name: "myfdw", Body: "CREATE FOREIGN DATA WRAPPER myfdw HANDLER h1"},
-			newObj:         &ir.ForeignDataWrapper{Name: "myfdw", Body: "CREATE FOREIGN DATA WRAPPER myfdw HANDLER h2"},
+			oldObj:         &ir.ForeignDataWrapper{Name: "myfdw", Handler: "h1", Body: "CREATE FOREIGN DATA WRAPPER myfdw HANDLER h1"},
+			newObj:         &ir.ForeignDataWrapper{Name: "myfdw", Handler: "h2", Body: "CREATE FOREIGN DATA WRAPPER myfdw HANDLER h2"},
 			wantDropSubstr: `DROP FOREIGN DATA WRAPPER IF EXISTS "myfdw";`,
 			wantNewInBody:  "h2",
 		},
 		{
+			// A FDW-wrapper change specifically (not an OPTIONS-only change,
+			// which RFC §14.9 gives a real, targeted ALTER SERVER for — see
+			// TestDiffForeignServerOptionsChangeIsSafeAlter — real PostgreSQL
+			// has no ALTER SERVER ... FOREIGN DATA WRAPPER at all, confirmed
+			// via `\h ALTER SERVER`).
 			name:           "server",
-			oldObj:         &ir.ForeignServer{Name: "srv", Body: "CREATE SERVER srv FOREIGN DATA WRAPPER myfdw OPTIONS (host 'a')"},
-			newObj:         &ir.ForeignServer{Name: "srv", Body: "CREATE SERVER srv FOREIGN DATA WRAPPER myfdw OPTIONS (host 'b')"},
+			oldObj:         &ir.ForeignServer{Name: "srv", FDWName: "myfdw1", Body: "CREATE SERVER srv FOREIGN DATA WRAPPER myfdw1"},
+			newObj:         &ir.ForeignServer{Name: "srv", FDWName: "myfdw2", Body: "CREATE SERVER srv FOREIGN DATA WRAPPER myfdw2"},
 			wantDropSubstr: `DROP SERVER IF EXISTS "srv";`,
-			wantNewInBody:  "'b'",
+			wantNewInBody:  "myfdw2",
 		},
 		{
 			name:           "user_mapping",
@@ -9428,6 +9433,281 @@ func TestDiffEventTriggerStaleSnapshotDoesNotRecreate(t *testing.T) {
 	}
 	if containsSQL(ops, "DROP EVENT TRIGGER") {
 		t.Errorf("stale snapshot must not trigger DROP EVENT TRIGGER, got: %v", sqlList(ops))
+	}
+}
+
+// ── FDW/ForeignServer/UserMapping structured OPTIONS diffing (G-live Tier 2) ──
+// Same G-live gap as Tier 1 (Tablespace/Cast/EventTrigger): Reconstructed
+// forced BodyHash to "" on the live side, silently disabling diffOpaqueIR's
+// comparison on verify/plan --live. diffFDW/diffForeignServer/diffUserMapping
+// replace that with field-level comparison, gated by the explicit
+// OptionsStructured sentinel (none of these 3 kinds has a field guaranteed
+// non-empty the way Tier 1's did).
+
+func TestDiffFDWOptionsChangeRecreates(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("myfdw", &snapshot.SnapObject{
+		Kind: "fdw",
+		Opaque: &snapshot.SnapOpaque{
+			Kind: "fdw", Name: "myfdw", OptionsStructured: true,
+			FDWOptions: []snapshot.SnapOptionKV{{Key: "debug", Value: "false"}},
+		},
+	})
+	desired := []pipeline.IRObject{
+		&ir.ForeignDataWrapper{
+			Name: "myfdw", Options: []pipeline.StorageParam{{Key: "debug", Value: "true"}},
+			Body: "CREATE FOREIGN DATA WRAPPER myfdw OPTIONS (debug 'true')",
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsSQL(ops, `DROP FOREIGN DATA WRAPPER IF EXISTS "myfdw"`) {
+		t.Errorf("expected DROP FOREIGN DATA WRAPPER, got: %v", sqlList(ops))
+	}
+	for _, op := range ops {
+		if strings.Contains(op.SQL(), "DROP FOREIGN DATA WRAPPER") && op.Safety() != pipeline.Destructive {
+			t.Errorf("expected DROP FOREIGN DATA WRAPPER to be Destructive (RFC §14.8), got %v: %s", op.Safety(), op.SQL())
+		}
+	}
+}
+
+func TestDiffFDWUnchangedIsNoop(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("myfdw", &snapshot.SnapObject{
+		Kind: "fdw",
+		Opaque: &snapshot.SnapOpaque{
+			Kind: "fdw", Name: "myfdw", OptionsStructured: true,
+			FDWHandler: "public.h1", FDWOptions: []snapshot.SnapOptionKV{{Key: "debug", Value: "true"}},
+		},
+	})
+	desired := []pipeline.IRObject{
+		&ir.ForeignDataWrapper{
+			Name: "myfdw", Handler: "h1", // unqualified — must match "public.h1" via qualifyFuncForCompare
+			Options: []pipeline.StorageParam{{Key: "debug", Value: "true"}},
+			Body:    "CREATE FOREIGN DATA WRAPPER myfdw HANDLER h1 OPTIONS (debug 'true')",
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ops) != 0 {
+		t.Errorf("expected zero ops for an unchanged FDW, got: %v", sqlList(ops))
+	}
+}
+
+func TestDiffFDWStaleSnapshotDoesNotRecreate(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("myfdw", &snapshot.SnapObject{
+		Kind:   "fdw",
+		Opaque: &snapshot.SnapOpaque{Kind: "fdw", Name: "myfdw"},
+	})
+	desired := []pipeline.IRObject{
+		&ir.ForeignDataWrapper{Name: "myfdw", Handler: "h1", Body: "CREATE FOREIGN DATA WRAPPER myfdw HANDLER h1"},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if containsSQL(ops, "DROP FOREIGN DATA WRAPPER") {
+		t.Errorf("stale snapshot must not trigger DROP FOREIGN DATA WRAPPER, got: %v", sqlList(ops))
+	}
+}
+
+func TestDiffForeignServerOptionsChangeIsSafeAlter(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("srv", &snapshot.SnapObject{
+		Kind: "server",
+		Opaque: &snapshot.SnapOpaque{
+			Kind: "server", Name: "srv", OptionsStructured: true, ServerFDWName: "myfdw",
+			ServerOptions: []snapshot.SnapOptionKV{{Key: "host", Value: "a"}, {Key: "port", Value: "5432"}},
+		},
+	})
+	desired := []pipeline.IRObject{
+		&ir.ForeignServer{
+			Name: "srv", FDWName: "myfdw",
+			Options: []pipeline.StorageParam{{Key: "host", Value: "b"}, {Key: "dbname", Value: "mydb"}},
+			Body:    "CREATE SERVER srv FOREIGN DATA WRAPPER myfdw OPTIONS (host 'b', dbname 'mydb')",
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ops) != 1 {
+		t.Fatalf("expected exactly 1 op (targeted ALTER SERVER, RFC §14.9), got %d: %v", len(ops), sqlList(ops))
+	}
+	sql := ops[0].SQL()
+	if !strings.HasPrefix(sql, "ALTER SERVER") {
+		t.Errorf("expected a targeted ALTER SERVER, not DROP+CREATE, got: %s", sql)
+	}
+	if ops[0].Safety() != pipeline.Safe {
+		t.Errorf("expected ALTER SERVER OPTIONS to be Safe (RFC §14.9), got %v: %s", ops[0].Safety(), sql)
+	}
+	if !strings.Contains(sql, "SET host 'b'") {
+		t.Errorf("expected SET host 'b', got: %s", sql)
+	}
+	if !strings.Contains(sql, "ADD dbname 'mydb'") {
+		t.Errorf("expected ADD dbname 'mydb', got: %s", sql)
+	}
+	if !strings.Contains(sql, "DROP port") {
+		t.Errorf("expected DROP port, got: %s", sql)
+	}
+}
+
+func TestDiffForeignServerVersionChangeIsSafeAlter(t *testing.T) {
+	d := New()
+	v1 := "1.0"
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("srv", &snapshot.SnapObject{
+		Kind: "server",
+		Opaque: &snapshot.SnapOpaque{
+			Kind: "server", Name: "srv", OptionsStructured: true, ServerFDWName: "myfdw", ServerVersion: &v1,
+		},
+	})
+	v2 := "2.0"
+	desired := []pipeline.IRObject{
+		&ir.ForeignServer{Name: "srv", FDWName: "myfdw", Version: &v2, Body: "CREATE SERVER srv VERSION '2.0' FOREIGN DATA WRAPPER myfdw"},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ops) != 1 {
+		t.Fatalf("expected exactly 1 op (targeted ALTER SERVER VERSION), got %d: %v", len(ops), sqlList(ops))
+	}
+	if !strings.Contains(ops[0].SQL(), "VERSION '2.0'") || ops[0].Safety() != pipeline.Safe {
+		t.Errorf("expected Safe ALTER SERVER VERSION '2.0', got %v: %s", ops[0].Safety(), ops[0].SQL())
+	}
+}
+
+func TestDiffForeignServerFDWChangeRecreates(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("srv", &snapshot.SnapObject{
+		Kind: "server",
+		Opaque: &snapshot.SnapOpaque{
+			Kind: "server", Name: "srv", OptionsStructured: true, ServerFDWName: "fdw1",
+		},
+	})
+	desired := []pipeline.IRObject{
+		&ir.ForeignServer{Name: "srv", FDWName: "fdw2", Body: "CREATE SERVER srv FOREIGN DATA WRAPPER fdw2"},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsSQL(ops, `DROP SERVER IF EXISTS "srv"`) {
+		t.Errorf("expected DROP SERVER for a FDW-wrapper change, got: %v", sqlList(ops))
+	}
+}
+
+func TestDiffForeignServerStaleSnapshotDoesNotRecreate(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("srv", &snapshot.SnapObject{
+		Kind:   "server",
+		Opaque: &snapshot.SnapOpaque{Kind: "server", Name: "srv"},
+	})
+	desired := []pipeline.IRObject{
+		&ir.ForeignServer{Name: "srv", FDWName: "myfdw", Body: "CREATE SERVER srv FOREIGN DATA WRAPPER myfdw"},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if containsSQL(ops, "DROP SERVER") {
+		t.Errorf("stale snapshot must not trigger DROP SERVER, got: %v", sqlList(ops))
+	}
+}
+
+// TestDiffUserMappingLiveOnlyNonSensitiveOptionsChangeDetected is the actual
+// G-live proof for UserMapping: on the live path (snap.BodyHash == "", i.e.
+// Reconstructed), a non-sensitive OPTIONS change must now be detected via
+// the new structural comparison — before this fix, diffUserMapping's sole
+// check (snap.BodyHash == "" || newHash == snap.BodyHash) treated
+// snap.BodyHash == "" as unconditionally "no change."
+func TestDiffUserMappingLiveOnlyNonSensitiveOptionsChangeDetected(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("app@srv", &snapshot.SnapObject{
+		Kind: "user_mapping",
+		Opaque: &snapshot.SnapOpaque{
+			Kind: "user_mapping", Name: "app@srv", OptionsStructured: true,
+			UserMappingOptions: []snapshot.SnapOptionKV{{Key: "user", Value: "app_v1"}},
+			// BodyHash intentionally "" — simulates the introspected/live side.
+		},
+	})
+	desired := []pipeline.IRObject{
+		&ir.UserMapping{
+			User: "app", Server: "srv",
+			Options: []pipeline.StorageParam{{Key: "user", Value: "app_v2"}},
+			Body:    "CREATE USER MAPPING FOR app SERVER srv OPTIONS (user 'app_v2')",
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsSQL(ops, `DROP USER MAPPING IF EXISTS FOR "app" SERVER "srv"`) {
+		t.Fatalf("G-live gap not closed: expected the live-only OPTIONS change to be detected, got %d ops: %v", len(ops), sqlList(ops))
+	}
+}
+
+// TestDiffUserMappingLiveOnlyPasswordChangeStaysUndetected documents the
+// remaining, genuinely inherent limitation (RFC §24): the live side can
+// never expose a real password value to compare against, only a fixed
+// redaction placeholder, so a live-only password change cannot be detected
+// — this is a deliberate scope boundary, not an oversight. Non-sensitive
+// OPTIONS on the exact same mapping still work (proven above).
+func TestDiffUserMappingLiveOnlyPasswordChangeStaysUndetected(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("app@srv", &snapshot.SnapObject{
+		Kind: "user_mapping",
+		Opaque: &snapshot.SnapOpaque{
+			Kind: "user_mapping", Name: "app@srv", OptionsStructured: true,
+			UserMappingOptions: nil, // password-like keys are never stored
+		},
+	})
+	desired := []pipeline.IRObject{
+		&ir.UserMapping{
+			User: "app", Server: "srv",
+			Options: []pipeline.StorageParam{{Key: "password", Value: "{{vault:secret/db#new}}"}},
+			Body:    "CREATE USER MAPPING FOR app SERVER srv OPTIONS (password '{{vault:secret/db#new}}')",
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ops) != 0 {
+		t.Errorf("expected zero ops (password changes are undetectable on the live path, by design), got: %v", sqlList(ops))
+	}
+}
+
+func TestDiffUserMappingStaleSnapshotDoesNotRecreate(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("app@srv", &snapshot.SnapObject{
+		Kind:   "user_mapping",
+		Opaque: &snapshot.SnapOpaque{Kind: "user_mapping", Name: "app@srv"},
+	})
+	desired := []pipeline.IRObject{
+		&ir.UserMapping{User: "app", Server: "srv", Body: "CREATE USER MAPPING FOR app SERVER srv OPTIONS (user 'app')"},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if containsSQL(ops, "DROP USER MAPPING") {
+		t.Errorf("stale snapshot must not trigger DROP USER MAPPING, got: %v", sqlList(ops))
 	}
 }
 
