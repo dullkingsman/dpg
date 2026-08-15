@@ -82,6 +82,22 @@ type SnapOpaque struct {
 	ServerVersion      *string        `json:"server_version,omitempty"`
 	ServerOptions      []SnapOptionKV `json:"server_options,omitempty"`
 	UserMappingOptions []SnapOptionKV `json:"user_mapping_options,omitempty"`
+	// PublicationStructured/PublicationAllTables/PublicationTables/
+	// PublicationInsert/Update/Delete/Truncate are RFC §13.1's structured
+	// diffing inputs — see ir.Publication.AllTables' doc comment.
+	// PublicationTables holds "schema.name" qualified strings, compared as
+	// a set (order-independent). PublicationStructured is the same
+	// explicit-sentinel pattern as OptionsStructured above (Publish flags
+	// default true, AllTables can legitimately be false — no field is a
+	// reliable "not yet populated" signal on its own).
+	PublicationStructured        bool     `json:"publication_structured,omitempty"`
+	PublicationAllTables         bool     `json:"publication_all_tables,omitempty"`
+	PublicationTables            []string `json:"publication_tables,omitempty"`
+	PublicationInsert            bool     `json:"publication_insert,omitempty"`
+	PublicationUpdate            bool     `json:"publication_update,omitempty"`
+	PublicationDelete            bool     `json:"publication_delete,omitempty"`
+	PublicationTruncate          bool     `json:"publication_truncate,omitempty"`
+	PublicationHasFilteredTables bool     `json:"publication_has_filtered_tables,omitempty"`
 }
 
 // SnapOptionKV is one OPTIONS (...) key/value entry, used by the

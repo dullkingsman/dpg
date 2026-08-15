@@ -1468,6 +1468,141 @@ func diffForeignServer(o *ir.ForeignServer, snap *snapshot.SnapOpaque) ([]pipeli
 	return ops, nil
 }
 
+// qualifyTableForCompare mirrors qualifyFuncForCompare (used for Cast/
+// EventTrigger's Function fields): a Publication's FOR TABLE entry may be
+// left unqualified in source, relying on the default "public" schema,
+// while introspection always returns a fully schema-qualified name.
+func qualifyTableForCompare(s string) string {
+	if strings.Contains(s, ".") {
+		return s
+	}
+	return "public." + s
+}
+
+// publicationTableKeys converts Tables to "schema.name"/"name" strings
+// matching toSnapObject's own PublicationTables format (see convert.go) —
+// raw, un-defaulted, for storage-shape consistency; qualifyTableForCompare
+// normalizes at comparison time instead, same layering as
+// qualifyFuncForCompare.
+func publicationTableKeys(tables []ir.PublicationTableRef) []string {
+	out := make([]string, len(tables))
+	for i, t := range tables {
+		if t.Schema != "" {
+			out[i] = t.Schema + "." + t.Name
+		} else {
+			out[i] = t.Name
+		}
+	}
+	return out
+}
+
+// publishClause renders a Publication's WITH (publish = ...) value —
+// matches introspect.publishOption's own "insert, update"-style format for
+// consistency, though byte-identical output isn't required here (this
+// feeds a freshly-built ALTER statement, not a reconstruction compare).
+func publishClause(o *ir.Publication) string {
+	var ops []string
+	if o.Insert {
+		ops = append(ops, "insert")
+	}
+	if o.Update {
+		ops = append(ops, "update")
+	}
+	if o.Delete {
+		ops = append(ops, "delete")
+	}
+	if o.Truncate {
+		ops = append(ops, "truncate")
+	}
+	return strings.Join(ops, ", ")
+}
+
+// diffPublication implements RFC §13.1's structured diffing table: a
+// FOR ALL TABLES publication can never be converted to/from an explicit
+// table list via ALTER (confirmed live against a real PostgreSQL 17
+// server: "Tables cannot be added to or dropped from FOR ALL TABLES
+// publications") — an AllTables change decides DROP+CREATE (DESTRUCTIVE,
+// matching dropObject's existing "publication" case and RFC §13.1's
+// "Publication removed" row). A Tables or WITH (publish = ...) change
+// each get their own real, targeted ALTER PUBLICATION (RFC §13.1: both
+// rows SAFE) — a genuine new capability, not just detection. Replaces
+// diffOpaqueIR's generic Reconstructed-gated body-hash compare (silently
+// unset on every live path). FOR TABLES IN SCHEMA targets are a
+// pre-existing, separate gap not modeled here (see ir.Publication.
+// AllTables' doc comment) — unaffected by this change either way.
+func diffPublication(o *ir.Publication, snap *snapshot.SnapOpaque) ([]pipeline.DiffOp, error) {
+	pos := o.SrcPos
+	ident := quoteIdent(o.Name)
+	if !snap.PublicationStructured {
+		// Stale snapshot predating these structured fields — same
+		// self-healing pattern as diffFDW/diffForeignServer.
+		var ops []pipeline.DiffOp
+		if !ptrEq(o.Comment, snap.Comment) {
+			if sql := commentOnOpaqueSQL("publication", "", o.Name, "", "", o.Comment); sql != "" {
+				ops = append(ops, safeOp(sql, pos))
+			}
+		}
+		if len(ops) == 0 {
+			ops = append(ops, safeOp(fmt.Sprintf("-- refresh snapshot metadata for publication %s", ident), pos))
+		}
+		return ops, nil
+	}
+	if o.AllTables != snap.PublicationAllTables {
+		ops := dropObject(&snapshot.SnapObject{Kind: snap.Kind, Opaque: snap})
+		createOps, err := createOpaque(o.Name, o.Body, "PUBLICATION", "", pos)
+		if err != nil {
+			return nil, err
+		}
+		ops = append(ops, createOps...)
+		return appendCommentOp(ops, nil, "publication", "", o.Name, "", "", o.Comment, pos)
+	}
+	var ops []pipeline.DiffOp
+	if !o.AllTables {
+		desiredKeys := publicationTableKeys(o.Tables)
+		normDesired := make([]string, len(desiredKeys))
+		for i, k := range desiredKeys {
+			normDesired[i] = qualifyTableForCompare(k)
+		}
+		normLive := make([]string, len(snap.PublicationTables))
+		for i, k := range snap.PublicationTables {
+			normLive[i] = qualifyTableForCompare(k)
+		}
+		if !stringSetEqual(normDesired, normLive) {
+			if o.HasFilteredTables || snap.PublicationHasFilteredTables {
+				// A column-list/WHERE filter exists on at least one table
+				// entry, on at least one side — PublicationTableRef can't
+				// represent either, so a targeted SET TABLE here would
+				// silently rebuild the table list without it (see
+				// ir.Publication.HasFilteredTables' doc comment). Fall back
+				// to a full DROP+CREATE, which always regenerates from the
+				// complete, correct Body.
+				ops = dropObject(&snapshot.SnapObject{Kind: snap.Kind, Opaque: snap})
+				createOps, err := createOpaque(o.Name, o.Body, "PUBLICATION", "", pos)
+				if err != nil {
+					return nil, err
+				}
+				ops = append(ops, createOps...)
+				return appendCommentOp(ops, nil, "publication", "", o.Name, "", "", o.Comment, pos)
+			}
+			idents := make([]string, len(o.Tables))
+			for i, t := range o.Tables {
+				idents[i] = qualIdent(t.Schema, t.Name)
+			}
+			ops = append(ops, safeOp(fmt.Sprintf("ALTER PUBLICATION %s SET TABLE %s;", ident, strings.Join(idents, ", ")), pos))
+		}
+	}
+	if o.Insert != snap.PublicationInsert || o.Update != snap.PublicationUpdate ||
+		o.Delete != snap.PublicationDelete || o.Truncate != snap.PublicationTruncate {
+		ops = append(ops, safeOp(fmt.Sprintf("ALTER PUBLICATION %s SET (publish = %s);", ident, quoteLit(publishClause(o))), pos))
+	}
+	if !ptrEq(o.Comment, snap.Comment) {
+		if sql := commentOnOpaqueSQL("publication", "", o.Name, "", "", o.Comment); sql != "" {
+			ops = append(ops, safeOp(sql, pos))
+		}
+	}
+	return ops, nil
+}
+
 // diffSubscription mirrors diffOpaqueIR's shape (offline body-hash compare,
 // structured DROP+CREATE on a real change) but can't reuse it directly: its
 // CREATE side must produce a subscriptionCreateOp, not a generic createOpaque
@@ -2758,7 +2893,7 @@ func diffObject(desired pipeline.IRObject, snap *snapshot.SnapObject, fullSnap *
 		if snap.Opaque == nil {
 			return nil, nil
 		}
-		return diffOpaqueIR(o.Name, o.Body, o.Reconstructed, o.Comment, snap.Opaque, o.SrcPos)
+		return diffPublication(o, snap.Opaque)
 	case *ir.Subscription:
 		if snap.Opaque == nil {
 			return nil, nil

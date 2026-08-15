@@ -614,6 +614,291 @@ USER MAPPING FOR PUBLIC SERVER gl_srv3 OPTIONS (user 'app_v1');`
 	}
 }
 
+// TestGLivePublicationChangesDetectedAsAlter is the live-catalog proof for
+// Publication's new capability, not just the G-live gap closure: live-only
+// Tables and WITH (publish = ...) changes are each detected as a real,
+// targeted ALTER PUBLICATION (RFC §13.1), not a spurious DROP+CREATE.
+func TestGLivePublicationChangesDetectedAsAlter(t *testing.T) {
+	connStr := testpg.Start(t)
+	ctx := context.Background()
+
+	differ := diff.New()
+	emitter := emit.New()
+	applyExec := executor.New()
+	ci := introspect.New()
+	store := newMemStore()
+
+	conn, err := executor.Connect(ctx, connStr)
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	defer conn.Close(ctx)
+
+	dir := t.TempDir()
+	f := filepath.Join(dir, "schema.dpg")
+	fixture := `TABLE gl_t1 (id integer) {}
+TABLE gl_t2 (id integer) {}
+
+PUBLICATION gl_pub FOR TABLE gl_t1;`
+	if err := os.WriteFile(f, []byte(fixture), 0o644); err != nil {
+		t.Fatalf("write schema: %v", err)
+	}
+	applyFixture(t, ctx, conn, []string{f}, dir, differ, emitter, applyExec, store)
+
+	desired, err := compiler.Compile([]string{f}, dir, pipeline.Default)
+	if err != nil {
+		t.Fatalf("compile: %v", err)
+	}
+
+	// Mutate directly via raw SQL: real ALTER PUBLICATION statements,
+	// exactly as a hand-run migration outside DPG would issue.
+	if _, err := conn.Exec(ctx, `ALTER PUBLICATION gl_pub SET TABLE gl_t1, gl_t2;`); err != nil {
+		t.Fatalf("alter publication set table: %v", err)
+	}
+	if _, err := conn.Exec(ctx, `ALTER PUBLICATION gl_pub SET (publish = 'insert');`); err != nil {
+		t.Fatalf("alter publication set publish: %v", err)
+	}
+
+	liveObjects, err := ci.Introspect(ctx, conn)
+	if err != nil {
+		t.Fatalf("introspect: %v", err)
+	}
+	snap, _ := store.Load("test", "dpgtest")
+	var managedLive []pipeline.IRObject
+	for _, obj := range liveObjects {
+		if _, ok := snap.Objects[obj.QualifiedName()]; ok {
+			managedLive = append(managedLive, obj)
+		}
+	}
+	liveSnap := &pipeline.Snapshot{}
+	if err := snapshot.Populate(liveSnap, managedLive); err != nil {
+		t.Fatalf("populate live snapshot: %v", err)
+	}
+
+	driftOps, err := differ.Diff(desired, liveSnap)
+	if err != nil {
+		t.Fatalf("drift diff: %v", err)
+	}
+	if len(driftOps) != 2 {
+		t.Fatalf("G-live gap not closed: expected exactly 2 ops (targeted ALTER PUBLICATION x2) detecting the live-only changes, got %d: %v", len(driftOps), driftOps)
+	}
+	for _, op := range driftOps {
+		if !strings.HasPrefix(op.SQL(), "ALTER PUBLICATION") {
+			t.Errorf("expected a targeted ALTER PUBLICATION, not DROP+CREATE, got: %s", op.SQL())
+		}
+		if op.Safety() != pipeline.Safe {
+			t.Errorf("expected ALTER PUBLICATION ops to be Safe, got %v: %s", op.Safety(), op.SQL())
+		}
+	}
+
+	// Apply the correction and confirm zero drift remains — proves the
+	// generated ALTER PUBLICATION statements are valid SQL a real server
+	// accepts, not just well-formed text.
+	migration, err := emitter.Emit(driftOps, pipeline.MigrationMeta{Cluster: "test", Database: "dpgtest"})
+	if err != nil {
+		t.Fatalf("emit: %v", err)
+	}
+	if err := applyExec.Apply(ctx, migration, conn); err != nil {
+		t.Fatalf("apply corrective ALTER PUBLICATION statements: %v", err)
+	}
+	liveObjects2, err := ci.Introspect(ctx, conn)
+	if err != nil {
+		t.Fatalf("re-introspect: %v", err)
+	}
+	var managedLive2 []pipeline.IRObject
+	for _, obj := range liveObjects2 {
+		if _, ok := snap.Objects[obj.QualifiedName()]; ok {
+			managedLive2 = append(managedLive2, obj)
+		}
+	}
+	liveSnap2 := &pipeline.Snapshot{}
+	if err := snapshot.Populate(liveSnap2, managedLive2); err != nil {
+		t.Fatalf("populate live snapshot 2: %v", err)
+	}
+	finalOps, err := differ.Diff(desired, liveSnap2)
+	if err != nil {
+		t.Fatalf("final drift diff: %v", err)
+	}
+	if len(finalOps) != 0 {
+		t.Errorf("expected zero drift after applying the corrective ALTER PUBLICATION statements, got: %v", finalOps)
+	}
+}
+
+func TestGLivePublicationAllTablesChangeDetected(t *testing.T) {
+	connStr := testpg.Start(t)
+	ctx := context.Background()
+
+	differ := diff.New()
+	emitter := emit.New()
+	applyExec := executor.New()
+	ci := introspect.New()
+	store := newMemStore()
+
+	conn, err := executor.Connect(ctx, connStr)
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	defer conn.Close(ctx)
+
+	dir := t.TempDir()
+	f := filepath.Join(dir, "schema.dpg")
+	fixture := `TABLE gl_t3 (id integer) {}
+
+PUBLICATION gl_pub2 FOR TABLE gl_t3;`
+	if err := os.WriteFile(f, []byte(fixture), 0o644); err != nil {
+		t.Fatalf("write schema: %v", err)
+	}
+	applyFixture(t, ctx, conn, []string{f}, dir, differ, emitter, applyExec, store)
+
+	desired, err := compiler.Compile([]string{f}, dir, pipeline.Default)
+	if err != nil {
+		t.Fatalf("compile: %v", err)
+	}
+
+	// Mutate directly via raw SQL: real PostgreSQL has no way to convert
+	// a table-scoped publication to FOR ALL TABLES via ALTER (confirmed
+	// live) — DROP+CREATE, matching a hand-run migration outside DPG.
+	if _, err := conn.Exec(ctx, `DROP PUBLICATION gl_pub2;`); err != nil {
+		t.Fatalf("drop publication: %v", err)
+	}
+	if _, err := conn.Exec(ctx, `CREATE PUBLICATION gl_pub2 FOR ALL TABLES;`); err != nil {
+		t.Fatalf("recreate publication for all tables: %v", err)
+	}
+
+	liveObjects, err := ci.Introspect(ctx, conn)
+	if err != nil {
+		t.Fatalf("introspect: %v", err)
+	}
+	snap, _ := store.Load("test", "dpgtest")
+	var managedLive []pipeline.IRObject
+	for _, obj := range liveObjects {
+		if _, ok := snap.Objects[obj.QualifiedName()]; ok {
+			managedLive = append(managedLive, obj)
+		}
+	}
+	liveSnap := &pipeline.Snapshot{}
+	if err := snapshot.Populate(liveSnap, managedLive); err != nil {
+		t.Fatalf("populate live snapshot: %v", err)
+	}
+
+	driftOps, err := differ.Diff(desired, liveSnap)
+	if err != nil {
+		t.Fatalf("drift diff: %v", err)
+	}
+	var sql string
+	for _, op := range driftOps {
+		sql += op.SQL()
+	}
+	if !strings.Contains(sql, "DROP PUBLICATION") {
+		t.Fatalf("G-live gap not closed: expected plan --live to detect the live-only AllTables change, got %d ops: %q", len(driftOps), sql)
+	}
+	if !strings.Contains(sql, "gl_t3") {
+		t.Errorf("expected recreate to restore the declared FOR TABLE gl_t3, got: %s", sql)
+	}
+}
+
+// TestGLivePublicationFilteredTableChangeFallsBackToDropCreate is the
+// live-catalog correctness proof for HasFilteredTables: a table-list
+// change on a publication using a column-list/WHERE filter (the exact
+// shape RFC §13.1's own worked example uses) must fall back to DROP+CREATE
+// rather than a targeted ALTER PUBLICATION ... SET TABLE — the latter
+// would silently rebuild the table list without the filter, an
+// unintentional widening of what's replicated.
+func TestGLivePublicationFilteredTableChangeFallsBackToDropCreate(t *testing.T) {
+	connStr := testpg.Start(t)
+	ctx := context.Background()
+
+	differ := diff.New()
+	emitter := emit.New()
+	applyExec := executor.New()
+	ci := introspect.New()
+	store := newMemStore()
+
+	conn, err := executor.Connect(ctx, connStr)
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	defer conn.Close(ctx)
+
+	dir := t.TempDir()
+	f := filepath.Join(dir, "schema.dpg")
+	fixture := `TABLE gl_orders (id integer, customer_id integer, status text, total integer) {}
+TABLE gl_line_items (id integer) {}
+
+PUBLICATION gl_filtered_pub
+    FOR TABLE gl_orders (id, customer_id, status, total)
+    WHERE (status != 'draft');`
+	if err := os.WriteFile(f, []byte(fixture), 0o644); err != nil {
+		t.Fatalf("write schema: %v", err)
+	}
+	applyFixture(t, ctx, conn, []string{f}, dir, differ, emitter, applyExec, store)
+
+	// Confirm PostgreSQL actually recorded the column-list/WHERE filter —
+	// a guard against the assertion below passing for the wrong reason.
+	rfRows, err := conn.QueryRows(ctx, `SELECT rowfilter FROM pg_publication_tables WHERE pubname = 'gl_filtered_pub'`)
+	if err != nil {
+		t.Fatalf("query pg_publication_tables: %v", err)
+	}
+	var rowfilter *string
+	if rfRows.Next() {
+		if err := rfRows.Scan(&rowfilter); err != nil {
+			t.Fatalf("scan rowfilter: %v", err)
+		}
+	}
+	rfRows.Close()
+	if rowfilter == nil || !strings.Contains(*rowfilter, "status") {
+		t.Fatalf("expected the applied publication to have a real row filter, got: %v", rowfilter)
+	}
+
+	desired, err := compiler.Compile([]string{f}, dir, pipeline.Default)
+	if err != nil {
+		t.Fatalf("compile: %v", err)
+	}
+
+	// Mutate directly via raw SQL: a real hand-run migration outside DPG
+	// changing the table list on a filtered publication.
+	if _, err := conn.Exec(ctx, `ALTER PUBLICATION gl_filtered_pub DROP TABLE gl_orders;`); err != nil {
+		t.Fatalf("drop table from publication: %v", err)
+	}
+	if _, err := conn.Exec(ctx, `ALTER PUBLICATION gl_filtered_pub ADD TABLE gl_line_items;`); err != nil {
+		t.Fatalf("add table to publication: %v", err)
+	}
+
+	liveObjects, err := ci.Introspect(ctx, conn)
+	if err != nil {
+		t.Fatalf("introspect: %v", err)
+	}
+	snap, _ := store.Load("test", "dpgtest")
+	var managedLive []pipeline.IRObject
+	for _, obj := range liveObjects {
+		if _, ok := snap.Objects[obj.QualifiedName()]; ok {
+			managedLive = append(managedLive, obj)
+		}
+	}
+	liveSnap := &pipeline.Snapshot{}
+	if err := snapshot.Populate(liveSnap, managedLive); err != nil {
+		t.Fatalf("populate live snapshot: %v", err)
+	}
+
+	driftOps, err := differ.Diff(desired, liveSnap)
+	if err != nil {
+		t.Fatalf("drift diff: %v", err)
+	}
+	var sql string
+	for _, op := range driftOps {
+		sql += op.SQL()
+	}
+	if strings.Contains(sql, "SET TABLE") {
+		t.Fatalf("expected the lossy ALTER PUBLICATION SET TABLE path to be avoided for a filtered publication, got: %q", sql)
+	}
+	if !strings.Contains(sql, "DROP PUBLICATION") {
+		t.Fatalf("expected a fallback DROP+CREATE detecting the live-only table change, got %d ops: %q", len(driftOps), sql)
+	}
+	if !strings.Contains(sql, "gl_orders") || !strings.Contains(sql, "status") {
+		t.Errorf("expected the recreate to restore the original filtered table declaration, got: %s", sql)
+	}
+}
+
 // TestRoundtripOpaqueBodyEditAppliesLive is the live-catalog guard for #3
 // (real update path for opaque objects, internal/diff/differ.go diffOpaqueIR):
 // previously an offline body edit to an opaque object (here, a COLLATION's

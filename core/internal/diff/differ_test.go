@@ -6969,12 +6969,16 @@ func TestDiffPublicationOfflineDetectsEdit(t *testing.T) {
 	d := New()
 	snap := &pipeline.Snapshot{}
 	if err := snapshot.Populate(snap, []pipeline.IRObject{
-		&ir.Publication{Name: "p", Body: "CREATE PUBLICATION p FOR ALL TABLES"},
+		&ir.Publication{Name: "p", AllTables: true, Insert: true, Update: true, Delete: true, Truncate: true, Body: "CREATE PUBLICATION p FOR ALL TABLES"},
 	}); err != nil {
 		t.Fatal(err)
 	}
 	desired := []pipeline.IRObject{
-		&ir.Publication{Name: "p", Body: "CREATE PUBLICATION p FOR TABLE public.t"},
+		&ir.Publication{
+			Name: "p", Tables: []ir.PublicationTableRef{{Schema: "public", Name: "t"}},
+			Insert: true, Update: true, Delete: true, Truncate: true,
+			Body: "CREATE PUBLICATION p FOR TABLE public.t",
+		},
 	}
 	ops, err := d.Diff(desired, snap)
 	if err != nil {
@@ -7565,9 +7569,25 @@ func TestDiffOpaqueOfflineEditEmitsStructuredDropRecreate(t *testing.T) {
 			wantNewInBody:  "'p2'",
 		},
 		{
-			name:           "publication",
-			oldObj:         &ir.Publication{Name: "p", Body: "CREATE PUBLICATION p FOR ALL TABLES"},
-			newObj:         &ir.Publication{Name: "p", Body: "CREATE PUBLICATION p FOR TABLE public.t"},
+			// An AllTables change specifically (not a Tables-list-only or
+			// WITH (publish = ...)-only change, which RFC §13.1 gives a
+			// real, targeted ALTER PUBLICATION for — see
+			// TestDiffPublicationTablesChangeIsSafeAlter/
+			// TestDiffPublicationPublishOptionsChangeIsSafeAlter — real
+			// PostgreSQL has no way to convert a FOR ALL TABLES
+			// publication to/from an explicit table list via ALTER,
+			// confirmed via a live "Tables cannot be added to or dropped
+			// from FOR ALL TABLES publications" error).
+			name: "publication",
+			oldObj: &ir.Publication{
+				Name: "p", AllTables: true, Insert: true, Update: true, Delete: true, Truncate: true,
+				Body: "CREATE PUBLICATION p FOR ALL TABLES",
+			},
+			newObj: &ir.Publication{
+				Name: "p", Tables: []ir.PublicationTableRef{{Schema: "public", Name: "t"}},
+				Insert: true, Update: true, Delete: true, Truncate: true,
+				Body: "CREATE PUBLICATION p FOR TABLE public.t",
+			},
 			wantDropSubstr: `DROP PUBLICATION IF EXISTS "p";`,
 			wantNewInBody:  "public.t",
 		},
@@ -9708,6 +9728,231 @@ func TestDiffUserMappingStaleSnapshotDoesNotRecreate(t *testing.T) {
 	}
 	if containsSQL(ops, "DROP USER MAPPING") {
 		t.Errorf("stale snapshot must not trigger DROP USER MAPPING, got: %v", sqlList(ops))
+	}
+}
+
+// ── Publication structured diffing (G-live Tier 3) ────────────────────────────
+// Same G-live gap as Tiers 1/2: Reconstructed forced BodyHash to "" on the
+// live side, silently disabling diffOpaqueIR's comparison on verify/
+// plan --live. diffPublication replaces that with field-level comparison,
+// gated by the explicit PublicationStructured sentinel (AllTables can
+// legitimately be false and Insert/Update/Delete/Truncate default true, so
+// no single field is a reliable "not yet populated" signal).
+
+func TestDiffPublicationTablesChangeIsSafeAlter(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("p", &snapshot.SnapObject{
+		Kind: "publication",
+		Opaque: &snapshot.SnapOpaque{
+			Kind: "publication", Name: "p", PublicationStructured: true,
+			PublicationTables: []string{"public.t1"},
+			PublicationInsert: true, PublicationUpdate: true, PublicationDelete: true, PublicationTruncate: true,
+		},
+	})
+	desired := []pipeline.IRObject{
+		&ir.Publication{
+			Name: "p", Tables: []ir.PublicationTableRef{{Schema: "public", Name: "t1"}, {Schema: "public", Name: "t2"}},
+			Insert: true, Update: true, Delete: true, Truncate: true,
+			Body: "CREATE PUBLICATION p FOR TABLE public.t1, public.t2",
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ops) != 1 {
+		t.Fatalf("expected exactly 1 op (targeted ALTER PUBLICATION SET TABLE, RFC §13.1), got %d: %v", len(ops), sqlList(ops))
+	}
+	sql := ops[0].SQL()
+	if !strings.HasPrefix(sql, "ALTER PUBLICATION") || !strings.Contains(sql, "SET TABLE") {
+		t.Errorf("expected a targeted ALTER PUBLICATION ... SET TABLE, not DROP+CREATE, got: %s", sql)
+	}
+	if ops[0].Safety() != pipeline.Safe {
+		t.Errorf("expected ALTER PUBLICATION SET TABLE to be Safe (RFC §13.1), got %v: %s", ops[0].Safety(), sql)
+	}
+	if !strings.Contains(sql, `"public"."t1"`) || !strings.Contains(sql, `"public"."t2"`) {
+		t.Errorf("expected both tables in the SET TABLE list, got: %s", sql)
+	}
+}
+
+func TestDiffPublicationUnqualifiedTableMatchesQualifiedNoOp(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("p", &snapshot.SnapObject{
+		Kind: "publication",
+		Opaque: &snapshot.SnapOpaque{
+			Kind: "publication", Name: "p", PublicationStructured: true,
+			PublicationTables: []string{"public.t1"}, // introspection always qualifies
+			PublicationInsert: true, PublicationUpdate: true, PublicationDelete: true, PublicationTruncate: true,
+		},
+	})
+	desired := []pipeline.IRObject{
+		&ir.Publication{
+			Name: "p", Tables: []ir.PublicationTableRef{{Name: "t1"}}, // unqualified in source
+			Insert: true, Update: true, Delete: true, Truncate: true,
+			Body: "CREATE PUBLICATION p FOR TABLE t1",
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ops) != 0 {
+		t.Errorf("expected zero ops for a schema-unqualified-vs-qualified table match, got: %v", sqlList(ops))
+	}
+}
+
+func TestDiffPublicationPublishOptionsChangeIsSafeAlter(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("p", &snapshot.SnapObject{
+		Kind: "publication",
+		Opaque: &snapshot.SnapOpaque{
+			Kind: "publication", Name: "p", PublicationStructured: true, PublicationAllTables: true,
+			PublicationInsert: true, PublicationUpdate: true, PublicationDelete: true, PublicationTruncate: true,
+		},
+	})
+	desired := []pipeline.IRObject{
+		&ir.Publication{
+			Name: "p", AllTables: true, Insert: true, Update: false, Delete: false, Truncate: true,
+			Body: "CREATE PUBLICATION p FOR ALL TABLES WITH (publish = 'insert, truncate')",
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ops) != 1 {
+		t.Fatalf("expected exactly 1 op (targeted ALTER PUBLICATION SET (publish=...)), got %d: %v", len(ops), sqlList(ops))
+	}
+	sql := ops[0].SQL()
+	if !strings.HasPrefix(sql, "ALTER PUBLICATION") || !strings.Contains(sql, "SET (publish") {
+		t.Errorf("expected a targeted ALTER PUBLICATION ... SET (publish = ...), got: %s", sql)
+	}
+	if ops[0].Safety() != pipeline.Safe {
+		t.Errorf("expected ALTER PUBLICATION SET (publish) to be Safe, got %v: %s", ops[0].Safety(), sql)
+	}
+	if !strings.Contains(sql, "'insert, truncate'") {
+		t.Errorf("expected publish = 'insert, truncate', got: %s", sql)
+	}
+}
+
+func TestDiffPublicationAllTablesChangeRecreates(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("p", &snapshot.SnapObject{
+		Kind: "publication",
+		Opaque: &snapshot.SnapOpaque{
+			Kind: "publication", Name: "p", PublicationStructured: true, PublicationAllTables: true,
+			PublicationInsert: true, PublicationUpdate: true, PublicationDelete: true, PublicationTruncate: true,
+		},
+	})
+	desired := []pipeline.IRObject{
+		&ir.Publication{
+			Name: "p", Tables: []ir.PublicationTableRef{{Schema: "public", Name: "t1"}},
+			Insert: true, Update: true, Delete: true, Truncate: true,
+			Body: "CREATE PUBLICATION p FOR TABLE public.t1",
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsSQL(ops, `DROP PUBLICATION IF EXISTS "p"`) {
+		t.Errorf("expected DROP PUBLICATION for an AllTables change, got: %v", sqlList(ops))
+	}
+	for _, op := range ops {
+		if strings.Contains(op.SQL(), "DROP PUBLICATION") && op.Safety() != pipeline.Destructive {
+			t.Errorf("expected DROP PUBLICATION to be Destructive (RFC §13.1), got %v: %s", op.Safety(), op.SQL())
+		}
+	}
+}
+
+func TestDiffPublicationUnchangedIsNoop(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("p", &snapshot.SnapObject{
+		Kind: "publication",
+		Opaque: &snapshot.SnapOpaque{
+			Kind: "publication", Name: "p", PublicationStructured: true, PublicationAllTables: true,
+			PublicationInsert: true, PublicationUpdate: true, PublicationDelete: true, PublicationTruncate: true,
+		},
+	})
+	desired := []pipeline.IRObject{
+		&ir.Publication{Name: "p", AllTables: true, Insert: true, Update: true, Delete: true, Truncate: true, Body: "CREATE PUBLICATION p FOR ALL TABLES"},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ops) != 0 {
+		t.Errorf("expected zero ops for an unchanged publication, got: %v", sqlList(ops))
+	}
+}
+
+func TestDiffPublicationStaleSnapshotDoesNotRecreate(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("p", &snapshot.SnapObject{
+		Kind:   "publication",
+		Opaque: &snapshot.SnapOpaque{Kind: "publication", Name: "p"},
+	})
+	desired := []pipeline.IRObject{
+		&ir.Publication{Name: "p", AllTables: true, Insert: true, Update: true, Delete: true, Truncate: true, Body: "CREATE PUBLICATION p FOR ALL TABLES"},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if containsSQL(ops, "DROP PUBLICATION") {
+		t.Errorf("stale snapshot must not trigger DROP PUBLICATION, got: %v", sqlList(ops))
+	}
+}
+
+// TestDiffPublicationFilteredTableChangeFallsBackToDropCreate is a
+// correctness regression guard, not just a G-live proof: a Tables-set
+// change on a publication using a column-list/WHERE filter (real syntax:
+// FOR TABLE t (col1, col2) WHERE (expr)) must NOT be rendered as
+// ALTER PUBLICATION ... SET TABLE from PublicationTableRef alone — doing
+// so would silently rebuild the table list without the filter, an
+// unintentional widening of what's replicated. Falling back to DROP+CREATE
+// (which regenerates from the complete Body) is the only safe option here.
+func TestDiffPublicationFilteredTableChangeFallsBackToDropCreate(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("p", &snapshot.SnapObject{
+		Kind: "publication",
+		Opaque: &snapshot.SnapOpaque{
+			Kind: "publication", Name: "p", PublicationStructured: true,
+			PublicationTables: []string{"public.orders"}, PublicationHasFilteredTables: true,
+			PublicationInsert: true, PublicationUpdate: true, PublicationDelete: true, PublicationTruncate: true,
+		},
+	})
+	desired := []pipeline.IRObject{
+		&ir.Publication{
+			Name: "p",
+			Tables: []ir.PublicationTableRef{
+				{Schema: "public", Name: "orders"},
+				{Schema: "public", Name: "line_items"},
+			},
+			HasFilteredTables: true,
+			Insert:            true, Update: true, Delete: true, Truncate: true,
+			Body: "CREATE PUBLICATION p FOR TABLE public.orders (id, status) WHERE (status = 'active'), public.line_items",
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if containsSQL(ops, "SET TABLE") {
+		t.Fatalf("expected the lossy ALTER PUBLICATION SET TABLE path to be avoided for a filtered publication, got: %v", sqlList(ops))
+	}
+	if !containsSQL(ops, `DROP PUBLICATION IF EXISTS "p"`) {
+		t.Errorf("expected a fallback DROP+CREATE, got: %v", sqlList(ops))
+	}
+	if !containsSQL(ops, "line_items") {
+		t.Errorf("expected the recreate to include the new table, got: %v", sqlList(ops))
 	}
 }
 

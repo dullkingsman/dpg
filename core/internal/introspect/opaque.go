@@ -564,7 +564,24 @@ ORDER  BY p.pubname`
 		if opt, ok := publishOption(r.ins, r.upd, r.del, r.trunc); ok {
 			fmt.Fprintf(&sb, " WITH (publish = %s)", quoteLit(opt))
 		}
-		out = append(out, &ir.Publication{Name: r.name, Body: canonicalDDL(sb.String()), Comment: r.comment, Reconstructed: true})
+		pub := &ir.Publication{
+			Name: r.name, AllTables: r.allTables,
+			Insert: r.ins, Update: r.upd, Delete: r.del, Truncate: r.trunc,
+			Body: canonicalDDL(sb.String()), Comment: r.comment, Reconstructed: true,
+		}
+		if !r.allTables {
+			tables, err := publicationTableRefs(ctx, conn, r.oid)
+			if err != nil {
+				return nil, err
+			}
+			pub.Tables = tables
+			filtered, err := publicationHasFilteredTables(ctx, conn, r.oid)
+			if err != nil {
+				return nil, err
+			}
+			pub.HasFilteredTables = filtered
+		}
+		out = append(out, pub)
 	}
 	return out, rs.Err()
 }
@@ -742,6 +759,60 @@ ORDER  BY s.subname`, twoPhaseCol, disableOnErrCol, pwReqCol, runAsOwnerCol, fai
 		})
 	}
 	return out, rs.Err()
+}
+
+// publicationTableRefs is the structured counterpart to publicationTargets'
+// own table query (same underlying pg_publication_rel/pg_class join),
+// returning ir.PublicationTableRef instead of pre-quoted display strings —
+// used for RFC §13.1's structured Tables diffing input rather than Body
+// reconstruction.
+func publicationTableRefs(ctx context.Context, conn pipeline.Querier, pubid uint32) ([]ir.PublicationTableRef, error) {
+	rs, err := conn.QueryRows(ctx, `
+SELECT n.nspname, c.relname
+FROM   pg_publication_rel pr
+JOIN   pg_class c     ON c.oid = pr.prrelid
+JOIN   pg_namespace n ON n.oid = c.relnamespace
+WHERE  pr.prpubid = $1
+ORDER  BY n.nspname, c.relname`, pubid)
+	if err != nil {
+		return nil, err
+	}
+	defer rs.Close()
+	var out []ir.PublicationTableRef
+	for rs.Next() {
+		var schema, name string
+		if err := rs.Scan(&schema, &name); err != nil {
+			return nil, err
+		}
+		out = append(out, ir.PublicationTableRef{Schema: schema, Name: name})
+	}
+	return out, rs.Err()
+}
+
+// publicationHasFilteredTables reports whether any of a publication's
+// FOR TABLE entries carries an explicit column list or WHERE row-filter —
+// see ir.Publication.HasFilteredTables' doc comment for why this needs
+// pg_publication_rel.prattrs/prqual directly (NULL exactly when no filter
+// was written) rather than pg_publication_tables.attnames, which always
+// resolves to concrete column names either way and so can't distinguish
+// "no explicit list" from "explicit list happening to name every column."
+func publicationHasFilteredTables(ctx context.Context, conn pipeline.Querier, pubid uint32) (bool, error) {
+	rs, err := conn.QueryRows(ctx, `
+SELECT EXISTS (
+    SELECT 1 FROM pg_publication_rel pr
+    WHERE pr.prpubid = $1 AND (pr.prattrs IS NOT NULL OR pr.prqual IS NOT NULL)
+)`, pubid)
+	if err != nil {
+		return false, err
+	}
+	defer rs.Close()
+	var filtered bool
+	if rs.Next() {
+		if err := rs.Scan(&filtered); err != nil {
+			return false, err
+		}
+	}
+	return filtered, rs.Err()
 }
 
 // publicationTargets builds the FOR TABLE / FOR TABLES IN SCHEMA clauses for a

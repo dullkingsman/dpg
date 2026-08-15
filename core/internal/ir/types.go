@@ -652,9 +652,49 @@ type Publication struct {
 	// Tables is the FOR TABLE target list (PUBLICATIONOBJ_TABLE entries
 	// only — FOR TABLES IN SCHEMA/FOR ALL TABLES have no single fixed table
 	// to order against). See PublicationTableRef.
-	Tables        []PublicationTableRef
-	Reconstructed bool // Body rebuilt from the catalog; see Tablespace.Reconstructed
-	SrcPos        pipeline.SourcePos
+	Tables []PublicationTableRef
+	// AllTables/Insert/Update/Delete/Truncate are RFC §13.1's structured
+	// diffing inputs, alongside Tables above: a FOR ALL TABLES publication
+	// can never be converted to/from an explicit table list via ALTER
+	// (confirmed live against a real PostgreSQL 17 server: "Tables cannot
+	// be added to or dropped from FOR ALL TABLES publications"), so an
+	// AllTables change decides DROP+CREATE, while a Tables or WITH
+	// (publish = ...) change each get their own real, targeted
+	// ALTER PUBLICATION (RFC §13.1's own diffing table: both rows say
+	// SAFE). Insert/Update/Delete/Truncate always hold PostgreSQL's
+	// concrete resolved value (true for all four when WITH (publish = ...)
+	// is omitted — PostgreSQL's own default, not a DPG-invented one) on
+	// both sides, so no nil/unset tri-state is needed. Previously only
+	// Body's opaque hash decided any of this, which (via Reconstructed,
+	// below) went silently unset on every live path. FOR TABLES IN SCHEMA
+	// targets are a pre-existing, separate gap: never modeled as a
+	// structured field on either side (only captured in the opaque Body
+	// text), so a schema-target-only change stays undetected by this
+	// comparison — the same status quo as before this fix, not a
+	// regression it introduces.
+	AllTables                        bool
+	Insert, Update, Delete, Truncate bool
+	// HasFilteredTables is true when any FOR TABLE entry carries an
+	// explicit column list or WHERE row-filter (real PostgreSQL syntax:
+	// FOR TABLE t (col1, col2) WHERE (expr)) — neither is captured by
+	// PublicationTableRef (schema/name only), so a Tables-set change on a
+	// publication using either can't be safely rendered as a targeted
+	// ALTER PUBLICATION ... SET TABLE: doing so from PublicationTableRef
+	// alone would silently rebuild the table list WITHOUT the original
+	// column-list/WHERE filter, an unintentional narrowing (or removal)
+	// of what's actually replicated — confirmed live: pg_publication_rel.
+	// prattrs/prqual are non-NULL exactly when a filter was written,
+	// distinguishing this from the implicit "all columns" case (which
+	// pg_publication_tables.attnames can't distinguish, since it always
+	// resolves to concrete column names either way). When true on either
+	// side, diffPublication falls back to DROP+CREATE for a Tables
+	// change instead of the lossy ALTER — full correctness at the cost of
+	// forgoing the optimization for filtered publications specifically;
+	// unfiltered publications (the common case) still get the real
+	// ALTER PUBLICATION ... SET TABLE this fix adds.
+	HasFilteredTables bool
+	Reconstructed     bool // Body rebuilt from the catalog; see Tablespace.Reconstructed
+	SrcPos            pipeline.SourcePos
 }
 
 func (p *Publication) QualifiedName() string   { return p.Name }

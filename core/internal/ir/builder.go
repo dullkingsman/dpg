@@ -2211,7 +2211,15 @@ func (b *Builder) buildOpaque(node *pg_query.Node, block pipeline.BlockAST, pos 
 	sql := rawSQL(node)
 	switch n := node.Node.(type) {
 	case *pg_query.Node_CreatePublicationStmt:
-		pub := &Publication{Name: n.CreatePublicationStmt.Pubname, Body: sql, SrcPos: pos}
+		pub := &Publication{
+			Name: n.CreatePublicationStmt.Pubname, AllTables: n.CreatePublicationStmt.ForAllTables,
+			// PostgreSQL's own default when WITH (publish = ...) is
+			// omitted entirely — confirmed via pg_publication.pubinsert
+			// etc., all NOT NULL and true by default — not a DPG-invented
+			// default.
+			Insert: true, Update: true, Delete: true, Truncate: true,
+			Body: sql, SrcPos: pos,
+		}
 		if block.Comment != nil {
 			pub.Comment = &block.Comment.Value
 		}
@@ -2220,11 +2228,43 @@ func (b *Builder) buildOpaque(node *pg_query.Node, block pipeline.BlockAST, pos 
 			if spec == nil || spec.Pubobjtype != pg_query.PublicationObjSpecType_PUBLICATIONOBJ_TABLE {
 				continue
 			}
-			rv := spec.GetPubtable().GetRelation()
+			pubtable := spec.GetPubtable()
+			rv := pubtable.GetRelation()
 			if rv == nil || rv.Relname == "" {
 				continue
 			}
 			pub.Tables = append(pub.Tables, PublicationTableRef{Schema: rv.Schemaname, Name: rv.Relname})
+			if pubtable.GetWhereClause() != nil || len(pubtable.GetColumns()) > 0 {
+				pub.HasFilteredTables = true
+			}
+		}
+		for _, o := range n.CreatePublicationStmt.Options {
+			de := o.GetDefElem()
+			if de == nil || de.Defname != "publish" {
+				continue
+			}
+			sv := de.GetArg().GetString_()
+			if sv == nil {
+				continue
+			}
+			// PostgreSQL normalises this to a comma-separated list, e.g.
+			// "insert, update" (confirmed via pg_query.Parse probe) —
+			// explicitly specifying WITH (publish = ...) at all means only
+			// the listed operations are enabled, so every operation not
+			// named must be turned off from the all-true default above.
+			pub.Insert, pub.Update, pub.Delete, pub.Truncate = false, false, false, false
+			for op := range strings.SplitSeq(sv.Sval, ",") {
+				switch strings.TrimSpace(op) {
+				case "insert":
+					pub.Insert = true
+				case "update":
+					pub.Update = true
+				case "delete":
+					pub.Delete = true
+				case "truncate":
+					pub.Truncate = true
+				}
+			}
 		}
 		return pub, nil
 	case *pg_query.Node_CreateSubscriptionStmt:

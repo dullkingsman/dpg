@@ -179,8 +179,20 @@ func toSnapObject(obj pipeline.IRObject) *SnapObject {
 			BodyHash: sourceBodyHash(o.Body, o.Reconstructed),
 		}}
 	case *ir.Publication:
+		tables := make([]string, len(o.Tables))
+		for i, t := range o.Tables {
+			if t.Schema != "" {
+				tables[i] = t.Schema + "." + t.Name
+			} else {
+				tables[i] = t.Name
+			}
+		}
 		return &SnapObject{Kind: "publication", Opaque: &SnapOpaque{
-			Kind: "publication", Name: o.Name, BodyHash: sourceBodyHash(o.Body, o.Reconstructed), Comment: o.Comment,
+			Kind: "publication", Name: o.Name,
+			PublicationStructured: true, PublicationAllTables: o.AllTables, PublicationTables: tables,
+			PublicationInsert: o.Insert, PublicationUpdate: o.Update, PublicationDelete: o.Delete, PublicationTruncate: o.Truncate,
+			PublicationHasFilteredTables: o.HasFilteredTables,
+			BodyHash:                     sourceBodyHash(o.Body, o.Reconstructed), Comment: o.Comment,
 		}}
 	case *ir.Subscription:
 		return &SnapObject{Kind: "subscription", Opaque: &SnapOpaque{
