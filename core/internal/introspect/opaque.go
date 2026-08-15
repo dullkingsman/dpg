@@ -107,6 +107,59 @@ func formatOptions(opts []string) string {
 	return " OPTIONS (" + strings.Join(parts, ", ") + ")"
 }
 
+// userMappingPasswordKeys mirrors internal/linter's passwordColNames — kept
+// as a local duplicate (5 strings) rather than a cross-package import, since
+// internal/introspect must not depend on internal/linter (introspect sits
+// below linter in the dependency graph).
+var userMappingPasswordKeys = []string{"password", "passwd", "pwd", "secret", "passphrase"}
+
+func isUserMappingPasswordKey(key string) bool {
+	lower := strings.ToLower(key)
+	for _, kw := range userMappingPasswordKeys {
+		if strings.Contains(lower, kw) {
+			return true
+		}
+	}
+	return false
+}
+
+// UserMappingRedactedPlaceholder replaces a password-like OPTIONS value on
+// introspection. pg_user_mappings.umoptions only ever exposes the resolved,
+// live credential to a privileged caller — PostgreSQL has no memory of the
+// {{secret-uri}} reference (if any) that originally produced it via
+// pipeline.ResolveTemplate at apply time, so a dump has no way to recover
+// the original reference, only to stop leaking the live plaintext into a
+// file that's normally git-committed (see RFC §14.10/§24). Mirrors
+// subscriptionConnInfoPlaceholder's approach. Deliberately does NOT contain
+// "{{" so internal/linter's hardcoded-fdw-password rule still hard-errors if
+// a user tries to plan/apply the dumped file unmodified (checkUserMapping's
+// regex matches the literal "password" key specifically; the broader key
+// list here still stops raw exposure for passwd/pwd/secret/passphrase too,
+// just without that same automatic lint catch for those four).
+const UserMappingRedactedPlaceholder = "live value redacted -- replace with a secret-uri reference before applying"
+
+// formatUserMappingOptions is formatOptions' UserMapping-specific variant:
+// redacts password-like OPTIONS values, leaving every other key untouched.
+// FDW/Server OPTIONS (formatOptions, still called directly for those) are
+// never redacted — RFC §24 treats them as non-sensitive by convention.
+func formatUserMappingOptions(opts []string) string {
+	var parts []string
+	for _, o := range opts {
+		k, v, found := strings.Cut(o, "=")
+		if !found {
+			continue
+		}
+		if isUserMappingPasswordKey(k) {
+			v = UserMappingRedactedPlaceholder
+		}
+		parts = append(parts, k+" "+quoteLit(v))
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	return " OPTIONS (" + strings.Join(parts, ", ") + ")"
+}
+
 // ── tablespaces ───────────────────────────────────────────────────────────────
 
 func introspectTablespaces(ctx context.Context, conn pipeline.Querier) ([]pipeline.IRObject, error) {
@@ -263,7 +316,7 @@ ORDER  BY um.srvname, um.usename`
 			irUser = *user
 		}
 		body := fmt.Sprintf("CREATE USER MAPPING FOR %s SERVER %s%s",
-			forClause, quoteIdent(server), formatOptions(options))
+			forClause, quoteIdent(server), formatUserMappingOptions(options))
 		out = append(out, &ir.UserMapping{User: irUser, Server: server, Body: canonicalDDL(body), Reconstructed: true})
 	}
 	return out, rs.Err()

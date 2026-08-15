@@ -13,6 +13,7 @@ import (
 	"github.com/dullkingsman/dpg/internal/compiler"
 	"github.com/dullkingsman/dpg/internal/executor"
 	"github.com/dullkingsman/dpg/internal/format"
+	"github.com/dullkingsman/dpg/internal/introspect"
 	"github.com/dullkingsman/dpg/internal/ir"
 	"github.com/dullkingsman/dpg/internal/pipeline"
 	"github.com/dullkingsman/dpg/internal/project"
@@ -143,6 +144,10 @@ func runDump(
 	var clusterFile, dbLevelFile strings.Builder
 	var dbObjects, clusterObjects []pipeline.IRObject
 	for _, obj := range objects {
+		if um, ok := obj.(*ir.UserMapping); ok && strings.Contains(um.Body, introspect.UserMappingRedactedPlaceholder) {
+			fmt.Fprintf(os.Stderr, "%s  user mapping %s: a password-like OPTIONS value was redacted; replace the placeholder with a {{secret-uri}} reference before applying\n",
+				ui.Yellow("warning", color), um.QualifiedName())
+		}
 		if isClusterScoped(obj) {
 			renderObjectDPG(&clusterFile, obj, fmtOpts)
 			clusterObjects = append(clusterObjects, obj)

@@ -1,8 +1,10 @@
 package linter
 
 import (
+	"fmt"
 	"testing"
 
+	"github.com/dullkingsman/dpg/internal/introspect"
 	"github.com/dullkingsman/dpg/internal/ir"
 	"github.com/dullkingsman/dpg/internal/pipeline"
 )
@@ -227,6 +229,34 @@ func TestLintFDWPasswordRuleDisabled(t *testing.T) {
 		if d.Rule == "hardcoded-fdw-password" {
 			t.Errorf("did not expect hardcoded-fdw-password with the rule disabled, got: %v", d)
 		}
+	}
+}
+
+// TestLintFDWPasswordCatchesDumpedRedactionPlaceholder proves the
+// composability `dpg dump`'s UserMapping password redaction relies on: a
+// dumped mapping still carries the placeholder as a literal `password '...'`
+// value (not a {{secret-uri}} reference), so re-planning/re-applying the
+// dumped file unmodified must still hard-error via hardcoded-fdw-password —
+// the redaction alone isn't enough, the user must be forced to replace it.
+func TestLintFDWPasswordCatchesDumpedRedactionPlaceholder(t *testing.T) {
+	l := New()
+	objects := []pipeline.IRObject{&ir.UserMapping{
+		User: "app", Server: "srv",
+		Body: fmt.Sprintf("CREATE USER MAPPING FOR app SERVER srv OPTIONS (user 'app', password %s)",
+			"'"+introspect.UserMappingRedactedPlaceholder+"'"),
+	}}
+	diags, err := l.Lint(objects, pipeline.LinterConfig{ForbidHardcodedPasswords: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, d := range diags {
+		if d.Rule == "hardcoded-fdw-password" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("expected hardcoded-fdw-password error for a dumped-but-unreplaced redaction placeholder")
 	}
 }
 

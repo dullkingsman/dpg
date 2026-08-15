@@ -3158,8 +3158,12 @@ PUBLICATION filtered_orders
    to PUBLIC (PostgreSQL revokes it from a normal caller outright), and
    even a privileged caller who *can* read it has no way to recover
    whatever `{{secret-uri}}` the original `CONNECTION` clause held, if
-   any — same inherent limitation as User Mapping `OPTIONS` (§14.10). An
-   introspected Subscription's `CONNECTION` is rendered as a fixed,
+   any — the same inherent limitation User Mapping `OPTIONS` (§14.10, §24)
+   has on recovering its original reference, though User Mapping's
+   redaction works field-by-field rather than by omitting a whole column,
+   since `OPTIONS` also carries non-sensitive keys `dump` must still
+   reconstruct. An introspected Subscription's `CONNECTION` is rendered
+   as a fixed,
    syntactically-valid-but-inert placeholder conninfo instead (with
    `connect = false`, `create_slot = false`, and `enabled = false` always
    forced in its `WITH` clause, since the placeholder can never actually
@@ -4759,15 +4763,30 @@ serial_sequence_declared      = "off"
    escaping into a persisted file) applies there too. Subscription
    `CONNECTION` is handled fully: `pg_subscription.subconninfo` is never
    selected at all (§13.2), so a resolved credential can never reach a
-   dumped `.dpg` file this way. User Mapping `OPTIONS` is NOT: PostgreSQL
-   itself redacts `pg_user_mappings.umoptions` to `NULL` for a
+   dumped `.dpg` file this way. User Mapping `OPTIONS` is handled the
+   same way it can be, given a structural difference from Subscription:
+   PostgreSQL redacts `pg_user_mappings.umoptions` to `NULL` for a
    non-owner/non-superuser caller, but shows the real, already-resolved
-   value to a privileged one (the owner or a superuser) — and `dump`
-   writes whatever it's shown straight into source. There's no
-   `{{secret-uri}}` to recover in either case (PostgreSQL itself only
-   ever stores the resolved value, never the reference), so this isn't a
-   missing redaction step so much as an inherent limitation of reading a
-   secret back out of a system that only remembers its resolved form.
+   value to a privileged one (the owner or a superuser) — and unlike
+   `subconninfo`, `umoptions` is a set of provider-specific key/value
+   pairs DPG must read individually to reconstruct valid `OPTIONS (...)`
+   syntax at all, so the column can't simply be skipped the way
+   `subconninfo` is. Instead, `dump` redacts password-like keys
+   (`password`, `passwd`, `pwd`, `secret`, `passphrase` — matched
+   case-insensitively as a substring, same heuristic as the
+   `hardcoded_fdw_password` lint rule's column-default check) to a fixed,
+   clearly-fake placeholder before writing OPTIONS into source; every
+   other key (`user`, `dbname`, `host`, etc.) is left untouched. The
+   placeholder deliberately contains no `{{...}}` marker, so if the
+   dumped file is planned or applied unmodified, the existing
+   `hardcoded_fdw_password` rule (§19.1) still hard-errors on the literal
+   `password` key and forces the operator to replace it with a real
+   `{{secret-uri}}` reference. What remains a genuine, inherent
+   limitation — not fixable by redaction — is narrower than the above:
+   PostgreSQL itself only ever stores the resolved credential, never the
+   original `{{secret-uri}}` reference (if any) that produced it, so
+   `dump` has no way to *recover* that reference; it can only stop the
+   live value from leaking into a persisted file.
 
    **SQL injection in generated DDL:** All identifier names read from
    source files are validated against PostgreSQL's identifier rules
