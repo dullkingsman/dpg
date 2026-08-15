@@ -49,6 +49,20 @@ type SnapOpaque struct {
 	Revocations []SnapGrant        `json:"revocations,omitempty"` // procedure only
 	Mappings    []SnapTSMapping    `json:"mappings,omitempty"`    // ts_config only (RFC §12.1 MAPPING FOR)
 	NameMaps    []SnapNameMapEntry `json:"name_maps,omitempty"`
+	// TablespaceLocation (RFC §14.7), CastMethod/CastContext/CastFunction
+	// (RFC §14.5), and EventTriggerEvent/EventTriggerTags/
+	// EventTriggerFunction (RFC §14.1) are structured diffing inputs for
+	// their respective kinds only — see ir.Tablespace.Location/ir.Cast.
+	// Method/ir.EventTrigger.Event's doc comments for why BodyHash alone
+	// was insufficient (it goes unset, via Reconstructed, on every live
+	// path, so a live-catalog-only change was silently invisible).
+	TablespaceLocation   string   `json:"tablespace_location,omitempty"`
+	CastMethod           string   `json:"cast_method,omitempty"`
+	CastContext          string   `json:"cast_context,omitempty"`
+	CastFunction         string   `json:"cast_function,omitempty"`
+	EventTriggerEvent    string   `json:"event_trigger_event,omitempty"`
+	EventTriggerTags     []string `json:"event_trigger_tags,omitempty"`
+	EventTriggerFunction string   `json:"event_trigger_function,omitempty"`
 }
 
 // SnapTSMapping is one MAPPING FOR entry (RFC §12.1) on a text search

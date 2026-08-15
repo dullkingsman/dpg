@@ -92,6 +92,267 @@ SERVER dummy_srv FOREIGN DATA WRAPPER dummy_fdw;
 USER MAPPING FOR PUBLIC SERVER dummy_srv;`)
 }
 
+// ── G-live closure: Tablespace/Cast/EventTrigger structured diffing ───────────
+// These three tests are the actual proof the G-live gap is closed, not just
+// that structured diffing round-trips cleanly (assertOpaqueRoundtrip only
+// proves reconstruction correctness — it can't catch a live-path detection
+// regression, since it re-diffs the SAME object it just introspected, never
+// a live-catalog-only mutation DPG never applied). Each test: applies via
+// DPG, then mutates the object DIRECTLY via raw SQL (bypassing DPG
+// entirely — simulating a hand-run change or drift from another tool),
+// introspects, and asserts the resulting drift diff (desired vs. the fresh
+// live-introspected snapshot) now detects the change. Before the fix, all
+// three showed zero drift here (Reconstructed forced BodyHash to "" on the
+// live side, so diffOpaqueIR's comparison silently never ran).
+
+func TestGLiveCastFunctionChangeDetected(t *testing.T) {
+	connStr := testpg.Start(t)
+	ctx := context.Background()
+
+	differ := diff.New()
+	emitter := emit.New()
+	applyExec := executor.New()
+	ci := introspect.New()
+	store := newMemStore()
+
+	conn, err := executor.Connect(ctx, connStr)
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	defer conn.Close(ctx)
+
+	dir := t.TempDir()
+	f := filepath.Join(dir, "schema.dpg")
+	// Two fresh ENUM types guarantee no pre-existing system cast conflicts
+	// (unlike built-in type pairs such as integer/text, which PostgreSQL
+	// already casts implicitly).
+	fixture := `TYPE cast_src_enum AS ENUM ('a');
+TYPE cast_tgt_enum AS ENUM ('b');
+
+FUNCTION cast_fn_v1(x cast_src_enum) RETURNS cast_tgt_enum
+LANGUAGE sql AS $$ SELECT 'b'::cast_tgt_enum; $$ {}
+
+CAST (cast_src_enum AS cast_tgt_enum) WITH FUNCTION cast_fn_v1(cast_src_enum);`
+	if err := os.WriteFile(f, []byte(fixture), 0o644); err != nil {
+		t.Fatalf("write schema: %v", err)
+	}
+	applyFixture(t, ctx, conn, []string{f}, dir, differ, emitter, applyExec, store)
+
+	desired, err := compiler.Compile([]string{f}, dir, pipeline.Default)
+	if err != nil {
+		t.Fatalf("compile: %v", err)
+	}
+
+	// Mutate directly via raw SQL: PostgreSQL has no ALTER CAST, so this is
+	// DROP + CREATE with a different function — exactly what a hand-run
+	// migration outside DPG would look like.
+	if _, err := conn.Exec(ctx, `CREATE FUNCTION cast_fn_v2(x cast_src_enum) RETURNS cast_tgt_enum LANGUAGE sql AS $$ SELECT 'b'::cast_tgt_enum; $$;`); err != nil {
+		t.Fatalf("create cast_fn_v2: %v", err)
+	}
+	if _, err := conn.Exec(ctx, `DROP CAST (cast_src_enum AS cast_tgt_enum);`); err != nil {
+		t.Fatalf("drop cast: %v", err)
+	}
+	if _, err := conn.Exec(ctx, `CREATE CAST (cast_src_enum AS cast_tgt_enum) WITH FUNCTION cast_fn_v2(cast_src_enum);`); err != nil {
+		t.Fatalf("recreate cast with cast_fn_v2: %v", err)
+	}
+
+	liveObjects, err := ci.Introspect(ctx, conn)
+	if err != nil {
+		t.Fatalf("introspect: %v", err)
+	}
+	snap, _ := store.Load("test", "dpgtest")
+	var managedLive []pipeline.IRObject
+	for _, obj := range liveObjects {
+		if _, ok := snap.Objects[obj.QualifiedName()]; ok {
+			managedLive = append(managedLive, obj)
+		}
+	}
+	liveSnap := &pipeline.Snapshot{}
+	if err := snapshot.Populate(liveSnap, managedLive); err != nil {
+		t.Fatalf("populate live snapshot: %v", err)
+	}
+
+	driftOps, err := differ.Diff(desired, liveSnap)
+	if err != nil {
+		t.Fatalf("drift diff: %v", err)
+	}
+	var sql string
+	for _, op := range driftOps {
+		sql += op.SQL()
+	}
+	if !strings.Contains(sql, "DROP CAST") {
+		t.Fatalf("G-live gap not closed: expected plan --live to detect the live-catalog-only cast function change, got %d ops: %q", len(driftOps), sql)
+	}
+	if !strings.Contains(sql, "cast_fn_v1") {
+		t.Errorf("expected recreate to restore the declared cast_fn_v1, got: %s", sql)
+	}
+}
+
+func TestGLiveEventTriggerTagChangeDetected(t *testing.T) {
+	connStr := testpg.Start(t)
+	ctx := context.Background()
+
+	differ := diff.New()
+	emitter := emit.New()
+	applyExec := executor.New()
+	ci := introspect.New()
+	store := newMemStore()
+
+	conn, err := executor.Connect(ctx, connStr)
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	defer conn.Close(ctx)
+
+	dir := t.TempDir()
+	f := filepath.Join(dir, "schema.dpg")
+	fixture := `FUNCTION evt_fn() RETURNS event_trigger
+LANGUAGE plpgsql AS $$ BEGIN END; $$ {}
+
+EVENT TRIGGER evt_test ON sql_drop
+    WHEN TAG IN ('DROP TABLE')
+    EXECUTE FUNCTION evt_fn();`
+	if err := os.WriteFile(f, []byte(fixture), 0o644); err != nil {
+		t.Fatalf("write schema: %v", err)
+	}
+	applyFixture(t, ctx, conn, []string{f}, dir, differ, emitter, applyExec, store)
+
+	desired, err := compiler.Compile([]string{f}, dir, pipeline.Default)
+	if err != nil {
+		t.Fatalf("compile: %v", err)
+	}
+
+	// Mutate directly via raw SQL: PostgreSQL has no ALTER EVENT TRIGGER
+	// for the tag list — DROP + CREATE with an extra tag, matching a
+	// hand-run migration outside DPG.
+	if _, err := conn.Exec(ctx, `DROP EVENT TRIGGER evt_test;`); err != nil {
+		t.Fatalf("drop event trigger: %v", err)
+	}
+	if _, err := conn.Exec(ctx, `CREATE EVENT TRIGGER evt_test ON sql_drop WHEN TAG IN ('DROP TABLE', 'DROP SCHEMA') EXECUTE FUNCTION evt_fn();`); err != nil {
+		t.Fatalf("recreate event trigger with extra tag: %v", err)
+	}
+
+	liveObjects, err := ci.Introspect(ctx, conn)
+	if err != nil {
+		t.Fatalf("introspect: %v", err)
+	}
+	snap, _ := store.Load("test", "dpgtest")
+	var managedLive []pipeline.IRObject
+	for _, obj := range liveObjects {
+		if _, ok := snap.Objects[obj.QualifiedName()]; ok {
+			managedLive = append(managedLive, obj)
+		}
+	}
+	liveSnap := &pipeline.Snapshot{}
+	if err := snapshot.Populate(liveSnap, managedLive); err != nil {
+		t.Fatalf("populate live snapshot: %v", err)
+	}
+
+	driftOps, err := differ.Diff(desired, liveSnap)
+	if err != nil {
+		t.Fatalf("drift diff: %v", err)
+	}
+	var sql string
+	for _, op := range driftOps {
+		sql += op.SQL()
+	}
+	if !strings.Contains(sql, "DROP EVENT TRIGGER") {
+		t.Fatalf("G-live gap not closed: expected plan --live to detect the live-catalog-only tag change, got %d ops: %q", len(driftOps), sql)
+	}
+	if strings.Contains(sql, "'DROP SCHEMA'") {
+		t.Errorf("expected recreate to restore the declared tag list ('DROP TABLE' only), not the live-mutated one, got: %s", sql)
+	}
+	for _, op := range driftOps {
+		if op.Safety() != pipeline.Safe {
+			t.Errorf("expected event trigger DROP+CREATE to be Safe (RFC §14.1), got %v: %s", op.Safety(), op.SQL())
+		}
+	}
+}
+
+// TestGLiveTablespaceLocationChangeDetected needs real filesystem
+// directories inside the container (PostgreSQL requires LOCATION to
+// already exist on disk — no SQL statement can create it), so it uses
+// testpg.StartWithContainer rather than plain testpg.Start.
+func TestGLiveTablespaceLocationChangeDetected(t *testing.T) {
+	connStr, container := testpg.StartWithContainer(t)
+	ctx := context.Background()
+
+	for _, dir := range []string{"/var/lib/postgresql/ts1", "/var/lib/postgresql/ts2"} {
+		if code, _, err := container.Exec(ctx, []string{"mkdir", "-p", dir}); err != nil || code != 0 {
+			t.Fatalf("mkdir %s in container: code=%d err=%v", dir, code, err)
+		}
+		if code, _, err := container.Exec(ctx, []string{"chown", "postgres:postgres", dir}); err != nil || code != 0 {
+			t.Fatalf("chown %s in container: code=%d err=%v", dir, code, err)
+		}
+	}
+
+	differ := diff.New()
+	emitter := emit.New()
+	applyExec := executor.New()
+	ci := introspect.New()
+	store := newMemStore()
+
+	conn, err := executor.Connect(ctx, connStr)
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	defer conn.Close(ctx)
+
+	dir := t.TempDir()
+	f := filepath.Join(dir, "schema.dpg")
+	fixture := `TABLESPACE gl_ts LOCATION '/var/lib/postgresql/ts1';`
+	if err := os.WriteFile(f, []byte(fixture), 0o644); err != nil {
+		t.Fatalf("write schema: %v", err)
+	}
+	applyFixture(t, ctx, conn, []string{f}, dir, differ, emitter, applyExec, store)
+
+	desired, err := compiler.Compile([]string{f}, dir, pipeline.Default)
+	if err != nil {
+		t.Fatalf("compile: %v", err)
+	}
+
+	// Mutate directly via raw SQL: LOCATION cannot be changed after
+	// creation (RFC §14.7) — DROP + CREATE at the second directory,
+	// matching a hand-run migration outside DPG.
+	if _, err := conn.Exec(ctx, `DROP TABLESPACE gl_ts;`); err != nil {
+		t.Fatalf("drop tablespace: %v", err)
+	}
+	if _, err := conn.Exec(ctx, `CREATE TABLESPACE gl_ts LOCATION '/var/lib/postgresql/ts2';`); err != nil {
+		t.Fatalf("recreate tablespace at ts2: %v", err)
+	}
+
+	liveObjects, err := ci.Introspect(ctx, conn)
+	if err != nil {
+		t.Fatalf("introspect: %v", err)
+	}
+	snap, _ := store.Load("test", "dpgtest")
+	var managedLive []pipeline.IRObject
+	for _, obj := range liveObjects {
+		if _, ok := snap.Objects[obj.QualifiedName()]; ok {
+			managedLive = append(managedLive, obj)
+		}
+	}
+	liveSnap := &pipeline.Snapshot{}
+	if err := snapshot.Populate(liveSnap, managedLive); err != nil {
+		t.Fatalf("populate live snapshot: %v", err)
+	}
+
+	driftOps, err := differ.Diff(desired, liveSnap)
+	if err != nil {
+		t.Fatalf("drift diff: %v", err)
+	}
+	var sql string
+	for _, op := range driftOps {
+		sql += op.SQL()
+	}
+	if !strings.Contains(sql, "DROP TABLESPACE") {
+		t.Fatalf("G-live gap not closed: expected plan --live to detect the live-catalog-only location change, got %d ops: %q", len(driftOps), sql)
+	}
+	if !strings.Contains(sql, "/var/lib/postgresql/ts1") {
+		t.Errorf("expected recreate to restore the declared location ts1, got: %s", sql)
+	}
+}
+
 // TestRoundtripOpaqueBodyEditAppliesLive is the live-catalog guard for #3
 // (real update path for opaque objects, internal/diff/differ.go diffOpaqueIR):
 // previously an offline body edit to an opaque object (here, a COLLATION's

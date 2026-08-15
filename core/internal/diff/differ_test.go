@@ -7528,8 +7528,8 @@ func TestDiffOpaqueOfflineEditEmitsStructuredDropRecreate(t *testing.T) {
 	}{
 		{
 			name:           "tablespace",
-			oldObj:         &ir.Tablespace{Name: "ts", Body: "CREATE TABLESPACE ts LOCATION '/data/ts1'"},
-			newObj:         &ir.Tablespace{Name: "ts", Body: "CREATE TABLESPACE ts LOCATION '/data/ts2'"},
+			oldObj:         &ir.Tablespace{Name: "ts", Location: "/data/ts1", Body: "CREATE TABLESPACE ts LOCATION '/data/ts1'"},
+			newObj:         &ir.Tablespace{Name: "ts", Location: "/data/ts2", Body: "CREATE TABLESPACE ts LOCATION '/data/ts2'"},
 			wantDropSubstr: `DROP TABLESPACE IF EXISTS "ts";`,
 			wantNewInBody:  "/data/ts2",
 			// Manual (non-transactional), not Safe like every other opaque
@@ -7581,8 +7581,8 @@ func TestDiffOpaqueOfflineEditEmitsStructuredDropRecreate(t *testing.T) {
 		},
 		{
 			name:           "event_trigger",
-			oldObj:         &ir.EventTrigger{Name: "et", Body: "CREATE EVENT TRIGGER et ON ddl_command_start EXECUTE FUNCTION f1()"},
-			newObj:         &ir.EventTrigger{Name: "et", Body: "CREATE EVENT TRIGGER et ON ddl_command_start EXECUTE FUNCTION f2()"},
+			oldObj:         &ir.EventTrigger{Name: "et", Event: "ddl_command_start", Function: "f1", Body: "CREATE EVENT TRIGGER et ON ddl_command_start EXECUTE FUNCTION f1()"},
+			newObj:         &ir.EventTrigger{Name: "et", Event: "ddl_command_start", Function: "f2", Body: "CREATE EVENT TRIGGER et ON ddl_command_start EXECUTE FUNCTION f2()"},
 			wantDropSubstr: `DROP EVENT TRIGGER IF EXISTS "et";`,
 			wantNewInBody:  "f2()",
 			// Unlike every other opaque kind here, an event trigger holds no
@@ -7623,8 +7623,8 @@ func TestDiffOpaqueOfflineEditEmitsStructuredDropRecreate(t *testing.T) {
 		},
 		{
 			name:           "cast",
-			oldObj:         &ir.Cast{SourceType: ir.TypeRef{Name: "int4"}, TargetType: ir.TypeRef{Name: "text"}, Body: "CREATE CAST (int4 AS text) WITH FUNCTION f1(int4)"},
-			newObj:         &ir.Cast{SourceType: ir.TypeRef{Name: "int4"}, TargetType: ir.TypeRef{Name: "text"}, Body: "CREATE CAST (int4 AS text) WITH FUNCTION f2(int4)"},
+			oldObj:         &ir.Cast{SourceType: ir.TypeRef{Name: "int4"}, TargetType: ir.TypeRef{Name: "text"}, Method: "f", Function: "f1", Body: "CREATE CAST (int4 AS text) WITH FUNCTION f1(int4)"},
+			newObj:         &ir.Cast{SourceType: ir.TypeRef{Name: "int4"}, TargetType: ir.TypeRef{Name: "text"}, Method: "f", Function: "f2", Body: "CREATE CAST (int4 AS text) WITH FUNCTION f2(int4)"},
 			wantDropSubstr: `DROP CAST IF EXISTS (int4 AS text);`,
 			wantNewInBody:  "f2(int4)",
 		},
@@ -9152,6 +9152,282 @@ func TestDiffDomainStaleSnapshotDoesNotRecreate(t *testing.T) {
 		if o.Safety() == pipeline.Destructive {
 			t.Errorf("stale snapshot transition must never be destructive, got: %v", sqlList(ops))
 		}
+	}
+}
+
+// ── Tablespace/Cast/EventTrigger structured diffing (G-live closure) ──────────
+// Regression guards for the "G-live" gap: the 9 reconstruction-tier opaque
+// kinds set Reconstructed=true on introspection, which forced BodyHash to ""
+// on the live side (sourceBodyHash), silently disabling diffOpaqueIR's
+// body-hash comparison on verify/plan --live — a live-catalog-only change to
+// one of these 3 kinds went completely undetected. diffTablespace/diffCast/
+// diffEventTrigger replace that with field-level comparison (RFC
+// §14.7/§14.5/§14.1), which works identically whether the snapshot side came
+// from source or from introspection, since it never depends on Reconstructed
+// or BodyHash at all.
+
+func TestDiffTablespaceLocationChangeIsDestructiveManual(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("ts", &snapshot.SnapObject{
+		Kind: "tablespace",
+		Opaque: &snapshot.SnapOpaque{
+			Kind: "tablespace", Name: "ts", TablespaceLocation: "/data/ts1",
+		},
+	})
+	desired := []pipeline.IRObject{
+		&ir.Tablespace{Name: "ts", Location: "/data/ts2", Body: "CREATE TABLESPACE ts LOCATION '/data/ts2'"},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsSQL(ops, `DROP TABLESPACE IF EXISTS "ts"`) {
+		t.Errorf("expected DROP TABLESPACE, got: %v", sqlList(ops))
+	}
+	if !containsSQL(ops, "/data/ts2") {
+		t.Errorf("expected recreate to reflect the new location, got: %v", sqlList(ops))
+	}
+	// DROP TABLESPACE is Destructive (dropObject's destructiveManualOp);
+	// CREATE TABLESPACE is Manual (createOpaque's tablespace special-case)
+	// — both non-transactional (CREATE/DROP TABLESPACE cannot run inside a
+	// transaction block), but Safety() and Transactional() are independent
+	// fields (see destructiveManualOp's doc comment), so the two ops carry
+	// different Safety() values despite both being non-transactional.
+	for _, op := range ops {
+		switch {
+		case strings.Contains(op.SQL(), "DROP TABLESPACE"):
+			if op.Safety() != pipeline.Destructive {
+				t.Errorf("expected DROP TABLESPACE op to be Destructive safety, got %v: %s", op.Safety(), op.SQL())
+			}
+		case strings.Contains(op.SQL(), "CREATE TABLESPACE"):
+			if op.Safety() != pipeline.Manual {
+				t.Errorf("expected CREATE TABLESPACE op to be Manual safety, got %v: %s", op.Safety(), op.SQL())
+			}
+		}
+	}
+}
+
+func TestDiffTablespaceUnchangedIsNoop(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("ts", &snapshot.SnapObject{
+		Kind: "tablespace",
+		Opaque: &snapshot.SnapOpaque{
+			Kind: "tablespace", Name: "ts", TablespaceLocation: "/data/ts1",
+		},
+	})
+	desired := []pipeline.IRObject{
+		&ir.Tablespace{Name: "ts", Location: "/data/ts1", Body: "CREATE TABLESPACE ts LOCATION '/data/ts1'"},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ops) != 0 {
+		t.Errorf("expected zero ops for an unchanged tablespace, got: %v", sqlList(ops))
+	}
+}
+
+// TestDiffTablespaceStaleSnapshotDoesNotRecreate is the G-live counterpart to
+// TestDiffDomainStaleSnapshotDoesNotRecreate: a snapshot written before
+// TablespaceLocation existed has the Go zero value "" even though the
+// tablespace is real — without the guard, every already-applied tablespace
+// would look like a spurious location change (DROP TABLESPACE, destructive)
+// on the very first plan/apply after upgrading.
+func TestDiffTablespaceStaleSnapshotDoesNotRecreate(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("ts", &snapshot.SnapObject{
+		Kind:   "tablespace",
+		Opaque: &snapshot.SnapOpaque{Kind: "tablespace", Name: "ts"},
+	})
+	desired := []pipeline.IRObject{
+		&ir.Tablespace{Name: "ts", Location: "/data/ts1", Body: "CREATE TABLESPACE ts LOCATION '/data/ts1'"},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if containsSQL(ops, "DROP TABLESPACE") {
+		t.Errorf("stale snapshot must not trigger DROP TABLESPACE, got: %v", sqlList(ops))
+	}
+	for _, o := range ops {
+		if o.Safety() == pipeline.Destructive || o.Safety() == pipeline.Manual {
+			t.Errorf("stale snapshot transition must never be destructive/manual, got: %v", sqlList(ops))
+		}
+	}
+}
+
+func TestDiffCastFunctionChangeRecreates(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("int4->text", &snapshot.SnapObject{
+		Kind: "cast",
+		Opaque: &snapshot.SnapOpaque{
+			Kind: "cast", Name: "int4->text", CastMethod: "f", CastContext: "e", CastFunction: "public.f1",
+		},
+	})
+	desired := []pipeline.IRObject{
+		&ir.Cast{
+			SourceType: ir.TypeRef{Name: "int4"}, TargetType: ir.TypeRef{Name: "text"},
+			Method: "f", Context: "e", Function: "f2", // unqualified — must still compare equal via qualifyFuncForCompare against a *different* function
+			Body: "CREATE CAST (int4 AS text) WITH FUNCTION f2(int4)",
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsSQL(ops, "DROP CAST IF EXISTS (int4 AS text)") {
+		t.Errorf("expected DROP CAST, got: %v", sqlList(ops))
+	}
+	if !containsSQL(ops, "f2(int4)") {
+		t.Errorf("expected recreate to reflect the new function, got: %v", sqlList(ops))
+	}
+}
+
+// TestDiffCastFunctionUnqualifiedMatchesQualifiedNoOp proves
+// qualifyFuncForCompare's reuse is wired correctly: introspection always
+// returns a schema-qualified CastFunction ("public.f1"), while hand-written
+// source commonly leaves it unqualified ("f1") relying on the default
+// "public" schema — these must compare equal, not spuriously recreate.
+func TestDiffCastFunctionUnqualifiedMatchesQualifiedNoOp(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("int4->text", &snapshot.SnapObject{
+		Kind: "cast",
+		Opaque: &snapshot.SnapOpaque{
+			Kind: "cast", Name: "int4->text", CastMethod: "f", CastContext: "e", CastFunction: "public.f1",
+		},
+	})
+	desired := []pipeline.IRObject{
+		&ir.Cast{
+			SourceType: ir.TypeRef{Name: "int4"}, TargetType: ir.TypeRef{Name: "text"},
+			Method: "f", Context: "e", Function: "f1",
+			Body: "CREATE CAST (int4 AS text) WITH FUNCTION f1(int4)",
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ops) != 0 {
+		t.Errorf("expected zero ops for a schema-unqualified-vs-qualified match, got: %v", sqlList(ops))
+	}
+}
+
+// TestDiffCastStaleSnapshotDoesNotRecreate mirrors
+// TestDiffTablespaceStaleSnapshotDoesNotRecreate: CastMethod == "" (Go zero
+// value) must be treated as "not yet populated," not "changed."
+func TestDiffCastStaleSnapshotDoesNotRecreate(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("int4->text", &snapshot.SnapObject{
+		Kind:   "cast",
+		Opaque: &snapshot.SnapOpaque{Kind: "cast", Name: "int4->text"},
+	})
+	desired := []pipeline.IRObject{
+		&ir.Cast{
+			SourceType: ir.TypeRef{Name: "int4"}, TargetType: ir.TypeRef{Name: "text"},
+			Method: "f", Context: "e", Function: "f1",
+			Body: "CREATE CAST (int4 AS text) WITH FUNCTION f1(int4)",
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if containsSQL(ops, "DROP CAST") {
+		t.Errorf("stale snapshot must not trigger DROP CAST, got: %v", sqlList(ops))
+	}
+}
+
+func TestDiffEventTriggerTagChangeRecreatesAndIsSafe(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("et", &snapshot.SnapObject{
+		Kind: "event_trigger",
+		Opaque: &snapshot.SnapOpaque{
+			Kind: "event_trigger", Name: "et",
+			EventTriggerEvent: "sql_drop", EventTriggerTags: []string{"DROP TABLE"}, EventTriggerFunction: "public.f1",
+		},
+	})
+	desired := []pipeline.IRObject{
+		&ir.EventTrigger{
+			Name: "et", Event: "sql_drop", Tags: []string{"DROP TABLE", "DROP SCHEMA"}, Function: "f1",
+			Body: "CREATE EVENT TRIGGER et ON sql_drop WHEN TAG IN ('DROP TABLE', 'DROP SCHEMA') EXECUTE FUNCTION f1()",
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsSQL(ops, `DROP EVENT TRIGGER IF EXISTS "et"`) {
+		t.Errorf("expected DROP EVENT TRIGGER, got: %v", sqlList(ops))
+	}
+	if !containsSQL(ops, "DROP SCHEMA") {
+		t.Errorf("expected recreate to reflect the new tag list, got: %v", sqlList(ops))
+	}
+	// RFC §14.1: event trigger DROP+CREATE is SAFE (no data involved),
+	// unlike every other opaque-tier DROP+CREATE.
+	for _, op := range ops {
+		if op.Safety() != pipeline.Safe {
+			t.Errorf("expected event trigger DROP+CREATE ops to be Safe, got %v: %s", op.Safety(), op.SQL())
+		}
+	}
+}
+
+// TestDiffEventTriggerTagOrderIsNotDrift proves tags are compared as a set
+// (stringSetEqual), not positionally — PostgreSQL's evttags is an unordered
+// array and WHEN TAG IN (...)'s list order carries no meaning.
+func TestDiffEventTriggerTagOrderIsNotDrift(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("et", &snapshot.SnapObject{
+		Kind: "event_trigger",
+		Opaque: &snapshot.SnapOpaque{
+			Kind: "event_trigger", Name: "et",
+			EventTriggerEvent: "sql_drop", EventTriggerTags: []string{"DROP TABLE", "DROP SCHEMA"}, EventTriggerFunction: "public.f1",
+		},
+	})
+	desired := []pipeline.IRObject{
+		&ir.EventTrigger{
+			Name: "et", Event: "sql_drop", Tags: []string{"DROP SCHEMA", "DROP TABLE"}, Function: "f1",
+			Body: "CREATE EVENT TRIGGER et ON sql_drop WHEN TAG IN ('DROP SCHEMA', 'DROP TABLE') EXECUTE FUNCTION f1()",
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ops) != 0 {
+		t.Errorf("expected zero ops for a reordered-but-identical tag set, got: %v", sqlList(ops))
+	}
+}
+
+// TestDiffEventTriggerStaleSnapshotDoesNotRecreate mirrors
+// TestDiffTablespaceStaleSnapshotDoesNotRecreate: EventTriggerEvent == ""
+// (Go zero value) must be treated as "not yet populated," not "changed."
+func TestDiffEventTriggerStaleSnapshotDoesNotRecreate(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("et", &snapshot.SnapObject{
+		Kind:   "event_trigger",
+		Opaque: &snapshot.SnapOpaque{Kind: "event_trigger", Name: "et"},
+	})
+	desired := []pipeline.IRObject{
+		&ir.EventTrigger{
+			Name: "et", Event: "sql_drop", Tags: []string{"DROP TABLE"}, Function: "f1",
+			Body: "CREATE EVENT TRIGGER et ON sql_drop WHEN TAG IN ('DROP TABLE') EXECUTE FUNCTION f1()",
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if containsSQL(ops, "DROP EVENT TRIGGER") {
+		t.Errorf("stale snapshot must not trigger DROP EVENT TRIGGER, got: %v", sqlList(ops))
 	}
 }
 

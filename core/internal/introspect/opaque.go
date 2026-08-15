@@ -185,7 +185,7 @@ ORDER  BY spcname`
 			return nil, err
 		}
 		body := fmt.Sprintf("CREATE TABLESPACE %s LOCATION %s", quoteIdent(name), quoteLit(location))
-		out = append(out, &ir.Tablespace{Name: name, Body: canonicalDDL(body), Comment: comment, Reconstructed: true})
+		out = append(out, &ir.Tablespace{Name: name, Location: location, Body: canonicalDDL(body), Comment: comment, Reconstructed: true})
 	}
 	return out, rs.Err()
 }
@@ -359,7 +359,15 @@ ORDER  BY e.evtname`
 			fmt.Fprintf(&sb, " WHEN TAG IN (%s)", strings.Join(quoted, ", "))
 		}
 		fmt.Fprintf(&sb, " EXECUTE FUNCTION %s()", qualIdentQ(fnSchema, fnName))
-		out = append(out, &ir.EventTrigger{Name: name, Body: canonicalDDL(sb.String()), Comment: comment, Reconstructed: true})
+		out = append(out, &ir.EventTrigger{
+			Name:          name,
+			Event:         event,
+			Tags:          tags,
+			Function:      fnSchema + "." + fnName,
+			Body:          canonicalDDL(sb.String()),
+			Comment:       comment,
+			Reconstructed: true,
+		})
 	}
 	return out, rs.Err()
 }
@@ -415,9 +423,19 @@ ORDER  BY src, tgt`
 		case "i":
 			sb.WriteString(" AS IMPLICIT")
 		}
+		function := ""
+		if fnName != nil {
+			function = deref(fnName)
+			if fnSchema != nil && *fnSchema != "" {
+				function = *fnSchema + "." + function
+			}
+		}
 		out = append(out, &ir.Cast{
 			SourceType:    ir.TypeRef{Name: src},
 			TargetType:    ir.TypeRef{Name: tgt},
+			Method:        method,
+			Context:       context8,
+			Function:      function,
 			Body:          canonicalDDL(sb.String()),
 			Comment:       comment,
 			Reconstructed: true,

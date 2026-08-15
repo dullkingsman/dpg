@@ -18,7 +18,8 @@ import (
 // when Start returns.
 func Start(t *testing.T) string {
 	t.Helper()
-	return startContainer(t, nil)
+	connStr, _ := startContainer(t, nil)
+	return connStr
 }
 
 // StartLogical is Start with wal_level=logical set — the prerequisite for a
@@ -28,12 +29,23 @@ func Start(t *testing.T) string {
 // way specifically (the subscriber side has no such requirement).
 func StartLogical(t *testing.T) string {
 	t.Helper()
-	return startContainer(t, []string{"postgres", "-c", "wal_level=logical"})
+	connStr, _ := startContainer(t, []string{"postgres", "-c", "wal_level=logical"})
+	return connStr
+}
+
+// StartWithContainer is Start, additionally returning the underlying
+// testcontainers.Container — needed only by tests that must reach the
+// container's filesystem directly (e.g. mkdir-ing a real path for
+// CREATE TABLESPACE, which PostgreSQL requires to already exist on disk;
+// no SQL statement can create it).
+func StartWithContainer(t *testing.T) (string, testcontainers.Container) {
+	t.Helper()
+	return startContainer(t, nil)
 }
 
 // startContainer starts a fresh postgres:17 testcontainer. cmd overrides the
 // container's default command when non-nil (e.g. to set wal_level).
-func startContainer(t *testing.T, cmd []string) string {
+func startContainer(t *testing.T, cmd []string) (string, testcontainers.Container) {
 	t.Helper()
 	ctx := context.Background()
 
@@ -74,5 +86,5 @@ func startContainer(t *testing.T, cmd []string) string {
 		t.Fatalf("testpg: get port: %v", err)
 	}
 
-	return fmt.Sprintf("postgres://dpg:dpg@%s:%s/dpgtest?sslmode=disable", host, port.Port())
+	return fmt.Sprintf("postgres://dpg:dpg@%s:%s/dpgtest?sslmode=disable", host, port.Port()), container
 }

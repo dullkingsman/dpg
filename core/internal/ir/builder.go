@@ -1668,7 +1668,7 @@ func (b *Builder) buildRole(cs *pg_query.CreateRoleStmt, block pipeline.BlockAST
 // ── Tablespace ────────────────────────────────────────────────────────────────
 
 func (b *Builder) buildTablespace(cs *pg_query.CreateTableSpaceStmt, block pipeline.BlockAST, pos pipeline.SourcePos, body string) (pipeline.IRObject, error) {
-	ts := &Tablespace{Name: cs.Tablespacename, Body: body, SrcPos: pos}
+	ts := &Tablespace{Name: cs.Tablespacename, Location: cs.Location, Body: body, SrcPos: pos}
 	if block.Comment != nil {
 		ts.Comment = &block.Comment.Value
 	}
@@ -2075,6 +2075,26 @@ func (b *Builder) buildCast(cs *pg_query.CreateCastStmt, block pipeline.BlockAST
 	if cs.Targettype != nil {
 		c.TargetType = typeNameToRef(cs.Targettype)
 	}
+	switch {
+	case cs.Inout:
+		c.Method = "i"
+	case cs.Func != nil:
+		c.Method = "f"
+	default:
+		c.Method = "b"
+	}
+	switch cs.Context {
+	case pg_query.CoercionContext_COERCION_ASSIGNMENT:
+		c.Context = "a"
+	case pg_query.CoercionContext_COERCION_IMPLICIT:
+		c.Context = "i"
+	default:
+		// COERCION_CONTEXT_UNDEFINED (pg_query's zero value for an unset
+		// field): real PostgreSQL grammar has no "AS EXPLICIT" clause — the
+		// absence of any AS clause is what "explicit-only" means, matching
+		// pg_cast.castcontext's own "e" catalog code.
+		c.Context = "e"
+	}
 	if cs.Func != nil {
 		funcSchema, funcName := extractTypeName(cs.Func.Objname)
 		c.Function = funcName
@@ -2150,7 +2170,30 @@ func (b *Builder) buildOpaque(node *pg_query.Node, block pipeline.BlockAST, pos 
 		if funcSchema != "" {
 			function = funcSchema + "." + funcName
 		}
-		evt := &EventTrigger{Name: n.CreateEventTrigStmt.Trigname, Function: function, Body: sql, SrcPos: pos}
+		evt := &EventTrigger{
+			Name:     n.CreateEventTrigStmt.Trigname,
+			Event:    n.CreateEventTrigStmt.Eventname,
+			Function: function,
+			Body:     sql, SrcPos: pos,
+		}
+		// WHEN TAG IN (...) is a single DefElem (Defname == "tag") whose Arg
+		// is a List of String nodes — confirmed via pg_query.Parse probe
+		// against a real "WHEN TAG IN (...)" clause, not assumed.
+		for _, w := range n.CreateEventTrigStmt.Whenclause {
+			de := w.GetDefElem()
+			if de == nil || de.Defname != "tag" {
+				continue
+			}
+			lst := de.GetArg().GetList()
+			if lst == nil {
+				continue
+			}
+			for _, item := range lst.Items {
+				if sv := item.GetString_(); sv != nil {
+					evt.Tags = append(evt.Tags, sv.Sval)
+				}
+			}
+		}
 		if block.Comment != nil {
 			evt.Comment = &block.Comment.Value
 		}

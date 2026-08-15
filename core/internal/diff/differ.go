@@ -327,6 +327,30 @@ func ptrEq(a, b *string) bool {
 	return *a == *b
 }
 
+// stringSetEqual compares two string slices as sets (order-independent,
+// duplicates collapsed) — used for EVENT TRIGGER's WHEN TAG IN (...) list,
+// which PostgreSQL stores as an unordered evttags array.
+func stringSetEqual(a, b []string) bool {
+	if len(a) != len(b) {
+		// A dedup-aware length check would be more correct for duplicate
+		// entries, but WHEN TAG IN (...) listing the same tag twice is not
+		// a real, meaningful shape (RFC §14.1's tag-list is just an
+		// enumeration of distinct DDL command tags) — a plain length
+		// mismatch is sufficient signal here without building a multiset.
+		return false
+	}
+	set := make(map[string]bool, len(a))
+	for _, s := range a {
+		set[s] = true
+	}
+	for _, s := range b {
+		if !set[s] {
+			return false
+		}
+	}
+	return true
+}
+
 // effectiveComment resolves an object's live COMMENT text — used for
 // columns, tables, views, and functions (the RFC's own stated scope for
 // DEPRECATED, §19.1: "Applied to tables, columns, views, functions").
@@ -1070,6 +1094,145 @@ func createSubscription(o *ir.Subscription) ([]pipeline.DiffOp, error) {
 		))
 	}
 	return ops, nil
+}
+
+// diffTablespace implements RFC §14.7's structured diffing (Location is the
+// only property that decides DROP+CREATE — LOCATION cannot be changed after
+// creation in real PostgreSQL) in place of diffOpaqueIR's generic
+// Reconstructed-gated body-hash compare, which went silently unset (via
+// Reconstructed) on every live path — verify/plan --live never detected a
+// live-catalog-only LOCATION change. Comment is still diffed independently,
+// same as every other opaque-tier kind.
+func diffTablespace(o *ir.Tablespace, snap *snapshot.SnapOpaque) ([]pipeline.DiffOp, error) {
+	pos := o.SrcPos
+	// Stale snapshot predating this structured field: Go's zero value ""
+	// for TablespaceLocation, even though a real tablespace always has a
+	// non-empty LOCATION (required by CREATE TABLESPACE's grammar) — same
+	// self-healing guard pattern as diffType's DOMAIN branch
+	// (snap.DomainBaseType == ""). Skip structural comparison and fall back
+	// to Comment-only, emitting a harmless refresh op if nothing else
+	// changed so the snapshot self-heals on the very next apply instead of
+	// staying stale forever.
+	if snap.TablespaceLocation == "" {
+		var ops []pipeline.DiffOp
+		if !ptrEq(o.Comment, snap.Comment) {
+			if sql := commentOnOpaqueSQL("tablespace", "", o.Name, "", "", o.Comment); sql != "" {
+				ops = append(ops, safeOp(sql, pos))
+			}
+		}
+		if len(ops) == 0 {
+			ops = append(ops, safeOp(fmt.Sprintf("-- refresh snapshot metadata for tablespace %s", quoteIdent(o.Name)), pos))
+		}
+		return ops, nil
+	}
+	if o.Location != snap.TablespaceLocation {
+		ops := dropObject(&snapshot.SnapObject{Kind: snap.Kind, Opaque: snap})
+		createOps, err := createOpaque(o.Name, o.Body, "TABLESPACE", "", pos)
+		if err != nil {
+			return nil, err
+		}
+		ops = append(ops, createOps...)
+		return appendCommentOp(ops, nil, "tablespace", "", o.Name, "", "", o.Comment, pos)
+	}
+	if !ptrEq(o.Comment, snap.Comment) {
+		if sql := commentOnOpaqueSQL("tablespace", "", o.Name, "", "", o.Comment); sql != "" {
+			return []pipeline.DiffOp{safeOp(sql, pos)}, nil
+		}
+	}
+	return nil, nil
+}
+
+// diffCast implements RFC §14.5's structured diffing: PostgreSQL provides no
+// ALTER CAST at all, so any change to Method, Function, or Context decides
+// DROP+CREATE, in place of diffOpaqueIR's generic Reconstructed-gated
+// body-hash compare (silently unset on every live path — see
+// diffTablespace's doc comment for the same root cause). Function is
+// compared via qualifyFuncForCompare (same helper diffTriggers already
+// uses): introspection always returns a schema-qualified name, while
+// hand-written source commonly leaves it unqualified relying on the default
+// "public" schema.
+func diffCast(o *ir.Cast, snap *snapshot.SnapOpaque) ([]pipeline.DiffOp, error) {
+	pos := o.SrcPos
+	name := o.QualifiedName()
+	// Stale snapshot predating these structured fields: CastMethod is
+	// always one of "f"/"i"/"b" for a real cast, never the Go zero value —
+	// same self-healing guard pattern as diffTablespace.
+	if snap.CastMethod == "" {
+		var ops []pipeline.DiffOp
+		if !ptrEq(o.Comment, snap.Comment) {
+			if sql := commentOnOpaqueSQL("cast", "", name, "", "", o.Comment); sql != "" {
+				ops = append(ops, safeOp(sql, pos))
+			}
+		}
+		if len(ops) == 0 {
+			ops = append(ops, safeOp(fmt.Sprintf("-- refresh snapshot metadata for cast %s", name), pos))
+		}
+		return ops, nil
+	}
+	if o.Method != snap.CastMethod || o.Context != snap.CastContext ||
+		qualifyFuncForCompare(o.Function) != qualifyFuncForCompare(snap.CastFunction) {
+		ops := dropObject(&snapshot.SnapObject{Kind: snap.Kind, Opaque: snap})
+		createOps, err := createOpaque(name, o.Body, "CAST", "", pos)
+		if err != nil {
+			return nil, err
+		}
+		ops = append(ops, createOps...)
+		return appendCommentOp(ops, nil, "cast", "", name, "", "", o.Comment, pos)
+	}
+	if !ptrEq(o.Comment, snap.Comment) {
+		if sql := commentOnOpaqueSQL("cast", "", name, "", "", o.Comment); sql != "" {
+			return []pipeline.DiffOp{safeOp(sql, pos)}, nil
+		}
+	}
+	return nil, nil
+}
+
+// diffEventTrigger implements RFC §14.1's structured diffing: PostgreSQL has
+// no ALTER EVENT TRIGGER for Event/Tags/Function (only ENABLE/DISABLE/
+// OWNER TO/RENAME TO, none modeled here), so any change to those three
+// decides DROP+CREATE — RFC §14.1 classifies this SAFE ("no data
+// involved"), unlike every other opaque-tier DROP+CREATE, which is why
+// dropObject's "event_trigger" case already uses safeOp instead of
+// destructiveOp. Replaces diffOpaqueIR's generic Reconstructed-gated
+// body-hash compare (silently unset on every live path — see
+// diffTablespace's doc comment for the same root cause). Tags are compared
+// as a set (stringSetEqual): PostgreSQL stores evttags as an unordered
+// array, and WHEN TAG IN (...)'s list order carries no meaning.
+func diffEventTrigger(o *ir.EventTrigger, snap *snapshot.SnapOpaque) ([]pipeline.DiffOp, error) {
+	pos := o.SrcPos
+	// Stale snapshot predating these structured fields: EventTriggerEvent
+	// is always non-empty for a real event trigger (required by CREATE
+	// EVENT TRIGGER's grammar), never the Go zero value — same
+	// self-healing guard pattern as diffTablespace/diffCast.
+	if snap.EventTriggerEvent == "" {
+		var ops []pipeline.DiffOp
+		if !ptrEq(o.Comment, snap.Comment) {
+			if sql := commentOnOpaqueSQL("event_trigger", "", o.Name, "", "", o.Comment); sql != "" {
+				ops = append(ops, safeOp(sql, pos))
+			}
+		}
+		if len(ops) == 0 {
+			ops = append(ops, safeOp(fmt.Sprintf("-- refresh snapshot metadata for event trigger %s", quoteIdent(o.Name)), pos))
+		}
+		return ops, nil
+	}
+	if o.Event != snap.EventTriggerEvent ||
+		qualifyFuncForCompare(o.Function) != qualifyFuncForCompare(snap.EventTriggerFunction) ||
+		!stringSetEqual(o.Tags, snap.EventTriggerTags) {
+		ops := dropObject(&snapshot.SnapObject{Kind: snap.Kind, Opaque: snap})
+		createOps, err := createOpaque(o.Name, o.Body, "EVENT TRIGGER", "", pos)
+		if err != nil {
+			return nil, err
+		}
+		ops = append(ops, createOps...)
+		return appendCommentOp(ops, nil, "event_trigger", "", o.Name, "", "", o.Comment, pos)
+	}
+	if !ptrEq(o.Comment, snap.Comment) {
+		if sql := commentOnOpaqueSQL("event_trigger", "", o.Name, "", "", o.Comment); sql != "" {
+			return []pipeline.DiffOp{safeOp(sql, pos)}, nil
+		}
+	}
+	return nil, nil
 }
 
 // diffSubscription mirrors diffOpaqueIR's shape (offline body-hash compare,
@@ -2342,7 +2505,7 @@ func diffObject(desired pipeline.IRObject, snap *snapshot.SnapObject, fullSnap *
 		if snap.Opaque == nil {
 			return nil, nil
 		}
-		return diffOpaqueIR(o.Name, o.Body, o.Reconstructed, o.Comment, snap.Opaque, o.SrcPos)
+		return diffTablespace(o, snap.Opaque)
 	case *ir.ForeignDataWrapper:
 		if snap.Opaque == nil {
 			return nil, nil
@@ -2372,7 +2535,7 @@ func diffObject(desired pipeline.IRObject, snap *snapshot.SnapObject, fullSnap *
 		if snap.Opaque == nil {
 			return nil, nil
 		}
-		return diffOpaqueIR(o.Name, o.Body, o.Reconstructed, o.Comment, snap.Opaque, o.SrcPos)
+		return diffEventTrigger(o, snap.Opaque)
 	case *ir.Collation:
 		if snap.Opaque == nil {
 			return nil, nil
@@ -2397,7 +2560,7 @@ func diffObject(desired pipeline.IRObject, snap *snapshot.SnapObject, fullSnap *
 		if snap.Opaque == nil {
 			return nil, nil
 		}
-		return diffOpaqueIR(o.QualifiedName(), o.Body, o.Reconstructed, o.Comment, snap.Opaque, o.SrcPos)
+		return diffCast(o, snap.Opaque)
 	case *ir.StatisticsObject:
 		if snap.Opaque == nil {
 			return nil, nil

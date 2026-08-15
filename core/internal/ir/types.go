@@ -530,9 +530,15 @@ func (r *Role) irObject()               {}
 
 // Tablespace is a CREATE TABLESPACE declaration.
 type Tablespace struct {
-	Name    string
-	Body    string // raw Part1 text
-	Comment *string
+	Name string
+	// Location is RFC §14.7's structured diffing input: LOCATION cannot be
+	// changed after creation in real PostgreSQL, so a Location mismatch is
+	// what actually decides DROP+CREATE — previously only Body's opaque
+	// hash decided this, which (via Reconstructed, below) went silently
+	// unset on every live path, missing any live-catalog LOCATION change.
+	Location string
+	Body     string // raw Part1 text
+	Comment  *string
 	// Reconstructed marks a Body rebuilt from the live catalog by the
 	// introspector (as opposed to parsed from source). Reconstructed bodies are
 	// canonical but not byte-identical to hand-written source, so the snapshot
@@ -640,6 +646,15 @@ func (s *Subscription) irObject()               {}
 // EventTrigger is a CREATE EVENT TRIGGER declaration.
 type EventTrigger struct {
 	Name string
+	// Event/Tags are RFC §14.1's structured diffing inputs, alongside
+	// Function below: PostgreSQL has no ALTER EVENT TRIGGER for any of
+	// these three (only ENABLE/DISABLE/OWNER TO/RENAME TO, none modeled
+	// here), so any change to Event, Tags, or Function decides DROP+CREATE
+	// — previously only Body's opaque hash decided this, which (via
+	// Reconstructed, below) went silently unset on every live path,
+	// missing any live-catalog change to an event trigger's definition.
+	Event string
+	Tags  []string
 	// Function is the qualified name of the EXECUTE FUNCTION target, extracted
 	// separately from Body for the dependency graph — an event trigger created
 	// before the function it calls exists fails at apply time (confirmed
@@ -799,6 +814,21 @@ func (o *OperatorFamily) irObject()               {}
 type Cast struct {
 	SourceType TypeRef
 	TargetType TypeRef
+	// Method/Context are RFC §14.5's structured diffing inputs, alongside
+	// Function below: PostgreSQL provides no ALTER CAST at all, so any
+	// change to Method, Function, or Context decides DROP+CREATE —
+	// previously only Body's opaque hash decided this, which (via
+	// Reconstructed, below) went silently unset on every live path,
+	// missing any live-catalog change to a cast's definition. Values use
+	// the same single-letter catalog vocabulary as pg_cast.castmethod
+	// ("f" = WITH FUNCTION, "i" = WITH INOUT, "b" = WITHOUT FUNCTION/
+	// binary-coercible) and pg_cast.castcontext ("e" = no AS clause/
+	// explicit-only — PostgreSQL's grammar has no "AS EXPLICIT" — "a" =
+	// AS ASSIGNMENT, "i" = AS IMPLICIT), so both sides (source-parsed and
+	// introspected) always populate the same three-value vocabulary with
+	// no translation needed.
+	Method  string
+	Context string
 	// Function is the qualified name of the WITH FUNCTION target, extracted
 	// separately from Body for the dependency graph — empty for WITHOUT
 	// FUNCTION/WITH INOUT casts, which have no function to order against.

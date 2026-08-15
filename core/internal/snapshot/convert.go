@@ -113,7 +113,8 @@ func toSnapObject(obj pipeline.IRObject) *SnapObject {
 	// verify/plan --live (which involve a reconstruction) skip the comparison.
 	case *ir.Tablespace:
 		return &SnapObject{Kind: "tablespace", Opaque: &SnapOpaque{
-			Kind: "tablespace", Name: o.Name, BodyHash: sourceBodyHash(o.Body, o.Reconstructed), Comment: o.Comment,
+			Kind: "tablespace", Name: o.Name, TablespaceLocation: o.Location,
+			BodyHash: sourceBodyHash(o.Body, o.Reconstructed), Comment: o.Comment,
 		}}
 	case *ir.ForeignDataWrapper:
 		return &SnapObject{Kind: "fdw", Opaque: &SnapOpaque{
@@ -137,7 +138,9 @@ func toSnapObject(obj pipeline.IRObject) *SnapObject {
 		}}
 	case *ir.EventTrigger:
 		return &SnapObject{Kind: "event_trigger", Opaque: &SnapOpaque{
-			Kind: "event_trigger", Name: o.Name, BodyHash: sourceBodyHash(o.Body, o.Reconstructed), Comment: o.Comment,
+			Kind: "event_trigger", Name: o.Name,
+			EventTriggerEvent: o.Event, EventTriggerTags: o.Tags, EventTriggerFunction: o.Function,
+			BodyHash: sourceBodyHash(o.Body, o.Reconstructed), Comment: o.Comment,
 		}}
 	case *ir.Collation:
 		return &SnapObject{Kind: "collation", Opaque: &SnapOpaque{
@@ -160,10 +163,13 @@ func toSnapObject(obj pipeline.IRObject) *SnapObject {
 		}}
 	case *ir.Cast:
 		return &SnapObject{Kind: "cast", Opaque: &SnapOpaque{
-			Kind:     "cast",
-			Name:     o.SourceType.String() + "->" + o.TargetType.String(),
-			BodyHash: sourceBodyHash(o.Body, o.Reconstructed),
-			Comment:  o.Comment,
+			Kind:         "cast",
+			Name:         o.SourceType.String() + "->" + o.TargetType.String(),
+			CastMethod:   o.Method,
+			CastContext:  o.Context,
+			CastFunction: o.Function,
+			BodyHash:     sourceBodyHash(o.Body, o.Reconstructed),
+			Comment:      o.Comment,
 		}}
 	case *ir.StatisticsObject:
 		return &SnapObject{Kind: "statistics", Opaque: &SnapOpaque{
