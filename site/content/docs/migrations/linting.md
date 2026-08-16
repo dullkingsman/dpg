@@ -143,11 +143,63 @@ TABLE users ( created_at TIMESTAMPTZ NOT NULL DEFAULT now(), ... )
 
 ---
 
-## `warn-on-scalar-merge-conflict`
+## `serial-sequence-declared`
 
-**Severity:** Warning — **Config:** `warn_on_scalar_merge_conflict` — **Default:** enabled
+**Severity:** Warning — **Config:** always enabled
 
-Warns when the same scalar property (owner, comment, tablespace, etc.) is declared in multiple files for the same object. Last-declaration-wins applies (alphabetical by file path), but the conflict may indicate an unintentional discrepancy.
+Warns when a hand-declared `SEQUENCE` object's name collides with the name PostgreSQL auto-manages for a `GENERATED ... AS IDENTITY` column's sequence (`<table>_<column>_seq`) elsewhere in the same project.
+
+```sql
+TABLE t ( id integer GENERATED ALWAYS AS IDENTITY, ... );
+
+SEQUENCE t_id_seq;   -- triggers warning: collides with t's own identity sequence
+```
+
+```
+warn  [serial-sequence-declared] sequence public.t_id_seq has the same name PostgreSQL auto-manages for an identity column's sequence in this schema
+```
+
+Scoped to `GENERATED ... AS IDENTITY` columns only. `SERIAL`/`BIGSERIAL`/`SMALLSERIAL` are not covered — DPG does not model `SERIAL` as a distinct concept in the IR today, so there's no auto-sequence relationship to check it against.
+
+---
+
+## `unnecessary-revocation`
+
+**Severity:** Warning — **Config:** always enabled
+
+Warns when a `REVOCATIONS` entry names a (role, privilege) pair with no matching `GRANTS` entry for that same pair in the *same object's* declaration — usually a copy-paste or typo, since revoking a privilege that was never declared as granted is a no-op.
+
+```sql
+TABLE orders ( ... )
+{
+    GRANTS      { SELECT TO app_readonly; }
+    REVOCATIONS { DELETE FROM app_readonly; }   -- triggers warning: no GRANT of DELETE above
+}
+```
+
+```
+warn  [unnecessary-revocation] table public.orders: REVOCATION of DELETE from app_readonly has no matching GRANT in this declaration
+```
+
+This is scoped to a single object's own declaration, not full grant history — it won't catch a revocation targeting a privilege that was granted by a previous `apply` but isn't declared in the current source.
+
+---
+
+## `[linter.rules]` — per-rule severity overrides
+
+Individual rules can be set to `"error"`, `"warning"`, or `"off"`, overriding their own default level:
+
+```toml
+[linter.rules]
+security-definer-search-path = "error"
+deprecated                   = "off"
+```
+
+An `"off"` rule is suppressed entirely (no diagnostic emitted at all). An `"error"` override behaves like `--strict`, but scoped to just that rule.
+
+---
+
+**Not yet implemented:** RFC §19.1 also documents `deprecated_reference` (a non-deprecated object referencing a deprecated one) and `scalar_merge_conflict` (conflicting scalar values for the same property across multiple files — despite `warn_on_scalar_merge_conflict` existing as a `dpg.toml` field, it isn't read anywhere yet). Both need real new infrastructure before they're checkable — see `rfc/dpg-1.md` Appendix D.3 for the scoped explanation.
 
 ---
 

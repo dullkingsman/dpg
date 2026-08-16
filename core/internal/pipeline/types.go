@@ -313,6 +313,10 @@ type LinterConfig struct {
 	ForbidHardcodedPasswords  bool
 	MaxColumnsPerTable        int
 	WarnOnScalarMergeConflict bool
+	// Rules holds per-rule-ID severity overrides from [linter.rules]:
+	// "error", "warning", or "off". A rule ID absent from this map keeps
+	// its own default severity. Nil/empty is equivalent to no overrides.
+	Rules map[string]string
 }
 
 // Conn abstracts a database connection so the pipeline package does not import pgx.

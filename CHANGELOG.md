@@ -169,6 +169,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   filtered by `subdbid` (confirmed live — every other reliable-tier
   catalog here is already database-local, so nothing else in this codebase
   needed this filter before).
+- Two more built-in linter rules, closing part of the RFC-vs-code linter
+  rule-ID gap (see the rule-ID renames earlier in this file): `serial-sequence-declared`
+  warns when a hand-declared `SEQUENCE` collides with the name PostgreSQL
+  auto-manages for a `GENERATED ... AS IDENTITY` column's sequence
+  (`<table>_<column>_seq`) elsewhere in the same project — scoped to
+  `IDENTITY` only, since DPG has no distinct IR representation for `SERIAL`
+  at all today (a separate, pre-existing gap, not something this rule was
+  narrowed to avoid). `unnecessary-revocation` warns when a `REVOCATIONS`
+  entry names a (role, privilege) pair with no matching `GRANTS` entry in
+  the *same object's own declaration* — narrower than the RFC's literal
+  wording ("never granted... by DPG", which would need snapshot/grant-
+  history access the linter doesn't have), but still catches the common
+  real mistake (a copy-pasted or typo'd revocation with no corresponding
+  grant). The remaining two RFC-documented-but-unimplemented rules,
+  `deprecated_reference` and `scalar_merge_conflict`, need real new
+  infrastructure before either is checkable at all (a payload-carrying,
+  column-level-aware reference graph the topological-sort graph doesn't
+  provide; before/after comparison logic in the merger, which today does
+  blind unconditional last-file-wins overwrites with no comparison at all)
+  — scoped, not implemented, see `.dpg-notes/dpg-tracker.md`.
+- `[linter.rules]` per-rule severity overrides (RFC §19.2), previously
+  documented but entirely unimplemented: `dpg.toml`'s `[linter.rules]`
+  subtable maps a rule ID to `"error"`, `"warning"`, or `"off"`, applied
+  once inside the built-in linter so every caller (`plan`, `apply`,
+  `validate`, the `pkg/dpg` SDK) gets it uniformly rather than needing its
+  own promotion logic (unlike `--strict`'s existing per-command
+  `IsError = true` loops, which today only run at 2 of the linter's 5
+  call sites).
 
 ### Fixed
 
@@ -1030,11 +1058,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `require-column-comments` → `missing-column-comment`,
   `max-columns` → `column-count-exceeded`. Every other rule ID mismatch
   between the RFC and code (a real, pre-existing gap — see RFC Appendix
-  D.3 for the full corrected table) is left as-is; several RFC-documented
-  rules (`deprecated_reference`, `scalar_merge_conflict`,
-  `serial_sequence_declared`, `unnecessary_revocation`,
-  `stale_renamed_from`, `unguarded_enum_removal`) have no implementation
-  under any name and remain aspirational/roadmap entries only.
+  D.3 for the full corrected table) is left as-is. (Correction to this
+  entry, made later the same day: `stale_renamed_from` and
+  `unguarded_enum_removal`, initially believed to have no implementation
+  under any name, turned out to already be fully implemented and tested —
+  as hard `Differ.Diff` errors, DPG-E021/DPG-E014, not `Linter.Lint`
+  rules. `serial_sequence_declared` and `unnecessary_revocation` are now
+  implemented too, see below. Only `deprecated_reference` and
+  `scalar_merge_conflict` remain genuinely unimplemented.)
 - `LANGUAGE plpgsql` function/procedure body canonicalisation now also
   covers embedded expression fragments (conditions, assignment left- and
   right-hand sides, `RETURN` expressions, `RAISE` parameters, embedded SQL),

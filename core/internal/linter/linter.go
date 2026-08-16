@@ -28,8 +28,36 @@ func (l *BuiltinLinter) Lint(objects []pipeline.IRObject, cfg pipeline.LinterCon
 	for _, obj := range objects {
 		diags = append(diags, checkObject(obj, cfg)...)
 	}
+	diags = append(diags, checkCrossObjectRules(objects, cfg)...)
 
-	return diags, nil
+	return applyRuleSeverityOverrides(diags, cfg.Rules), nil
+}
+
+// applyRuleSeverityOverrides applies RFC §19.2's [linter.rules] per-rule
+// severity overrides ("error", "warning", or "off") to diags, matched by
+// d.Rule. A rule ID absent from rules is left at its own default severity.
+// This runs once here, inside the one function every external Lint caller
+// (plan/apply/validate/pkg/dpg) converges on, rather than being duplicated
+// at each call site — the same reasoning --strict's existing per-command
+// IsError-promotion loops don't apply to, since those only run at 2 of the
+// 5 call sites today.
+func applyRuleSeverityOverrides(diags []pipeline.LintDiagnostic, rules map[string]string) []pipeline.LintDiagnostic {
+	if len(rules) == 0 {
+		return diags
+	}
+	out := diags[:0]
+	for _, d := range diags {
+		switch strings.ToLower(rules[d.Rule]) {
+		case "off":
+			continue // drop entirely
+		case "error":
+			d.IsError = true
+		case "warning":
+			d.IsError = false
+		}
+		out = append(out, d)
+	}
+	return out
 }
 
 func checkObject(obj pipeline.IRObject, cfg pipeline.LinterConfig) []pipeline.LintDiagnostic {
@@ -40,6 +68,8 @@ func checkObject(obj pipeline.IRObject, cfg pipeline.LinterConfig) []pipeline.Li
 		diags = append(diags, checkTable(o, cfg)...)
 	case *ir.Function:
 		diags = append(diags, checkFunction(o, cfg)...)
+	case *ir.Procedure:
+		diags = append(diags, checkProcedure(o, cfg)...)
 	case *ir.View:
 		diags = append(diags, checkView(o, cfg)...)
 	case *ir.Role:
@@ -106,7 +136,11 @@ func checkTable(t *ir.Table, cfg pipeline.LinterConfig) []pipeline.LintDiagnosti
 				})
 			}
 		}
+		diags = append(diags, checkUnnecessaryRevocation(col.Grants, col.Revocations, col.SrcPos,
+			fmt.Sprintf("column %s.%s", t.QualifiedName(), col.Name))...)
 	}
+
+	diags = append(diags, checkUnnecessaryRevocation(t.Grants, t.Revocations, pos, "table "+t.QualifiedName())...)
 
 	return diags
 }
@@ -131,8 +165,15 @@ func checkFunction(f *ir.Function, cfg pipeline.LinterConfig) []pipeline.LintDia
 			Message: fmt.Sprintf("SECURITY DEFINER function %s should set search_path", f.QualifiedName()),
 		})
 	}
+	diags = append(diags, checkUnnecessaryRevocation(f.Grants, f.Revocations, f.SrcPos, "function "+f.QualifiedName())...)
 
 	return diags
+}
+
+// ── Procedure rules ──────────────────────────────────────────────────────────
+
+func checkProcedure(p *ir.Procedure, cfg pipeline.LinterConfig) []pipeline.LintDiagnostic {
+	return checkUnnecessaryRevocation(p.Grants, p.Revocations, p.SrcPos, "procedure "+p.QualifiedName())
 }
 
 // ── View rules ────────────────────────────────────────────────────────────────
@@ -147,6 +188,7 @@ func checkView(v *ir.View, cfg pipeline.LinterConfig) []pipeline.LintDiagnostic 
 			Message: fmt.Sprintf("view %s is deprecated: %s", v.QualifiedName(), *v.Deprecated),
 		})
 	}
+	diags = append(diags, checkUnnecessaryRevocation(v.Grants, v.Revocations, v.SrcPos, "view "+v.QualifiedName())...)
 
 	return diags
 }
@@ -219,7 +261,118 @@ func checkUserMapping(u *ir.UserMapping, cfg pipeline.LinterConfig) []pipeline.L
 	return diags
 }
 
+// ── Cross-object rules ───────────────────────────────────────────────────────
+
+// checkCrossObjectRules runs rules that need to see the whole desired
+// object set at once, not just one object in isolation.
+func checkCrossObjectRules(objects []pipeline.IRObject, cfg pipeline.LinterConfig) []pipeline.LintDiagnostic {
+	return checkSerialSequenceDeclared(objects)
+}
+
+// checkSerialSequenceDeclared implements RFC §19.1's serial_sequence_declared
+// rule, scoped to GENERATED ... AS IDENTITY columns only (see the rule's
+// entry in rfc/dpg-1.md Appendix D.3 for why SERIAL itself is out of
+// scope: DPG has no distinct IR representation for it at all today). Warns
+// when a hand-declared SEQUENCE's name collides with the name PostgreSQL
+// auto-generates for an identity column in the same desired state
+// ("<table>_<column>_seq", PostgreSQL's own naming convention for a
+// column's implicit sequence) — such a sequence is either redundant (it's
+// the identity column's own auto-managed sequence, which DPG and
+// PostgreSQL already handle without a separate declaration) or a genuine
+// naming collision PostgreSQL will reject at apply time; either way, it's
+// worth flagging before that happens.
+func checkSerialSequenceDeclared(objects []pipeline.IRObject) []pipeline.LintDiagnostic {
+	var diags []pipeline.LintDiagnostic
+
+	identityNames := make(map[string]bool) // "schema.name" of auto-managed sequences
+	for _, obj := range objects {
+		t, ok := obj.(*ir.Table)
+		if !ok {
+			continue
+		}
+		for _, col := range t.Columns {
+			if col.Identity != nil {
+				identityNames[t.Schema+"."+t.Name+"_"+col.Name+"_seq"] = true
+			}
+		}
+	}
+	if len(identityNames) == 0 {
+		return diags
+	}
+
+	for _, obj := range objects {
+		seq, ok := obj.(*ir.Sequence)
+		if !ok {
+			continue
+		}
+		if identityNames[seq.Schema+"."+seq.Name] {
+			diags = append(diags, pipeline.LintDiagnostic{
+				Pos:  seq.Pos(),
+				Rule: "serial-sequence-declared",
+				Message: fmt.Sprintf("sequence %s.%s has the same name PostgreSQL auto-manages for an identity column's sequence in this schema",
+					seq.Schema, seq.Name),
+			})
+		}
+	}
+
+	return diags
+}
+
 // ── helpers ───────────────────────────────────────────────────────────────────
+
+// checkUnnecessaryRevocation implements RFC §19.1's unnecessary_revocation
+// rule, scoped to a single object's own declaration (see rfc/dpg-1.md
+// Appendix D.3): warns when revocations names a (role, privilege) pair
+// with no matching entry in grants for that same object — catching a
+// revocation with no corresponding grant (a copy-paste or typo), not the
+// RFC's literal broader wording ("never granted... by DPG" — that would
+// need snapshot/grant-history access the linter doesn't have, see the RFC
+// note for why). A grant with nil Privileges means ALL, and covers every
+// revoked privilege for that role.
+func checkUnnecessaryRevocation(grants []ir.Grant, revocations []ir.Revocation, pos pipeline.SourcePos, objDesc string) []pipeline.LintDiagnostic {
+	if len(revocations) == 0 {
+		return nil
+	}
+
+	granted := make(map[string]map[string]bool) // role -> privilege ("ALL" or specific) -> true
+	for _, g := range grants {
+		for _, role := range g.Roles {
+			if granted[role] == nil {
+				granted[role] = make(map[string]bool)
+			}
+			if len(g.Privileges) == 0 {
+				granted[role]["ALL"] = true
+				continue
+			}
+			for _, priv := range g.Privileges {
+				granted[role][strings.ToUpper(priv)] = true
+			}
+		}
+	}
+
+	var diags []pipeline.LintDiagnostic
+	for _, rev := range revocations {
+		privs := rev.Privileges
+		if len(privs) == 0 {
+			privs = []string{"ALL"}
+		}
+		for _, role := range rev.Roles {
+			for _, priv := range privs {
+				p := strings.ToUpper(priv)
+				if granted[role]["ALL"] || granted[role][p] {
+					continue
+				}
+				diags = append(diags, pipeline.LintDiagnostic{
+					Pos:  rev.Pos,
+					Rule: "unnecessary-revocation",
+					Message: fmt.Sprintf("%s: REVOCATION of %s from %s has no matching GRANT in this declaration",
+						objDesc, priv, role),
+				})
+			}
+		}
+	}
+	return diags
+}
 
 var passwordColNames = []string{"password", "passwd", "pwd", "secret", "passphrase"}
 

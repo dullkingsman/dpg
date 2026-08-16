@@ -93,6 +93,12 @@ type LinterConfig struct {
 	ForbidHardcodedPasswords  bool `toml:"forbid_hardcoded_passwords"`
 	MaxColumnsPerTable        int  `toml:"max_columns_per_table"`
 	WarnOnScalarMergeConflict bool `toml:"warn_on_scalar_merge_conflict"`
+	// Rules holds per-rule-ID severity overrides from a [linter.rules]
+	// subtable (RFC §19.2), e.g. `security-definer-search-path = "error"`.
+	// Values are "error", "warning", or "off"; validated in cmd/dpg at the
+	// point a LinterConfig is turned into a pipeline.LinterConfig, not here
+	// (this package has no dependency on the actual set of rule IDs).
+	Rules map[string]string `toml:"rules"`
 }
 
 // SnapshotsConfig controls snapshot file locations.

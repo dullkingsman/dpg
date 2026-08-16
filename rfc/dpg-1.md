@@ -5866,6 +5866,8 @@ APP_SERVICE_PW="s3cr3t"
    | `missing-column-comment` | Column lacks a `COMMENT` when `require_column_comments = true`. Renamed from `require-column-comments` (§19.1 named this `missing_column_comment`; the actual code now matches that wording, kebab-cased). | Warning |
    | `column-count-exceeded` | Table exceeds `max_columns_per_table` columns. Renamed from `max-columns` (§19.1 named this `column_count_exceeded`; the actual code now matches that wording, kebab-cased). | Error |
    | `security-definer-search-path` | `SECURITY DEFINER` function body does not reference `search_path`. | Warning |
+   | `serial-sequence-declared` | A hand-declared `SEQUENCE` collides with the name PostgreSQL auto-manages for a `GENERATED ... AS IDENTITY` column's sequence (`<table>_<column>_seq`) in the same desired state. Renamed from §19.1's `serial_sequence_declared`; scoped to `IDENTITY` only — see the note below. | Warning |
+   | `unnecessary-revocation` | A `REVOCATIONS` entry names a (role, privilege) pair with no matching `GRANTS` entry in the *same object's own declaration*. Renamed from §19.1's `unnecessary_revocation`; narrower in scope than that entry's wording — see the note below. | Warning |
 
    **Implementation note on `hardcoded-password` vs. `hardcoded-role-password`:**
    the column rule checks a table column's `DEFAULT` expression: if the
@@ -5876,18 +5878,62 @@ APP_SERVICE_PW="s3cr3t"
    unrelated: it checks `ROLE ... PASSWORD` directly (a structured field,
    not a text-pattern match) for the absence of any `{{...}}` placeholder.
 
-   **Note (unimplemented rules):** `deprecated_reference`,
-   `scalar_merge_conflict`, `serial_sequence_declared`,
-   `unnecessary_revocation`, `stale_renamed_from`, `unguarded_enum_removal`,
-   and `protected_drop_attempt`, all listed in §19.1, are not implemented
-   as `Linter.Lint`-interface rules today. `protected_drop_attempt` (only)
-   is enforced as a compiler-phase diagnostic instead, emitted during
-   diffing (DPG-E022), not by the linter. The other six — including
-   `deprecated_reference` and the `[linter.rules]` per-rule override
-   mechanism described in §19.2 — have no implementation anywhere in the
-   codebase under any name; they remain documented in §19.1 for
-   conceptual completeness/as a roadmap, not as a description of current
-   behavior.
+   **Note on the remaining §19.1 rules' actual implementation status:**
+   three of them — `stale_renamed_from` (DPG-E021), `unguarded_enum_removal`
+   (DPG-E014), and `protected_drop_attempt` (DPG-E022) — are fully
+   implemented and tested, but not as `Linter.Lint`-interface rules: each
+   is a hard `error` returned directly from `Differ.Diff` during the
+   desired-vs-snapshot comparison (`internal/diff/differ.go`), which aborts
+   the plan/apply outright rather than surfacing as a downgradable
+   diagnostic. This is a real, deliberate architectural difference from
+   the built-in linter rules, not a gap: `stale_renamed_from` and
+   `unguarded_enum_removal` both fundamentally need a desired-vs-snapshot
+   comparison to detect what they detect (a stale rename target, a
+   removed enum value), which the differ already does every run and the
+   linter — see §19.1's own `Linter.Lint(objects []IRObject, cfg
+   LinterConfig)` signature — does not have access to at all today.
+   (A prior revision of this note incorrectly stated these two had no
+   implementation anywhere; corrected after re-reading `differ.go`
+   directly.)
+
+   Of the remaining three, `serial_sequence_declared` and
+   `unnecessary_revocation` are now implemented as real `Linter.Lint`
+   rules — see below for their exact, and in `unnecessary_revocation`'s
+   case deliberately narrowed, scope. `deprecated_reference` and
+   `scalar_merge_conflict` remain unimplemented under any name: both need
+   real new infrastructure before a lint check is even possible on top of
+   it (a payload-carrying reference graph with column-level tracking for
+   the former; before/after comparison logic in the merger, which
+   currently does blind unconditional last-file-wins overwrites with no
+   comparison at all, for the latter) — see `.dpg-notes/dpg-tracker.md`
+   for the scoped plan for each.
+
+   **`serial_sequence_declared`:** scoped to `GENERATED ... AS IDENTITY`
+   columns only, using the existing `ir.Column.Identity` field — warns
+   when a hand-declared `SEQUENCE` object's name collides with the
+   auto-managed sequence name PostgreSQL generates for an identity column
+   in the same desired state (`<table>_<column>_seq`). `SERIAL`/
+   `BIGSERIAL`/`SMALLSERIAL` columns are deliberately out of scope: DPG
+   does not model `SERIAL` as a distinct concept anywhere in the IR today
+   (a column declared `SERIAL` passes through as a literal type named
+   `"serial"`, with no auto-sequence relationship recorded at all) — a
+   separate, pre-existing gap, not something this rule's scope was
+   narrowed to avoid fixing incidentally.
+
+   **`unnecessary_revocation`:** scoped to a single object's own
+   declaration — warns when a `REVOCATIONS` entry names a
+   (role, privilege) pair with no matching `GRANTS` entry for that same
+   pair in the *same* object's declaration. This is narrower than this
+   section's literal wording ("a role that was never granted the
+   privilege by DPG"), which would require snapshot/grant-history access
+   the linter does not have (see above) — the within-object scope still
+   catches the common real mistake (a copy-pasted or typo'd revocation
+   with no corresponding grant) without requiring an interface change.
+
+   The `[linter.rules]` per-rule severity-override mechanism described in
+   §19.2 is now implemented, following the existing `--strict` promotion
+   pattern (`LintDiagnostic.IsError`) for `"error"`, and a post-filter
+   step for `"off"`.
 
 ---
 

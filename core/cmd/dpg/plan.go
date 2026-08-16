@@ -46,6 +46,7 @@ func linterConfigFrom(c config.LinterConfig) pipeline.LinterConfig {
 		ForbidHardcodedPasswords:  c.ForbidHardcodedPasswords,
 		MaxColumnsPerTable:        c.MaxColumnsPerTable,
 		WarnOnScalarMergeConflict: c.WarnOnScalarMergeConflict,
+		Rules:                     c.Rules,
 	}
 }
 

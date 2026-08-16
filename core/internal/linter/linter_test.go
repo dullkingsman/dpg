@@ -305,6 +305,173 @@ func TestLintSecurityDefiner(t *testing.T) {
 	}
 }
 
+func TestLintSerialSequenceDeclared(t *testing.T) {
+	l := New()
+	trueVal := true
+	objects := []pipeline.IRObject{
+		&ir.Table{Schema: "public", Name: "users", Columns: []*ir.Column{
+			{Name: "id", Type: ir.TypeRef{Name: "integer"}, Identity: &ir.Identity{Always: trueVal}},
+		}},
+		&ir.Sequence{Schema: "public", Name: "users_id_seq"},
+	}
+	diags, err := l.Lint(objects, pipeline.LinterConfig{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, d := range diags {
+		if d.Rule == "serial-sequence-declared" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("expected serial-sequence-declared warning")
+	}
+}
+
+func TestLintSerialSequenceDeclaredNoCollisionOK(t *testing.T) {
+	l := New()
+	objects := []pipeline.IRObject{
+		&ir.Table{Schema: "public", Name: "users", Columns: []*ir.Column{
+			{Name: "id", Type: ir.TypeRef{Name: "integer"}},
+		}},
+		&ir.Sequence{Schema: "public", Name: "invoice_numbers"},
+	}
+	diags, err := l.Lint(objects, pipeline.LinterConfig{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, d := range diags {
+		if d.Rule == "serial-sequence-declared" {
+			t.Errorf("did not expect serial-sequence-declared warning, got: %s", d.Message)
+		}
+	}
+}
+
+func TestLintUnnecessaryRevocation(t *testing.T) {
+	l := New()
+	objects := []pipeline.IRObject{
+		&ir.Table{
+			Schema: "public", Name: "orders",
+			Grants:      []ir.Grant{{Privileges: []string{"SELECT"}, Roles: []string{"app_readonly"}}},
+			Revocations: []ir.Revocation{{Privileges: []string{"DELETE"}, Roles: []string{"app_readonly"}}},
+		},
+	}
+	diags, err := l.Lint(objects, pipeline.LinterConfig{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, d := range diags {
+		if d.Rule == "unnecessary-revocation" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("expected unnecessary-revocation warning")
+	}
+}
+
+func TestLintUnnecessaryRevocationMatchingGrantOK(t *testing.T) {
+	l := New()
+	objects := []pipeline.IRObject{
+		&ir.Table{
+			Schema: "public", Name: "orders",
+			Grants:      []ir.Grant{{Privileges: []string{"SELECT", "DELETE"}, Roles: []string{"app_readonly"}}},
+			Revocations: []ir.Revocation{{Privileges: []string{"DELETE"}, Roles: []string{"app_readonly"}}},
+		},
+	}
+	diags, err := l.Lint(objects, pipeline.LinterConfig{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, d := range diags {
+		if d.Rule == "unnecessary-revocation" {
+			t.Errorf("did not expect unnecessary-revocation warning, got: %s", d.Message)
+		}
+	}
+}
+
+func TestLintUnnecessaryRevocationAllPrivilegeGrantOK(t *testing.T) {
+	l := New()
+	objects := []pipeline.IRObject{
+		&ir.Table{
+			Schema: "public", Name: "orders",
+			Grants:      []ir.Grant{{Roles: []string{"app_readonly"}}}, // nil Privileges = ALL
+			Revocations: []ir.Revocation{{Privileges: []string{"DELETE"}, Roles: []string{"app_readonly"}}},
+		},
+	}
+	diags, err := l.Lint(objects, pipeline.LinterConfig{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, d := range diags {
+		if d.Rule == "unnecessary-revocation" {
+			t.Errorf("did not expect unnecessary-revocation warning for a role granted ALL, got: %s", d.Message)
+		}
+	}
+}
+
+func TestLintRuleSeverityOverrideError(t *testing.T) {
+	l := New()
+	reason := "use accounts instead"
+	objects := []pipeline.IRObject{
+		&ir.Table{Schema: "public", Name: "users", Deprecated: &reason},
+	}
+	diags, err := l.Lint(objects, pipeline.LinterConfig{
+		WarnOnDeprecated: true,
+		Rules:            map[string]string{"deprecated": "error"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(diags) == 0 {
+		t.Fatal("expected a deprecated diagnostic")
+	}
+	if !diags[0].IsError {
+		t.Error("expected [linter.rules] override to promote deprecated to an error")
+	}
+}
+
+func TestLintRuleSeverityOverrideOff(t *testing.T) {
+	l := New()
+	reason := "use accounts instead"
+	objects := []pipeline.IRObject{
+		&ir.Table{Schema: "public", Name: "users", Deprecated: &reason},
+	}
+	diags, err := l.Lint(objects, pipeline.LinterConfig{
+		WarnOnDeprecated: true,
+		Rules:            map[string]string{"deprecated": "off"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(diags) != 0 {
+		t.Errorf("expected [linter.rules] \"off\" to suppress the diagnostic entirely, got %d", len(diags))
+	}
+}
+
+func TestLintRuleSeverityOverrideUnrelatedRuleUnaffected(t *testing.T) {
+	l := New()
+	cols := make([]*ir.Column, 5)
+	for i := range cols {
+		cols[i] = &ir.Column{Name: "c", Type: ir.TypeRef{Name: "text"}}
+	}
+	objects := []pipeline.IRObject{
+		&ir.Table{Schema: "public", Name: "wide", Columns: cols},
+	}
+	diags, err := l.Lint(objects, pipeline.LinterConfig{
+		MaxColumnsPerTable: 3,
+		Rules:              map[string]string{"deprecated": "off"}, // unrelated rule
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(diags) == 0 || diags[0].Rule != "column-count-exceeded" || !diags[0].IsError {
+		t.Errorf("expected column-count-exceeded to be unaffected by an override for a different rule, got %+v", diags)
+	}
+}
+
 func TestLintRegistration(t *testing.T) {
 	l, ok := pipeline.Resolve[pipeline.Linter](pipeline.Default, pipeline.KeyLinter)
 	if !ok {
