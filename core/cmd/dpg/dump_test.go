@@ -8,11 +8,13 @@ import (
 	"testing"
 
 	"github.com/dullkingsman/dpg/internal/compiler"
+	"github.com/dullkingsman/dpg/internal/config"
 	"github.com/dullkingsman/dpg/internal/diff"
 	"github.com/dullkingsman/dpg/internal/format"
 	"github.com/dullkingsman/dpg/internal/ir"
 	"github.com/dullkingsman/dpg/internal/pipeline"
 	"github.com/dullkingsman/dpg/internal/project"
+	"github.com/dullkingsman/dpg/internal/snapshot"
 )
 
 // TestRenderColumnSerialCompiles proves a column with Serial set renders the
@@ -2291,5 +2293,80 @@ func TestRenderExcludeConstraintRoundtrip(t *testing.T) {
 	sql := ops[0].SQL()
 	if !strings.Contains(sql, `CONSTRAINT "no_overlap" EXCLUDE USING gist ("room" WITH =, "during" WITH &&) WHERE (room > 0)`) {
 		t.Errorf("expected the real EXCLUDE body to survive render+recompile, got: %s", sql)
+	}
+}
+
+// ── dumpClusterTargets (dpg dump -o sandboxing) ─────────────────────────────
+
+// TestDumpClusterTargetsNoOutputDirUsesRealLocations proves that without -o,
+// dumpClusterTargets returns exactly the real, permanent project locations
+// unchanged — a pure regression guard that the fix below doesn't alter the
+// default (no -o) behavior at all.
+func TestDumpClusterTargetsNoOutputDirUsesRealLocations(t *testing.T) {
+	realStore := &snapshot.FileStore{Dir: "/real/project/.dpg/snapshots"}
+	cl := &project.Cluster{ObjectsDir: "/real/project/cluster1/cluster"}
+
+	clusterOut, dumpStore := dumpClusterTargets(cl, realStore, "")
+
+	if clusterOut != cl.ObjectsDir {
+		t.Errorf("clusterOut without -o: got %q, want cl.ObjectsDir %q", clusterOut, cl.ObjectsDir)
+	}
+	if dumpStore != pipeline.SnapshotStore(realStore) {
+		t.Error("dumpStore without -o: expected the exact same store instance passed in, got a different one")
+	}
+}
+
+// TestDumpClusterTargetsWithOutputDirSandboxes proves that with -o set,
+// dumpClusterTargets redirects BOTH cluster-scoped output and the snapshot
+// under outputDir instead of the real project — this is the actual fix:
+// previously dump.go always used cl.ObjectsDir and the registered store
+// unconditionally, regardless of -o.
+func TestDumpClusterTargetsWithOutputDirSandboxes(t *testing.T) {
+	realStore := &snapshot.FileStore{Dir: "/real/project/.dpg/snapshots"}
+	cl := &project.Cluster{
+		Config:     config.ClusterConfig{Cluster: config.ClusterDef{Name: "cluster1"}},
+		ObjectsDir: "/real/project/cluster1/cluster",
+	}
+
+	clusterOut, dumpStore := dumpClusterTargets(cl, realStore, "/scratch/out")
+
+	wantClusterOut := filepath.Join("/scratch/out", "cluster1", "cluster")
+	if clusterOut != wantClusterOut {
+		t.Errorf("clusterOut with -o: got %q, want %q", clusterOut, wantClusterOut)
+	}
+	if clusterOut == cl.ObjectsDir {
+		t.Error("clusterOut with -o must never equal the real project's cl.ObjectsDir")
+	}
+
+	fs, ok := dumpStore.(*snapshot.FileStore)
+	if !ok {
+		t.Fatalf("dumpStore with -o: expected *snapshot.FileStore, got %T", dumpStore)
+	}
+	wantStoreDir := filepath.Join("/scratch/out", ".dpg", "snapshots")
+	if fs.Dir != wantStoreDir {
+		t.Errorf("dumpStore.Dir with -o: got %q, want %q", fs.Dir, wantStoreDir)
+	}
+	if fs.Dir == realStore.Dir {
+		t.Error("dumpStore with -o must never write to the real project's snapshot store directory")
+	}
+}
+
+// TestDumpClusterTargetsMultipleClustersNamespaced proves two different
+// clusters sharing the same -o value get distinct clusterOut paths (each
+// namespaced by cluster name) — otherwise a single dump invocation spanning
+// multiple clusters would silently mix their roles.dpg content together,
+// a regression this fix must not introduce relative to the pre-fix
+// behavior (which always wrote each cluster to its own distinct real
+// ObjectsDir and never had this collision risk at all).
+func TestDumpClusterTargetsMultipleClustersNamespaced(t *testing.T) {
+	store := &snapshot.FileStore{Dir: "/real/.dpg/snapshots"}
+	cl1 := &project.Cluster{Config: config.ClusterConfig{Cluster: config.ClusterDef{Name: "cluster1"}}}
+	cl2 := &project.Cluster{Config: config.ClusterConfig{Cluster: config.ClusterDef{Name: "cluster2"}}}
+
+	out1, _ := dumpClusterTargets(cl1, store, "/scratch/out")
+	out2, _ := dumpClusterTargets(cl2, store, "/scratch/out")
+
+	if out1 == out2 {
+		t.Errorf("two different clusters sharing one -o value must not resolve to the same clusterOut, both got %q", out1)
 	}
 }

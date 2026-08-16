@@ -169,7 +169,7 @@ proper DPG declarations.`,
 	}
 	cmd.Flags().String("cluster", "", "cluster to dump (required when multiple clusters exist)")
 	cmd.Flags().String("database", "", "database to dump (required when multiple databases exist)")
-	cmd.Flags().StringP("output", "o", "", "output directory (default: cluster/database/ within project root)")
+	cmd.Flags().StringP("output", "o", "", "output directory (default: cluster/database/ within project root); when set, sandboxes ALL output here, including cluster-level roles.dpg and the snapshot, not just per-database source")
 	return cmd
 }
 

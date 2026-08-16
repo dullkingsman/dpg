@@ -1173,6 +1173,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   recompiling and reapplying that dumped source failed outright. Fixed by
   rendering the literal `SERIAL`-family keyword instead, the same
   treatment identity-backed sequences already received.
+- **`dpg dump -o <dir>` silently wrote cluster-scoped `roles.dpg` and the
+  snapshot to the real project regardless of `-o`.** `-o` only ever
+  redirected the per-database schema/`objects.dpg` files; `roles.dpg`
+  always went to the cluster's real `ObjectsDir`, and the snapshot always
+  went through the registered (real-project) `SnapshotStore`, both
+  unconditionally — confirmed live against a real demo project
+  (byte-identical `roles.dpg`/snapshot files, unchanged mtimes, before and
+  after an `-o`-scoped dump). Fixed via a new `dumpClusterTargets` helper:
+  with `-o` set, `roles.dpg` now writes to
+  `<outDir>/<cluster-name>/cluster/roles.dpg` (namespaced by cluster name
+  so one `-o` value spanning multiple clusters in a single invocation
+  can't mix their roles together) and the snapshot to
+  `<outDir>/.dpg/snapshots/`, mirroring the real project's own layout;
+  without `-o`, both keep writing to their real, permanent locations
+  exactly as before. New live Docker integration test
+  (`TestDumpDashOSandboxesClusterOutput`) applies a real `ROLE` and proves
+  the real project's cluster `ObjectsDir` is never even created by a
+  sandboxed dump.
 
 ### Changed
 

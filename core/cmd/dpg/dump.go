@@ -75,12 +75,14 @@ Use this to bootstrap a DPG project from an existing database.`,
 					fmtOpts.KeywordCase = "upper"
 				}
 
+				clusterOut, dumpStore := dumpClusterTargets(cl, store, outputDir)
+
 				for _, db := range databases {
 					out := outputDir
 					if out == "" {
 						out = filepath.Join(proj.RootDir, cl.Name(), db.Name())
 					}
-					if err := runDump(cl, db, out, introspector, store, secretResolver, fmtOpts); err != nil {
+					if err := runDump(cl, db, out, clusterOut, introspector, dumpStore, secretResolver, fmtOpts); err != nil {
 						return fmt.Errorf("%s/%s: %w", cl.Name(), db.Name(), err)
 					}
 				}
@@ -91,15 +93,35 @@ Use this to bootstrap a DPG project from an existing database.`,
 
 	cmd.Flags().StringVar(&clusterName, "cluster", "", "cluster to dump (required when multiple clusters exist)")
 	cmd.Flags().StringVar(&databaseName, "database", "", "database to dump (required when multiple databases exist)")
-	cmd.Flags().StringVarP(&outputDir, "output", "o", "", "output directory (default: cluster/database/ within project root)")
+	cmd.Flags().StringVarP(&outputDir, "output", "o", "", "output directory (default: cluster/database/ within project root); when set, sandboxes ALL output here, including cluster-level roles.dpg and the snapshot, not just per-database source")
 
 	return cmd
+}
+
+// dumpClusterTargets decides where cluster-scoped output (roles.dpg) and the
+// snapshot for a dump of cluster cl should land this invocation. Without -o
+// (outputDir == ""), both keep writing to their real, permanent project
+// locations exactly as before -o existed: cl.ObjectsDir and the registered
+// store. With -o set, sandbox EVERYTHING dump writes there — cluster-scoped
+// roles.dpg and the snapshot otherwise always land in the real project
+// regardless of -o (confirmed real, not a bug — was flagged, now fixed).
+// Namespaced by cluster name under outputDir so a single -o value covering
+// multiple clusters in one invocation doesn't mix their roles.dpg together
+// (each cluster's own roles stay distinct output, just no longer
+// real-project output).
+func dumpClusterTargets(cl *project.Cluster, store pipeline.SnapshotStore, outputDir string) (clusterOut string, dumpStore pipeline.SnapshotStore) {
+	if outputDir == "" {
+		return cl.ObjectsDir, store
+	}
+	return filepath.Join(outputDir, cl.Name(), "cluster"),
+		&snapshot.FileStore{Dir: filepath.Join(outputDir, ".dpg", "snapshots")}
 }
 
 func runDump(
 	cl *project.Cluster,
 	db *project.Database,
 	outDir string,
+	clusterObjectsDir string,
 	introspector pipeline.Introspector,
 	store pipeline.SnapshotStore,
 	secretResolver pipeline.SecretResolver,
@@ -191,13 +213,16 @@ func runDump(
 		ui.PrintInfo(os.Stdout, "wrote", path, color)
 	}
 
-	// Write cluster-level objects (roles, tablespaces) to the cluster objects dir.
+	// Write cluster-level objects (roles, tablespaces) to the cluster objects
+	// dir — clusterObjectsDir, NOT necessarily cl.ObjectsDir: when -o is set,
+	// the caller passes a sandboxed path under outDir instead, so a scratch
+	// dump never touches the real project's cluster/roles.dpg (see newDumpCmd).
 	var clusterDPGFiles []string
 	if clusterFile.Len() > 0 {
-		if err := os.MkdirAll(cl.ObjectsDir, 0o755); err != nil {
+		if err := os.MkdirAll(clusterObjectsDir, 0o755); err != nil {
 			return fmt.Errorf("create cluster objects directory: %w", err)
 		}
-		path := filepath.Join(cl.ObjectsDir, "roles.dpg")
+		path := filepath.Join(clusterObjectsDir, "roles.dpg")
 		if err := os.WriteFile(path, []byte(clusterFile.String()), 0o644); err != nil {
 			return err
 		}
@@ -233,7 +258,7 @@ func runDump(
 	if len(clusterObjects) > 0 {
 		clusterSnapObjects := clusterObjects
 		if len(clusterDPGFiles) > 0 {
-			if compiled, _, compileErr := compiler.Compile(clusterDPGFiles, cl.ObjectsDir, pipeline.Default); compileErr == nil {
+			if compiled, _, compileErr := compiler.Compile(clusterDPGFiles, clusterObjectsDir, pipeline.Default); compileErr == nil {
 				clusterSnapObjects = compiled
 			} else {
 				fmt.Fprintf(os.Stderr, "%s  dumped cluster source did not recompile for %s; snapshot built from live catalog instead: %v\n",

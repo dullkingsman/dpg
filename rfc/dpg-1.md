@@ -4450,10 +4450,30 @@ Options:
   --database <name>   REQUIRED. The database to introspect.
   --output / -o <dir> Output directory for .dpg files
                       (default: <cluster>/<database>/ within project root).
+                      When set, sandboxes ALL output under this directory —
+                      including cluster-level roles.dpg and the snapshot,
+                      not just the per-database source files — so a dump
+                      run this way never touches the real project.
 ```
 
    Note: existing files are never overwritten; re-running `dpg dump`
    on a directory that already contains `.dpg` files is safe.
+
+   `--output`/`-o` sandboxing detail: without `-o`, cluster-scoped output
+   (`roles.dpg`) and the snapshot are written to their real, permanent
+   project locations — the cluster's own objects directory and the
+   registered snapshot store — exactly as if `dpg dump` were run with no
+   flags at all. With `-o <dir>` set, both are redirected under `<dir>`
+   instead: `roles.dpg` to `<dir>/<cluster-name>/cluster/roles.dpg`
+   (namespaced by cluster name so a single `-o` value spanning multiple
+   clusters in one invocation cannot mix their roles together), and the
+   snapshot to `<dir>/.dpg/snapshots/`, mirroring the real project's own
+   layout convention. Earlier versions of `dpg dump` only ever redirected
+   the per-database schema/`objects.dpg` files — `roles.dpg` and the
+   snapshot silently ignored `-o` and always wrote to the real project
+   regardless, a real, confirmed bug (not the intended behavior of `-o`,
+   whose whole purpose is to let a dump be inspected without touching the
+   real project) — fixed.
 
    The dump output is a best-effort conversion.  Objects whose DDL
    cannot be cleanly reconstructed from catalog information are emitted

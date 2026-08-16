@@ -29,7 +29,7 @@ dpg dump [flags]
       --cluster string    cluster to dump (required when multiple clusters exist)
       --database string   database to dump (required when multiple databases exist)
   -h, --help              help for dump
-  -o, --output string     output directory (default: cluster/database/ within project root)
+  -o, --output string     output directory (default: cluster/database/ within project root); when set, sandboxes ALL output here, including cluster-level roles.dpg and the snapshot, not just per-database source
 ```
 
 ### Options inherited from parent commands
