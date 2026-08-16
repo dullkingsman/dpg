@@ -159,6 +159,15 @@ type RawObject struct {
 	Part1 string
 	// Part2 is the raw text of the trailing { } block, or "" if absent.
 	Part2 string
+	// HasPart2 disambiguates Part2's "" from an explicit, genuinely empty
+	// "{ }" block in source — Part2 alone can't tell the two apart, since a
+	// "{ }" with no content between the braces also reads as "". Consumers
+	// that only care about the block's content can ignore this and keep
+	// treating Part2 == "" as "nothing to do here" (an empty block and no
+	// block are equivalent for parsing/diffing purposes); it exists for
+	// internal/format's dpg fmt, which must round-trip an explicit "{ }" as
+	// "{ }" rather than collapsing it to a bare ";".
+	HasPart2 bool
 	// Schema is the enclosing schema name when this declaration was found inside
 	// a SCHEMA { } block. Empty for top-level declarations.
 	Schema string

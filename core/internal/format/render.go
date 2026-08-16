@@ -66,7 +66,7 @@ func renderOpaque(b *strings.Builder, n *OpaqueNode, opts Options, ind string) {
 		}
 	}
 	b.WriteString(rekeyword(n.RawPart1, opts))
-	if n.RawPart2 != "" {
+	if n.HasPart2 {
 		b.WriteString(" {")
 		b.WriteString(sortBlock(n.RawPart2))
 		b.WriteString("}")
@@ -118,7 +118,7 @@ func renderTable(b *strings.Builder, n *TableNode, opts Options, ind string) {
 	b.WriteByte('\n')
 	b.WriteString(ind)
 	b.WriteByte(')')
-	if n.RawPart2 != "" {
+	if n.HasPart2 {
 		b.WriteString(" {")
 		b.WriteString(sortBlock(n.RawPart2))
 		b.WriteString("}")

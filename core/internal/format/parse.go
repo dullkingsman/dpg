@@ -286,6 +286,7 @@ func (p *parser) buildNode(raw pipeline.RawObject, leading []string) ObjectNode 
 			KindKeyword: kindKeyword(raw.Kind),
 			RawPart1:    raw.Part1,
 			RawPart2:    raw.Part2,
+			HasPart2:    raw.HasPart2,
 		}
 	}
 }
@@ -299,6 +300,7 @@ func (p *parser) buildTableNode(raw pipeline.RawObject, leading []string) Object
 			KindKeyword: kindKeyword(raw.Kind),
 			RawPart1:    raw.Part1,
 			RawPart2:    raw.Part2,
+			HasPart2:    raw.HasPart2,
 		}
 	}
 
@@ -308,6 +310,7 @@ func (p *parser) buildTableNode(raw pipeline.RawObject, leading []string) Object
 		Name:     extractTableName(raw.Part1),
 		Columns:  columns,
 		RawPart2: raw.Part2,
+		HasPart2: raw.HasPart2,
 	}
 }
 

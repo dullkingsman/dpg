@@ -408,8 +408,17 @@ func (s *state) readBraceBlock() (string, error) {
 }
 
 // readFunctionPart1 reads a FUNCTION or PROCEDURE Part 1, which includes the
-// full PG SQL signature and the dollar-quoted body, ending at (and including)
-// the "$$;" or "$tag$;" sequence that terminates the definition.
+// full PG SQL signature and the dollar-quoted body, ending at (but not
+// including) the closing "$$" or "$tag$" that terminates the body. Unlike
+// the generic readRawUntil("{;") path used by every other kind, this can't
+// stop at the first ';'/'{' it sees, since either may appear literally
+// inside the dollar-quoted body — but it must otherwise behave the same way
+// those kinds do: it does NOT consume a following ';', leaving that to
+// scanBody's shared "consume a terminating ';' if present" logic. A prior
+// version consumed the ';' here and returned it as part of Part1 itself,
+// which double-terminated on re-format: the renderer always appends its own
+// ';' when Part2 is empty, so a Part1 that already ended in ';' rendered as
+// ";;", worsening by one extra ';' every time `dpg fmt` ran.
 func (s *state) readFunctionPart1() (string, error) {
 	start := s.pos
 	for !s.eof() {
@@ -419,11 +428,6 @@ func (s *state) readFunctionPart1() (string, error) {
 			if tag, ok := s.peekDollarTag(); ok {
 				if err := s.skipDollarQuoted(tag); err != nil {
 					return "", err
-				}
-				// After the closing tag, a ';' must follow (RFC §3.4).
-				s.skipWS()
-				if s.peek() == ';' {
-					s.advance()
 				}
 				return strings.TrimSpace(string(s.src[start:s.pos])), nil
 			}
@@ -453,14 +457,18 @@ func (s *state) readFunctionPart1() (string, error) {
 
 // readOptionalPart2 reads the optional trailing { } block that follows a Part 1.
 // If the next non-whitespace character is '{', it is consumed and the block
-// content is returned. Otherwise "" is returned without advancing.
-func (s *state) readOptionalPart2() (string, error) {
+// content is returned along with has=true — even when the block is
+// genuinely empty ("{ }"), which reads as content "" but is still a block
+// that was present, distinct from no block at all. Otherwise "", false is
+// returned without advancing.
+func (s *state) readOptionalPart2() (text string, has bool, err error) {
 	s.skipWS()
 	if s.peek() != '{' {
-		return "", nil
+		return "", false, nil
 	}
 	s.advance() // consume '{'
-	return s.readBraceBlock()
+	text, err = s.readBraceBlock()
+	return text, true, err
 }
 
 // ── kind detection ────────────────────────────────────────────────────────────
@@ -788,7 +796,7 @@ func (s *state) scanBody(schemaName string, stopAtBrace bool) ([]pipeline.RawObj
 		if s.peek() == ';' {
 			s.advance()
 		}
-		part2, err := s.readOptionalPart2()
+		part2, hasPart2, err := s.readOptionalPart2()
 		if err != nil {
 			return nil, "", err
 		}
@@ -799,11 +807,12 @@ func (s *state) scanBody(schemaName string, stopAtBrace bool) ([]pipeline.RawObj
 		}
 
 		objects = append(objects, pipeline.RawObject{
-			Kind:   kind,
-			Part1:  part1,
-			Part2:  part2,
-			Schema: schemaName,
-			Pos:    declPos,
+			Kind:     kind,
+			Part1:    part1,
+			Part2:    part2,
+			HasPart2: hasPart2,
+			Schema:   schemaName,
+			Pos:      declPos,
 		})
 	}
 

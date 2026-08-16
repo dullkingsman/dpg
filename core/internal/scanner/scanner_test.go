@@ -101,6 +101,22 @@ func TestTableWithBlock(t *testing.T) {
 	assertPart2Contains(t, obj, "app_readonly")
 }
 
+// TestTableExplicitEmptyBlockSetsHasPart2 is TABLE's sibling of
+// TestFunctionExplicitEmptyBlockSetsHasPart2 — TABLE's Part1 is read via a
+// different scanner path (readRawUntil, not readFunctionPart1) but shares
+// the same scanBody-level readOptionalPart2 call, so it must behave
+// identically: an explicit empty "{ }" sets HasPart2 even though Part2's
+// content is "".
+func TestTableExplicitEmptyBlockSetsHasPart2(t *testing.T) {
+	src := `TABLE t (id integer) {}`
+	obj := assertOne(t, scan(t, src))
+	assertKind(t, obj, pipeline.KindTable)
+	assertPart2Empty(t, obj)
+	if !obj.HasPart2 {
+		t.Error("expected HasPart2 == true for an explicit, empty '{ }' block")
+	}
+}
+
 func TestTableWithStorageOptions(t *testing.T) {
 	src := `TABLE large_events (
     id      BIGINT GENERATED ALWAYS AS IDENTITY,
@@ -216,6 +232,41 @@ $func$;`
 	assertKind(t, obj, pipeline.KindFunction)
 	assertPart1Contains(t, obj, "$func$")
 	assertPart1Contains(t, obj, "RETURN '$'")
+}
+
+// TestFunctionPart1ExcludesTrailingSemicolon is a regression guard for the
+// `dpg fmt` double-";;" bug: readFunctionPart1 used to consume a trailing
+// ';' and include it in the returned Part1 string, unlike every other kind's
+// readPart1 path (which strips ';' separately in scanBody and never bakes it
+// into Part1). Since format/render.go always appends its own ';' when no
+// "{ }" block follows, a Part1 that already ended in ';' rendered as ";;" —
+// and worsened by one extra ';' on every subsequent `dpg fmt` run, since the
+// same double-consumption happened again on the reformatted output.
+func TestFunctionPart1ExcludesTrailingSemicolon(t *testing.T) {
+	src := `FUNCTION f() RETURNS integer LANGUAGE sql AS $$SELECT 1$$;`
+	obj := assertOne(t, scan(t, src))
+	assertKind(t, obj, pipeline.KindFunction)
+	if strings.HasSuffix(strings.TrimSpace(obj.Part1), ";") {
+		t.Errorf("Part1 must not include the trailing ';': %q", obj.Part1)
+	}
+	if obj.HasPart2 {
+		t.Errorf("expected HasPart2 == false for a bare ';'-terminated function, got true")
+	}
+}
+
+// TestFunctionExplicitEmptyBlockSetsHasPart2 guards the second half of the
+// same fix: an explicit, genuinely empty "{ }" block reads as Part2 == ""
+// (identical to no block at all), so HasPart2 is the only signal that lets
+// the formatter round-trip "{ }" as "{ }" instead of collapsing it to a bare
+// ';'.
+func TestFunctionExplicitEmptyBlockSetsHasPart2(t *testing.T) {
+	src := `FUNCTION f() RETURNS integer LANGUAGE sql AS $$SELECT 1$$ {}`
+	obj := assertOne(t, scan(t, src))
+	assertKind(t, obj, pipeline.KindFunction)
+	assertPart2Empty(t, obj)
+	if !obj.HasPart2 {
+		t.Error("expected HasPart2 == true for an explicit, empty '{ }' block")
+	}
 }
 
 func TestProcedure(t *testing.T) {

@@ -35,8 +35,16 @@ type OpaqueNode struct {
 	// RawPart1 is the declaration text up to (but not including) the { block,
 	// with the kind keyword already stripped.
 	RawPart1 string
-	// RawPart2 is the { } block text including braces, or "" when absent.
+	// RawPart2 is the { } block's inner content, or "" both when the block
+	// is absent and when it is present but genuinely empty ("{ }") — see
+	// HasPart2 to tell those two apart.
 	RawPart2 string
+	// HasPart2 is true when a "{ }" block was present in source at all
+	// (even if RawPart2's content is ""), false when there was no block. The
+	// renderer uses this, not RawPart2's emptiness, to decide whether to
+	// emit "{ }" or a bare ";" — otherwise an explicit empty block would be
+	// silently rewritten to ";" on every format.
+	HasPart2 bool
 }
 
 func (n *OpaqueNode) objectNode() {}
@@ -59,9 +67,12 @@ type TableNode struct {
 	Unlogged bool
 	Name     string
 	Columns  []*ColumnNode
-	// RawPart2 is the unparsed { } block; preserved verbatim pending a full
-	// directive parser (planned for a future pass).
+	// RawPart2 is the unparsed { } block's inner content; preserved verbatim
+	// pending a full directive parser (planned for a future pass). Same ""
+	// ambiguity as OpaqueNode.RawPart2 — see HasPart2.
 	RawPart2 string
+	// HasPart2 — see OpaqueNode.HasPart2.
+	HasPart2 bool
 }
 
 func (n *TableNode) objectNode() {}

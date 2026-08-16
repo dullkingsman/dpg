@@ -1005,6 +1005,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   single renderer (`ir.RenderCreateFunctionSQL`/`RenderCreateProcedureSQL`)
   with the shim-building logic the plpgsql body-hash fix above needs on the
   introspect side, rather than two parallel, drifting implementations.
+- `dpg fmt` no longer accumulates a double `;;` (and worse on every subsequent
+  run) on a FUNCTION/PROCEDURE declaration terminated by a bare `;`, and no
+  longer rewrites an explicit, empty `{ }` block into a bare `;`. Two bugs
+  compounded: `readFunctionPart1` (unlike every other object kind) consumed a
+  trailing `;` and baked it into the returned Part1 text, while the renderer
+  always appended its own `;` whenever no block was detected — with no way to
+  tell "no block present" apart from "an explicit but genuinely empty `{ }`
+  block present," since both read as an empty string. `pipeline.RawObject`
+  gained a `HasPart2` field to disambiguate the two; `readFunctionPart1` no
+  longer consumes the trailing `;` at all, matching every other kind.
 
 ### Changed
 

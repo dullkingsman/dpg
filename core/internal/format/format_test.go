@@ -261,6 +261,89 @@ TABLE orders (
 	}
 }
 
+// TestFormat_FunctionEmptyBlockNoDoubleSemicolon is a regression guard for a
+// real bug: a FUNCTION/PROCEDURE declaration with an empty "{ }" Part 2
+// block accumulated a double ";;" every time `dpg fmt` ran. Root cause was
+// two independent bugs compounding: readFunctionPart1 baked a trailing ';'
+// into Part1 (unlike every other kind, whose ';' is stripped separately and
+// never appears in Part1), while the renderer always appended its own ';'
+// whenever it decided no "{ }" block was present — so a Part1 that already
+// ended in ';' rendered as ";;", and reformatting the already-broken output
+// through readFunctionPart1 again added yet another ';'.
+func TestFormat_FunctionEmptyBlockNoDoubleSemicolon(t *testing.T) {
+	// An explicit empty "{ }" block is preserved as "{}" (see
+	// TestFormat_ExplicitEmptyBlockPreserved) and never gets a ';'
+	// appended, so this case has zero semicolons after formatting. The
+	// real regression this guards is accumulation across repeated
+	// formatting — a bare-';'-terminated function is the shape that used
+	// to gain an extra ';' on every run.
+	src := `FUNCTION f() RETURNS integer LANGUAGE sql AS $$SELECT 1$$;`
+	first := formatSrc(t, src, defaultOpts)
+	if strings.Count(first, ";") != 1 {
+		t.Errorf("expected exactly one ';' after formatting once, got:\n%s", first)
+	}
+	second := formatSrc(t, first, defaultOpts)
+	third := formatSrc(t, second, defaultOpts)
+	if strings.Count(second, ";") != 1 || strings.Count(third, ";") != 1 {
+		t.Errorf("';' accumulated across repeated formatting.\n1st:\n%s\n2nd:\n%s\n3rd:\n%s", first, second, third)
+	}
+	if first != second || second != third {
+		t.Errorf("format is not idempotent.\n1st:\n%s\n2nd:\n%s\n3rd:\n%s", first, second, third)
+	}
+}
+
+// TestFormat_ExplicitEmptyBlockPreserved guards the fix's second half: an
+// explicit, genuinely empty "{ }" block must round-trip as "{ }", not get
+// silently collapsed to a bare ';' — Part2's content alone can't tell "empty
+// block present" apart from "no block at all" (both read as ""), so the
+// renderer must key off HasPart2 instead.
+func TestFormat_ExplicitEmptyBlockPreserved(t *testing.T) {
+	cases := []struct {
+		name string
+		src  string
+	}{
+		{"function", `FUNCTION f() RETURNS integer LANGUAGE sql AS $$SELECT 1$$ {}`},
+		{"table", `TABLE t (id integer) {}`},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			out := formatSrc(t, c.src, defaultOpts)
+			if !strings.HasSuffix(strings.TrimRight(out, "\n"), "{}") {
+				t.Errorf("expected an explicit empty '{ }' block to be preserved as '{}', got:\n%s", out)
+			}
+			if strings.Contains(out, "};") {
+				t.Errorf("an explicit '{ }' block must never be followed by ';', got:\n%s", out)
+			}
+		})
+	}
+}
+
+// TestFormat_NoBlockStaysSemicolon is the converse of
+// TestFormat_ExplicitEmptyBlockPreserved: a declaration with no "{ }" block
+// at all must keep rendering as a bare ';', not gain a spurious "{}" — the
+// HasPart2 fix must not over-correct in the other direction.
+func TestFormat_NoBlockStaysSemicolon(t *testing.T) {
+	cases := []struct {
+		name string
+		src  string
+	}{
+		{"function", `FUNCTION f() RETURNS integer LANGUAGE sql AS $$SELECT 1$$;`},
+		{"table", `TABLE t (id integer);`},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			out := formatSrc(t, c.src, defaultOpts)
+			trimmed := strings.TrimRight(out, "\n")
+			if !strings.HasSuffix(trimmed, ";") {
+				t.Errorf("expected a bare ';' with no block, got:\n%s", out)
+			}
+			if strings.Contains(out, "{}") {
+				t.Errorf("no '{ }' block was present in source, none should appear in output, got:\n%s", out)
+			}
+		})
+	}
+}
+
 // ── Options ───────────────────────────────────────────────────────────────────
 
 func TestOptions_IndentDefault(t *testing.T) {
