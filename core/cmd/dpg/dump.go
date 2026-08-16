@@ -1071,6 +1071,28 @@ func renderObjectDPG(b *strings.Builder, obj pipeline.IRObject, fmtOpts format.O
 		if o.Comment != nil {
 			fmt.Fprintf(b, "%s%s %s;\n", ind, kw("COMMENT"), sqlStringLit(*o.Comment))
 		}
+		for _, g := range o.Grants {
+			priv := "ALL"
+			if len(g.Privileges) > 0 {
+				priv = strings.Join(g.Privileges, ", ")
+			}
+			fmt.Fprintf(b, "%s%s %s %s %s", ind, kw("GRANT"), priv, kw("TO"), strings.Join(g.Roles, ", "))
+			if g.WithGrant {
+				fmt.Fprintf(b, " %s %s %s", kw("WITH"), kw("GRANT"), kw("OPTION"))
+			}
+			b.WriteString(";\n")
+		}
+		for _, r := range o.Revocations {
+			priv := "ALL"
+			if len(r.Privileges) > 0 {
+				priv = strings.Join(r.Privileges, ", ")
+			}
+			fmt.Fprintf(b, "%s%s %s %s %s", ind, kw("REVOCATION"), priv, kw("FROM"), strings.Join(r.Roles, ", "))
+			if r.Cascade {
+				fmt.Fprintf(b, " %s", kw("CASCADE"))
+			}
+			b.WriteString(";\n")
+		}
 		b.WriteString("}\n")
 
 	case *ir.Extension:

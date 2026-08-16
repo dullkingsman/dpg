@@ -2014,6 +2014,17 @@ func createSchema(o *ir.Schema) []pipeline.DiffOp {
 			o.SrcPos,
 		))
 	}
+	schemaIdent := quoteIdent(o.Name)
+	for _, g := range o.Grants {
+		sql := fmt.Sprintf("GRANT %s ON SCHEMA %s TO %s", privStr(g.Privileges), schemaIdent, roleList(g.Roles))
+		if g.WithGrant {
+			sql += " WITH GRANT OPTION"
+		}
+		ops = append(ops, safeOp(sql+";", o.SrcPos))
+	}
+	for _, r := range o.Revocations {
+		ops = append(ops, explicitRevokeOp(r, "SCHEMA "+schemaIdent, o.SrcPos))
+	}
 	return ops
 }
 
@@ -3636,6 +3647,9 @@ func diffSchema(o *ir.Schema, snap *snapshot.SnapSchema) []pipeline.DiffOp {
 			))
 		}
 	}
+	schemaIdent := quoteIdent(o.Name)
+	ops = append(ops, diffGrantSet(snap.Grants, o.Grants, "SCHEMA "+schemaIdent, pos)...)
+	ops = append(ops, diffRevocationSet(snap.Revocations, o.Revocations, "SCHEMA "+schemaIdent, pos)...)
 	return ops
 }
 

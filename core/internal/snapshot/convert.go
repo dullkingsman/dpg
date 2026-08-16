@@ -352,13 +352,20 @@ func toSnapVtypeBody(body ir.VtypeBody) SnapVtypeBody {
 }
 
 func toSnapSchema(o *ir.Schema) *SnapSchema {
-	return &SnapSchema{
+	ss := &SnapSchema{
 		Name:        o.Name,
 		Owner:       o.Owner,
 		Comment:     o.Comment,
 		RenamedFrom: o.RenamedFrom,
 		NameMaps:    toSnapNameMaps(o.NameMaps),
 	}
+	for _, g := range o.Grants {
+		ss.Grants = append(ss.Grants, toSnapGrant(g))
+	}
+	for _, r := range o.Revocations {
+		ss.Revocations = append(ss.Revocations, toSnapRevocation(r))
+	}
+	return ss
 }
 
 func toSnapExtension(o *ir.Extension) *SnapExtension {

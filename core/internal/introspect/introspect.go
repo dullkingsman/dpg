@@ -33,6 +33,9 @@ func (ci *CatalogIntrospector) Introspect(ctx context.Context, conn pipeline.Que
 	if err != nil {
 		return nil, err
 	}
+	if err := introspectSchemaGrants(ctx, conn, schemas); err != nil {
+		return nil, err
+	}
 	all = append(all, schemas...)
 
 	extensions, err := introspectExtensions(ctx, conn)
@@ -418,6 +421,81 @@ ORDER  BY n.nspname`
 		out = append(out, &ir.Schema{Name: name, Owner: &owner, Comment: comment})
 	}
 	return out, rs.Err()
+}
+
+// introspectSchemaGrants populates Schema.Grants for every schema in objs
+// using aclexplode on pg_namespace.nspacl, mirroring introspectTableGrants.
+func introspectSchemaGrants(ctx context.Context, conn pipeline.Querier, objs []pipeline.IRObject) error {
+	idx := make(map[string]*ir.Schema, len(objs))
+	for _, o := range objs {
+		if s, ok := o.(*ir.Schema); ok {
+			idx[s.Name] = s
+		}
+	}
+	if len(idx) == 0 {
+		return nil
+	}
+
+	// aclexplode(NULL) returns 0 rows on PG14+, so no COALESCE needed.
+	const q = `
+SELECT n.nspname,
+       CASE WHEN a.grantee = 0 THEN 'PUBLIC' ELSE pg_get_userbyid(a.grantee) END AS grantee,
+       a.privilege_type, a.is_grantable
+FROM   pg_namespace n,
+       LATERAL aclexplode(n.nspacl) a
+WHERE  n.nspname NOT LIKE 'pg_%'
+AND    n.nspname NOT IN ('information_schema', 'public')
+ORDER  BY n.nspname, grantee, a.privilege_type`
+
+	rs, err := conn.QueryRows(ctx, q)
+	if err != nil {
+		return fmt.Errorf("introspect schema grants: %w", err)
+	}
+	defer rs.Close()
+
+	type grantKey struct{ schema, grantee string }
+	type grantEntry struct {
+		privs     []string
+		grantable bool
+	}
+	grants := make(map[grantKey]*grantEntry)
+	var order []grantKey
+
+	for rs.Next() {
+		var schema, grantee, priv string
+		var grantable bool
+		if err := rs.Scan(&schema, &grantee, &priv, &grantable); err != nil {
+			return err
+		}
+		k := grantKey{schema, grantee}
+		e, ok := grants[k]
+		if !ok {
+			e = &grantEntry{}
+			grants[k] = e
+			order = append(order, k)
+		}
+		e.privs = append(e.privs, priv)
+		if grantable {
+			e.grantable = true
+		}
+	}
+	if err := rs.Err(); err != nil {
+		return err
+	}
+
+	for _, k := range order {
+		s, ok := idx[k.schema]
+		if !ok {
+			continue
+		}
+		e := grants[k]
+		s.Grants = append(s.Grants, ir.Grant{
+			Privileges: e.privs,
+			Roles:      []string{k.grantee},
+			WithGrant:  e.grantable,
+		})
+	}
+	return nil
 }
 
 // ── extensions ────────────────────────────────────────────────────────────────

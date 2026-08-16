@@ -172,6 +172,8 @@ type SnapSchema struct {
 	Owner       *string            `json:"owner,omitempty"`
 	Comment     *string            `json:"comment,omitempty"`
 	RenamedFrom *string            `json:"renamed_from,omitempty"`
+	Grants      []SnapGrant        `json:"grants,omitempty"`
+	Revocations []SnapGrant        `json:"revocations,omitempty"`
 	NameMaps    []SnapNameMapEntry `json:"name_maps,omitempty"`
 }
 

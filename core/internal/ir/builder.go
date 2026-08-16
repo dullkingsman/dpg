@@ -1514,6 +1514,12 @@ func (b *Builder) buildSchema(cs *pg_query.CreateSchemaStmt, block pipeline.Bloc
 	if block.RenamedFrom != nil {
 		s.RenamedFrom = &block.RenamedFrom.Name
 	}
+	for _, g := range block.Grants {
+		s.Grants = append(s.Grants, blockGrantToIR(g))
+	}
+	for _, r := range block.Revocations {
+		s.Revocations = append(s.Revocations, blockRevocationToIR(r))
+	}
 	s.NameMaps = block.NameMaps
 	return s, nil
 }

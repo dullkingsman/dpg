@@ -323,6 +323,8 @@ type Schema struct {
 	Owner       *string
 	Comment     *string
 	RenamedFrom *string
+	Grants      []Grant
+	Revocations []Revocation
 	NameMaps    []pipeline.NameMapEntry
 	SrcPos      pipeline.SourcePos
 }
