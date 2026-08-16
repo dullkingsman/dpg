@@ -2658,17 +2658,38 @@ SCHEMA public {
        On any parse failure (a body the parser rejects for any reason),
        the compiler falls back to the plain normalisation below rather
        than erroring.
-   -   **Every other language** (`plpgsql` — the common case — `c`,
-       `internal`, and any procedural-language extension): plain text
+   -   **`LANGUAGE plpgsql`:** the body is compiled through the real
+       PL/pgSQL compiler (via `libpg_query`'s PL/pgSQL parse-to-JSON
+       entry point, fed a full, argument-accurate
+       `CREATE FUNCTION`/`PROCEDURE` statement — a bare body string is
+       not sufficient: the PL/pgSQL compiler resolves the body's own
+       parameter references, e.g. an assignment target, against the
+       declared argument list at compile time), and the resulting parse
+       tree is stripped of its one confirmed source-position field
+       (`lineno`) before hashing. This absorbs whitespace, blank-line,
+       and comment differences in the outer control-flow shape
+       (statement ordering/nesting, declarations, labels, flags). It
+       does **not** normalise the text of embedded SQL/expression
+       fragments (conditions, assignment right-hand sides, `RETURN`
+       expressions, embedded SQL) — those are carried as raw,
+       unre-parsed source substrings by the PL/pgSQL compiler itself, so
+       a whitespace-only change *inside* one of these fragments still
+       changes the hash. On any failure (a body the PL/pgSQL compiler
+       rejects, or a compile error from a mismatched shim), the compiler
+       falls back to the plain normalisation below rather than erroring.
+   -   **Every other language** (`c`, `internal`, and any procedural-
+       language extension other than `plpgsql`): plain text
        normalisation only —
        1.  Stripping leading and trailing whitespace from the body text.
        2.  Collapsing all internal runs of whitespace (spaces, tabs,
            newlines) to a single space character.
 
    Any change to the body that survives normalisation — including,
-   for non-SQL languages, changes that are cosmetic but not reducible to
-   whitespace alone (comment wording, quote style, capitalisation) —
-   changes the hash and causes the compiler to emit:
+   for languages with no canonicalisation, changes that are cosmetic but
+   not reducible to whitespace alone (comment wording, quote style,
+   capitalisation), and, for `plpgsql` specifically, a whitespace-only
+   change inside a single embedded expression/SQL fragment (see above)
+   — changes the hash and causes the compiler to emit:
 
    ```sql
    CREATE OR REPLACE FUNCTION schema.name(...) RETURNS ... AS $$...$$;
@@ -2679,20 +2700,17 @@ SCHEMA public {
    re-deparse identically are absorbed by the canonicalisation above;
    genuinely equivalent but differently-*structured* SQL (e.g. a
    rewritten join order) is still detected as changed, by design — this
-   is syntactic canonicalisation, not semantic equivalence. For every
-   other language, including `plpgsql`, no canonicalisation is performed
-   at all: the compiler does not detect semantically (or even
-   cosmetically, beyond whitespace) equivalent reformulations. This
-   narrower, language-scoped limitation is deliberate — an earlier
-   design considered canonicalising `plpgsql` bodies via a separate
-   PL/pgSQL-specific parse, but rejected it for this pass: unlike
-   `LANGUAGE SQL`, the safety of stripping/normalising a `plpgsql`
-   parse's volatile internal fields (e.g. source positions) has not
-   been empirically verified, and an incorrect canonicalisation would
-   risk two *genuinely different* bodies hashing equal — a silent
-   false negative, strictly worse than the false positive it would be
-   fixing, since it would drop a real change from `plan`/`verify`
-   output entirely instead of merely showing a redundant one.
+   is syntactic canonicalisation, not semantic equivalence. For
+   `LANGUAGE plpgsql`, the outer control-flow shape is canonicalised the
+   same way, but embedded expression/SQL fragment text is not — those
+   fragments are not, in general, valid standalone SQL statements (a
+   bare condition such as `n IS NULL` cannot be independently
+   parsed/deparsed), so normalising them would need a materially larger,
+   separate fragment-vs-statement heuristic; left for a future pass if
+   real false-positive reports justify it. For every other language, no
+   canonicalisation is performed at all: the compiler does not detect
+   semantically (or even cosmetically, beyond whitespace) equivalent
+   reformulations.
 
    **Function signature changes** (argument types, return type,
    language, `SECURITY DEFINER`, `STRICT`, any attribute) are handled

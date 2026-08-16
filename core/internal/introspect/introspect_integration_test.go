@@ -394,6 +394,100 @@ $$;`)
 	if !strings.Contains(proc.Attrs.Body, "NULL") {
 		t.Errorf("procedure Attrs.Body = %q, want it to contain the real procedure body", proc.Attrs.Body)
 	}
+
+	// Regression guard for introspectFunctionArgs (generalized from
+	// introspectFunctionArgModes): add_ints has proargmodes IS NULL (plain
+	// IN-only, the common case) — before that generalization, Args only
+	// ever got real names for functions with a non-default mode present, so
+	// this assertion would fail (both names empty). Argument names must be
+	// accurate here for a second reason beyond dump fidelity: they feed the
+	// CREATE FUNCTION shim HashFunctionBody's plpgsql canonicalisation
+	// compiles through the real PL/pgSQL compiler, which needs them to
+	// resolve the body's own parameter references.
+	if len(fn.Args) != 2 || fn.Args[0].Name != "a" || fn.Args[1].Name != "b" {
+		t.Errorf("function Args = %+v, want [{Name:a ...} {Name:b ...}]", fn.Args)
+	}
+}
+
+// TestIntrospectPlpgsqlBodyHashStableAcrossReformatting is the live
+// end-to-end guard for the introspect-side half of the plpgsql body-hash
+// canonicalization fix (the builder-side half is covered by
+// core/integration/roundtrip_opaque_test.go's snapshot-level tests): a
+// function is created, introspected, then ALTERed to a cosmetically
+// reformatted (but semantically identical) body, and re-introspected —
+// BodyHash must be unchanged. This exercises introspectFunctionArgs +
+// ir.RenderCreateFunctionSQL + ir.HashFunctionBody against a real catalog,
+// not just the direct pg_query-level unit tests in internal/ir.
+func TestIntrospectPlpgsqlBodyHashStableAcrossReformatting(t *testing.T) {
+	connStr := testpg.Start(t)
+	ctx := context.Background()
+
+	conn, err := executor.Connect(ctx, connStr)
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	defer conn.Close(ctx)
+
+	create := `CREATE FUNCTION public.bump(n integer) RETURNS integer LANGUAGE plpgsql AS $$
+BEGIN
+    n := n + 1;
+    RETURN n;
+END;
+$$;`
+	if _, err := conn.Exec(ctx, create); err != nil {
+		t.Fatalf("create function: %v", err)
+	}
+
+	findBump := func() *ir.Function {
+		ci := introspect.New()
+		objects, err := ci.Introspect(ctx, conn)
+		if err != nil {
+			t.Fatalf("introspect: %v", err)
+		}
+		for _, obj := range objects {
+			if fn, ok := obj.(*ir.Function); ok && fn.Name == "bump" {
+				return fn
+			}
+		}
+		t.Fatal("introspect: function public.bump not found")
+		return nil
+	}
+
+	before := findBump()
+	if before.BodyHash == "" {
+		t.Fatal("expected a non-empty BodyHash")
+	}
+
+	reformatted := `CREATE OR REPLACE FUNCTION public.bump(n integer) RETURNS integer LANGUAGE plpgsql AS $$
+BEGIN
+  -- bump n by one
+  n := n + 1;
+  RETURN n;
+END;
+$$;`
+	if _, err := conn.Exec(ctx, reformatted); err != nil {
+		t.Fatalf("alter function: %v", err)
+	}
+
+	after := findBump()
+	if after.BodyHash != before.BodyHash {
+		t.Errorf("BodyHash changed after cosmetic-only reformatting: before=%q after=%q", before.BodyHash, after.BodyHash)
+	}
+
+	genuinelyChanged := `CREATE OR REPLACE FUNCTION public.bump(n integer) RETURNS integer LANGUAGE plpgsql AS $$
+BEGIN
+  n := n + 2;
+  RETURN n;
+END;
+$$;`
+	if _, err := conn.Exec(ctx, genuinelyChanged); err != nil {
+		t.Fatalf("alter function (genuine change): %v", err)
+	}
+
+	changed := findBump()
+	if changed.BodyHash == before.BodyHash {
+		t.Error("BodyHash unchanged after a genuine logic change — canonicalization is masking real drift")
+	}
 }
 
 // TestIntrospectFunctionRowsSuppressesDefault is the live-catalog guard for

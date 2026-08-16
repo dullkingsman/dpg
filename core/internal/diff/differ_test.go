@@ -8,6 +8,8 @@ import (
 	"testing"
 	"unicode/utf8"
 
+	pg_query "github.com/pganalyze/pg_query_go/v6"
+
 	"github.com/dullkingsman/dpg/internal/ir"
 	"github.com/dullkingsman/dpg/internal/pipeline"
 	"github.com/dullkingsman/dpg/internal/snapshot"
@@ -1155,6 +1157,25 @@ func TestBuildFunctionSQLImplicitReturnsMultiOut(t *testing.T) {
 	sql := buildFunctionSQL(fn)
 	if !strings.Contains(sql, "RETURNS record LANGUAGE") {
 		t.Errorf("expected RETURNS record LANGUAGE, got: %s", sql)
+	}
+}
+
+// TestBuildFunctionSQLDollarQuoteCollision guards a real bug fixed alongside
+// the plpgsql body-hash canonicalization work: buildFunctionSQL used to
+// hardcode a literal "$$" delimiter with no collision handling, so a body
+// that itself contains "$$" (e.g. dynamic SQL using a dollar-quoted string
+// literal) would produce broken, unparseable migration SQL. It now delegates
+// to ir.RenderCreateFunctionSQL, which picks a colliding-free tag.
+func TestBuildFunctionSQLDollarQuoteCollision(t *testing.T) {
+	fn := &ir.Function{
+		Schema:     "public",
+		Name:       "f",
+		ReturnType: ir.TypeRef{Name: "text"},
+		Attrs:      ir.FuncAttrs{Language: "sql", Body: "SELECT $$literal$$"},
+	}
+	sql := buildFunctionSQL(fn)
+	if _, err := pg_query.Parse(sql); err != nil {
+		t.Fatalf("rendered SQL with a body containing a literal $$ failed to parse: %v\nSQL: %s", err, sql)
 	}
 }
 

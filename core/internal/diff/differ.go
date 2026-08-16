@@ -1750,30 +1750,7 @@ func buildProcedureSignature(o *ir.Procedure) string {
 }
 
 func createProcedure(o *ir.Procedure) []pipeline.DiffOp {
-	var b strings.Builder
-	b.WriteString("CREATE OR REPLACE PROCEDURE ")
-	b.WriteString(qualIdent(o.Schema, o.Name))
-	b.WriteString("(")
-	for i, a := range o.Args {
-		if i > 0 {
-			b.WriteString(", ")
-		}
-		if a.Mode != "" && a.Mode != "IN" {
-			b.WriteString(a.Mode)
-			b.WriteString(" ")
-		}
-		if a.Name != "" {
-			b.WriteString(a.Name)
-			b.WriteString(" ")
-		}
-		b.WriteString(a.Type.String())
-	}
-	b.WriteString(") LANGUAGE ")
-	b.WriteString(o.Attrs.Language)
-	b.WriteString(" AS $$")
-	b.WriteString(o.Attrs.Body)
-	b.WriteString("$$;")
-	ops := []pipeline.DiffOp{safeOp(b.String(), o.SrcPos)}
+	ops := []pipeline.DiffOp{safeOp(ir.RenderCreateProcedureSQL(o), o.SrcPos)}
 	sig := buildProcedureSignature(o)
 	if o.Comment != nil {
 		ops = append(ops, safeOp(fmt.Sprintf("COMMENT ON PROCEDURE %s IS %s;", sig, quoteLit(*o.Comment)), o.SrcPos))
@@ -2615,72 +2592,7 @@ func buildFuncSignature(o *ir.Function) string {
 }
 
 func buildFunctionSQL(o *ir.Function) string {
-	var b strings.Builder
-	b.WriteString("CREATE OR REPLACE FUNCTION ")
-	b.WriteString(qualIdent(o.Schema, o.Name))
-	b.WriteString("(")
-	first := true
-	for _, a := range o.Args {
-		// RETURNS TABLE(...) columns are declared in a separate clause below,
-		// never inline here — "TABLE a integer" is not valid parameter syntax.
-		if a.Mode == "TABLE" {
-			continue
-		}
-		if !first {
-			b.WriteString(", ")
-		}
-		first = false
-		if a.Mode != "" && a.Mode != "IN" {
-			b.WriteString(a.Mode)
-			b.WriteString(" ")
-		}
-		if a.Name != "" {
-			b.WriteString(a.Name)
-			b.WriteString(" ")
-		}
-		b.WriteString(a.Type.String())
-		if a.Default != nil {
-			b.WriteString(" DEFAULT ")
-			b.WriteString(*a.Default)
-		}
-	}
-	b.WriteString(") RETURNS ")
-	if tableCols := ir.FuncTableColumns(o.Args); len(tableCols) > 0 {
-		b.WriteString("TABLE(")
-		b.WriteString(ir.FormatTableColumns(tableCols))
-		b.WriteString(")")
-	} else {
-		if o.ReturnType.SetOf {
-			b.WriteString("SETOF ")
-		}
-		b.WriteString(o.ReturnType.String())
-	}
-	b.WriteString(" LANGUAGE ")
-	b.WriteString(o.Attrs.Language)
-	if o.Attrs.Volatility != "" && o.Attrs.Volatility != "VOLATILE" {
-		b.WriteString(" ")
-		b.WriteString(o.Attrs.Volatility)
-	}
-	if o.Attrs.Strict {
-		b.WriteString(" STRICT")
-	}
-	if o.Attrs.SecurityDef {
-		b.WriteString(" SECURITY DEFINER")
-	}
-	if o.Attrs.Parallel != "" && o.Attrs.Parallel != "UNSAFE" {
-		b.WriteString(" PARALLEL ")
-		b.WriteString(o.Attrs.Parallel)
-	}
-	if o.Attrs.Cost != nil {
-		fmt.Fprintf(&b, " COST %v", *o.Attrs.Cost)
-	}
-	if o.Attrs.Rows != nil {
-		fmt.Fprintf(&b, " ROWS %v", *o.Attrs.Rows)
-	}
-	b.WriteString(" AS $$")
-	b.WriteString(o.Attrs.Body)
-	b.WriteString("$$;")
-	return b.String()
+	return ir.RenderCreateFunctionSQL(o)
 }
 
 func createType(o *ir.Type, vtypes map[string]string) []pipeline.DiffOp {

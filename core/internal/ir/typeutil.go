@@ -2,6 +2,7 @@ package ir
 
 import (
 	"crypto/sha256"
+	"encoding/json"
 	"fmt"
 	"strings"
 
@@ -204,29 +205,117 @@ func HashBody(body string) string {
 	return fmt.Sprintf("%x", sum)
 }
 
-// HashFunctionBody is HashBody's language-aware variant: for a LANGUAGE SQL
-// body (case-insensitive), it canonicalises via pg_query.Parse/Deparse
-// before hashing — the same trick internal/introspect/opaque.go's
-// canonicalDDL already uses for whole-statement reconstruction of the
-// opaque-tier object kinds — so whitespace, quote-style, and clause-order
-// differences no longer cause a spurious CREATE OR REPLACE. On any
-// parse/deparse failure it falls back to HashBody(body) unchanged; a
-// hashing nicety must never block a build or introspection.
+// HashFunctionBody is HashBody's language-aware variant.
 //
-// Every other language (plpgsql above all — the common case) is NOT
-// canonicalised and behaves exactly as HashBody always has: plpgsql is not
-// parseable by pg_query's SQL grammar, and an unverified structural
-// canonicalisation risks a false negative (two genuinely different bodies
-// hashing equal), which is strictly worse than today's false positive since
-// it would silently drop a real change from plan/verify output. See RFC
+// For a LANGUAGE SQL body (case-insensitive), it canonicalises via
+// pg_query.Parse/Deparse before hashing — the same trick
+// internal/introspect/opaque.go's canonicalDDL already uses for
+// whole-statement reconstruction of the opaque-tier object kinds — so
+// whitespace, quote-style, and clause-order differences no longer cause a
+// spurious CREATE OR REPLACE.
+//
+// For a LANGUAGE plpgsql body, it canonicalises structurally via
+// canonicalizePlpgsqlBody, given fullStatement — a complete
+// "CREATE FUNCTION/PROCEDURE ... LANGUAGE plpgsql AS $$...$$" statement
+// (the real source text on the builder side; a reconstructed,
+// argument-accurate shim via RenderCreateFunctionSQL/RenderCreateProcedureSQL
+// on the introspect side). A bare body string is not enough here, unlike
+// LANGUAGE SQL: the PL/pgSQL compiler resolves the function's own parameter
+// names against its declared argument list at compile time, so
+// canonicalization needs the real signature, not just the body. If
+// fullStatement is empty or canonicalization fails for any reason, this
+// falls back to HashBody(body) unchanged.
+//
+// On any failure in either language's canonicalization it falls back to
+// HashBody(body) unchanged; a hashing nicety must never block a build or
+// introspection. Every other language (c, internal, other PL extensions) is
+// NOT canonicalised and behaves exactly as HashBody always has. See RFC
 // §9.5.
-func HashFunctionBody(language, body string) string {
+func HashFunctionBody(language, body, fullStatement string) string {
 	if strings.EqualFold(language, "sql") {
 		if canon, ok := canonicalizeSQLBody(body); ok {
 			return HashBody(canon)
 		}
+		return HashBody(body)
+	}
+	if strings.EqualFold(language, "plpgsql") && fullStatement != "" {
+		if canon, ok := canonicalizePlpgsqlBody(fullStatement); ok {
+			return HashBody(canon)
+		}
 	}
 	return HashBody(body)
+}
+
+// canonicalizePlpgsqlBody parses fullStatement via
+// pg_query.ParsePlPgSqlToJSON, strips the one confirmed-volatile field
+// ("lineno" — the PL/pgSQL compiler's source line number, which shifts
+// under pure reformatting with zero semantic change), and re-marshals the
+// result for hashing. Confirmed by direct inspection of libpg_query's
+// parser/pg_query_json_plpgsql.c: "location" and "stmtid" were hypothesized
+// volatile before investigation but do not exist anywhere in this emitter's
+// output — "lineno" is the entire volatility surface. json.Marshal on a
+// map[string]any sorts keys alphabetically, so the re-marshaled output is
+// deterministic regardless of libpg_query's emission order.
+//
+// Known residual limitation, deliberately not addressed here: every
+// PLpgSQL_expr node's "query" field is a raw, unparsed substring of the
+// original source (conditions, assignment RHS, RETURN expressions, RAISE
+// params, cursor queries, embedded SQL) — this emitter does not re-parse or
+// normalize it. A whitespace-only change *inside* one of these fragments
+// (e.g. "a||b" vs "a || b") still changes the hash after this
+// canonicalization; only the outer control-flow shape (statement
+// ordering/nesting, declarations) is canonicalised. Many such fragments
+// (e.g. a bare condition like "n IS NULL") are not complete standalone SQL
+// statements, so pg_query.Parse/Deparse would routinely fail on them, and a
+// reliable fragment-vs-statement heuristic to make per-expression
+// sub-canonicalisation safe is materially more scope than this fix — left
+// for a future pass if real false-positive reports justify it. See RFC
+// §9.5.
+//
+// Returns ok=false — caller falls back to raw HashBody(body) — on any parse
+// error, an empty "[]" result (fullStatement didn't produce a compiled
+// plpgsql function/DO block, e.g. because a reconstructed shim's argument
+// list didn't match the body's own references), or a JSON unmarshal
+// failure.
+func canonicalizePlpgsqlBody(fullStatement string) (string, bool) {
+	trimmed := strings.TrimSpace(fullStatement)
+	if trimmed == "" {
+		return "", false
+	}
+	jsonStr, err := pg_query.ParsePlPgSqlToJSON(trimmed)
+	if err != nil {
+		return "", false
+	}
+	if s := strings.TrimSpace(jsonStr); s == "" || s == "[]" {
+		return "", false
+	}
+	var parsed any
+	if err := json.Unmarshal([]byte(jsonStr), &parsed); err != nil {
+		return "", false
+	}
+	stripPlpgsqlVolatileFields(parsed)
+	out, err := json.Marshal(parsed)
+	if err != nil {
+		return "", false
+	}
+	return string(out), true
+}
+
+// stripPlpgsqlVolatileFields recursively deletes the "lineno" key from
+// every map in v, mutating map[string]any values in place and recursing
+// into []any elements.
+func stripPlpgsqlVolatileFields(v any) {
+	switch t := v.(type) {
+	case map[string]any:
+		delete(t, "lineno")
+		for _, child := range t {
+			stripPlpgsqlVolatileFields(child)
+		}
+	case []any:
+		for _, child := range t {
+			stripPlpgsqlVolatileFields(child)
+		}
+	}
 }
 
 // canonicalizeSQLBody parses body as one or more SQL statements and

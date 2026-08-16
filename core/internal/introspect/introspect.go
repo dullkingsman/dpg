@@ -1190,6 +1190,7 @@ ORDER  BY n.nspname, p.proname, args`
 	funcIdx := make(map[string]*ir.Function)
 	procIdx := make(map[string]*ir.Procedure)
 	fnByOID := make(map[int64]*ir.Function)
+	procByOID := make(map[int64]*ir.Procedure)
 	var out []pipeline.IRObject
 	for rs.Next() {
 		var schema, name, args, argTypes, retType, lang, volatility string
@@ -1206,10 +1207,9 @@ ORDER  BY n.nspname, p.proname, args`
 		}
 		if prokind == "p" {
 			proc := &ir.Procedure{
-				Schema:   schema,
-				Name:     name,
-				Comment:  comment,
-				BodyHash: ir.HashFunctionBody(lang, prosrc),
+				Schema:  schema,
+				Name:    name,
+				Comment: comment,
 				Attrs: ir.FuncAttrs{
 					Language: lang,
 					Body:     prosrc,
@@ -1225,6 +1225,7 @@ ORDER  BY n.nspname, p.proname, args`
 				}
 			}
 			procIdx[schema+"."+name+"("+args+")"] = proc
+			procByOID[oid] = proc
 			out = append(out, proc)
 		} else {
 			// procost/prorows are NOT NULL in pg_proc — every function has a
@@ -1264,7 +1265,6 @@ ORDER  BY n.nspname, p.proname, args`
 				Name:       name,
 				ReturnType: ir.TypeRef{Name: retType, SetOf: retset},
 				Comment:    comment,
-				BodyHash:   ir.HashFunctionBody(lang, prosrc),
 				Attrs:      attrs,
 			}
 			// Use argTypes (type-only) so QualifiedName matches argsKey() in IR builder.
@@ -1284,8 +1284,25 @@ ORDER  BY n.nspname, p.proname, args`
 	}
 	rs.Close()
 
-	if err := introspectFunctionArgModes(ctx, conn, fnByOID); err != nil {
+	if err := introspectFunctionArgs(ctx, conn, fnByOID, procByOID); err != nil {
 		return nil, err
+	}
+
+	// Body hashes are computed here, after argument names/modes are final,
+	// not inline in the row-scan loop above: ir.HashFunctionBody's plpgsql
+	// canonicalisation compiles a reconstructed CREATE FUNCTION/PROCEDURE
+	// shim through the real PL/pgSQL compiler, which resolves the
+	// function's own parameter names against its declared argument list
+	// (e.g. "a := a + 1"). A shim built before introspectFunctionArgs has
+	// run would have empty/wrong names for the plain-IN-only common case,
+	// so the plpgsql compile would frequently fail and silently fall back
+	// to raw hashing — defeating the fix for exactly the case it exists
+	// for.
+	for _, fn := range funcIdx {
+		fn.BodyHash = ir.HashFunctionBody(fn.Attrs.Language, fn.Attrs.Body, ir.RenderCreateFunctionSQL(fn))
+	}
+	for _, proc := range procIdx {
+		proc.BodyHash = ir.HashFunctionBody(proc.Attrs.Language, proc.Attrs.Body, ir.RenderCreateProcedureSQL(proc))
 	}
 
 	if err := introspectFunctionGrants(ctx, conn, funcIdx); err != nil {
@@ -1297,52 +1314,80 @@ ORDER  BY n.nspname, p.proname, args`
 	return out, nil
 }
 
-// introspectFunctionArgModes fixes up Args for any function that has at least
-// one non-plain-IN parameter (OUT, INOUT, VARIADIC, or TABLE mode). The main
-// introspectFunctions query builds Args purely from
-// oidvectortypes(proargtypes), which — like pg_get_function_identity_arguments
-// — only ever reports IN/INOUT/VARIADIC argument TYPES, with no mode or name
-// information at all, and OUT/TABLE-mode arguments are invisible to it
-// entirely. That meant, before this fix: a RETURNS TABLE function's output
-// columns were silently missing from Args altogether (not just
-// mis-rendered); a plain OUT-only function's OUT columns were equally
-// missing; and an INOUT or VARIADIC function's argument TYPE was present but
-// its mode keyword was always lost (dump/diff would render it as a plain IN
-// argument — a different, non-equivalent declaration for VARIADIC in
-// particular, since it changes callable arity).
+// introspectFunctionArgs fixes up Args (name, mode, type) for every function
+// AND procedure, superseding the type-only Args the main introspectFunctions
+// query builds from oidvectortypes(proargtypes)/oidvectortypes(proargtypes)
+// (function/procedure branches respectively) — which, like
+// pg_get_function_identity_arguments, only ever reports IN/INOUT/VARIADIC
+// argument TYPES, with no name or mode information at all, and never
+// touches procedures' Args in any capacity.
 //
-// Scoped to functions where proargmodes IS NOT NULL — PostgreSQL's own
-// signal that at least one argument uses a non-default mode — which covers
-// OUT/INOUT/VARIADIC/TABLE all at once and leaves the overwhelming common
-// case (plain IN-only functions, where proargmodes is NULL) completely
-// untouched, using the original, unmodified oidvectortypes-based path.
-func introspectFunctionArgModes(ctx context.Context, conn pipeline.Querier, fnByOID map[int64]*ir.Function) error {
+// Before this fix, only functions with at least one non-plain-IN parameter
+// (proargmodes IS NOT NULL) got real names/modes, via a narrower predecessor
+// of this function; the overwhelming common case — plain IN-only functions,
+// and every procedure regardless of its argument modes — had empty Name on
+// every arg. That meant: a plain function's dumped/rendered signature always
+// omitted parameter names (e.g. "add_ints(integer, integer)" instead of
+// "add_ints(a integer, b integer)"), and — the reason this function was
+// generalized rather than left as-is — HashFunctionBody's plpgsql
+// canonicalisation needs an argument-accurate CREATE FUNCTION/PROCEDURE shim
+// to feed the real PL/pgSQL compiler, which resolves the body's own
+// parameter references (e.g. "a := a + 1") against the declared argument
+// list at compile time; a shim with empty names would fail to compile for
+// exactly the common case this whole feature targets.
+//
+// Uses generate_subscripts over COALESCE(proallargtypes, proargtypes::oid[])
+// so it naturally covers both the "has a non-default mode" case
+// (proallargtypes/proargmodes populated) and the plain-IN-only case
+// (proallargtypes NULL, proargmodes NULL — COALESCE(proargmodes[i], 'i')
+// supplies the default mode per PostgreSQL's own documented invariant that
+// proargmodes, when non-NULL, has exactly the same length as
+// proallargtypes). A function/procedure with zero arguments naturally
+// produces zero subscript rows, leaving Args nil, same as before.
+func introspectFunctionArgs(ctx context.Context, conn pipeline.Querier, fnByOID map[int64]*ir.Function, procByOID map[int64]*ir.Procedure) error {
+	// alltypes is computed via a LATERAL subquery rather than inline
+	// COALESCE(proallargtypes, proargtypes::oid[]) repeated at every use
+	// site: proargtypes is an oidvector, PostgreSQL's special 0-based-lower-
+	// bound array type (unlike every ordinary 1-based array), and a bare
+	// ::oid[] cast preserves that 0-based numbering rather than
+	// renormalizing it — confirmed live, this silently misaligned every
+	// plain-IN-only function's argument names by one position before this
+	// fix (name[i] read against a 0-based type array's index i landed on
+	// the wrong argument). ARRAY(SELECT unnest(...)) is the standard
+	// PostgreSQL idiom to renumber a 0-based array to an ordinary 1-based
+	// one, matching proargnames/proargmodes's native 1-based indexing.
 	const q = `
-SELECT p.oid::bigint, u.mode::text, u.nm, pg_catalog.format_type(u.ty, NULL)
+SELECT p.oid::bigint, p.prokind::text,
+       COALESCE(p.proargmodes[i], 'i')::text AS mode,
+       p.proargnames[i] AS name,
+       pg_catalog.format_type(t.alltypes[i], NULL) AS type
 FROM   pg_proc p
 JOIN   pg_namespace n ON n.oid = p.pronamespace,
-       LATERAL unnest(p.proargmodes, p.proargnames, p.proallargtypes) WITH ORDINALITY AS u(mode, nm, ty, ord)
-WHERE  p.proargmodes IS NOT NULL
+       LATERAL (SELECT COALESCE(p.proallargtypes, ARRAY(SELECT unnest(p.proargtypes))) AS alltypes) t,
+       LATERAL generate_subscripts(t.alltypes, 1) AS i
+WHERE  p.prokind IN ('f','p')
 AND    n.nspname NOT IN ('pg_catalog','information_schema','pg_toast')
-ORDER  BY p.oid, u.ord`
+ORDER  BY p.oid, i`
 
 	rs, err := conn.QueryRows(ctx, q)
 	if err != nil {
-		return fmt.Errorf("introspect function table args: %w", err)
+		return fmt.Errorf("introspect function/procedure args: %w", err)
 	}
 	defer rs.Close()
 
 	argsByOID := make(map[int64][]ir.FuncArg)
+	kindByOID := make(map[int64]string)
 	var order []int64
 	for rs.Next() {
 		var oid int64
-		var mode, typ string
+		var prokind, mode, typ string
 		var name *string
-		if err := rs.Scan(&oid, &mode, &name, &typ); err != nil {
+		if err := rs.Scan(&oid, &prokind, &mode, &name, &typ); err != nil {
 			return err
 		}
 		if _, ok := argsByOID[oid]; !ok {
 			order = append(order, oid)
+			kindByOID[oid] = prokind
 		}
 		argName := ""
 		if name != nil {
@@ -1366,6 +1411,12 @@ ORDER  BY p.oid, u.ord`
 	}
 
 	for _, oid := range order {
+		if kindByOID[oid] == "p" {
+			if proc, ok := procByOID[oid]; ok {
+				proc.Args = argsByOID[oid]
+			}
+			continue
+		}
 		if fn, ok := fnByOID[oid]; ok {
 			fn.Args = argsByOID[oid]
 		}

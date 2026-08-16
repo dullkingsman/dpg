@@ -34,7 +34,7 @@ func (p *Parser) Parse(kind pipeline.ObjectKind, part1 string, pos pipeline.Sour
 	if err != nil {
 		return pipeline.PGParseResult{}, pipeline.Errorf(pos, "PG parse error: %s", translateError(err, sql))
 	}
-	return pipeline.PGParseResult{Raw: result, Pos: pos}, nil
+	return pipeline.PGParseResult{Raw: result, Pos: pos, SourceSQL: sql}, nil
 }
 
 // translateError extracts the message from a pg_query parse error, stripping

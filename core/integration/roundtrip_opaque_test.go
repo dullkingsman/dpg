@@ -3422,6 +3422,328 @@ $$ {}`
 	}
 }
 
+// TestRoundtripFunctionPlpgsqlBodyReformattingNoSpuriousDrift is
+// TestRoundtripFunctionSQLBodyReformattingNoSpuriousDrift's plpgsql sibling,
+// exercising the builder-side half of ir.HashFunctionBody's plpgsql
+// canonicalisation (both "desired" computations below go through
+// buildFunction/HashFunctionBody with a real fullStatement — see RFC §9.5).
+// The body deliberately assigns to its own declared parameter ("n := n +
+// 1"), the case the whole shim design exists for: the PL/pgSQL compiler
+// must resolve "n" against the function's own argument list at compile
+// time, so a shim with an inaccurate argument list would fail to compile
+// and silently fall back to raw hashing, defeating the fix for exactly this
+// common case. The introspect-side half (live catalog, not source-vs-
+// snapshot) is covered separately by
+// TestRoundtripFunctionPlpgsqlBodyReformattingLiveNoSpuriousDrift below.
+func TestRoundtripFunctionPlpgsqlBodyReformattingNoSpuriousDrift(t *testing.T) {
+	connStr := testpg.Start(t)
+	ctx := context.Background()
+
+	differ := diff.New()
+	emitter := emit.New()
+	applyExec := executor.New()
+	store := newMemStore()
+
+	conn, err := executor.Connect(ctx, connStr)
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	defer conn.Close(ctx)
+
+	dir := t.TempDir()
+	f := filepath.Join(dir, "schema.dpg")
+	original := `FUNCTION f_pl(n integer) RETURNS integer
+LANGUAGE plpgsql AS $$
+BEGIN
+    n := n + 1;
+    RETURN n;
+END;
+$$ {}`
+	if err := os.WriteFile(f, []byte(original), 0o644); err != nil {
+		t.Fatalf("write schema: %v", err)
+	}
+	applyFixture(t, ctx, conn, []string{f}, dir, differ, emitter, applyExec, store)
+
+	// Cosmetically reformatted (blank lines, a comment) but semantically identical.
+	reformatted := `FUNCTION f_pl(n integer) RETURNS integer
+LANGUAGE plpgsql AS $$
+BEGIN
+
+    -- bump n by one
+    n := n + 1;
+
+    RETURN n;
+END;
+$$ {}`
+	if err := os.WriteFile(f, []byte(reformatted), 0o644); err != nil {
+		t.Fatalf("write reformatted: %v", err)
+	}
+	desired, err := compiler.Compile([]string{f}, dir, pipeline.Default)
+	if err != nil {
+		t.Fatalf("compile reformatted: %v", err)
+	}
+	base, _ := store.Load("test", "dpgtest")
+	ops, err := differ.Diff(desired, base)
+	if err != nil {
+		t.Fatalf("diff (reformatted): %v", err)
+	}
+	if len(ops) != 0 {
+		t.Errorf("expected zero ops for a cosmetically-reformatted-but-equivalent plpgsql body, got %d:", len(ops))
+		for _, op := range ops {
+			t.Errorf("  [%s] %s", op.Safety(), op.SQL())
+		}
+	}
+
+	// Genuinely different body (even though also reformatted) must still be
+	// detected — the canonicalisation must not blind the differ entirely.
+	changed := `FUNCTION f_pl(n integer) RETURNS integer
+LANGUAGE plpgsql AS $$
+BEGIN
+    n := n + 2;
+    RETURN n;
+END;
+$$ {}`
+	if err := os.WriteFile(f, []byte(changed), 0o644); err != nil {
+		t.Fatalf("write changed: %v", err)
+	}
+	desired2, err := compiler.Compile([]string{f}, dir, pipeline.Default)
+	if err != nil {
+		t.Fatalf("compile changed: %v", err)
+	}
+	base2, _ := store.Load("test", "dpgtest")
+	changeOps, err := differ.Diff(desired2, base2)
+	if err != nil {
+		t.Fatalf("diff (changed): %v", err)
+	}
+	if len(changeOps) == 0 {
+		t.Fatal("expected a CREATE OR REPLACE FUNCTION op for a genuine body change, got none")
+	}
+	if !strings.Contains(changeOps[0].SQL(), "CREATE OR REPLACE FUNCTION") {
+		t.Errorf("expected CREATE OR REPLACE FUNCTION, got: %s", changeOps[0].SQL())
+	}
+}
+
+// TestRoundtripFunctionPlpgsqlBodyReformattingLiveNoSpuriousDrift is the
+// test that actually proves the introspect-side half of the plpgsql
+// body-hash fix works: unlike the snapshot-only test above (which never
+// touches internal/introspect), this applies a function, edits only the
+// *source* file cosmetically (the live catalog body is never re-applied,
+// so the live function keeps its original, unreformatted text), then
+// introspects the live function and diffs desired (from the reformatted
+// source) against a fresh live snapshot — proving
+// introspectFunctionArgs + ir.RenderCreateFunctionSQL + HashFunctionBody
+// together reconstruct an argument-accurate shim from the catalog that
+// canonicalizes to the same hash as the source side.
+func TestRoundtripFunctionPlpgsqlBodyReformattingLiveNoSpuriousDrift(t *testing.T) {
+	connStr := testpg.Start(t)
+	ctx := context.Background()
+
+	differ := diff.New()
+	emitter := emit.New()
+	applyExec := executor.New()
+	ci := introspect.New()
+	store := newMemStore()
+
+	conn, err := executor.Connect(ctx, connStr)
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	defer conn.Close(ctx)
+
+	dir := t.TempDir()
+	f := filepath.Join(dir, "schema.dpg")
+	original := `FUNCTION f_pl_live(n integer) RETURNS integer
+LANGUAGE plpgsql AS $$
+BEGIN
+    n := n + 1;
+    RETURN n;
+END;
+$$ {}`
+	if err := os.WriteFile(f, []byte(original), 0o644); err != nil {
+		t.Fatalf("write schema: %v", err)
+	}
+	applyFixture(t, ctx, conn, []string{f}, dir, differ, emitter, applyExec, store)
+
+	liveSnapFor := func() *pipeline.Snapshot {
+		liveObjects, err := ci.Introspect(ctx, conn)
+		if err != nil {
+			t.Fatalf("introspect: %v", err)
+		}
+		snap, _ := store.Load("test", "dpgtest")
+		var managedLive []pipeline.IRObject
+		for _, obj := range liveObjects {
+			if _, ok := snap.Objects[obj.QualifiedName()]; ok {
+				managedLive = append(managedLive, obj)
+			}
+		}
+		liveSnap := &pipeline.Snapshot{}
+		if err := snapshot.Populate(liveSnap, managedLive); err != nil {
+			t.Fatalf("populate live snapshot: %v", err)
+		}
+		return liveSnap
+	}
+
+	// Source-only cosmetic reformatting — the live catalog body is untouched.
+	reformatted := `FUNCTION f_pl_live(n integer) RETURNS integer
+LANGUAGE plpgsql AS $$
+BEGIN
+
+    -- bump n by one
+    n := n + 1;
+
+    RETURN n;
+END;
+$$ {}`
+	if err := os.WriteFile(f, []byte(reformatted), 0o644); err != nil {
+		t.Fatalf("write reformatted: %v", err)
+	}
+	desired, err := compiler.Compile([]string{f}, dir, pipeline.Default)
+	if err != nil {
+		t.Fatalf("compile reformatted: %v", err)
+	}
+	driftOps, err := differ.Diff(desired, liveSnapFor())
+	if err != nil {
+		t.Fatalf("drift diff (reformatted): %v", err)
+	}
+	if len(driftOps) != 0 {
+		t.Errorf("expected zero live drift for a cosmetically-reformatted-but-equivalent plpgsql body, got %d ops:", len(driftOps))
+		for _, op := range driftOps {
+			t.Errorf("  [%s] %s", op.Safety(), op.SQL())
+		}
+	}
+
+	// Genuine change must still be detected against the live catalog.
+	changed := `FUNCTION f_pl_live(n integer) RETURNS integer
+LANGUAGE plpgsql AS $$
+BEGIN
+    n := n + 2;
+    RETURN n;
+END;
+$$ {}`
+	if err := os.WriteFile(f, []byte(changed), 0o644); err != nil {
+		t.Fatalf("write changed: %v", err)
+	}
+	desired2, err := compiler.Compile([]string{f}, dir, pipeline.Default)
+	if err != nil {
+		t.Fatalf("compile changed: %v", err)
+	}
+	changeOps, err := differ.Diff(desired2, liveSnapFor())
+	if err != nil {
+		t.Fatalf("drift diff (changed): %v", err)
+	}
+	if len(changeOps) == 0 {
+		t.Fatal("expected a CREATE OR REPLACE FUNCTION op for a genuine body change against the live catalog, got none")
+	}
+	if !strings.Contains(changeOps[0].SQL(), "CREATE OR REPLACE FUNCTION") {
+		t.Errorf("expected CREATE OR REPLACE FUNCTION, got: %s", changeOps[0].SQL())
+	}
+}
+
+// TestRoundtripProcedurePlpgsqlBodyReformattingLiveNoSpuriousDrift is
+// TestRoundtripFunctionPlpgsqlBodyReformattingLiveNoSpuriousDrift's
+// PROCEDURE sibling. Procedure shares HashFunctionBody's exact call path
+// (buildProcedure/introspect's procedure branch both call it identically to
+// Function) but has its own RenderCreateProcedureSQL shim renderer — this
+// is the only test that would catch that renderer diverging from
+// RenderCreateFunctionSQL's correctness (e.g. a wrong argument-list shape
+// that silently fails plpgsql compilation and falls back to raw hashing).
+func TestRoundtripProcedurePlpgsqlBodyReformattingLiveNoSpuriousDrift(t *testing.T) {
+	connStr := testpg.Start(t)
+	ctx := context.Background()
+
+	differ := diff.New()
+	emitter := emit.New()
+	applyExec := executor.New()
+	ci := introspect.New()
+	store := newMemStore()
+
+	conn, err := executor.Connect(ctx, connStr)
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	defer conn.Close(ctx)
+
+	dir := t.TempDir()
+	f := filepath.Join(dir, "schema.dpg")
+	original := `PROCEDURE p_pl_live(n integer) LANGUAGE plpgsql AS $$
+BEGIN
+    n := n + 1;
+END;
+$$ {}`
+	if err := os.WriteFile(f, []byte(original), 0o644); err != nil {
+		t.Fatalf("write schema: %v", err)
+	}
+	applyFixture(t, ctx, conn, []string{f}, dir, differ, emitter, applyExec, store)
+
+	liveSnapFor := func() *pipeline.Snapshot {
+		liveObjects, err := ci.Introspect(ctx, conn)
+		if err != nil {
+			t.Fatalf("introspect: %v", err)
+		}
+		snap, _ := store.Load("test", "dpgtest")
+		var managedLive []pipeline.IRObject
+		for _, obj := range liveObjects {
+			if _, ok := snap.Objects[obj.QualifiedName()]; ok {
+				managedLive = append(managedLive, obj)
+			}
+		}
+		liveSnap := &pipeline.Snapshot{}
+		if err := snapshot.Populate(liveSnap, managedLive); err != nil {
+			t.Fatalf("populate live snapshot: %v", err)
+		}
+		return liveSnap
+	}
+
+	reformatted := `PROCEDURE p_pl_live(n integer) LANGUAGE plpgsql AS $$
+BEGIN
+
+    -- bump n by one
+    n := n + 1;
+
+END;
+$$ {}`
+	if err := os.WriteFile(f, []byte(reformatted), 0o644); err != nil {
+		t.Fatalf("write reformatted: %v", err)
+	}
+	desired, err := compiler.Compile([]string{f}, dir, pipeline.Default)
+	if err != nil {
+		t.Fatalf("compile reformatted: %v", err)
+	}
+	driftOps, err := differ.Diff(desired, liveSnapFor())
+	if err != nil {
+		t.Fatalf("drift diff (reformatted): %v", err)
+	}
+	if len(driftOps) != 0 {
+		t.Errorf("expected zero live drift for a cosmetically-reformatted-but-equivalent plpgsql procedure body, got %d ops:", len(driftOps))
+		for _, op := range driftOps {
+			t.Errorf("  [%s] %s", op.Safety(), op.SQL())
+		}
+	}
+
+	changed := `PROCEDURE p_pl_live(n integer) LANGUAGE plpgsql AS $$
+BEGIN
+    n := n + 2;
+END;
+$$ {}`
+	if err := os.WriteFile(f, []byte(changed), 0o644); err != nil {
+		t.Fatalf("write changed: %v", err)
+	}
+	desired2, err := compiler.Compile([]string{f}, dir, pipeline.Default)
+	if err != nil {
+		t.Fatalf("compile changed: %v", err)
+	}
+	changeOps, err := differ.Diff(desired2, liveSnapFor())
+	if err != nil {
+		t.Fatalf("drift diff (changed): %v", err)
+	}
+	if len(changeOps) == 0 {
+		t.Fatal("expected a CREATE OR REPLACE PROCEDURE op for a genuine body change against the live catalog, got none")
+	}
+	if !strings.Contains(changeOps[0].SQL(), "CREATE OR REPLACE PROCEDURE") {
+		t.Errorf("expected CREATE OR REPLACE PROCEDURE, got: %s", changeOps[0].SQL())
+	}
+}
+
 // TestRoundtripFunctionSetOf covers RETURNS SETOF fidelity end to end: a
 // set-returning function (also declaring ROWS, only valid together with
 // SETOF — closing the gap TestRoundtripFunctionParallelCostRows had to

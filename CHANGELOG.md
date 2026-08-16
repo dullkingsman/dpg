@@ -968,6 +968,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   "body changed" drift on `verify`/`plan --live` when hand-written source uses an
   equivalent-but-differently-spelled form; offline `plan`/`apply` still detect
   genuine body edits.
+- **`LANGUAGE plpgsql` function/procedure bodies no longer report spurious
+  drift on pure reformatting** (whitespace, blank lines, comments) — the last
+  remaining case in the "no canonicalisation for non-SQL languages" gap
+  (`LANGUAGE SQL` was already fixed; see RFC §9.5). The body is now compiled
+  through the real PL/pgSQL parser (via `libpg_query`'s PL/pgSQL-to-JSON
+  entry point, fed a full, argument-accurate `CREATE FUNCTION`/`PROCEDURE`
+  shim) and the one confirmed source-position field (`lineno`) is stripped
+  before hashing; everything else in the parse tree — control-flow shape,
+  declarations, labels, flags — is structural and left intact, so a genuine
+  logic change is still detected. Known limitation, documented rather than
+  fixed: embedded SQL/expression text inside the body (conditions,
+  assignment right-hand sides, `RETURN` expressions) is carried as raw,
+  unre-parsed source text by the PL/pgSQL compiler itself, so a
+  whitespace-only change *inside* one of these fragments still changes the
+  hash — closing that needs a separate fragment-vs-statement heuristic, left
+  for a future pass. Uncovered a real prerequisite bug while implementing
+  this: introspection only ever populated argument **names** for a
+  function/procedure with at least one non-plain-IN parameter; ordinary
+  plain-`IN`-only functions (the common case) had empty argument names, and
+  procedures never got names at all. Both are now populated for every
+  function and procedure, which also fixes a real, independent dump-fidelity
+  gap (plain-arg functions previously dumped without parameter names, e.g.
+  `add_ints(integer, integer)` instead of `add_ints(a integer, b integer)`).
+  A second bug was found and fixed along the way while writing the
+  introspection query: PostgreSQL's `oidvector` type (`pg_proc.proargtypes`)
+  is one of the few array types with a 0-based lower bound rather than the
+  ordinary 1-based one, and a bare `::oid[]` cast preserves that numbering —
+  a naive subscript-matching query against it silently misaligned every
+  plain-`IN`-only function's argument names by one position.
+- `internal/diff`'s `buildFunctionSQL`/`createProcedure` (real migration SQL
+  emission) now pick a collision-free dollar-quote tag for the function/
+  procedure body instead of hardcoding a literal `$$` — a body containing a
+  literal `$$` (e.g. dynamic SQL using a dollar-quoted string literal)
+  previously produced broken, unparseable migration SQL. Both now share a
+  single renderer (`ir.RenderCreateFunctionSQL`/`RenderCreateProcedureSQL`)
+  with the shim-building logic the plpgsql body-hash fix above needs on the
+  introspect side, rather than two parallel, drifting implementations.
 
 ### Changed
 
@@ -1029,6 +1066,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   that don't use operator classes, or that don't re-`dump` after upgrading,
   are unaffected — this is a real but narrow risk window, not a default-path
   regression.
+- **`LANGUAGE plpgsql` function/procedure `BodyHash` self-heals on next apply,
+  one safe re-`CREATE OR REPLACE` per object.** The hashing algorithm changed
+  from plain whitespace-collapse to structural canonicalisation (see Fixed
+  above), so every existing snapshot's stored `BodyHash` for a plpgsql
+  function/procedure no longer matches what the new algorithm computes from
+  the same, unchanged body. The first `plan`/`apply` after upgrading emits a
+  `SAFE` `CREATE OR REPLACE FUNCTION`/`PROCEDURE` for every plpgsql function/
+  procedure already in the snapshot, even if its body hasn't actually
+  changed; the snapshot re-heals with the new hash immediately, so every run
+  after that is a genuine no-op. Confirmed live against a real project: after
+  this one-time re-apply, PostgreSQL's function/procedure OIDs, ACLs, and
+  dependents are all preserved (`CREATE OR REPLACE` never drops the object),
+  and a follow-up `plan` shows zero drift.
 
 ## [idea-v0.5.2-alpha.13] — 2026-05-22
 

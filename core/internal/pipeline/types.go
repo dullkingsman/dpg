@@ -215,6 +215,12 @@ type PGParseResult struct {
 	// inside a SCHEMA { } block. The IR builder uses it as a schema fallback
 	// for objects whose Part1 text has no schema qualifier.
 	SchemaContext string
+	// SourceSQL is the full reconstructed "CREATE FUNCTION/PROCEDURE ..."
+	// statement text that produced Raw (pgparser.Reconstruct(kind, part1)).
+	// Used by ir.HashFunctionBody's plpgsql canonicalisation, which needs a
+	// complete, argument-accurate statement to feed pg_query.ParsePlPgSqlToJSON
+	// — not just the bare body. Empty for non-function/procedure kinds.
+	SourceSQL string
 }
 
 // IRObject is the common interface for all fully-resolved internal representation

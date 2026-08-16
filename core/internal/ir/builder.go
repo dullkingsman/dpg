@@ -1158,10 +1158,8 @@ func (b *Builder) buildMaterializedView(cta *pg_query.CreateTableAsStmt, block p
 // ── Function / Procedure ──────────────────────────────────────────────────────
 
 func (b *Builder) buildFunction(cfs *pg_query.CreateFunctionStmt, pg pipeline.PGParseResult, block pipeline.BlockAST, pos pipeline.SourcePos) (pipeline.IRObject, error) {
-	raw := ast.Unwrap(pg)
-
 	if cfs.IsProcedure {
-		return b.buildProcedure(cfs, raw, block, pos)
+		return b.buildProcedure(cfs, pg, block, pos)
 	}
 
 	fn := &Function{SrcPos: pos}
@@ -1180,9 +1178,7 @@ func (b *Builder) buildFunction(cfs *pg_query.CreateFunctionStmt, pg pipeline.PG
 	}
 	fn.Attrs = extractFuncAttrs(cfs.Options)
 
-	// Body hash from the Part1 raw text (we can recover it via deparse or from raw).
-	body := fn.Attrs.Body
-	fn.BodyHash = HashFunctionBody(fn.Attrs.Language, body)
+	fn.BodyHash = HashFunctionBody(fn.Attrs.Language, fn.Attrs.Body, pg.SourceSQL)
 
 	if block.Comment != nil {
 		fn.Comment = &block.Comment.Value
@@ -1203,7 +1199,7 @@ func (b *Builder) buildFunction(cfs *pg_query.CreateFunctionStmt, pg pipeline.PG
 	return fn, nil
 }
 
-func (b *Builder) buildProcedure(cfs *pg_query.CreateFunctionStmt, _ *pg_query.ParseResult, block pipeline.BlockAST, pos pipeline.SourcePos) (pipeline.IRObject, error) {
+func (b *Builder) buildProcedure(cfs *pg_query.CreateFunctionStmt, pg pipeline.PGParseResult, block pipeline.BlockAST, pos pipeline.SourcePos) (pipeline.IRObject, error) {
 	proc := &Procedure{SrcPos: pos}
 	if len(cfs.Funcname) > 0 {
 		proc.Schema, proc.Name = extractFuncName(cfs.Funcname)
@@ -1214,7 +1210,7 @@ func (b *Builder) buildProcedure(cfs *pg_query.CreateFunctionStmt, _ *pg_query.P
 		}
 	}
 	proc.Attrs = extractFuncAttrs(cfs.Options)
-	proc.BodyHash = HashFunctionBody(proc.Attrs.Language, proc.Attrs.Body)
+	proc.BodyHash = HashFunctionBody(proc.Attrs.Language, proc.Attrs.Body, pg.SourceSQL)
 	if block.Comment != nil {
 		proc.Comment = &block.Comment.Value
 	}

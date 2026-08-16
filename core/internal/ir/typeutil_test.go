@@ -11,18 +11,18 @@ import (
 func TestHashFunctionBodySQLReformattingIsNoop(t *testing.T) {
 	a := "SELECT   1 + 1;"
 	b := "select 1+1;"
-	if ir.HashFunctionBody("sql", a) != ir.HashFunctionBody("sql", b) {
+	if ir.HashFunctionBody("sql", a, "") != ir.HashFunctionBody("sql", b, "") {
 		t.Errorf("cosmetically-reformatted-but-equivalent SQL bodies hashed differently: %q vs %q", a, b)
 	}
 
 	multi := "SELECT   1;\nSELECT 2;"
 	multiReformatted := "select 1; select    2;"
-	if ir.HashFunctionBody("sql", multi) != ir.HashFunctionBody("sql", multiReformatted) {
+	if ir.HashFunctionBody("sql", multi, "") != ir.HashFunctionBody("sql", multiReformatted, "") {
 		t.Errorf("multi-statement SQL bodies with only whitespace/case differences hashed differently: %q vs %q", multi, multiReformatted)
 	}
 
 	// Case-insensitive language match.
-	if ir.HashFunctionBody("SQL", a) != ir.HashFunctionBody("sql", b) {
+	if ir.HashFunctionBody("SQL", a, "") != ir.HashFunctionBody("sql", b, "") {
 		t.Errorf("language match should be case-insensitive")
 	}
 }
@@ -30,45 +30,117 @@ func TestHashFunctionBodySQLReformattingIsNoop(t *testing.T) {
 func TestHashFunctionBodySQLGenuineChangeStillDetected(t *testing.T) {
 	a := "SELECT   1 + 1;"
 	b := "SELECT   1 + 2;"
-	if ir.HashFunctionBody("sql", a) == ir.HashFunctionBody("sql", b) {
+	if ir.HashFunctionBody("sql", a, "") == ir.HashFunctionBody("sql", b, "") {
 		t.Errorf("genuinely different SQL bodies (even both reformatted) hashed equal: %q vs %q", a, b)
 	}
 }
 
 func TestHashFunctionBodySQLMalformedFallsBackToRawHash(t *testing.T) {
 	malformed := "this is not valid SQL at all ((("
-	got := ir.HashFunctionBody("sql", malformed)
+	got := ir.HashFunctionBody("sql", malformed, "")
 	want := ir.HashBody(malformed)
 	if got != want {
 		t.Errorf("malformed SQL body should fall back to raw-text HashBody; got %q, want %q", got, want)
 	}
 }
 
-// TestHashFunctionBodyPlpgsqlReformattingStillDetected is a deliberate
-// regression guard for the documented, retained scope boundary: plpgsql is
-// NOT canonicalized (see HashFunctionBody's doc comment and RFC §9.5), so a
-// purely cosmetic reformatting of a plpgsql body must still hash
-// differently. This test should FAIL if plpgsql canonicalization is added
-// later without updating this test to match the new, intentionally
-// narrower scope.
-func TestHashFunctionBodyPlpgsqlReformattingStillDetected(t *testing.T) {
-	// A comment-only difference: HashBody's whitespace-collapse alone can't
-	// normalize this away (unlike pure whitespace/indentation, which it
-	// already handles), so this specifically proves plpgsql gets no
-	// pg_query-level canonicalization the way LANGUAGE SQL does.
-	a := "BEGIN\n  -- explain the thing\n  RETURN 1;\nEND;"
-	b := "BEGIN RETURN 1; END;"
-	if ir.HashFunctionBody("plpgsql", a) == ir.HashFunctionBody("plpgsql", b) {
-		t.Errorf("plpgsql bodies should NOT be canonicalized (documented scope boundary), but %q and %q hashed equal", a, b)
+// plpgsqlShim builds a minimal, argument-accurate "CREATE FUNCTION ...
+// LANGUAGE plpgsql AS $$...$$;" statement, the shape HashFunctionBody's
+// plpgsql canonicalisation needs as its fullStatement argument (a bare body
+// string is not enough — see HashFunctionBody's doc comment).
+func plpgsqlShim(argList, returnType, body string) string {
+	return "CREATE FUNCTION f(" + argList + ") RETURNS " + returnType +
+		" LANGUAGE plpgsql AS $$" + body + "$$;"
+}
+
+// TestHashFunctionBodyPlpgsqlReformattingIsNoop guards the fix itself: a
+// purely cosmetic reformatting (blank lines, a comment) of a plpgsql body
+// must now hash equal, given an accurate fullStatement shim.
+func TestHashFunctionBodyPlpgsqlReformattingIsNoop(t *testing.T) {
+	a := "BEGIN\n  -- explain the thing\n  RETURN n;\nEND;"
+	b := "BEGIN RETURN n; END;"
+	full := func(body string) string { return plpgsqlShim("n integer", "integer", body) }
+	if ir.HashFunctionBody("plpgsql", a, full(a)) != ir.HashFunctionBody("plpgsql", b, full(b)) {
+		t.Errorf("cosmetically-reformatted-but-equivalent plpgsql bodies hashed differently: %q vs %q", a, b)
+	}
+}
+
+// TestHashFunctionBodyPlpgsqlGenuineChangeStillDetected mirrors the SQL
+// genuine-change test: canonicalisation must never mask a real logic
+// change, even when both sides are also reformatted.
+func TestHashFunctionBodyPlpgsqlGenuineChangeStillDetected(t *testing.T) {
+	a := "BEGIN\n  RETURN n + 1;\nEND;"
+	b := "BEGIN RETURN n + 2; END;"
+	full := func(body string) string { return plpgsqlShim("n integer", "integer", body) }
+	if ir.HashFunctionBody("plpgsql", a, full(a)) == ir.HashFunctionBody("plpgsql", b, full(b)) {
+		t.Errorf("genuinely different plpgsql bodies (even both reformatted) hashed equal: %q vs %q", a, b)
+	}
+}
+
+func TestHashFunctionBodyPlpgsqlMalformedFallsBackToRawHash(t *testing.T) {
+	body := "this is not valid plpgsql at all ((("
+	full := "CREATE FUNCTION f() RETURNS integer LANGUAGE plpgsql AS $$" + body + "$$;"
+	got := ir.HashFunctionBody("plpgsql", body, full)
+	want := ir.HashBody(body)
+	if got != want {
+		t.Errorf("malformed plpgsql body should fall back to raw-text HashBody; got %q, want %q", got, want)
+	}
+}
+
+func TestHashFunctionBodyPlpgsqlEmptyFullStatementFallsBackToRawHash(t *testing.T) {
+	body := "BEGIN RETURN 1; END;"
+	got := ir.HashFunctionBody("plpgsql", body, "")
+	want := ir.HashBody(body)
+	if got != want {
+		t.Errorf("empty fullStatement should fall back to raw-text HashBody; got %q, want %q", got, want)
+	}
+}
+
+// TestHashFunctionBodyPlpgsqlOwnParameterReference is the case the whole
+// design hinges on: the PL/pgSQL compiler resolves a body's own parameter
+// references (assignment target "a := ...") against the shim's declared
+// argument list at compile time, so canonicalisation only works when that
+// list is accurate. Also proves the fallback path itself degrades
+// gracefully (no panic/error) when the shim's argument list doesn't match.
+func TestHashFunctionBodyPlpgsqlOwnParameterReference(t *testing.T) {
+	a := "BEGIN\n  a := a + 1;\n  RETURN a;\nEND;"
+	b := "BEGIN a := a + 1; RETURN a; END;"
+
+	correctShim := func(body string) string { return plpgsqlShim("a integer", "integer", body) }
+	if ir.HashFunctionBody("plpgsql", a, correctShim(a)) != ir.HashFunctionBody("plpgsql", b, correctShim(b)) {
+		t.Errorf("reformatted bodies with a correct-arg-list shim should hash equal: %q vs %q", a, b)
+	}
+
+	// A shim whose argument list doesn't match the body's own reference to
+	// "a" fails to compile through the real PL/pgSQL compiler; canonicalizePlpgsqlBody
+	// must fall back to raw HashBody(body) rather than error or panic.
+	wrongShim := plpgsqlShim("", "integer", a) // no "a" declared at all
+	got := ir.HashFunctionBody("plpgsql", a, wrongShim)
+	want := ir.HashBody(a)
+	if got != want {
+		t.Errorf("a mismatched shim should fall back to raw-text HashBody; got %q, want %q", got, want)
+	}
+}
+
+// TestHashFunctionBodyPlpgsqlTriggerNewOld verifies (not just assumes) that
+// a trigger function shim — zero SQL-level parameters, RETURNS trigger —
+// still compiles through ParsePlPgSqlToJSON with NEW/OLD resolved, so
+// reformatting a trigger body's whitespace/comments is absorbed same as any
+// other plpgsql function.
+func TestHashFunctionBodyPlpgsqlTriggerNewOld(t *testing.T) {
+	a := "BEGIN\n  -- bump x\n  NEW.x := OLD.x + 1;\n  RETURN NEW;\nEND;"
+	b := "BEGIN NEW.x := OLD.x + 1; RETURN NEW; END;"
+	full := func(body string) string {
+		return "CREATE FUNCTION t() RETURNS trigger LANGUAGE plpgsql AS $$" + body + "$$;"
+	}
+	if ir.HashFunctionBody("plpgsql", a, full(a)) != ir.HashFunctionBody("plpgsql", b, full(b)) {
+		t.Errorf("reformatted trigger-function bodies (NEW/OLD) should hash equal: %q vs %q", a, b)
 	}
 }
 
 func TestHashFunctionBodyNonSQLLanguageMatchesHashBody(t *testing.T) {
 	body := "BEGIN\n  RETURN 1;\nEND;"
-	if got, want := ir.HashFunctionBody("plpgsql", body), ir.HashBody(body); got != want {
-		t.Errorf("HashFunctionBody(plpgsql, ...) = %q, want HashBody(...) = %q", got, want)
-	}
-	if got, want := ir.HashFunctionBody("c", body), ir.HashBody(body); got != want {
+	if got, want := ir.HashFunctionBody("c", body, ""), ir.HashBody(body); got != want {
 		t.Errorf("HashFunctionBody(c, ...) = %q, want HashBody(...) = %q", got, want)
 	}
 }
