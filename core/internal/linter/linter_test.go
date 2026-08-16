@@ -55,13 +55,13 @@ func TestLintMaxColumns(t *testing.T) {
 		t.Fatal(err)
 	}
 	if len(diags) == 0 {
-		t.Fatal("expected max-columns error")
+		t.Fatal("expected column-count-exceeded error")
 	}
 	if !diags[0].IsError {
 		t.Errorf("expected IsError=true")
 	}
-	if diags[0].Rule != "max-columns" {
-		t.Errorf("expected max-columns rule, got %s", diags[0].Rule)
+	if diags[0].Rule != "column-count-exceeded" {
+		t.Errorf("expected column-count-exceeded rule, got %s", diags[0].Rule)
 	}
 }
 
@@ -80,22 +80,22 @@ func TestLintRequireColumnComments(t *testing.T) {
 	}
 	found := false
 	for _, d := range diags {
-		if d.Rule == "require-column-comments" {
+		if d.Rule == "missing-column-comment" {
 			found = true
 		}
 	}
 	if !found {
-		t.Fatal("expected require-column-comments warning for id column")
+		t.Fatal("expected missing-column-comment warning for id column")
 	}
 	// email has a comment: no warning for it.
 	warnCount := 0
 	for _, d := range diags {
-		if d.Rule == "require-column-comments" {
+		if d.Rule == "missing-column-comment" {
 			warnCount++
 		}
 	}
 	if warnCount != 1 {
-		t.Errorf("expected 1 require-column-comments warning, got %d", warnCount)
+		t.Errorf("expected 1 missing-column-comment warning, got %d", warnCount)
 	}
 }
 

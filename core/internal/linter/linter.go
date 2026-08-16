@@ -72,7 +72,7 @@ func checkTable(t *ir.Table, cfg pipeline.LinterConfig) []pipeline.LintDiagnosti
 	if cfg.MaxColumnsPerTable > 0 && len(t.Columns) > cfg.MaxColumnsPerTable {
 		diags = append(diags, pipeline.LintDiagnostic{
 			Pos:     pos,
-			Rule:    "max-columns",
+			Rule:    "column-count-exceeded",
 			Message: fmt.Sprintf("table %s has %d columns (max %d)", t.QualifiedName(), len(t.Columns), cfg.MaxColumnsPerTable),
 			IsError: true,
 		})
@@ -83,7 +83,7 @@ func checkTable(t *ir.Table, cfg pipeline.LinterConfig) []pipeline.LintDiagnosti
 		if cfg.RequireColumnComments && col.Comment == nil {
 			diags = append(diags, pipeline.LintDiagnostic{
 				Pos:     col.SrcPos,
-				Rule:    "require-column-comments",
+				Rule:    "missing-column-comment",
 				Message: fmt.Sprintf("column %s.%s has no comment", t.QualifiedName(), col.Name),
 			})
 		}
@@ -162,14 +162,13 @@ func checkView(v *ir.View, cfg pipeline.LinterConfig) []pipeline.LintDiagnostic 
 // table-column-default case. Scheme-agnostic: checks for any {{...}}
 // placeholder, not one specific scheme (an earlier RFC draft named
 // env:VAR_NAME specifically, before four more backends existed).
-// Rule ID is "hardcoded-role-password", not "hardcoded-password" (which
-// would collide with the pre-existing table-column-default rule below,
-// name-identical despite checking a completely different thing) — RFC
-// §19.1's own rules table separately names this `hardcoded_password` and
-// the table-column one is unlisted there at all, so neither the RFC's
-// snake_case naming nor a shared name were adopted; kept kebab-case to
-// match every other rule ID actually in code, and disambiguated the two
-// checks now that both concretely exist under the same linter flag.
+// Rule ID is "hardcoded-role-password", not "hardcoded-password" — the
+// latter is the pre-existing, semantically distinct table-column-default
+// rule above (checkTable), which checks a completely different thing.
+// RFC §19.1's rules table now lists both under their real, disambiguated
+// code names (kebab-case, matching every rule ID actually in code); it
+// used to conflate this rule alone under a single snake_case
+// `hardcoded_password` entry with no table-column entry at all.
 func checkRole(r *ir.Role, cfg pipeline.LinterConfig) []pipeline.LintDiagnostic {
 	var diags []pipeline.LintDiagnostic
 

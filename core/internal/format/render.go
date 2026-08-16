@@ -173,6 +173,17 @@ func renderSchemaBlock(b *strings.Builder, n *SchemaBlockNode, opts Options, dep
 
 // rekeyword rewrites known SQL/DPG keywords in text according to opts.KeywordCase.
 // It operates on a whitespace-split token stream to avoid mangling identifiers.
+//
+// The lexer classifies any bare word matching dpgKeywords as TokKeyword with
+// zero context awareness — it can't tell "PUBLIC" the GRANT-target pseudo-role
+// keyword apart from "public" used as an ordinary schema-qualifier prefix
+// (e.g. "public.log_drop_attempt()"), and many other keywords in the list
+// (USER, DEFAULT, ALL, TEXT, TYPE, ROLE, TIME, ...) are equally plausible as
+// real schema/object names. A keyword-classified word is only re-cased here
+// when it is NOT immediately adjacent to a '.' — i.e. not in identifier
+// position — since no dpgKeywords entry is ever legitimately dot-qualified
+// (PUBLIC the pseudo-role, PROCEDURE the object-kind keyword, etc. never
+// appear next to a '.'), so this can't misfire on a genuine keyword use.
 func rekeyword(text string, opts Options) string {
 	// Fast path: if no case preference, return as-is.
 	if opts.KeywordCase == "" {
@@ -180,11 +191,13 @@ func rekeyword(text string, opts Options) string {
 	}
 	tokens := Lex("", []byte(text))
 	var b strings.Builder
-	for _, tok := range tokens {
+	for i, tok := range tokens {
 		if tok.Type == TokEOF {
 			break
 		}
-		if tok.Type == TokKeyword {
+		inIdentPosition := (i > 0 && tokens[i-1].Type == TokDot) ||
+			(i+1 < len(tokens) && tokens[i+1].Type == TokDot)
+		if tok.Type == TokKeyword && !inIdentPosition {
 			b.WriteString(opts.keyword(tok.Text))
 		} else {
 			b.WriteString(tok.Text)

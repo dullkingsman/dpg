@@ -165,13 +165,13 @@ func TestLinterRequireColumnComments(t *testing.T) {
 		}
 	}
 
-	// Every diagnostic should be a require-column-comments warning.
+	// Every diagnostic should be a missing-column-comment warning.
 	for _, d := range diags {
-		if d.Rule != "require-column-comments" {
+		if d.Rule != "missing-column-comment" {
 			t.Errorf("unexpected rule %q", d.Rule)
 		}
 		if strings.Contains(d.Rule, "error") {
-			t.Errorf("require-column-comments should be a warning, not an error")
+			t.Errorf("missing-column-comment should be a warning, not an error")
 		}
 	}
 }

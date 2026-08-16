@@ -2523,7 +2523,7 @@ func-directive = comment-dir / grants-block / deprecated-dir
    `SECURITY DEFINER` SHOULD include `SET search_path = schema [, ...]`
    to prevent search path injection.  The linter SHOULD warn when a
    `SECURITY DEFINER` function lacks an explicit `search_path` setting
-   (rule: `security_definer_search_path`).
+   (rule: `security-definer-search-path`).
 
    Examples:
 
@@ -3627,10 +3627,10 @@ USER MAPPING FOR app_service
    Hardcoded passwords (an `OPTIONS` `password` value with no `{{...}}`
    placeholder at all) are rejected by the linter when
    `forbid_hardcoded_passwords` is enabled (default `true`) — implemented
-   as `hardcoded-fdw-password` in the reference linter (§19.1 names this
-   `hardcoded_fdw_password`; the actual rule identifiers in code use
-   kebab-case throughout, not this document's snake_case, a pre-existing
-   naming mismatch spanning every built-in rule, not specific to this one).
+   as `hardcoded-fdw-password` in the reference linter (§19.1's own table
+   still names several rules with this document's snake_case rather than
+   the actual kebab-case rule identifiers in code; see Appendix D.3 for
+   the corrected, authoritative rule ID table).
 
    **Diffing semantics:** any change to the mapping is a full
    `DROP USER MAPPING` + `CREATE USER MAPPING`, not a targeted
@@ -4482,7 +4482,7 @@ Options:
     "file": "schemas/public/tables/users.dpg",
     "line": 12,
     "col": 5,
-    "rule": "hardcoded_password",
+    "rule": "hardcoded-role-password",
     "message": "Role password must use env:VAR_NAME syntax",
     "is_error": true
   }
@@ -4893,12 +4893,13 @@ serial_sequence_declared      = "off"
    `subconninfo` is. Instead, `dump` redacts password-like keys
    (`password`, `passwd`, `pwd`, `secret`, `passphrase` — matched
    case-insensitively as a substring, same heuristic as the
-   `hardcoded_fdw_password` lint rule's column-default check) to a fixed,
+   `hardcoded-fdw-password` lint rule's column-default check) to a fixed,
    clearly-fake placeholder before writing OPTIONS into source; every
    other key (`user`, `dbname`, `host`, etc.) is left untouched. The
    placeholder deliberately contains no `{{...}}` marker, so if the
    dumped file is planned or applied unmodified, the existing
-   `hardcoded_fdw_password` rule (§19.1) still hard-errors on the literal
+   `hardcoded-fdw-password` rule (see Appendix D.3 for the corrected
+   rule ID table) still hard-errors on the literal
    `password` key and forces the operator to replace it with a real
    `{{secret-uri}}` reference. What remains a genuine, inherent
    limitation — not fixable by redaction — is narrower than the above:
@@ -4916,7 +4917,7 @@ serial_sequence_declared      = "off"
 
    **SECURITY DEFINER functions:** The linter warns on `SECURITY
    DEFINER` functions lacking explicit `SET search_path` to mitigate
-   search path injection attacks (rule: `security_definer_search_path`).
+   search path injection attacks (rule: `security-definer-search-path`).
 
    **Snapshot integrity:** The snapshot is a plain JSON file.  It MUST
    be committed to version control to prevent tampering.  An attacker
@@ -5833,31 +5834,42 @@ APP_SERVICE_PW="s3cr3t"
 ### D.3. Linter Rule ID Corrections (amends §19)
 
    The actual built-in linter rule identifiers use hyphens, NOT
-   underscores.  The corrected rule ID table:
+   underscores. §19.1's table also predates two rule identifiers being
+   split apart and two others being renamed (both corrected below) — the
+   corrected, complete rule ID table, matching `internal/linter/linter.go`
+   exactly as of this writing:
 
    | Rule ID (actual) | Description | Default Level |
    |---|---|---|
-   | `hardcoded-password` | Column `DEFAULT` or ROLE `PASSWORD` contains a hardcoded string. | Error |
-   | `deprecated` | Object or column is marked `DEPRECATED`. Applied to tables, columns, views, functions. | Warning |
-   | `require-column-comments` | Column lacks a `COMMENT` when `require_column_comments = true`. | Warning |
-   | `max-columns` | Table exceeds `max_columns_per_table` columns. | Error |
+   | `hardcoded-password` | A table column's `DEFAULT` contains a hardcoded string, for a column whose name contains `password`, `passwd`, `pwd`, `secret`, or `passphrase` (case-insensitive). | Error |
+   | `hardcoded-role-password` | A `ROLE`'s `PASSWORD` is a literal value with no `{{secret-uri}}` placeholder. A separate rule from `hardcoded-password` above — different check, different object kind — despite §19.1's table conflating both under one `hardcoded_password` entry. | Error |
+   | `hardcoded-fdw-password` | A `USER MAPPING`'s `OPTIONS (password '...')` is a literal value with no `{{secret-uri}}` placeholder. | Error |
+   | `deprecated` | Object or column is marked `DEPRECATED`. Applied to tables, columns, views, functions. Narrower than §19.1's `deprecated_reference` entry, which describes a *different, unimplemented* check (a non-deprecated object referencing a deprecated one) — see the note below. | Warning |
+   | `missing-column-comment` | Column lacks a `COMMENT` when `require_column_comments = true`. Renamed from `require-column-comments` (§19.1 named this `missing_column_comment`; the actual code now matches that wording, kebab-cased). | Warning |
+   | `column-count-exceeded` | Table exceeds `max_columns_per_table` columns. Renamed from `max-columns` (§19.1 named this `column_count_exceeded`; the actual code now matches that wording, kebab-cased). | Error |
    | `security-definer-search-path` | `SECURITY DEFINER` function body does not reference `search_path`. | Warning |
 
-   **Implementation note on `hardcoded-password` for columns:** The
-   linter checks column `DEFAULT` expressions for patterns that suggest
-   a hardcoded password.  Specifically, if the column name contains any
-   of the substrings `password`, `passwd`, `pwd`, `secret`, or
-   `passphrase` (case-insensitive), AND the default expression is a
-   single-quoted string literal (starts with `'`), the linter emits
-   this rule as an error.
+   **Implementation note on `hardcoded-password` vs. `hardcoded-role-password`:**
+   the column rule checks a table column's `DEFAULT` expression: if the
+   column name contains any of the substrings `password`, `passwd`, `pwd`,
+   `secret`, or `passphrase` (case-insensitive), AND the default
+   expression is a single-quoted string literal (starts with `'`), the
+   linter emits `hardcoded-password` as an error. The role rule is
+   unrelated: it checks `ROLE ... PASSWORD` directly (a structured field,
+   not a text-pattern match) for the absence of any `{{...}}` placeholder.
 
-   **Note:** The rules `scalar_merge_conflict`, `serial_sequence_declared`,
+   **Note (unimplemented rules):** `deprecated_reference`,
+   `scalar_merge_conflict`, `serial_sequence_declared`,
    `unnecessary_revocation`, `stale_renamed_from`, `unguarded_enum_removal`,
-   and `protected_drop_attempt` listed in §19.1 are compiler-phase
-   diagnostics rather than linter rules in the current implementation.
-   They are emitted during diffing or IR construction, not by the
-   `Linter.Lint` interface.  They are included in §19.1 for conceptual
-   completeness.
+   and `protected_drop_attempt`, all listed in §19.1, are not implemented
+   as `Linter.Lint`-interface rules today. `protected_drop_attempt` (only)
+   is enforced as a compiler-phase diagnostic instead, emitted during
+   diffing (DPG-E022), not by the linter. The other six — including
+   `deprecated_reference` and the `[linter.rules]` per-rule override
+   mechanism described in §19.2 — have no implementation anywhere in the
+   codebase under any name; they remain documented in §19.1 for
+   conceptual completeness/as a roadmap, not as a description of current
+   behavior.
 
 ---
 

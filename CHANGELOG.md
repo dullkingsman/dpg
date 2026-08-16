@@ -1015,6 +1015,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   block present," since both read as an empty string. `pipeline.RawObject`
   gained a `HasPart2` field to disambiguate the two; `readFunctionPart1` no
   longer consumes the trailing `;` at all, matching every other kind.
+- `dpg fmt` no longer re-cases a word that merely spells a keyword but is
+  actually used as a schema-qualified identifier — most visibly
+  `public.some_function()` was rewritten to `PUBLIC.some_function()` under
+  `KeywordCase: "upper"`, silently renaming a real function call rather than
+  restyling a keyword. Every keyword in the built-in list is at risk of this
+  (USER, DEFAULT, ALL, TEXT, TYPE, ROLE, TIME, ...), not just `PUBLIC`.
+  Fixed by never re-casing a keyword-classified token that is immediately
+  adjacent to a `.` — no real DPG/SQL keyword is ever legitimately
+  dot-qualified, so this can't misfire on a genuine keyword use (e.g.
+  `GRANT ... TO PUBLIC` is still correctly re-cased).
+- Two built-in linter rule IDs are renamed to match the wording RFC §19.1
+  always documented (kebab-cased to match every other rule ID in code):
+  `require-column-comments` → `missing-column-comment`,
+  `max-columns` → `column-count-exceeded`. Every other rule ID mismatch
+  between the RFC and code (a real, pre-existing gap — see RFC Appendix
+  D.3 for the full corrected table) is left as-is; several RFC-documented
+  rules (`deprecated_reference`, `scalar_merge_conflict`,
+  `serial_sequence_declared`, `unnecessary_revocation`,
+  `stale_renamed_from`, `unguarded_enum_removal`) have no implementation
+  under any name and remain aspirational/roadmap entries only.
 
 ### Changed
 
@@ -1089,6 +1109,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   this one-time re-apply, PostgreSQL's function/procedure OIDs, ACLs, and
   dependents are all preserved (`CREATE OR REPLACE` never drops the object),
   and a follow-up `plan` shows zero drift.
+- **Two linter rule IDs changed name** (see Fixed above):
+  `require-column-comments` → `missing-column-comment`,
+  `max-columns` → `column-count-exceeded`. This changes the `[rule-id]`
+  tag in CLI diagnostic text and `--format json`'s `"rule"` field for
+  these two rules. No `dpg.toml`/snapshot impact — the `[linter.rules]`
+  per-rule override mechanism these IDs would otherwise key into isn't
+  implemented, so nothing reads them as configuration keys today. Any
+  external tooling that greps/matches CLI output or JSON diagnostics on
+  the old rule ID strings needs updating.
 
 ## [idea-v0.5.2-alpha.13] — 2026-05-22
 

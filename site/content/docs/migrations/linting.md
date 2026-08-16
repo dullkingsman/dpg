@@ -58,6 +58,24 @@ Use a parameter or runtime value instead. For role passwords, use `env:VAR_NAME`
 
 ---
 
+## `hardcoded-role-password`
+
+**Severity:** Error — **Config:** `forbid_hardcoded_passwords` — **Default:** enabled
+
+Errors when a `ROLE`'s `PASSWORD` is a literal value with no `{{secret-uri}}` placeholder — a separate check from `hardcoded-password` above (a table column default), covering the same failure mode for `ROLE PASSWORD`.
+
+```sql
+ROLE app_user PASSWORD 'changeme';   -- error
+```
+
+```
+error [hardcoded-role-password] role app_user: PASSWORD is a literal value; use a {{secret-uri}} reference instead
+```
+
+See [Roles](../../access-control/roles/).
+
+---
+
 ## `security-definer-search-path`
 
 **Severity:** Warning — **Config:** always enabled
@@ -86,7 +104,7 @@ AS $$ ... $$;
 
 ---
 
-## `max-columns`
+## `column-count-exceeded`
 
 **Severity:** Error — **Config:** `max_columns_per_table` — **Default:** `50` (set to `0` to disable)
 
@@ -96,12 +114,12 @@ max_columns_per_table = 50  # default; 0 = disabled
 ```
 
 ```
-error [max-columns] table public.wide_table has 67 columns (max 50)
+error [column-count-exceeded] table public.wide_table has 67 columns (max 50)
 ```
 
 ---
 
-## `require-column-comments`
+## `missing-column-comment`
 
 **Severity:** Warning — **Config:** `require_column_comments` — **Default:** disabled
 
@@ -111,7 +129,7 @@ require_column_comments = true
 ```
 
 ```
-warn  [require-column-comments] column public.users.created_at has no comment
+warn  [missing-column-comment] column public.users.created_at has no comment
 ```
 
 Fix by adding a `COLUMN` block with a comment:

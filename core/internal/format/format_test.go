@@ -98,6 +98,48 @@ func formatSrc(t *testing.T, src string, opts format.Options) string {
 
 var defaultOpts = format.Options{IndentSize: 4, KeywordCase: "upper"}
 
+// TestFormat_KeywordNotRecasedInQualifiedIdentifier is a regression guard
+// for a real bug: the lexer classifies any bare word matching dpgKeywords as
+// a keyword with zero context awareness, so a schema-qualified name whose
+// schema or object part happens to spell a keyword (most commonly "public",
+// but the same class of word — USER, DEFAULT, ALL, TEXT, TYPE, ROLE, TIME,
+// etc. — is equally at risk) got case-normalized by KeywordCase even when
+// used as an ordinary identifier, not the keyword. "public.f()" rendered as
+// "PUBLIC.f()" under KeywordCase: "upper", silently renaming a real function
+// call rather than restyling a keyword. Fixed by never re-casing a
+// keyword-classified token that is immediately adjacent to a '.' — no real
+// DPG/SQL keyword (PUBLIC the pseudo-role included) is ever legitimately
+// dot-qualified, so this can't misfire on a genuine keyword use.
+func TestFormat_KeywordNotRecasedInQualifiedIdentifier(t *testing.T) {
+	src := `EVENT TRIGGER log_drops ON sql_drop EXECUTE FUNCTION public.log_drop_attempt();`
+	out := formatSrc(t, src, defaultOpts)
+	if !strings.Contains(out, "public.log_drop_attempt") {
+		t.Errorf("schema-qualified identifier 'public' must not be re-cased, got:\n%s", out)
+	}
+	if strings.Contains(out, "PUBLIC.log_drop_attempt") {
+		t.Errorf("schema-qualified identifier 'public' was incorrectly uppercased, got:\n%s", out)
+	}
+}
+
+// TestFormat_KeywordStillCasedNearButNotAdjacentToDot is the converse of the
+// test above: a genuine keyword use that merely happens to sit near — but
+// is not immediately adjacent to — a '.' must still be re-cased normally.
+// Both cases live in the same Part1 text on purpose: "public" immediately
+// precedes '.' (must NOT be re-cased) while "assignment" is a real
+// AS ASSIGNMENT keyword with no adjacent '.' at all (must still be
+// re-cased) — proving the dot-adjacency fix is precise, not a blanket
+// keyword-recasing suppression anywhere near a dot in the same statement.
+func TestFormat_KeywordStillCasedNearButNotAdjacentToDot(t *testing.T) {
+	src := `CAST (order_status AS int) WITH FUNCTION public.order_status_to_int(s order_status) AS assignment;`
+	out := formatSrc(t, src, defaultOpts)
+	if !strings.Contains(out, "public.order_status_to_int") {
+		t.Errorf("schema-qualified identifier 'public' must not be re-cased, got:\n%s", out)
+	}
+	if !strings.Contains(out, "AS ASSIGNMENT") {
+		t.Errorf("genuine ASSIGNMENT keyword should still be uppercased, got:\n%s", out)
+	}
+}
+
 func TestFormat_SimpleTable(t *testing.T) {
 	src := `table users (
     id bigint not null,
