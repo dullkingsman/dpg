@@ -1238,6 +1238,68 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `varchar(10)` to `varchar(20)`, actually RFC §7.2's own primary example
   for this rule) is a different mechanism entirely (`pg_cast` has no entry
   for a type to itself) and still falls through to `DESTRUCTIVE`.
+- **The same-base-type typmod-widening residual flagged just above is now
+  closed too** — RFC §7.2's own primary example, `VARCHAR(10)` to
+  `VARCHAR(20)`, is `CAUTION` now, not `DESTRUCTIVE`. New
+  `internal/diff/typmod_widening.go`, one comparison rule per type
+  family, each verified live against a real PostgreSQL 17 container
+  rather than assumed by analogy: `character varying`/`bit varying`
+  (length widen safe, shrink or unbounded-to-bounded not); `character`
+  (same widen rule, confirmed live it physically re-pads stored values;
+  bare `character` deliberately NOT treated as unbounded the way
+  `character varying` is, since PostgreSQL's own bare-word default is
+  `character(1)`, not unbounded); `bit` (fixed-length) — **never** safe
+  in either direction, a genuinely surprising exception confirmed live
+  (`bit(4)` to `bit(8)` errors outright: "bit string length 4 does not
+  match type bit(8)" — unlike `character`, fixed `bit` has no auto-pad
+  coercion at all); `numeric(p,s)` (safe iff precision AND scale both
+  widen or hold, or the target is unbounded — shrinking scale alone
+  doesn't error, PostgreSQL silently *rounds* the value with no signal,
+  confirmed live, so it stays unsafe); `time`/`timestamp`
+  (with/without time zone)/`interval` fractional-second precision (safe
+  iff precision widens or the target drops it, PostgreSQL's bare-word
+  form already being maximum precision 6). Arrays deliberately excluded
+  (stays `DESTRUCTIVE`) — only the scalar case was verified live.
+  15 new fast unit tests plus 3 new differ-level tests (including RFC
+  §7.2's own literal `VARCHAR(10)`→`VARCHAR(20)` example end to end) plus
+  revert-and-confirm on the core wiring.
+- **Found while live round-trip-testing the fix above, two real,
+  independent, high-impact pre-existing bugs — not related to typmod
+  widening itself, but blocking correct implementation of it:**
+  - **A bare `TIMESTAMP`/`TIME` column (no precision) permanently
+    mismatched PostgreSQL's own `format_type()` spelling** (`"timestamp"`
+    vs. `"timestamp without time zone"`), causing *permanent* spurious
+    `DESTRUCTIVE` drift on every `plan --live`/`verify` for any table
+    with one of these extremely common column types — confirmed live via
+    apply + `plan --live` (real drift, not theoretical) before fixing.
+    `ir.PGCatalogName` gained `"time"`→`"time without time zone"` and
+    `"timestamp"`→`"timestamp without time zone"` mappings (mirroring the
+    existing `timetz`/`timestamptz` ones), which in turn required two
+    more coupled fixes to avoid re-breaking precision entirely:
+    `TypeRef.String()`'s mid-string modifier insertion only checked for
+    `" with time zone"` (never matches `"without time zone"`, since the
+    word is "without", not "with"+"out"), and `typmodString`'s
+    time-family case list had gone stale under the new mapped spellings
+    — both fixed together, confirmed live (zero drift on
+    `TIMESTAMP(2)`/`TIME(3)`/bare `TIMESTAMP`/bare `TIME` after).
+  - **`BIT VARYING(n)`/`BIT(n)`'s length was silently dropped from
+    emitted DDL entirely** (`typmodString` had no case for either type
+    name at all) — not just cosmetic: for fixed `BIT(n)`, PostgreSQL's
+    own bare-word default (`bit(1)`) silently applied instead,
+    confirmed live that `BIT(4)` compiled down to a column 4x narrower
+    than declared, with no error anywhere in the pipeline. `varbit` also
+    gained a `PGCatalogName` mapping to `"bit varying"` (matching
+    `format_type()`, same reasoning as the timestamp/time fix) once the
+    length-dropping half was fixed.
+  - Both self-heal automatically on an existing project's first
+    `plan`/`apply` after upgrading — new `legacyTypeNameBeforeFix` in
+    `internal/diff/differ.go` recognizes a pre-upgrade snapshot's stale
+    short spelling as "no real drift, only DPG's own rendering changed,"
+    the same one-time upgrade-effect pattern already used for `SERIAL`
+    IR modeling and the plpgsql `BodyHash` algorithm change — confirmed
+    via dedicated regression tests, including one proving a *genuine*
+    type change starting from a legacy value is still correctly
+    detected, not swallowed by the new guard.
 
 ### Changed
 

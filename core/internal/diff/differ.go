@@ -228,6 +228,34 @@ func isLegacySerialTypeName(typeName string) bool {
 	}
 }
 
+// legacyTypeNameBeforeFix reconstructs what resolveColType/TypeRef.String()
+// would have rendered for resolvedType before 2026-08-17's PGCatalogName fix
+// added "time"->"time without time zone", "timestamp"->"timestamp without
+// time zone", and "varbit"->"bit varying" mappings (all three previously
+// passed through PGCatalogName's default case unchanged, silently
+// mismatching format_type()'s own canonical spelling — a real, live-verified
+// bug that caused permanent spurious DESTRUCTIVE drift for every plain bare
+// TIMESTAMP/TIME column, and dropped the typmod entirely for BIT/BIT
+// VARYING). Used only to recognize a pre-upgrade snapshot's stale Type
+// string as "no real drift, only DPG's own rendering changed" so it
+// self-heals on save — the same pattern as isLegacySerialTypeName just
+// above.
+func legacyTypeNameBeforeFix(resolvedType string) string {
+	s := resolvedType
+	arraySuffix := ""
+	for strings.HasSuffix(s, "[]") {
+		arraySuffix += "[]"
+		s = strings.TrimSuffix(s, "[]")
+	}
+	switch {
+	case strings.HasSuffix(s, " without time zone"):
+		s = strings.TrimSuffix(s, " without time zone")
+	case s == "bit varying" || strings.HasPrefix(s, "bit varying("):
+		s = "varbit" + strings.TrimPrefix(s, "bit varying")
+	}
+	return s + arraySuffix
+}
+
 func resolveColType(t ir.TypeRef, vtypes map[string]string) string {
 	key := t.Name
 	if t.Schema != "" {
@@ -4475,6 +4503,14 @@ func diffColumns(tbl string, o *ir.Table, snap *snapshot.SnapTable, vtypes map[s
 			// ("integer"+Serial marker etc.) on this run's save, the same
 			// way a plpgsql BodyHash-algorithm upgrade self-heals (see
 			// internal/ir/typeutil.go's canonicalizePlpgsqlBody).
+		} else if sc.Type == legacyTypeNameBeforeFix(resolvedType) {
+			// Pre-2026-08-17 snapshot stored the un-normalized short
+			// spelling ("timestamp"/"time"/"varbit") for a type
+			// PGCatalogName now maps to its full canonical form — see
+			// legacyTypeNameBeforeFix's doc comment. The live column hasn't
+			// actually changed, only DPG's own rendering of it has. Treat
+			// as no drift; self-heals to the new spelling on this run's
+			// save, same pattern as the SERIAL case just above.
 		} else if resolvedType != sc.Type {
 			using := ""
 			// RFC §7.2/§17.2 "Column type change diffing": a type change is
@@ -4482,26 +4518,26 @@ func diffColumns(tbl string, o *ir.Table, snap *snapshot.SnapTable, vtypes map[s
 			// (their own safe conversion), OR when no USING is given but
 			// PostgreSQL itself has an implicit cast (pg_cast.castcontext =
 			// 'i') between the old and new base types — RFC §17.2's own
-			// "ALTER TABLE ALTER COLUMN TYPE (implicit cast) -> CAUTION" row.
-			// An implicit cast is PostgreSQL's own strongest cast-safety
-			// guarantee (safe to apply automatically in any context, never
-			// lossy) — see implicit_casts.go for the full "why this is
-			// knowable offline" writeup and the live-catalog extraction this
-			// table is built from. Anything else (no USING, no implicit cast
-			// — including any typmod-only change like widening a varchar's
-			// length, deliberately NOT special-cased here, since that would
-			// need type-specific precision/scale comparison logic this
-			// change doesn't add) stays the safe, conservative DESTRUCTIVE
-			// default. Found live-testing a demo project: this was once
-			// hardcoded destructiveOp unconditionally, so even a
-			// correctly-supplied USING clause got treated as potential data
-			// loss requiring --allow-destructive.
+			// "ALTER TABLE ALTER COLUMN TYPE (implicit cast) -> CAUTION" row
+			// — OR the change is a same-base-type modifier (length/
+			// precision/scale) widening PostgreSQL applies with no data
+			// loss, RFC §7.2's own primary example (VARCHAR(10) ->
+			// VARCHAR(20)) — see typmod_widening.go for the full per-type-
+			// family rules, each verified live, not assumed. Anything else
+			// (no USING, no implicit cast, no provable widening) stays the
+			// safe, conservative DESTRUCTIVE default. Found live-testing a
+			// demo project: this was once hardcoded destructiveOp
+			// unconditionally, so even a correctly-supplied USING clause
+			// got treated as potential data loss requiring
+			// --allow-destructive.
 			safety := pipeline.Destructive
 			switch {
 			case col.Using != nil:
 				using = " USING " + *col.Using
 				safety = pipeline.Caution
 			case hasImplicitCast(sc.Type, resolvedType):
+				safety = pipeline.Caution
+			case typmodWideningSafe(sc.Type, resolvedType):
 				safety = pipeline.Caution
 			}
 			ops = append(ops, &op{

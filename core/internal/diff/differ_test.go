@@ -11141,3 +11141,194 @@ func TestDiffColumnTypeExplicitUsingStillCautionRegardlessOfImplicitCast(t *test
 		}
 	}
 }
+
+// ── Legacy bare timestamp/time/varbit snapshot self-heal ───────────────────
+
+// TestDiffColumnsLegacyTimestampSnapshotNoDrift proves a pre-2026-08-17
+// snapshot's stale "timestamp"/"time"/"varbit" Type string (the un-mapped
+// short spelling, before PGCatalogName started aliasing them to their full
+// canonical form) self-heals to zero drift instead of showing a permanent
+// spurious DESTRUCTIVE ALTER COLUMN TYPE — the exact upgrade-compatibility
+// concern the new "time"/"timestamp"/"varbit" mappings introduced, guarded
+// the same way isLegacySerialTypeName already guards the SERIAL rename.
+func TestDiffColumnsLegacyTimestampSnapshotNoDrift(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.widgets", &snapshot.SnapObject{
+		Kind: "table",
+		Table: &snapshot.SnapTable{
+			Schema: "public",
+			Name:   "widgets",
+			Columns: []snapshot.SnapColumn{
+				{Name: "created", Type: "timestamp"},
+				{Name: "opens", Type: "time(2)"},
+				{Name: "flags", Type: "varbit(8)"},
+			},
+		},
+	})
+	desired := []pipeline.IRObject{
+		&ir.Table{
+			Schema: "public",
+			Name:   "widgets",
+			Columns: []*ir.Column{
+				{Name: "created", Type: ir.TypeRef{Name: "timestamp without time zone"}},
+				{Name: "opens", Type: ir.TypeRef{Name: "time without time zone", Mods: "(2)"}},
+				{Name: "flags", Type: ir.TypeRef{Name: "bit varying", Mods: "(8)"}},
+			},
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, o := range ops {
+		if strings.Contains(o.SQL(), "ALTER COLUMN") && strings.Contains(o.SQL(), "TYPE") {
+			t.Errorf("expected no ALTER COLUMN TYPE against a legacy timestamp/time/varbit snapshot, got: %s", o.SQL())
+		}
+	}
+}
+
+// TestDiffColumnsLegacyTimestampSnapshotStillCatchesRealChange proves the
+// self-heal guard is narrow — a genuine type change starting from a legacy
+// snapshot value must still be detected, not accidentally swallowed by the
+// new guard.
+func TestDiffColumnsLegacyTimestampSnapshotStillCatchesRealChange(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.widgets", &snapshot.SnapObject{
+		Kind: "table",
+		Table: &snapshot.SnapTable{
+			Schema:  "public",
+			Name:    "widgets",
+			Columns: []snapshot.SnapColumn{{Name: "created", Type: "timestamp"}},
+		},
+	})
+	desired := []pipeline.IRObject{
+		&ir.Table{
+			Schema: "public",
+			Name:   "widgets",
+			Columns: []*ir.Column{
+				{Name: "created", Type: ir.TypeRef{Name: "timestamp with time zone"}},
+			},
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsSQL(ops, `ALTER COLUMN "created" TYPE timestamp with time zone`) {
+		t.Errorf("expected a genuine ALTER COLUMN TYPE for timestamp -> timestamptz, got: %v", sqlList(ops))
+	}
+}
+
+// ── Column type change: typmod-widening safety classification ──────────────
+
+// TestDiffColumnTypeVarcharWideningNoUsingIsCaution proves RFC §7.2's own
+// primary example end to end: VARCHAR(10) -> VARCHAR(20) with no USING must
+// be CAUTION, not DESTRUCTIVE — this was the RFC's literal illustrative
+// case for "a type change PostgreSQL can apply implicitly," and it stayed
+// unimplemented even after the different-base-type implicit-cast case
+// (hasImplicitCast) was fixed, since pg_cast has no entry for a type to
+// itself.
+func TestDiffColumnTypeVarcharWideningNoUsingIsCaution(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.widgets", &snapshot.SnapObject{
+		Kind: "table",
+		Table: &snapshot.SnapTable{
+			Schema:  "public",
+			Name:    "widgets",
+			Columns: []snapshot.SnapColumn{{Name: "label", Type: "character varying(10)"}},
+		},
+	})
+	desired := []pipeline.IRObject{
+		&ir.Table{
+			Schema:  "public",
+			Name:    "widgets",
+			Columns: []*ir.Column{{Name: "label", Type: ir.TypeRef{Name: "character varying", Mods: "(20)"}}},
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsSQL(ops, `ALTER COLUMN "label" TYPE character varying(20)`) {
+		t.Fatalf("expected an ALTER COLUMN TYPE op, got: %v", sqlList(ops))
+	}
+	for _, op := range ops {
+		if strings.Contains(op.SQL(), `ALTER COLUMN "label" TYPE character varying(20)`) {
+			if op.Safety() != pipeline.Caution {
+				t.Errorf("expected Caution for VARCHAR(10) -> VARCHAR(20) with no USING, got %s", op.Safety())
+			}
+		}
+	}
+}
+
+// TestDiffColumnTypeVarcharShrinkingNoUsingStaysDestructive is the negative
+// case: shrinking must stay the conservative DESTRUCTIVE default, since it
+// can genuinely fail/truncate at apply time.
+func TestDiffColumnTypeVarcharShrinkingNoUsingStaysDestructive(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.widgets", &snapshot.SnapObject{
+		Kind: "table",
+		Table: &snapshot.SnapTable{
+			Schema:  "public",
+			Name:    "widgets",
+			Columns: []snapshot.SnapColumn{{Name: "label", Type: "character varying(20)"}},
+		},
+	})
+	desired := []pipeline.IRObject{
+		&ir.Table{
+			Schema:  "public",
+			Name:    "widgets",
+			Columns: []*ir.Column{{Name: "label", Type: ir.TypeRef{Name: "character varying", Mods: "(10)"}}},
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, op := range ops {
+		if strings.Contains(op.SQL(), `ALTER COLUMN "label" TYPE character varying(10)`) {
+			if op.Safety() != pipeline.Destructive {
+				t.Errorf("expected Destructive for VARCHAR(20) -> VARCHAR(10), got %s", op.Safety())
+			}
+		}
+	}
+}
+
+// TestDiffColumnTypeNumericScaleShrinkStaysDestructive proves the genuinely
+// surprising numeric case reaches the real diff path too: PostgreSQL
+// silently rounds on a scale-only shrink (no error), so this must stay
+// DESTRUCTIVE even though precision alone doesn't decrease.
+func TestDiffColumnTypeNumericScaleShrinkStaysDestructive(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.widgets", &snapshot.SnapObject{
+		Kind: "table",
+		Table: &snapshot.SnapTable{
+			Schema:  "public",
+			Name:    "widgets",
+			Columns: []snapshot.SnapColumn{{Name: "price", Type: "numeric(10,4)"}},
+		},
+	})
+	desired := []pipeline.IRObject{
+		&ir.Table{
+			Schema:  "public",
+			Name:    "widgets",
+			Columns: []*ir.Column{{Name: "price", Type: ir.TypeRef{Name: "numeric", Mods: "(10,1)"}}},
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, op := range ops {
+		if strings.Contains(op.SQL(), `ALTER COLUMN "price" TYPE numeric(10,1)`) {
+			if op.Safety() != pipeline.Destructive {
+				t.Errorf("expected Destructive for numeric(10,4) -> numeric(10,1) (silent rounding), got %s", op.Safety())
+			}
+		}
+	}
+}

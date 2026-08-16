@@ -40,14 +40,23 @@ type TypeRef struct {
 func (t TypeRef) String() string {
 	s := qualName(t.Schema, t.Name)
 	if t.Mods != "" {
-		// PostgreSQL's "... with time zone" types take their precision
-		// immediately after the base keyword, not at the end of the full
-		// name — "timestamp(3) with time zone", never "timestamp with time
-		// zone(3)" (the latter is a syntax error; confirmed live via
-		// format_type() against a real column). Every other modifier-bearing
-		// type (numeric, character varying, plain time/timestamp) has no
-		// trailing qualifier, so appending at the end is correct for them.
-		if idx := strings.Index(s, " with time zone"); idx >= 0 {
+		// PostgreSQL's "... with/without time zone" types take their
+		// precision immediately after the base keyword, not at the end of
+		// the full name — "timestamp(3) with time zone" / "timestamp(3)
+		// without time zone", never "...time zone(3)" (the latter is a
+		// syntax error; confirmed live via format_type() against a real
+		// column, for both qualifiers). Every other modifier-bearing type
+		// (numeric, character varying, plain bit/varbit) has no trailing
+		// qualifier, so appending at the end is correct for them. Checked
+		// in this order deliberately: " with time zone" never appears as a
+		// substring of "...without time zone" (the word is "without", not
+		// "with" + "out"), so there's no ambiguity, but without checks both
+		// since either can be present depending on PGCatalogName's mapping.
+		idx := strings.Index(s, " with time zone")
+		if idx < 0 {
+			idx = strings.Index(s, " without time zone")
+		}
+		if idx >= 0 {
 			s = s[:idx] + t.Mods + s[idx:]
 		} else {
 			s += t.Mods

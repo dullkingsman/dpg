@@ -1659,25 +1659,70 @@ TABLE order_items (
        of the rewrite, which is why it is always at least `CAUTION`.
 
    **Implementation status of "PostgreSQL can apply implicitly" (as of
-   this writing):** this bullet's own example, `VARCHAR(10)` →
-   `VARCHAR(20)`, is a same-base-type typmod (length/precision) widening
-   — real PostgreSQL permits it with no `USING` and no data loss because
-   the *type itself* hasn't changed, only its length constraint, which is
-   a different mechanism from `pg_cast`. This specific case is **NOT YET
-   implemented** — it still falls through to the conservative
-   `DESTRUCTIVE` default until DPG has type-specific typmod
-   comparison logic (comparing two `numeric(p,s)` precision/scale pairs,
-   two `varchar(n)` lengths, etc. — genuinely different per type, unlike
-   the different-base-type case below). What **IS** implemented: a type
-   change between two genuinely *different* base types (e.g. `smallint`
-   → `integer`, `real` → `double precision`) is classified `CAUTION`
-   when PostgreSQL has a real implicit cast (`pg_cast.castcontext = 'i'`)
-   between them, and `DESTRUCTIVE` otherwise — see `internal/diff/
-   implicit_casts.go` for the full table (extracted verbatim from a live
-   PostgreSQL 17 catalog, not reconstructed from memory, with a live
-   integration test cross-checking it against a fresh container so it can
-   never silently drift out of sync with a future PostgreSQL version) and
-   `.dpg-notes/dpg-tracker.md` for the closure writeup.
+   this writing):** fully implemented, across both mechanisms this bullet
+   covers:
+
+   -   A type change between two genuinely *different* base types (e.g.
+       `smallint` → `integer`, `real` → `double precision`) is `CAUTION`
+       when PostgreSQL has a real implicit cast (`pg_cast.castcontext =
+       'i'`) between them, `DESTRUCTIVE` otherwise — see `internal/diff/
+       implicit_casts.go` for the full table (extracted verbatim from a
+       live PostgreSQL 17 catalog, not reconstructed from memory, with a
+       live integration test cross-checking it against a fresh container
+       so it can never silently drift out of sync with a future
+       PostgreSQL version).
+   -   This bullet's own literal example, `VARCHAR(10)` → `VARCHAR(20)`,
+       is a same-*base-type* typmod (length/precision/scale) widening —
+       a genuinely different mechanism from `pg_cast` (which has no entry
+       for a type to itself). Implemented in `internal/diff/
+       typmod_widening.go`, one rule per type family, each verified live
+       against a real PostgreSQL 17 container (several turned out
+       surprising, not guessable by analogy — see the file's own
+       comments for the live evidence behind each):
+       - `character varying(n)`/`bit varying(n)`: widening (n₂ ≥ n₁) is
+         safe; dropping the length entirely is always safe (target is
+         unbounded); shrinking, or going from unbounded to bounded, is
+         not.
+       - `character(n)`: same widening rule — confirmed live it
+         physically re-pads stored values. Bare `character` (no length)
+         is **not** treated as unbounded, unlike `character varying` —
+         PostgreSQL's own bare-word default for `CHARACTER` is
+         `character(1)`, a fixed narrow width.
+       - `bit(n)` (fixed-length): **never** safe in either direction —
+         confirmed live that even widening errors outright
+         ("bit string length 4 does not match type bit(8)"); unlike
+         `character`, fixed `bit` has no auto-pad/auto-truncate
+         coercion at all.
+       - `numeric(p,s)`: safe iff p₂≥p₁ **and** s₂≥s₁, or the target is
+         fully unbounded. Shrinking scale alone (even with precision
+         held or increased) does **not** error — PostgreSQL silently
+         *rounds* the stored value with no signal — so any decrease in
+         either component stays `DESTRUCTIVE`.
+       - `time`/`timestamp` (with or without time zone)/`interval(p)`
+         (fractional-seconds precision): safe iff p₂≥p₁, or the target
+         drops the precision entirely (PostgreSQL's bare-word form is
+         already maximum precision, 6). Shrinking silently truncates
+         the stored value, same failure shape as `numeric` scale.
+       - Arrays are deliberately excluded from this mechanism (stays
+         `DESTRUCTIVE`) — the widening rules above were only verified
+         live for the scalar case.
+
+   Fixed alongside this workstream, found via live round-trip testing: a
+   real, high-impact pre-existing bug where a bare `TIMESTAMP`/`TIME`
+   column (no precision) rendered with a different spelling than
+   PostgreSQL's own `format_type()` (`"timestamp"` vs. `"timestamp
+   without time zone"`), causing *permanent* spurious `DESTRUCTIVE` drift
+   on every `plan --live`/`verify` for any table with one of these
+   extremely common column types; and a separate bug where `BIT
+   VARYING(n)`/`BIT(n)`'s length was silently dropped from emitted DDL
+   entirely, which for fixed `BIT(n)` meant the *applied* column was
+   PostgreSQL's own bare-word default (`bit(1)`) — genuinely different,
+   narrower, from what was declared, with no error anywhere in the
+   pipeline. Both self-heal on an existing project's first `plan`/`apply`
+   after upgrading (`legacyTypeNameBeforeFix` in `internal/diff/
+   differ.go`), the same one-time upgrade-effect pattern already used for
+   the `SERIAL` IR-modeling and plpgsql `BodyHash` upgrades. See
+   `.dpg-notes/dpg-tracker.md` for the full closure writeup.
 
 ### 7.3. Constraints
 

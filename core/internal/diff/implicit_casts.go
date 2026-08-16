@@ -209,10 +209,6 @@ func bareTypeName(rendered string) string {
 	for strings.HasSuffix(s, "[]") {
 		s = strings.TrimSuffix(s, "[]")
 	}
-	if open := strings.IndexByte(s, '('); open >= 0 {
-		if closeRel := strings.IndexByte(s[open:], ')'); closeRel >= 0 {
-			s = s[:open] + s[open+closeRel+1:]
-		}
-	}
-	return s
+	base, _ := splitTypeNameAndMods(s)
+	return base
 }

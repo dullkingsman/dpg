@@ -181,6 +181,12 @@ func PGCatalogName(internal string) string {
 		return "time with time zone"
 	case "timestamptz":
 		return "timestamp with time zone"
+	case "time":
+		return "time without time zone"
+	case "timestamp":
+		return "timestamp without time zone"
+	case "varbit":
+		return "bit varying"
 	default:
 		return internal
 	}
@@ -214,6 +220,22 @@ func typmodString(typeName string, mods []*pg_query.Node) string {
 	// For most types, the first typemod is an integer constant.
 	if val, ok := typmodInt(mods[0]); ok {
 		switch typeName {
+		case "bit", "varbit", "bit varying":
+			// Confirmed live: PostgreSQL's own bare-word defaults differ
+			// dramatically between these two (bit -> bit(1), bit varying ->
+			// unbounded), so silently dropping an explicit length here isn't
+			// just lossy formatting — it changes the actual column PostgreSQL
+			// creates. A source-declared `BIT(4)` with no case here compiled
+			// down to a bare `bit` in emitted DDL, which PostgreSQL silently
+			// interprets as `bit(1)`: applying it created a real column 4x
+			// narrower than declared, with no error or warning anywhere in
+			// the pipeline. bit's typmod is a bare length exactly like
+			// character/varchar (no VARHDRSZ-style live-catalog offset
+			// concern here either, for the same "source-parsed TypeName, not
+			// live atttypmod" reason documented on that case below).
+			if val > 0 {
+				return fmt.Sprintf("(%d)", val)
+			}
 		case "character", "character varying", "bpchar", "varchar":
 			// Confirmed live (pg_query.Parse probe): unlike a live catalog's
 			// atttypmod (which PostgreSQL internally offsets by VARHDRSZ, i.e.
@@ -238,17 +260,24 @@ func typmodString(typeName string, mods []*pg_query.Node) string {
 				}
 			}
 			return fmt.Sprintf("(%d)", val)
-		case "time", "timetz", "time with time zone",
-			"timestamp", "timestamptz", "timestamp with time zone", "interval":
-			// timetz/timestamptz never actually reach this switch under their
-			// short internal name: typeNameToRef runs ref.Name through
-			// PGCatalogName first, which maps both to their long canonical
-			// form ("time with time zone" / "timestamp with time zone")
-			// before typmodString ever sees it — confirmed live via the same
-			// pg_query.Parse probe used for the A_Const fix above. Both forms
-			// are kept here (matching the varchar/bpchar case's existing
-			// belt-and-suspenders style) rather than relying solely on
-			// PGCatalogName's current behavior.
+		case "time", "timetz", "time with time zone", "time without time zone",
+			"timestamp", "timestamptz", "timestamp with time zone", "timestamp without time zone",
+			"interval":
+			// timetz/timestamptz/time/timestamp never actually reach this
+			// switch under their short internal name: typeNameToRef runs
+			// ref.Name through PGCatalogName first, which maps all four to
+			// their long canonical form ("time with/without time zone" /
+			// "timestamp with/without time zone") before typmodString ever
+			// sees it — confirmed live via the same pg_query.Parse probe
+			// used for the A_Const fix above. The bare "time"/"timestamp"
+			// forms are kept here anyway (matching the varchar/bpchar case's
+			// existing belt-and-suspenders style) rather than relying solely
+			// on PGCatalogName's current behavior — this exact gap (a case
+			// list going stale after PGCatalogName gained a new mapping, so
+			// this switch silently stopped matching and dropped the typmod
+			// entirely) is precisely what happened to "time"/"timestamp"
+			// themselves when the "without time zone" mapping was added,
+			// caught live via a real apply+plan round-trip before shipping.
 			if val >= 0 {
 				return fmt.Sprintf("(%d)", val)
 			}

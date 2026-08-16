@@ -70,7 +70,7 @@ func TestHasImplicitCastKnownWidening(t *testing.T) {
 		{"integer", "numeric"},
 		{"character varying", "text"},
 		{"character", "text"},
-		{"date", "timestamp"}, // DPG's own TypeRef.String()/PGCatalogName render a bare "timestamp" column as literal "timestamp", NOT PostgreSQL's format_type()-style "timestamp without time zone" — confirmed by reading PGCatalogName's actual mapping table, not assumed.
+		{"date", "timestamp without time zone"}, // PGCatalogName now maps "timestamp" -> "timestamp without time zone" (fixed alongside this workstream — see ir/typeutil.go), matching format_type()'s own convention.
 	}
 	for _, c := range cases {
 		if !hasImplicitCast(c.from, c.to) {

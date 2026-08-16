@@ -2767,3 +2767,117 @@ func TestBuildOpFamilyMembersOnWrongKindErrors(t *testing.T) {
 		t.Fatal("expected a build error for OPERATOR/FUNCTION members on a non-family object")
 	}
 }
+
+// ── Bare-word type rendering fidelity (bit/varbit, time/timestamp) ─────────────
+
+// TestBuildColumnTimestampPrecisionPreserved guards a real, live-verified
+// bug: TIMESTAMP(2) compiled to a rendered type string with the precision
+// silently dropped entirely ("timestamp" instead of "timestamp(2) without
+// time zone"), because PGCatalogName's "timestamp" -> "timestamp without
+// time zone" mapping (added to fix a separate spurious-drift bug — see
+// TestBuildColumnBareTimestampMatchesFormatType below) moved typmodString's
+// switch case out from under it; both had to be fixed together. Confirmed
+// live via a real apply + `plan --live` round-trip against a PostgreSQL 17
+// container before landing (zero drift after the fix).
+func TestBuildColumnTimestampPrecisionPreserved(t *testing.T) {
+	obj := buildObject(t, pipeline.KindTable, `t (a TIMESTAMP(2), b TIME(3), c TIMESTAMPTZ(4))`, ``)
+	tbl := obj.(*ir.Table)
+	cases := map[string]string{
+		"a": "timestamp(2) without time zone",
+		"b": "time(3) without time zone",
+		"c": "timestamp(4) with time zone",
+	}
+	for _, col := range tbl.Columns {
+		want, ok := cases[col.Name]
+		if !ok {
+			continue
+		}
+		if got := col.Type.String(); got != want {
+			t.Errorf("column %s: got %q, want %q", col.Name, got, want)
+		}
+	}
+}
+
+// TestBuildColumnBareTimestampMatchesFormatType guards the actual bug found
+// live: a bare TIMESTAMP/TIME column (no precision) rendered as literal
+// "timestamp"/"time", permanently mismatching PostgreSQL's own
+// format_type() output ("timestamp without time zone"/"time without time
+// zone") that live introspection uses — a real, high-impact bug (these are
+// extremely common column types) causing permanent spurious DESTRUCTIVE
+// drift on every `plan --live`/`verify` for any table with a plain
+// TIMESTAMP or TIME column. Confirmed live via apply + `plan --live`
+// (zero drift after the fix) before landing.
+func TestBuildColumnBareTimestampMatchesFormatType(t *testing.T) {
+	obj := buildObject(t, pipeline.KindTable, `t (a TIMESTAMP, b TIME)`, ``)
+	tbl := obj.(*ir.Table)
+	cases := map[string]string{
+		"a": "timestamp without time zone",
+		"b": "time without time zone",
+	}
+	for _, col := range tbl.Columns {
+		want, ok := cases[col.Name]
+		if !ok {
+			continue
+		}
+		if got := col.Type.String(); got != want {
+			t.Errorf("column %s: got %q, want %q", col.Name, got, want)
+		}
+	}
+}
+
+// TestBuildColumnBitVaryingLengthPreserved guards a real, live-verified bug:
+// BIT VARYING(8) and BIT(4) both compiled with their length modifier
+// completely dropped ("varbit"/"bit", no "(n)" at all) — typmodString had
+// no case for either type name at all. This wasn't just cosmetic: applying
+// the resulting DDL created a column with PostgreSQL's own bare-word
+// default width instead of the declared one — confirmed live that bare
+// `bit` silently means `bit(1)`, an 8x-narrower column than BIT(4)
+// declared, with no error anywhere in the pipeline. Also guards the
+// "bit varying"/"varbit" rendering-fidelity half separately (PGCatalogName
+// now maps "varbit" -> "bit varying" to match format_type(), same
+// reasoning as the timestamp/time fix above).
+func TestBuildColumnBitVaryingLengthPreserved(t *testing.T) {
+	obj := buildObject(t, pipeline.KindTable, `t (a BIT VARYING(8), b BIT(4))`, ``)
+	tbl := obj.(*ir.Table)
+	cases := map[string]string{
+		"a": "bit varying(8)",
+		"b": "bit(4)",
+	}
+	for _, col := range tbl.Columns {
+		want, ok := cases[col.Name]
+		if !ok {
+			continue
+		}
+		if got := col.Type.String(); got != want {
+			t.Errorf("column %s: got %q, want %q", col.Name, got, want)
+		}
+	}
+}
+
+func TestPGCatalogNameNewMappings(t *testing.T) {
+	cases := map[string]string{
+		"time":      "time without time zone",
+		"timestamp": "timestamp without time zone",
+		"varbit":    "bit varying",
+	}
+	for internal, want := range cases {
+		if got := ir.PGCatalogName(internal); got != want {
+			t.Errorf("PGCatalogName(%q): got %q, want %q", internal, got, want)
+		}
+	}
+}
+
+// TestTypeRefStringWithoutTimeZoneModPosition proves TypeRef.String()
+// inserts a typmod before " without time zone" the same way it already did
+// for " with time zone" — the mid-string special case previously only
+// checked for " with time zone" as a substring, which "without time zone"
+// does NOT contain (the word is "without", not "with" immediately followed
+// by "out"), so a typmod on a "timestamp without time zone"/"time without
+// time zone" TypeRef was silently dropped entirely rather than merely
+// misplaced, until this was fixed alongside PGCatalogName's new mappings.
+func TestTypeRefStringWithoutTimeZoneModPosition(t *testing.T) {
+	ref := ir.TypeRef{Name: "timestamp without time zone", Mods: "(3)"}
+	if got := ref.String(); got != "timestamp(3) without time zone" {
+		t.Errorf("got %q, want %q", got, "timestamp(3) without time zone")
+	}
+}
