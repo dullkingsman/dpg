@@ -1,8 +1,10 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
@@ -26,6 +28,7 @@ func newDumpCmd() *cobra.Command {
 		clusterName  string
 		databaseName string
 		outputDir    string
+		yes          bool
 	)
 
 	cmd := &cobra.Command{
@@ -33,7 +36,11 @@ func newDumpCmd() *cobra.Command {
 		Short: "Introspect a live database and produce initial .dpg source files",
 		Long: `Connects to the primary node, reads the live catalog, and writes
 .dpg source files and an initial snapshot to the output directory.
-Use this to bootstrap a DPG project from an existing database.`,
+Use this to bootstrap a DPG project from an existing database.
+
+If any target file already exists, dump refuses to proceed until you
+explicitly confirm the overwrite (or pass --yes) — nothing is ever
+silently clobbered.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			proj, err := discoverProject()
 			if err != nil {
@@ -82,7 +89,7 @@ Use this to bootstrap a DPG project from an existing database.`,
 					if out == "" {
 						out = filepath.Join(proj.RootDir, cl.Name(), db.Name())
 					}
-					if err := runDump(cl, db, out, clusterOut, introspector, dumpStore, secretResolver, fmtOpts); err != nil {
+					if err := runDump(cl, db, out, clusterOut, introspector, dumpStore, secretResolver, fmtOpts, yes); err != nil {
 						return fmt.Errorf("%s/%s: %w", cl.Name(), db.Name(), err)
 					}
 				}
@@ -94,6 +101,7 @@ Use this to bootstrap a DPG project from an existing database.`,
 	cmd.Flags().StringVar(&clusterName, "cluster", "", "cluster to dump (required when multiple clusters exist)")
 	cmd.Flags().StringVar(&databaseName, "database", "", "database to dump (required when multiple databases exist)")
 	cmd.Flags().StringVarP(&outputDir, "output", "o", "", "output directory (default: cluster/database/ within project root); when set, sandboxes ALL output here, including cluster-level roles.dpg and the snapshot, not just per-database source")
+	cmd.Flags().BoolVarP(&yes, "yes", "y", false, "skip the interactive overwrite confirmation (for scripts/CI)")
 
 	return cmd
 }
@@ -117,6 +125,57 @@ func dumpClusterTargets(cl *project.Cluster, store pipeline.SnapshotStore, outpu
 		&snapshot.FileStore{Dir: filepath.Join(outputDir, ".dpg", "snapshots")}
 }
 
+// confirmOverwrite checks paths for any that already exist on disk and, if
+// any do, refuses to let dump proceed until the user explicitly confirms —
+// twice: a y/N prompt, then typing the literal word "overwrite" (a second,
+// distinct confirmation step, not just repeating y/N — matching the
+// type-the-word pattern tools like terraform destroy use for an action this
+// hard to reverse). skipConfirm (--yes) bypasses both prompts for
+// scripts/CI, but the loud warning listing every file still always prints
+// first regardless, so the operator sees exactly what happened even in
+// non-interactive use. Returns nil immediately, with no output at all, when
+// paths is empty or none of them exist yet — dumping into a brand-new
+// project or a fresh scratch directory stays completely frictionless.
+// w/r are explicit (rather than hardcoding os.Stderr/os.Stdin) so this is
+// unit-testable without a real TTY.
+func confirmOverwrite(w io.Writer, r io.Reader, paths []string, skipConfirm bool, color bool) error {
+	var existing []string
+	for _, p := range paths {
+		if _, err := os.Stat(p); err == nil {
+			existing = append(existing, p)
+		}
+	}
+	if len(existing) == 0 {
+		return nil
+	}
+	sort.Strings(existing)
+
+	fmt.Fprintln(w)
+	fmt.Fprintln(w, ui.Red(ui.Bold("WARNING: dpg dump will OVERWRITE the following existing file(s):", color), color))
+	for _, p := range existing {
+		fmt.Fprintln(w, "  "+ui.Yellow(p, color))
+	}
+	fmt.Fprintln(w, ui.Red("Any hand-edits to these files will be permanently lost.", color))
+
+	if skipConfirm {
+		return nil
+	}
+
+	scanner := bufio.NewScanner(r)
+
+	fmt.Fprintf(w, "\n%s [y/N] ", ui.Bold("Overwrite these files?", color))
+	if !scanner.Scan() || !strings.EqualFold(strings.TrimSpace(scanner.Text()), "y") {
+		return fmt.Errorf("aborted: dump would overwrite %d existing file(s); rerun with -o to target a different directory, or --yes to confirm non-interactively", len(existing))
+	}
+
+	fmt.Fprintf(w, "%s ", ui.Bold(`Type "overwrite" to confirm:`, color))
+	if !scanner.Scan() || strings.TrimSpace(scanner.Text()) != "overwrite" {
+		return fmt.Errorf("aborted: confirmation text did not match")
+	}
+
+	return nil
+}
+
 func runDump(
 	cl *project.Cluster,
 	db *project.Database,
@@ -126,6 +185,7 @@ func runDump(
 	store pipeline.SnapshotStore,
 	secretResolver pipeline.SecretResolver,
 	fmtOpts format.Options,
+	skipConfirm bool,
 ) error {
 	ctx := context.Background()
 	color := ui.IsColorEnabled(os.Stdout)
@@ -186,6 +246,29 @@ func runDump(
 		}
 		renderObjectDPG(schemaFiles[schema], obj, fmtOpts)
 		dbObjects = append(dbObjects, obj)
+	}
+
+	// Confirm before overwriting anything that already exists on disk — every
+	// path any of the write loops below is about to touch, computed up front
+	// so the check happens before the FIRST byte is written, not partway
+	// through. Previously dump silently clobbered pre-existing .dpg source
+	// with zero confirmation of any kind (a real incident during a prior
+	// session recovered only via transcript reconstruction — see
+	// .dpg-notes/dpg-tracker.md); this closes that gap for good. The
+	// snapshot is deliberately excluded — it's a derived/managed artifact
+	// dump is always expected to refresh, not hand-authored source.
+	var candidatePaths []string
+	for schema := range schemaFiles {
+		candidatePaths = append(candidatePaths, filepath.Join(outDir, "schemas", schema, "schema.dpg"))
+	}
+	if dbLevelFile.Len() > 0 {
+		candidatePaths = append(candidatePaths, filepath.Join(outDir, "objects.dpg"))
+	}
+	if clusterFile.Len() > 0 {
+		candidatePaths = append(candidatePaths, filepath.Join(clusterObjectsDir, "roles.dpg"))
+	}
+	if err := confirmOverwrite(os.Stderr, os.Stdin, candidatePaths, skipConfirm, color); err != nil {
+		return err
 	}
 
 	// Write DB-level schema files.

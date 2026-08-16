@@ -89,7 +89,7 @@ func TestDumpDashOSandboxesClusterOutput(t *testing.T) {
 	scratchStore := &snapshot.FileStore{Dir: filepath.Join(scratchOut, ".dpg", "snapshots")}
 
 	fmtOpts := format.Options{IndentSize: 4, KeywordCase: "upper"}
-	if err := runDump(cl, db, dbOut, clusterOut, introspect.New(), scratchStore, &mockSecretResolver{}, fmtOpts); err != nil {
+	if err := runDump(cl, db, dbOut, clusterOut, introspect.New(), scratchStore, &mockSecretResolver{}, fmtOpts, true); err != nil {
 		t.Fatalf("runDump: %v", err)
 	}
 
@@ -129,5 +129,105 @@ func TestDumpDashOSandboxesClusterOutput(t *testing.T) {
 	// must never be created by a sandboxed -o dump either.
 	if _, statErr := os.Stat(filepath.Join(realProjectDir, ".dpg")); !os.IsNotExist(statErr) {
 		t.Errorf("real project .dpg dir must not be created by a sandboxed -o dump (stat err: %v)", statErr)
+	}
+}
+
+// TestDumpRefusesToOverwriteWithoutConfirmation proves runDump's actual
+// wiring of the overwrite-protection fix end to end, not just
+// confirmOverwrite in isolation (already covered by dump_test.go's fast
+// unit tests): re-dumping into a directory that already has a
+// previously-dumped roles.dpg must (a) succeed silently with skipConfirm
+// (--yes) true, genuinely overwriting the file, and (b) refuse and leave
+// the file untouched when skipConfirm is false and the (real, temporarily
+// swapped) os.Stdin declines the prompt — proving runDump reads from the
+// real global os.Stdin, not a test-only seam, the same as an actual
+// interactive user would.
+func TestDumpRefusesToOverwriteWithoutConfirmation(t *testing.T) {
+	ctx := context.Background()
+	connStr := testpg.Start(t)
+	conn, err := executor.Connect(ctx, connStr)
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	defer conn.Close(ctx)
+
+	roleDir := t.TempDir()
+	roleFile := filepath.Join(roleDir, "roles.dpg")
+	if err := os.WriteFile(roleFile, []byte(`ROLE redump_probe NOLOGIN;`), 0o644); err != nil {
+		t.Fatalf("write role fixture: %v", err)
+	}
+	desired, _, err := compiler.Compile([]string{roleFile}, roleDir, pipeline.Default)
+	if err != nil {
+		t.Fatalf("compile role fixture: %v", err)
+	}
+	ops, err := diff.New().Diff(desired, &pipeline.Snapshot{})
+	if err != nil {
+		t.Fatalf("diff: %v", err)
+	}
+	migration, err := emit.New().Emit(ops, pipeline.MigrationMeta{Cluster: "test", Database: "dpgtest"})
+	if err != nil {
+		t.Fatalf("emit: %v", err)
+	}
+	if err := executor.New().Apply(ctx, migration, conn); err != nil {
+		t.Fatalf("apply: %v", err)
+	}
+
+	scratchOut := t.TempDir()
+	dbOut := filepath.Join(scratchOut, "db1")
+	clusterOut := filepath.Join(scratchOut, "cluster1", "cluster")
+	store := &snapshot.FileStore{Dir: filepath.Join(scratchOut, ".dpg", "snapshots")}
+	cl := &project.Cluster{
+		Config: config.ClusterConfig{Cluster: config.ClusterDef{Name: "cluster1", URL: connStr}},
+	}
+	db := &project.Database{Config: config.DatabaseConfig{Database: config.DatabaseDef{Name: "db1"}}}
+	fmtOpts := format.Options{IndentSize: 4, KeywordCase: "upper"}
+
+	// First dump: nothing exists yet, must succeed with zero confirmation
+	// (skipConfirm=false here specifically, to prove the frictionless-first-
+	// dump guarantee holds even when confirmation isn't being bypassed).
+	if err := runDump(cl, db, dbOut, clusterOut, introspect.New(), store, &mockSecretResolver{}, fmtOpts, false); err != nil {
+		t.Fatalf("first runDump (nothing pre-existing): %v", err)
+	}
+	rolesPath := filepath.Join(clusterOut, "roles.dpg")
+	before, err := os.ReadFile(rolesPath)
+	if err != nil {
+		t.Fatalf("read roles.dpg after first dump: %v", err)
+	}
+
+	// Second dump, skipConfirm=true: roles.dpg now exists, must still
+	// succeed (and does genuinely overwrite — same content here since
+	// nothing changed live, but the write path is exercised for real).
+	if err := runDump(cl, db, dbOut, clusterOut, introspect.New(), store, &mockSecretResolver{}, fmtOpts, true); err != nil {
+		t.Fatalf("second runDump with skipConfirm=true (roles.dpg pre-existing): %v", err)
+	}
+
+	// Third dump, skipConfirm=false, with a fake os.Stdin that declines the
+	// first prompt: must fail, and must NOT touch the existing roles.dpg.
+	origStdin := os.Stdin
+	r, w, pipeErr := os.Pipe()
+	if pipeErr != nil {
+		t.Fatalf("os.Pipe: %v", pipeErr)
+	}
+	if _, err := w.WriteString("n\n"); err != nil {
+		t.Fatalf("write to pipe: %v", err)
+	}
+	w.Close()
+	os.Stdin = r
+	err = runDump(cl, db, dbOut, clusterOut, introspect.New(), store, &mockSecretResolver{}, fmtOpts, false)
+	os.Stdin = origStdin
+	r.Close()
+
+	if err == nil {
+		t.Fatal("expected runDump to refuse when the (fake, declining) interactive prompt says no")
+	}
+	if !strings.Contains(err.Error(), "aborted") {
+		t.Errorf("expected an 'aborted' error, got: %v", err)
+	}
+	after, readErr := os.ReadFile(rolesPath)
+	if readErr != nil {
+		t.Fatalf("read roles.dpg after declined third dump: %v", readErr)
+	}
+	if string(after) != string(before) {
+		t.Error("roles.dpg must be byte-identical after a declined overwrite confirmation")
 	}
 }

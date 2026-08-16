@@ -4454,10 +4454,24 @@ Options:
                       including cluster-level roles.dpg and the snapshot,
                       not just the per-database source files — so a dump
                       run this way never touches the real project.
+  --yes / -y          Skip the interactive overwrite confirmation below
+                      (for scripts/CI). The warning still always prints.
 ```
 
-   Note: existing files are never overwritten; re-running `dpg dump`
-   on a directory that already contains `.dpg` files is safe.
+   Overwrite protection: if any target `.dpg` file already exists on disk,
+   `dpg dump` refuses to proceed silently. It prints a warning naming
+   every file that would be overwritten, then requires two separate
+   confirmations before continuing — an initial `[y/N]` prompt, followed
+   by typing the literal word `overwrite` — matching the type-the-word
+   confirmation pattern other tools use for an action this hard to
+   reverse. `--yes` skips both prompts for non-interactive use, but the
+   warning listing the affected files is still always printed first,
+   regardless. When nothing targeted by this dump already exists (a
+   brand-new project, or a fresh `-o` directory), there is no warning and
+   no prompt at all — re-running `dpg dump` is exactly as safe as before
+   in that case. The generated snapshot is deliberately excluded from
+   this check: it is a derived/managed artifact `dump` is always expected
+   to refresh, not hand-authored source.
 
    `--output`/`-o` sandboxing detail: without `-o`, cluster-scoped output
    (`roles.dpg`) and the snapshot are written to their real, permanent

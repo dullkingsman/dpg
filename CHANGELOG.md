@@ -1191,6 +1191,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`TestDumpDashOSandboxesClusterOutput`) applies a real `ROLE` and proves
   the real project's cluster `ObjectsDir` is never even created by a
   sandboxed dump.
+- **`dpg dump` silently overwrote existing `.dpg` source files with zero
+  confirmation of any kind** — a real prior-session incident (recovered
+  only via transcript reconstruction) that motivated a standing
+  never-run-bare-`dpg-dump` practice rather than an actual fix. `dpg dump`
+  now refuses to proceed if any target file already exists: it prints a
+  loud warning naming every affected file, then requires two separate
+  confirmations — an initial `[y/N]` prompt, then typing the literal word
+  `overwrite` — before continuing. New `--yes`/`-y` flag skips both
+  prompts for scripts/CI (the warning still always prints). Bootstrapping
+  a brand-new project, or dumping into a fresh `-o` directory, remains
+  completely frictionless — the check only fires when something would
+  actually be overwritten. The generated snapshot is deliberately
+  excluded from this check (it's a derived/managed artifact, not
+  hand-authored source dump is expected to refresh on every run). New
+  `confirmOverwrite` helper (`cmd/dpg/dump.go`), 8 new fast unit tests
+  covering every branch (no-existing-files no-op, `--yes` still warns,
+  both confirmations required independently, EOF/decline abort safely),
+  plus a new live Docker integration test
+  (`TestDumpRefusesToOverwriteWithoutConfirmation`) proving the real
+  `os.Stdin`-driven prompt genuinely blocks a re-dump and leaves the
+  existing file byte-identical when declined.
 
 ### Changed
 

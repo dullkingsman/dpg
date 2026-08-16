@@ -2370,3 +2370,152 @@ func TestDumpClusterTargetsMultipleClustersNamespaced(t *testing.T) {
 		t.Errorf("two different clusters sharing one -o value must not resolve to the same clusterOut, both got %q", out1)
 	}
 }
+
+// ── confirmOverwrite (dpg dump overwrite-protection) ────────────────────────
+
+// TestConfirmOverwriteNoExistingFilesNoPrompt proves the common, safe case
+// (bootstrapping a brand-new project, or a fresh scratch -o directory) is
+// completely frictionless: no existing files means no warning, no prompt,
+// nil error, and — critically — no attempt to read from r at all (a nil
+// reader would panic bufio.NewScanner if confirmOverwrite ever tried).
+func TestConfirmOverwriteNoExistingFilesNoPrompt(t *testing.T) {
+	dir := t.TempDir()
+	var out strings.Builder
+	err := confirmOverwrite(&out, nil, []string{filepath.Join(dir, "does-not-exist.dpg")}, false, false)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if out.Len() != 0 {
+		t.Errorf("expected no output when nothing exists yet, got: %s", out.String())
+	}
+}
+
+// TestConfirmOverwriteEmptyPathsNoPrompt is the same guarantee for a nil/
+// empty candidate list (e.g. a dump that wrote nothing at all this call).
+func TestConfirmOverwriteEmptyPathsNoPrompt(t *testing.T) {
+	var out strings.Builder
+	if err := confirmOverwrite(&out, nil, nil, false, false); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if out.Len() != 0 {
+		t.Errorf("expected no output for an empty path list, got: %s", out.String())
+	}
+}
+
+// TestConfirmOverwriteSkipConfirmStillWarns proves --yes (skipConfirm) still
+// prints the loud warning listing every file — silently skipping only the
+// interactive prompts, never the visibility — so non-interactive/CI use
+// still surfaces exactly what got overwritten.
+func TestConfirmOverwriteSkipConfirmStillWarns(t *testing.T) {
+	dir := t.TempDir()
+	existing := filepath.Join(dir, "schema.dpg")
+	if err := os.WriteFile(existing, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var out strings.Builder
+	if err := confirmOverwrite(&out, nil, []string{existing}, true, false); err != nil {
+		t.Fatalf("unexpected error with skipConfirm: %v", err)
+	}
+	if !strings.Contains(out.String(), existing) {
+		t.Errorf("expected the warning to name %s even with --yes, got: %s", existing, out.String())
+	}
+	if !strings.Contains(out.String(), "WARNING") {
+		t.Errorf("expected a WARNING banner even with --yes, got: %s", out.String())
+	}
+}
+
+// TestConfirmOverwriteInteractiveBothConfirmationsSucceed proves the full
+// double-confirmation path: "y" to the first prompt, then the literal word
+// "overwrite" to the second, distinct prompt — both required.
+func TestConfirmOverwriteInteractiveBothConfirmationsSucceed(t *testing.T) {
+	dir := t.TempDir()
+	existing := filepath.Join(dir, "schema.dpg")
+	if err := os.WriteFile(existing, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var out strings.Builder
+	in := strings.NewReader("y\noverwrite\n")
+	if err := confirmOverwrite(&out, in, []string{existing}, false, false); err != nil {
+		t.Fatalf("expected success after both confirmations, got: %v", err)
+	}
+}
+
+// TestConfirmOverwriteDeclineFirstPrompt proves "n" (or anything other than
+// "y") at the first prompt aborts immediately — the second prompt is never
+// reached (confirmed by the reader having nothing left, since only one line
+// was ever provided; a second Scan() call would return false/EOF, which the
+// "not \"overwrite\"" branch would also reject, but we want to fail on the
+// FIRST prompt specifically here).
+func TestConfirmOverwriteDeclineFirstPrompt(t *testing.T) {
+	dir := t.TempDir()
+	existing := filepath.Join(dir, "schema.dpg")
+	if err := os.WriteFile(existing, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var out strings.Builder
+	in := strings.NewReader("n\n")
+	err := confirmOverwrite(&out, in, []string{existing}, false, false)
+	if err == nil {
+		t.Fatal("expected an error when the user declines the first prompt")
+	}
+	if !strings.Contains(err.Error(), "aborted") {
+		t.Errorf("expected an 'aborted' error, got: %v", err)
+	}
+}
+
+// TestConfirmOverwriteWrongSecondConfirmationText proves saying "y" to the
+// first prompt but typing anything other than the exact word "overwrite" to
+// the second still aborts — the two prompts are independently enforced, not
+// just two chances to say yes.
+func TestConfirmOverwriteWrongSecondConfirmationText(t *testing.T) {
+	dir := t.TempDir()
+	existing := filepath.Join(dir, "schema.dpg")
+	if err := os.WriteFile(existing, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var out strings.Builder
+	in := strings.NewReader("y\nyes\n")
+	err := confirmOverwrite(&out, in, []string{existing}, false, false)
+	if err == nil {
+		t.Fatal("expected an error when the second confirmation text doesn't match \"overwrite\" exactly")
+	}
+}
+
+// TestConfirmOverwriteEOFAborts proves an unexpectedly-closed input stream
+// (e.g. dump run with stdin redirected from /dev/null in a broken script)
+// aborts safely rather than panicking or silently proceeding.
+func TestConfirmOverwriteEOFAborts(t *testing.T) {
+	dir := t.TempDir()
+	existing := filepath.Join(dir, "schema.dpg")
+	if err := os.WriteFile(existing, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var out strings.Builder
+	in := strings.NewReader("") // immediate EOF
+	err := confirmOverwrite(&out, in, []string{existing}, false, false)
+	if err == nil {
+		t.Fatal("expected an error on immediate EOF, not silent success")
+	}
+}
+
+// TestConfirmOverwriteOnlyExistingPathsWarned proves the warning lists only
+// the paths that actually already exist, not every candidate path passed in
+// (most of which, in the real dump flow, are new files that don't exist yet).
+func TestConfirmOverwriteOnlyExistingPathsWarned(t *testing.T) {
+	dir := t.TempDir()
+	existing := filepath.Join(dir, "exists.dpg")
+	missing := filepath.Join(dir, "does-not-exist.dpg")
+	if err := os.WriteFile(existing, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var out strings.Builder
+	if err := confirmOverwrite(&out, nil, []string{existing, missing}, true, false); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !strings.Contains(out.String(), existing) {
+		t.Errorf("expected warning to mention the existing file %s, got: %s", existing, out.String())
+	}
+	if strings.Contains(out.String(), missing) {
+		t.Errorf("expected warning NOT to mention the non-existent file %s, got: %s", missing, out.String())
+	}
+}

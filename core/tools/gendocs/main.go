@@ -160,8 +160,8 @@ func dumpCmd() *cobra.Command {
 		Long: `Connects to the primary node, reads the live catalog, and writes
 initial .dpg source files and a snapshot. Use this to bootstrap a DPG project from an existing database.
 
-Existing files are never overwritten; re-running dpg dump on a directory that already
-contains .dpg files is safe.
+If any target file already exists, dump refuses to proceed until you explicitly
+confirm the overwrite (or pass --yes) — nothing is ever silently clobbered.
 
 Objects whose DDL cannot be cleanly reconstructed from catalog information are emitted
 as comments with a -- dpg:manual marker. Review these manually and replace them with
@@ -170,6 +170,7 @@ proper DPG declarations.`,
 	cmd.Flags().String("cluster", "", "cluster to dump (required when multiple clusters exist)")
 	cmd.Flags().String("database", "", "database to dump (required when multiple databases exist)")
 	cmd.Flags().StringP("output", "o", "", "output directory (default: cluster/database/ within project root); when set, sandboxes ALL output here, including cluster-level roles.dpg and the snapshot, not just per-database source")
+	cmd.Flags().BoolP("yes", "y", false, "skip the interactive overwrite confirmation (for scripts/CI)")
 	return cmd
 }
 
