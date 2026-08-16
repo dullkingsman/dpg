@@ -557,6 +557,7 @@ module.exports = grammar({
       kw("OPERATOR"), kw("FAMILY"),
       field("name", $._object_ref),
       kw("USING"), $.identifier,
+      optional($.dpg_block),
       optional(";"),
     ),
 
@@ -614,6 +615,8 @@ module.exports = grammar({
       $.not_null_directive,
       $.check_directive,
       $.mapping_directive,
+      $.opfamily_operator_member,
+      $.opfamily_function_member,
       $.name_map_directive,
       $.name_maps_block,
     ),
@@ -650,6 +653,40 @@ module.exports = grammar({
     mapping_directive: $ => seq(
       kw("MAPPING"), kw("FOR"), commaSep1($.identifier),
       kw("WITH"), commaSep1($.identifier), ";",
+    ),
+
+    // OPERATOR FAMILY { } loose members (RFC §14.4) — real PG's own
+    // ALTER OPERATOR FAMILY ... ADD list-item grammar, minus the
+    // ALTER/family header. Each item restates its own OPERATOR/FUNCTION
+    // keyword and optionally ends in "," (more members follow, matching
+    // the block's usual comma-separated-list style) or ";" (like every
+    // other block directive) — the terminator is optional so the block's
+    // last member doesn't need trailing punctuation before "}".
+    opfamily_operator_member: $ => seq(
+      kw("OPERATOR"), $.number_literal,
+      $._operator_symbol,
+      "(", $.sql_type, ",", $.sql_type, ")",
+      optional(seq(kw("FOR"), choice(
+        kw("SEARCH"),
+        seq(kw("ORDER"), kw("BY"), $._object_ref),
+      ))),
+      optional(choice(",", ";")),
+    ),
+
+    opfamily_function_member: $ => seq(
+      kw("FUNCTION"), $.number_literal,
+      optional(seq("(", $.sql_type, optional(seq(",", $.sql_type)), ")")),
+      field("name", $._object_ref),
+      "(", commaSep($.sql_type), ")",
+      optional(choice(",", ";")),
+    ),
+
+    // A (possibly schema-qualified) operator symbol — real PG operator
+    // characters, see the "Operators" chapter of the PG docs:
+    // + - * / < > = ~ ! @ # % ^ & | ` ?
+    _operator_symbol: $ => seq(
+      optional(seq($.identifier, ".")),
+      /[-+*\/<>=~!@#%^&|`?]+/,
     ),
 
     indices_block: $ => seq(

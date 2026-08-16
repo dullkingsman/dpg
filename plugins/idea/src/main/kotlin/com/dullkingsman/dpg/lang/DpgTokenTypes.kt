@@ -149,6 +149,16 @@ object DpgTokenTypes {
         EVENT_KW, TEXT_KW, DEFAULT_KW, VIRTUAL_KW, USER_KW
     )
 
+    // OPERATOR_KW/FUNCTION_KW deliberately belong to BOTH this set and
+    // DPG_OBJECT_KEYWORDS above (unlike STATISTICS_KW, which was moved here
+    // exclusively) — they're common, load-bearing top-level object keywords
+    // (OPERATOR ===(...), FUNCTION foo(...)) that must keep parsing there,
+    // AND, since RFC §14.4, also valid inside an OPERATOR FAMILY { } block
+    // as loose-member directives (OPERATOR 1 <(...), FUNCTION 1 (...) fn(...)).
+    // Dual TokenSet membership is safe here: parseObjectDeclaration's
+    // isObjectKeyword() check and parseBlockContent's isBlockDirectiveKw()
+    // check run in disjoint parsing contexts (top-level source-file loop vs.
+    // already-inside-a-{ }-block loop), so there is no dispatch ambiguity.
     @JvmField val BLOCK_DIRECTIVE_KEYWORDS: TokenSet = TokenSet.create(
         INDEX_KW, INDICES_KW, POLICY_KW, POLICIES_KW,
         TRIGGER_KW, TRIGGERS_KW, GRANT_KW, GRANTS_KW,
@@ -161,6 +171,6 @@ object DpgTokenTypes {
         CREATEDB_KW, NOCREATEDB_KW, CREATEROLE_KW, NOCREATEROLE_KW,
         INHERIT_KW, NOINHERIT_KW, REPLICATION_KW, NOREPLICATION_KW,
         BYPASSRLS_KW, NOBYPASSRLS_KW, PASSWORD_KW, CONNECTION_KW,
-        VALID_KW, UNTIL_KW, IN_KW
+        VALID_KW, UNTIL_KW, IN_KW, OPERATOR_KW, FUNCTION_KW
     )
 }

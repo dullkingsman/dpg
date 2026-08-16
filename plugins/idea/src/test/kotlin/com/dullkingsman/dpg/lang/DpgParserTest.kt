@@ -193,4 +193,38 @@ class DpgParserTest : ParsingTestCase("", "dpg", DpgParserDefinition()) {
         assertNotNull(decls)
         assertEquals("pgcrypto", decls!![0].name)
     }
+
+    // ── Operator family loose members (RFC §14.4) ────────────────────────────
+
+    fun testOperatorFamilyWithLooseMembers() {
+        // No trailing ';' after the family's own '}': the DPG scanner treats
+        // that as optional for every object kind (readOptionalPart2 in
+        // internal/scanner/scanner.go), but the IntelliJ plugin's parser has
+        // a separate, pre-existing gap there unrelated to this feature — see
+        // parseObjectDeclaration, which never consumes one. Out of scope
+        // here; this test only exercises the new OPERATOR/FUNCTION member
+        // directives themselves.
+        val file = parseFile("opfamily", """
+            SCHEMA public {
+                OPERATOR FAMILY my_family USING btree {
+                    OPERATOR 1 <(int4, int8),
+                    OPERATOR 3 =(int4, int8) FOR ORDER BY my_family,
+                    FUNCTION 1 (int4, int8) btint48cmp(int4, int8)
+                }
+            }
+        """.trimIndent())
+        val err = PsiTreeUtil.findChildOfType(file, com.intellij.psi.PsiErrorElement::class.java)
+        assertNull("expected no parse errors, found: ${err?.errorDescription}", err)
+        val decls = PsiTreeUtil.getChildrenOfType(file, DpgObjectDeclaration::class.java)
+        assertNotNull(decls)
+        val schema = decls!!.firstOrNull { it.node.elementType == SCHEMA_BLOCK }
+        assertNotNull(schema)
+        // The family declaration is nested inside the schema's own
+        // PART2_BLOCK, not a direct child of the schema's
+        // DpgObjectDeclaration — findChildOfType searches descendants.
+        val fam = PsiTreeUtil.findChildOfType(schema, DpgObjectDeclaration::class.java)
+        assertNotNull(fam)
+        assertEquals("my_family", fam!!.name)
+        assertNotNull(fam.node.findChildByType(PART2_BLOCK))
+    }
 }

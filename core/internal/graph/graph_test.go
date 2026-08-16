@@ -635,3 +635,77 @@ func TestSort_FunctionBuiltinTypesNoError(t *testing.T) {
 		t.Fatalf("function with only built-in types must not error: %v", err)
 	}
 }
+
+// ── Operator family loose members (RFC §14.4) ─────────────────────────────────
+
+// TestSort_FunctionBeforeOpFamilyMember guards the same ordering hazard as
+// TestSort_FunctionBeforeOperatorClass, one level down: a FUNCTION loose
+// member's ALTER OPERATOR FAMILY ... ADD fails at apply time if it runs
+// before the function exists.
+func TestSort_FunctionBeforeOpFamilyMember(t *testing.T) {
+	fam := &ir.OperatorFamily{
+		Schema: "public", Name: "opfam_repro_fn_family", AccessMethod: "btree", SrcPos: pos,
+		Members: []pipeline.OpFamilyMember{
+			{IsFunction: true, Number: 1, Name: pipeline.Identifier{Name: "opfam_repro_fn"},
+				LeftType: "integer", RightType: "bigint", FuncArgs: []string{"integer", "bigint"}},
+		},
+	}
+	fn := &ir.Function{
+		Schema: "public", Name: "opfam_repro_fn",
+		Args:   []ir.FuncArg{{Type: ir.TypeRef{Name: "integer"}}, {Type: ir.TypeRef{Name: "bigint"}}},
+		SrcPos: pos,
+	}
+	sorted := sortObjects(t, []pipeline.IRObject{fam, fn})
+	assertBefore(t, sorted, "public.opfam_repro_fn(integer, bigint)", "public.opfam_repro_fn_family USING btree FAMILY")
+}
+
+// TestSort_OperatorBeforeOpFamilyMember guards the same hazard for an
+// OPERATOR loose member.
+func TestSort_OperatorBeforeOpFamilyMember(t *testing.T) {
+	leftType, rightType := ir.TypeRef{Name: "integer"}, ir.TypeRef{Name: "bigint"}
+	fam := &ir.OperatorFamily{
+		Schema: "public", Name: "opfam_repro_op_family", AccessMethod: "btree", SrcPos: pos,
+		Members: []pipeline.OpFamilyMember{
+			{Number: 1, Name: pipeline.Identifier{Name: "##%"}, LeftType: "integer", RightType: "bigint"},
+		},
+	}
+	op := &ir.Operator{
+		Schema: "public", Name: "##%",
+		LeftType: &leftType, RightType: &rightType, SrcPos: pos,
+	}
+	sorted := sortObjects(t, []pipeline.IRObject{fam, op})
+	assertBefore(t, sorted, "public.##%(integer, bigint)", "public.opfam_repro_op_family USING btree FAMILY")
+}
+
+// TestSort_TypeBeforeOpFamilyMember guards the op_type reference case: a
+// member naming a user-defined type must be ordered after that type.
+func TestSort_TypeBeforeOpFamilyMember(t *testing.T) {
+	fam := &ir.OperatorFamily{
+		Schema: "public", Name: "opfam_repro_type_family", AccessMethod: "btree", SrcPos: pos,
+		Members: []pipeline.OpFamilyMember{
+			{Number: 1, Name: pipeline.Identifier{Name: "="}, LeftType: "public.opfam_repro_type", RightType: "public.opfam_repro_type"},
+		},
+	}
+	typ := enumType("public", "opfam_repro_type")
+	sorted := sortObjects(t, []pipeline.IRObject{fam, typ})
+	assertBefore(t, sorted, "public.opfam_repro_type", "public.opfam_repro_type_family USING btree FAMILY")
+}
+
+// TestSort_OpFamilyMemberUnresolvedReferenceNoError guards the same
+// no-error-on-miss behavior refEdge/typeRefEdge/funcPrefixEdge already give
+// OperatorClass — a pg_catalog built-in referenced by a loose member (the
+// overwhelmingly common case) legitimately isn't part of the managed
+// object set.
+func TestSort_OpFamilyMemberUnresolvedReferenceNoError(t *testing.T) {
+	fam := &ir.OperatorFamily{
+		Schema: "public", Name: "opfam_builtin_only", AccessMethod: "btree", SrcPos: pos,
+		Members: []pipeline.OpFamilyMember{
+			{Number: 1, Name: pipeline.Identifier{Schema: "pg_catalog", Name: "<"}, LeftType: "integer", RightType: "bigint"},
+			{IsFunction: true, Number: 1, Name: pipeline.Identifier{Schema: "pg_catalog", Name: "btint48cmp"},
+				LeftType: "integer", RightType: "bigint", FuncArgs: []string{"integer", "bigint"}},
+		},
+	}
+	if _, err := graph.New().Sort([]pipeline.IRObject{fam}); err != nil {
+		t.Fatalf("built-in-only loose members must not error: %v", err)
+	}
+}

@@ -3394,9 +3394,79 @@ SCHEMA public {
 }
 ```
 
-   **Diffing:** Identity is `(schema, name, access_method)`.  The
-   body is diffed as normalised text (passthrough).  Any change to
-   the member list requires drop + recreate (`DESTRUCTIVE`).
+   **Diffing (operator class):** Identity is `(schema, name, access_method)`.
+   The body (its `AS` member list) is diffed as normalised text
+   (passthrough). Any change to the member list requires drop + recreate
+   (`DESTRUCTIVE`) — PostgreSQL provides no incremental `ALTER OPERATOR
+   CLASS` for its `AS` members at all, so there is no safer alternative.
+
+   **Loose family members.** PostgreSQL separately lets an operator family
+   carry members that belong to the family directly rather than to any one
+   of its operator classes — most often used for cross-type comparisons
+   (e.g. an `int4` family also handling `int4` vs. `int8`), added via
+   `ALTER OPERATOR FAMILY name USING access_method ADD OPERATOR
+   strategy_num operator_name (left_type, right_type) [FOR SEARCH | FOR
+   ORDER BY sort_family_name], FUNCTION support_num [(left_type,
+   right_type)] function_name (argument_types), ...`. DPG never exposes
+   `ALTER` as source syntax (declarations describe desired state, not
+   commands — the same reason table constraints never require `ALTER TABLE
+   ADD CONSTRAINT` boilerplate), so these are declared in the family's `{ }`
+   block instead, using the exact same member grammar `ALTER OPERATOR
+   FAMILY ... ADD` uses, just without repeating the `ALTER`/family header:
+
+```sql
+SCHEMA public {
+    OPERATOR FAMILY my_family USING btree {
+        OPERATOR 1 <(int4, int8),
+        OPERATOR 3 =(int4, int8),
+        FUNCTION 1 (int4, int8) btint48cmp(int4, int8)
+    };
+}
+```
+
+   `FOR ORDER BY sort_family_name` (used for GiST/SP-GiST "KNN" support —
+   `btree` itself rejects it, since it has no notion of ordering operators
+   distinct from its own strategies) always names a **btree** family:
+   PostgreSQL requires `sort_family_name` to reference one, so it is never
+   ambiguous even though the syntax itself doesn't repeat `USING btree`.
+
+   A member's identity is `(kind, strategy/support number, left_type,
+   right_type)` — matching PostgreSQL's own `pg_amop`/`pg_amproc` unique
+   indexes. Op-types are always compared in their canonical form (e.g.
+   `integer`, never `int4`). A `FUNCTION` item's `(left_type, right_type)`
+   may be omitted only when the function takes exactly two arguments (then
+   defaulting to its own argument types, PostgreSQL's own documented
+   default); any other arity requires them explicitly, since the correct
+   default (the owning operator class's input type) cannot be derived from
+   the function's signature alone.
+
+   **Diffing (loose family members):** unlike an operator class's `AS`
+   list, PostgreSQL genuinely supports incremental member changes at the
+   family level, so these are diffed per-member rather than forcing the
+   whole family to drop and recreate:
+
+   | Change | DDL emitted | Safety |
+   |--------|-------------|--------|
+   | Member added | `ALTER OPERATOR FAMILY f USING am ADD OPERATOR n op(lt,rt) [FOR SEARCH\|FOR ORDER BY sf]` / `... ADD FUNCTION n (lt,rt) fn(args)` | `SAFE` |
+   | Member changed in place (same slot, different operator/function/sort target) | `ALTER ... DROP ...;` then `ALTER ... ADD ...` | `DESTRUCTIVE` |
+   | Member removed | `ALTER OPERATOR FAMILY f USING am DROP OPERATOR n (lt,rt)` / `DROP FUNCTION n (lt,rt)` | `DESTRUCTIVE` |
+   | Family itself dropped and recreated (body or access method changed) | every declared member re-added in full after the `CREATE` | inherits the family's own classification |
+
+   Removal is classified `DESTRUCTIVE` even though it destroys no data:
+   dropping a cross-type member silently changes query-plan shape for any
+   query that relied on it (an index scan degrading to a sequential scan,
+   a merge join becoming a hash join) with no PostgreSQL error anywhere,
+   and the common real-world cause of "a declared member is gone" is an
+   accidental source omission, not an intentional removal —
+   `--allow-destructive` is the right point to require confirmation.
+
+   A member already owned by one of the family's operator classes (i.e.
+   already present in some class's own `AS` list) must never be
+   re-declared in the family's `{ }` block — PostgreSQL rejects the
+   resulting `ALTER ... ADD` as a duplicate. A family that has no
+   declaration of its own (relying entirely on PostgreSQL's same-name
+   auto-creation from an unqualified `CREATE OPERATOR CLASS`) has nowhere
+   to attach loose members; declare the family explicitly first.
 
 ### 14.5. Casts
 
@@ -4923,7 +4993,8 @@ serial_sequence_declared      = "off"
    | Subscriptions | Declared, Passthrough | Reconstructed from the catalog; hash-diffed. `CONNECTION` alone is never introspected (`subconninfo` has no PUBLIC grant, and even a privileged read can't recover the original `{{secret-uri}}`) — reconstructed as a fixed placeholder instead, excluded from the drift comparison like every other reconstructed body (§13.2). `CONNECTION` may hold a `{{secret-uri}}` reference in source (§13.2, §D.5), resolved only immediately before `CREATE SUBSCRIPTION` executes |
    | Collations | Declared, Passthrough | Reconstructed from catalog, hash-diffed; any change = DESTRUCTIVE |
    | Operators | Declared, Passthrough | Reconstructed from catalog, hash-diffed; any change = DESTRUCTIVE |
-   | Operator Classes / Families | Declared, Passthrough | Reconstructed from catalog, hash-diffed |
+   | Operator Classes | Declared, Passthrough | Reconstructed from catalog, hash-diffed; any `AS` member-list change = DESTRUCTIVE (PostgreSQL has no incremental `ALTER OPERATOR CLASS`) |
+   | Operator Families | Declared, Passthrough + Diffed | Header (name/access method) reconstructed from catalog, hash-diffed; loose members (§14.4, `ALTER OPERATOR FAMILY ... ADD`) are structured and diffed incrementally per member, live-path included — not gated on `Reconstructed` the way the bare header hash is |
    | Casts | Declared, Passthrough | Reconstructed from catalog, hash-diffed; any change = DESTRUCTIVE |
    | Extended Statistics Objects | Declared, Passthrough | Reconstructed from catalog; hash-diffed |
    | Text Search Configurations | Declared, Passthrough | Reconstructed from catalog; hash-diffed |

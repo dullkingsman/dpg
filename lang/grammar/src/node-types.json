@@ -64,6 +64,14 @@
         "named": true
       },
       {
+        "type": "opfamily_function_member",
+        "named": true
+      },
+      {
+        "type": "opfamily_operator_member",
+        "named": true
+      },
+      {
         "type": "owner_directive",
         "named": true
       },
@@ -1438,11 +1446,72 @@
       }
     },
     "children": {
-      "multiple": false,
+      "multiple": true,
+      "required": true,
+      "types": [
+        {
+          "type": "dpg_block",
+          "named": true
+        },
+        {
+          "type": "identifier",
+          "named": true
+        }
+      ]
+    }
+  },
+  {
+    "type": "opfamily_function_member",
+    "named": true,
+    "fields": {
+      "name": {
+        "multiple": true,
+        "required": true,
+        "types": [
+          {
+            "type": ".",
+            "named": false
+          },
+          {
+            "type": "identifier",
+            "named": true
+          }
+        ]
+      }
+    },
+    "children": {
+      "multiple": true,
+      "required": true,
+      "types": [
+        {
+          "type": "number_literal",
+          "named": true
+        },
+        {
+          "type": "sql_type",
+          "named": true
+        }
+      ]
+    }
+  },
+  {
+    "type": "opfamily_operator_member",
+    "named": true,
+    "fields": {},
+    "children": {
+      "multiple": true,
       "required": true,
       "types": [
         {
           "type": "identifier",
+          "named": true
+        },
+        {
+          "type": "number_literal",
+          "named": true
+        },
+        {
+          "type": "sql_type",
           "named": true
         }
       ]
@@ -3061,6 +3130,10 @@
   },
   {
     "type": "OPTIONS",
+    "named": false
+  },
+  {
+    "type": "ORDER",
     "named": false
   },
   {

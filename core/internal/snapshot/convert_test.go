@@ -345,6 +345,46 @@ func TestPopulateOperatorFamilyUsing(t *testing.T) {
 	}
 }
 
+// TestPopulateOperatorFamilyMembers guards RFC §14.4's loose-member
+// persistence, including the G-live regression case: members must survive
+// Populate even for a Reconstructed (live-introspected) family, unlike
+// BodyHash — sourceBodyHash intentionally returns "" for a reconstructed
+// body, but Members/OpFamilyMembersStructured are populated unconditionally
+// (see convert.go's OperatorFamily case), since they carry no
+// hand-written-vs-catalog-form ambiguity the way a whole-body hash does.
+func TestPopulateOperatorFamilyMembers(t *testing.T) {
+	for _, reconstructed := range []bool{false, true} {
+		snap := &pipeline.Snapshot{}
+		objects := []pipeline.IRObject{
+			&ir.OperatorFamily{
+				Schema: "public", Name: "my_family2", AccessMethod: "btree",
+				Body:          "CREATE OPERATOR FAMILY public.my_family2 USING btree",
+				Reconstructed: reconstructed,
+				Members: []pipeline.OpFamilyMember{
+					{Number: 1, Name: pipeline.Identifier{Name: "<"}, LeftType: "integer", RightType: "bigint"},
+				},
+			},
+		}
+		if err := Populate(snap, objects); err != nil {
+			t.Fatal(err)
+		}
+		raw, ok := snap.Objects["public.my_family2 USING btree FAMILY"]
+		if !ok {
+			t.Fatal("expected public.my_family2 USING btree FAMILY in snapshot")
+		}
+		var so SnapObject
+		if err := json.Unmarshal(raw, &so); err != nil {
+			t.Fatalf("unmarshal: %v", err)
+		}
+		if so.Opaque == nil || !so.Opaque.OpFamilyMembersStructured {
+			t.Fatalf("reconstructed=%v: OpFamilyMembersStructured not set: %+v", reconstructed, so.Opaque)
+		}
+		if len(so.Opaque.OpFamilyMembers) != 1 || so.Opaque.OpFamilyMembers[0].Name != "<" {
+			t.Errorf("reconstructed=%v: OpFamilyMembers: got %+v", reconstructed, so.Opaque.OpFamilyMembers)
+		}
+	}
+}
+
 // TestPopulateOperatorClassFamilyNoCollision guards the data-loss bug where an
 // operator class and the same-named operator family PostgreSQL auto-creates for
 // it both keyed to qualName(schema,name), so one silently overwrote the other in

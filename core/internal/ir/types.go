@@ -905,7 +905,19 @@ type OperatorFamily struct {
 	Comment       *string // see EventTrigger.Comment
 	Body          string
 	Reconstructed bool // Body rebuilt from the catalog; see Tablespace.Reconstructed
-	SrcPos        pipeline.SourcePos
+	// Members are the family's "loose" members — the ones real PG only lets
+	// you attach via ALTER OPERATOR FAMILY ... ADD, i.e. those that belong to
+	// the family directly rather than to one of its operator classes'
+	// AS-lists (RFC §14.4). Declared in the DPG { } block (Part 2), so Part 1
+	// stays exactly the bare, valid CREATE OPERATOR FAMILY statement
+	// pgparser/reconstruct.go's "CREATE OPERATOR FAMILY " prefix assumes.
+	// Populated for both source-declared and introspected/reconstructed
+	// families alike (unlike Body, never gated on Reconstructed) — diffed
+	// structurally and incrementally (diff.diffOpFamilyMembers), unlike
+	// OperatorClass's AS-list, which stays whole-body passthrough because
+	// PostgreSQL genuinely offers no incremental opclass member DDL.
+	Members []pipeline.OpFamilyMember
+	SrcPos  pipeline.SourcePos
 }
 
 // QualifiedName carries a trailing " FAMILY" so an operator family never

@@ -72,3 +72,39 @@ func TestHashFunctionBodyNonSQLLanguageMatchesHashBody(t *testing.T) {
 		t.Errorf("HashFunctionBody(c, ...) = %q, want HashBody(...) = %q", got, want)
 	}
 }
+
+// TestParseTypeText guards the one thing that makes OPERATOR FAMILY member
+// op_types (RFC §14.4) comparable across source and introspection: a
+// hand-written alias must normalize to the exact string format_type()/
+// ::regtype::text produces, not just round-trip through pg_query
+// unchanged (which is what canonicalDDL-style Parse+Deparse alone would
+// give — pg_query only rewrites an explicit "pg_catalog.int4", never a
+// bare "int4", since it has no catalog access to know they're the same
+// type).
+func TestParseTypeText(t *testing.T) {
+	cases := map[string]string{
+		"int4":            "integer",
+		"integer":         "integer",
+		"int8":            "bigint",
+		"varchar(20)":     "character varying(20)",
+		"numeric(10,2)":   "numeric(10,2)",
+		"myschema.mytype": "myschema.mytype",
+		"text":            "text",
+	}
+	for in, want := range cases {
+		if got := ir.ParseTypeText(in).String(); got != want {
+			t.Errorf("ParseTypeText(%q).String() = %q, want %q", in, got, want)
+		}
+	}
+}
+
+// TestParseTypeTextFallsBackOnParseFailure guards the documented
+// fail-open behavior: an input ParseTypeText can't parse must never be a
+// hard error (it only affects op_type comparison, showing as ordinary
+// drift at worst), so it falls back to the raw, trimmed input.
+func TestParseTypeTextFallsBackOnParseFailure(t *testing.T) {
+	got := ir.ParseTypeText("  not a valid type ((( ").String()
+	if got == "" {
+		t.Error("expected a non-empty fallback, got empty string")
+	}
+}

@@ -37,6 +37,29 @@ func toSnapOptions(opts []pipeline.StorageParam) []SnapOptionKV {
 	return out
 }
 
+// toSnapOpFamilyMembers converts an OPERATOR FAMILY's loose members (RFC
+// §14.4) to their snapshot form. FuncArgs is always non-nil (never omitted)
+// even for a zero-arg function, distinguishing "explicitly zero arguments"
+// from a stale/unpopulated slice the same way OpFamilyMembersStructured
+// distinguishes the outer slice being empty from being stale.
+func toSnapOpFamilyMembers(members []pipeline.OpFamilyMember) []SnapOpFamilyMember {
+	if len(members) == 0 {
+		return nil
+	}
+	out := make([]SnapOpFamilyMember, len(members))
+	for i, m := range members {
+		out[i] = SnapOpFamilyMember{
+			IsFunction: m.IsFunction, Number: m.Number,
+			NameSchema: m.Name.Schema, Name: m.Name.Name,
+			LeftType: m.LeftType, RightType: m.RightType,
+			FuncArgs:         m.FuncArgs,
+			OrderBy:          m.OrderBy,
+			SortFamilySchema: m.SortFamily.Schema, SortFamilyName: m.SortFamily.Name,
+		}
+	}
+	return out
+}
+
 // userMappingPasswordKeys mirrors internal/introspect's own copy of the same
 // list (which itself mirrors internal/linter's passwordColNames) — kept as
 // a local duplicate rather than a cross-package import, following this
@@ -224,8 +247,14 @@ func toSnapObject(obj pipeline.IRObject) *SnapObject {
 			Kind: "operator_class", Schema: o.Schema, Name: o.Name, Using: o.AccessMethod, BodyHash: sourceBodyHash(o.Body, o.Reconstructed), Comment: o.Comment,
 		}}
 	case *ir.OperatorFamily:
+		// Members are populated unconditionally, never routed through
+		// sourceBodyHash — they must persist for reconstructed/live objects
+		// too (this is the G-live fix for this kind, built in from the
+		// start rather than retrofitted the way the other 9
+		// reconstruction-tier kinds needed).
 		return &SnapObject{Kind: "operator_family", Opaque: &SnapOpaque{
 			Kind: "operator_family", Schema: o.Schema, Name: o.Name, Using: o.AccessMethod, BodyHash: sourceBodyHash(o.Body, o.Reconstructed), Comment: o.Comment,
+			OpFamilyMembersStructured: true, OpFamilyMembers: toSnapOpFamilyMembers(o.Members),
 		}}
 	case *ir.Cast:
 		return &SnapObject{Kind: "cast", Opaque: &SnapOpaque{

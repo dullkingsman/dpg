@@ -1498,7 +1498,7 @@ func introspectOperatorFamilies(ctx context.Context, conn pipeline.Querier) ([]p
 	// to guess, since the class always names its family explicitly, matching
 	// exactly how pg_dump avoids the same ambiguity.
 	q := `
-SELECT n.nspname, f.opfname, am.amname,
+SELECT f.oid, n.nspname, f.opfname, am.amname,
        obj_description(f.oid, 'pg_opfamily') AS comment
 FROM   pg_opfamily f
 JOIN   pg_namespace n ON n.oid = f.opfnamespace
@@ -1512,22 +1512,161 @@ ORDER  BY n.nspname, f.opfname`
 	if err != nil {
 		return nil, fmt.Errorf("introspect operator families: %w", err)
 	}
-	defer rs.Close()
 
-	var out []pipeline.IRObject
+	type famRow struct {
+		oid              uint32
+		schema, name, am string
+		comment          *string
+	}
+	var rows []famRow
 	for rs.Next() {
-		var schema, name, am string
-		var comment *string
-		if err := rs.Scan(&schema, &name, &am, &comment); err != nil {
+		var r famRow
+		if err := rs.Scan(&r.oid, &r.schema, &r.name, &r.am, &r.comment); err != nil {
+			rs.Close()
 			return nil, err
 		}
-		body := fmt.Sprintf("CREATE OPERATOR FAMILY %s USING %s", qualIdentQ(schema, name), quoteIdent(am))
+		rows = append(rows, r)
+	}
+	if err := rs.Err(); err != nil {
+		rs.Close()
+		return nil, err
+	}
+	rs.Close()
+
+	// Members are fetched per family in a second query, mirroring
+	// introspectOperatorClasses's own buffer-then-query-per-row pattern —
+	// a second query can't run while rs above is still open.
+	var out []pipeline.IRObject
+	for _, r := range rows {
+		members, err := opFamilyLooseMembers(ctx, conn, r.oid)
+		if err != nil {
+			return nil, err
+		}
+		body := fmt.Sprintf("CREATE OPERATOR FAMILY %s USING %s", qualIdentQ(r.schema, r.name), quoteIdent(r.am))
 		out = append(out, &ir.OperatorFamily{
-			Schema: schema, Name: name, AccessMethod: am,
-			Body: canonicalDDL(body), Comment: comment, Reconstructed: true,
+			Schema: r.schema, Name: r.name, AccessMethod: r.am,
+			Body: canonicalDDL(body), Comment: r.comment, Reconstructed: true,
+			Members: members,
 		})
 	}
-	return out, rs.Err()
+	return out, nil
+}
+
+// opFamilyLooseMembers returns every "loose" member of the operator family
+// identified by famOID — i.e. a member added via ALTER OPERATOR FAMILY ...
+// ADD rather than inherited from one of the family's operator classes' own
+// AS-lists (RFC §14.4). The distinguishing catalog signal (confirmed live
+// against PG 17) is NOT any column on pg_amop/pg_amproc itself — amopfamily/
+// amprocfamily point at the family either way — it's the row's OWNING
+// pg_depend entry: a class-owned member's pg_amop/pg_amproc row depends on
+// pg_opclass (deptype='i', exactly the join opClassMembers requires); a
+// loose member's row instead depends directly on pg_opfamily (deptype='a').
+// So "loose" here means simply: no such pg_opclass/'i' dependency row
+// exists. Unlike opClassMembers, this returns structured
+// pipeline.OpFamilyMember values (not rendered clause strings) — Body stays
+// a bare "CREATE OPERATOR FAMILY ... USING ..." regardless (see
+// ir.OperatorFamily.Members's doc comment for why members are never folded
+// into it).
+func opFamilyLooseMembers(ctx context.Context, conn pipeline.Querier, famOID uint32) ([]pipeline.OpFamilyMember, error) {
+	var members []pipeline.OpFamilyMember
+
+	const opQ = `
+SELECT ao.amopstrategy,
+       opn.nspname AS opr_schema, op.oprname AS opr_name,
+       ao.amoplefttype::regtype::text  AS lt,
+       ao.amoprighttype::regtype::text AS rt,
+       ao.amoppurpose::text,
+       sfn.nspname AS sort_family_schema, sf.opfname AS sort_family_name
+FROM   pg_amop ao
+JOIN   pg_operator op    ON op.oid = ao.amopopr
+JOIN   pg_namespace opn  ON opn.oid = op.oprnamespace
+LEFT JOIN pg_opfamily sf   ON sf.oid = ao.amopsortfamily
+LEFT JOIN pg_namespace sfn ON sfn.oid = sf.opfnamespace
+WHERE  ao.amopfamily = $1
+AND    NOT EXISTS (
+         SELECT 1 FROM pg_depend d
+         WHERE  d.classid    = 'pg_amop'::regclass
+         AND    d.objid      = ao.oid
+         AND    d.refclassid = 'pg_opclass'::regclass
+         AND    d.deptype    = 'i')
+ORDER  BY ao.amopstrategy, ao.amoplefttype, ao.amoprighttype`
+
+	rs, err := conn.QueryRows(ctx, opQ, famOID)
+	if err != nil {
+		return nil, fmt.Errorf("introspect operator family loose operators: %w", err)
+	}
+	for rs.Next() {
+		var strategy int
+		var oprSchema, oprName, lt, rt, purpose string
+		var sortSchema, sortName *string
+		if err := rs.Scan(&strategy, &oprSchema, &oprName, &lt, &rt, &purpose, &sortSchema, &sortName); err != nil {
+			rs.Close()
+			return nil, err
+		}
+		m := pipeline.OpFamilyMember{
+			Number:    strategy,
+			Name:      pipeline.Identifier{Schema: oprSchema, Name: oprName},
+			LeftType:  lt,
+			RightType: rt,
+		}
+		if purpose == "o" && sortName != nil {
+			m.OrderBy = true
+			m.SortFamily = pipeline.Identifier{Schema: deref(sortSchema), Name: *sortName}
+		}
+		members = append(members, m)
+	}
+	if err := rs.Err(); err != nil {
+		rs.Close()
+		return nil, err
+	}
+	rs.Close()
+
+	const fnQ = `
+SELECT ap.amprocnum,
+       pn.nspname AS fn_schema, p.proname AS fn_name,
+       (SELECT array_agg(format_type(t, NULL) ORDER BY ord)
+        FROM   unnest(p.proargtypes) WITH ORDINALITY AS u(t, ord)) AS fn_args,
+       ap.amproclefttype::regtype::text  AS lt,
+       ap.amprocrighttype::regtype::text AS rt
+FROM   pg_amproc ap
+JOIN   pg_proc p       ON p.oid = ap.amproc
+JOIN   pg_namespace pn ON pn.oid = p.pronamespace
+WHERE  ap.amprocfamily = $1
+AND    NOT EXISTS (
+         SELECT 1 FROM pg_depend d
+         WHERE  d.classid    = 'pg_amproc'::regclass
+         AND    d.objid      = ap.oid
+         AND    d.refclassid = 'pg_opclass'::regclass
+         AND    d.deptype    = 'i')
+ORDER  BY ap.amprocnum, ap.amproclefttype, ap.amprocrighttype`
+
+	rs2, err := conn.QueryRows(ctx, fnQ, famOID)
+	if err != nil {
+		return nil, fmt.Errorf("introspect operator family loose functions: %w", err)
+	}
+	for rs2.Next() {
+		var support int
+		var fnSchema, fnName, lt, rt string
+		var fnArgs []string
+		if err := rs2.Scan(&support, &fnSchema, &fnName, &fnArgs, &lt, &rt); err != nil {
+			rs2.Close()
+			return nil, err
+		}
+		members = append(members, pipeline.OpFamilyMember{
+			IsFunction: true,
+			Number:     support,
+			Name:       pipeline.Identifier{Schema: fnSchema, Name: fnName},
+			LeftType:   lt, RightType: rt,
+			FuncArgs: fnArgs,
+		})
+	}
+	if err := rs2.Err(); err != nil {
+		rs2.Close()
+		return nil, err
+	}
+	rs2.Close()
+
+	return members, nil
 }
 
 // ── operator classes ──────────────────────────────────────────────────────────

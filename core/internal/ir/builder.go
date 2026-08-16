@@ -39,6 +39,21 @@ func (b *Builder) Build(pg pipeline.PGParseResult, block pipeline.BlockAST) (pip
 	}
 	pos := pg.Pos
 
+	// OPERATOR/FUNCTION block directives (RFC §14.4's OPERATOR FAMILY loose
+	// members) are only meaningful on an OPERATOR FAMILY declaration — the
+	// BlockParser itself has no per-kind gating (it parses Part 2 without
+	// knowing what Part 1 declared), so this check has to live at the one
+	// place both halves are visible together. Checked centrally here, not in
+	// buildOpaque, because several kinds (Cast, Tablespace, FDW, ...) have
+	// their own dedicated build* function and never go through buildOpaque
+	// at all.
+	if len(block.OpFamilyMembers) > 0 {
+		if _, ok := node.Node.(*pg_query.Node_CreateOpFamilyStmt); !ok {
+			return nil, pipeline.Errorf(block.OpFamilyMembers[0].Pos,
+				"OPERATOR/FUNCTION members are only valid in an OPERATOR FAMILY { } block")
+		}
+	}
+
 	var obj pipeline.IRObject
 	var err error
 	switch n := node.Node.(type) {
@@ -2432,9 +2447,71 @@ func (b *Builder) buildOpaque(node *pg_query.Node, block pipeline.BlockAST, pos 
 		if block.Comment != nil {
 			opf.Comment = &block.Comment.Value
 		}
+		members, err := normalizeOpFamilyMembers(block.OpFamilyMembers)
+		if err != nil {
+			return nil, err
+		}
+		opf.Members = members
 		return opf, nil
 	}
 	return &OpaqueObject{kind: kind, body: kind, SrcPos: pos}, nil
+}
+
+// normalizeOpFamilyMembers canonicalizes and validates an OPERATOR FAMILY
+// { } block's raw parsed members (RFC §14.4) into their final IR form:
+// op_types run through ParseTypeText so a hand-written "int4" compares equal
+// to introspection's canonical "integer", and duplicate catalog slots
+// (same Key(), see pipeline.OpFamilyMember.Key's doc comment) are rejected
+// at compile time rather than surfacing only as a live "ALTER OPERATOR
+// FAMILY... ADD" error on apply.
+func normalizeOpFamilyMembers(raw []pipeline.OpFamilyMember) ([]pipeline.OpFamilyMember, error) {
+	if len(raw) == 0 {
+		return nil, nil
+	}
+	seen := make(map[string]pipeline.SourcePos, len(raw))
+	members := make([]pipeline.OpFamilyMember, len(raw))
+	for i, m := range raw {
+		kind := "OPERATOR"
+		if m.IsFunction {
+			kind = "FUNCTION"
+		}
+		if m.Number <= 0 {
+			return nil, pipeline.Errorf(m.Pos, "%s member's strategy/support number must be positive, got %d", kind, m.Number)
+		}
+		m.LeftType = ParseTypeText(m.LeftType).String()
+		m.RightType = ParseTypeText(m.RightType).String()
+		if m.IsFunction {
+			// The optional "(op_type[, op_type])" was already resolved into
+			// LeftType/RightType by the parser when the user wrote it; when
+			// omitted, PostgreSQL's own documented default (the function's
+			// own input types) is only correct for a 2-argument function —
+			// for any other arity the true amproclefttype/amprocrighttype
+			// is the opclass's OWN input type, not derivable from the
+			// function's signature at all, so require it explicitly rather
+			// than silently guess wrong.
+			if m.LeftType == "" && m.RightType == "" {
+				if len(m.FuncArgs) != 2 {
+					return nil, pipeline.Errorf(m.Pos,
+						"FUNCTION %d %s: op_type must be given explicitly as (op_type, op_type) — it can only be inferred from the function's own arguments when it takes exactly 2, this one takes %d",
+						m.Number, m.Name.String(), len(m.FuncArgs))
+				}
+				m.LeftType = ParseTypeText(m.FuncArgs[0]).String()
+				m.RightType = ParseTypeText(m.FuncArgs[1]).String()
+			}
+			for j, a := range m.FuncArgs {
+				m.FuncArgs[j] = ParseTypeText(a).String()
+			}
+		}
+		key := m.Key()
+		if prev, ok := seen[key]; ok {
+			return nil, pipeline.Errorf(m.Pos,
+				"duplicate operator family member for slot %s %d (%s, %s) — already declared at %s",
+				kind, m.Number, m.LeftType, m.RightType, prev)
+		}
+		seen[key] = m.Pos
+		members[i] = m
+	}
+	return members, nil
 }
 
 // ── conversion helpers ────────────────────────────────────────────────────────

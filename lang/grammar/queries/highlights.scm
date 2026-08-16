@@ -74,6 +74,13 @@
 (not_null_directive "NOT" @keyword.directive "NULL" @keyword.directive)
 (check_directive "CHECK" @keyword.directive)
 (mapping_directive "MAPPING" @keyword.directive)
+(opfamily_operator_member "OPERATOR" @keyword.directive)
+(opfamily_operator_member "FOR" @keyword.directive)
+(opfamily_operator_member "SEARCH" @keyword.directive)
+(opfamily_operator_member "ORDER" @keyword.directive)
+(opfamily_operator_member "BY" @keyword.directive)
+(opfamily_function_member "FUNCTION" @keyword.directive)
+(opfamily_function_member name: (identifier) @function)
 (name_map_directive "NAME" @keyword.directive "MAP" @keyword.directive)
 (name_maps_block "NAME" @keyword.directive "MAPS" @keyword.directive)
 

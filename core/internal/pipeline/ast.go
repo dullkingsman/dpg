@@ -1,5 +1,10 @@
 package pipeline
 
+import (
+	"strconv"
+	"strings"
+)
+
 // Identifier is a (possibly schema-qualified) SQL identifier.
 type Identifier struct {
 	Schema string
@@ -196,6 +201,67 @@ type TSMappingDef struct {
 	Pos          SourcePos
 }
 
+// OpFamilyMember is one "loose" (family-level) member declared in an
+// OPERATOR FAMILY { } block — real PG only lets you attach these via
+// ALTER OPERATOR FAMILY ... ADD, since a member may belong to the family
+// directly rather than to any one of its operator classes (RFC §14.4). Each
+// item's grammar is copied verbatim from that ALTER statement's own ADD
+// list-item grammar, just without repeating the ALTER/family header.
+type OpFamilyMember struct {
+	IsFunction bool       // false = OPERATOR item, true = FUNCTION item
+	Number     int        // strategy number (OPERATOR) / support number (FUNCTION)
+	Name       Identifier // operator symbol ("<", "@>", ...) or function name
+	LeftType   string     // op_type left; canonicalized by the IR builder
+	RightType  string     // op_type right; canonicalized by the IR builder
+	FuncArgs   []string   // FUNCTION only: declared argument types, canonicalized
+	OrderBy    bool       // OPERATOR only: true = FOR ORDER BY, false (default) = FOR SEARCH
+	SortFamily Identifier // OPERATOR + OrderBy only: the FOR ORDER BY target family
+	Pos        SourcePos
+}
+
+// Key identifies this member's catalog slot: PostgreSQL's own unique indexes
+// on pg_amop ((amopfamily, amoplefttype, amoprighttype, amopstrategy)) and
+// pg_amproc ((amprocfamily, amproclefttype, amprocrighttype, amprocnum))
+// never include the operator/function identity itself — so two members at
+// the same slot with a different operator/function are the same catalog row
+// changing shape (DROP the old one, ADD the new one), not two independent
+// members. LeftType/RightType MUST already be canonicalized (see
+// ir.ParseTypeText) before this is used as a diff key, or a same-type member
+// written as "int4" on one side and "integer" on the other will misdiff.
+func (m OpFamilyMember) Key() string {
+	kind := "OPERATOR"
+	if m.IsFunction {
+		kind = "FUNCTION"
+	}
+	return kind + "|" + strconv.Itoa(m.Number) + "|" + m.LeftType + "|" + m.RightType
+}
+
+// AddClause renders this member's contribution to an
+// "ALTER OPERATOR FAMILY ... ADD <clause>[, <clause>...]" statement.
+func (m OpFamilyMember) AddClause() string {
+	if m.IsFunction {
+		return "FUNCTION " + strconv.Itoa(m.Number) + " (" + m.LeftType + ", " + m.RightType + ") " +
+			m.Name.String() + "(" + strings.Join(m.FuncArgs, ", ") + ")"
+	}
+	clause := "OPERATOR " + strconv.Itoa(m.Number) + " " + m.Name.String() + "(" + m.LeftType + ", " + m.RightType + ")"
+	if m.OrderBy {
+		clause += " FOR ORDER BY " + m.SortFamily.String()
+	}
+	return clause
+}
+
+// DropClause renders this member's contribution to an
+// "ALTER OPERATOR FAMILY ... DROP <clause>[, <clause>...]" statement. Real
+// PG's DROP form identifies a member by slot only (number + op_types) — the
+// operator/function name is never repeated.
+func (m OpFamilyMember) DropClause() string {
+	kind := "OPERATOR"
+	if m.IsFunction {
+		kind = "FUNCTION"
+	}
+	return kind + " " + strconv.Itoa(m.Number) + " (" + m.LeftType + ", " + m.RightType + ")"
+}
+
 // NameMapEntry is a single NAME MAP directive inside a { } block.
 // Tool is the target tool identifier (e.g. "default", "prisma").
 // IsLiteral=false: Value is a rule keyword (e.g. "LOWER_SNAKE_CASE").
@@ -247,6 +313,7 @@ type BlockAST struct {
 	MigrateRemove       *MigrateRemoveBlock
 	DefaultPrivileges   []DefaultPrivilegesBlock
 	Mappings            []TSMappingDef
+	OpFamilyMembers     []OpFamilyMember
 	PreferredJsonFormat string // "json" or "jsonb"; empty = not set (default jsonb)
 	NameMaps            []NameMapEntry
 	// DomainDefault/DomainNotNull are RFC §5.4's DOMAIN-only "DEFAULT expr;"

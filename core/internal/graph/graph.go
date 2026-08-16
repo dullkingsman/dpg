@@ -418,6 +418,41 @@ func (r *Resolver) Sort(objects []pipeline.IRObject) ([]pipeline.IRObject, error
 
 		case *ir.OperatorFamily:
 			schemaEdge(i, o.Schema)
+			// Loose members (RFC §14.4) reference operators/functions/types
+			// the same way OperatorClass's AS-list members do above — same
+			// ordering hazard (ALTER OPERATOR FAMILY ... ADD referencing a
+			// not-yet-created operator/function/type fails at apply time),
+			// so reuse the exact same edge helpers rather than duplicate the
+			// reasoning.
+			for _, m := range o.Members {
+				if m.IsFunction {
+					funcPrefixEdge(i, m.Name.String(), o.Schema)
+				} else {
+					// Matches ir.Operator.QualifiedName()'s exact shape
+					// (qualName(schema, name) + "(" + OperandsKey(...) + ")")
+					// — LeftType/RightType are already canonical
+					// TypeRef.String() output (normalizeOpFamilyMembers ran
+					// them through ir.ParseTypeText), so this only needs the
+					// schema defaulted, same as funcPrefixEdge does
+					// internally for the function case above.
+					opSchema := defaultSchema(m.Name.Schema, o.Schema)
+					refEdge(i, opSchema+"."+m.Name.Name+"("+m.LeftType+", "+m.RightType+")")
+				}
+				typeRefEdge(i, ir.ParseTypeText(m.LeftType), o.Schema)
+				typeRefEdge(i, ir.ParseTypeText(m.RightType), o.Schema)
+				for _, a := range m.FuncArgs {
+					typeRefEdge(i, ir.ParseTypeText(a), o.Schema)
+				}
+				if m.OrderBy {
+					// PostgreSQL requires a FOR ORDER BY sort family to be a
+					// btree family — confirmed via the ALTER OPERATOR FAMILY
+					// grammar itself (amopsortfamily must reference a btree
+					// opfamily) — so the access method is never ambiguous
+					// even though the source text doesn't state it.
+					sortSchema := defaultSchema(m.SortFamily.Schema, o.Schema)
+					refEdge(i, sortSchema+"."+m.SortFamily.Name+" USING btree FAMILY")
+				}
+			}
 
 		case *ir.StatisticsObject:
 			schemaEdge(i, o.Schema)

@@ -122,6 +122,34 @@ type SnapOpaque struct {
 	StatisticsKinds      []string `json:"statistics_kinds,omitempty"`
 	StatisticsColumns    []string `json:"statistics_columns,omitempty"`
 	StatisticsTarget     *int     `json:"statistics_target,omitempty"`
+	// OpFamilyMembersStructured/OpFamilyMembers are RFC §14.4's structured
+	// diffing input for an operator family's "loose" members — see
+	// ir.OperatorFamily.Members's doc comment. OpFamilyMembersStructured is
+	// the same explicit-sentinel pattern as OptionsStructured above: a real
+	// family can legitimately have zero loose members, so an empty
+	// OpFamilyMembers slice can't distinguish "none declared" from
+	// "snapshot predates this feature" — getting that wrong would emit an
+	// ALTER OPERATOR FAMILY ... ADD for a member that already exists, which
+	// genuinely errors in PostgreSQL (there is no ADD ... IF NOT EXISTS).
+	// Populated unconditionally, never gated on Reconstructed — see
+	// convert.go's OperatorFamily case for why.
+	OpFamilyMembersStructured bool                 `json:"op_family_members_structured,omitempty"`
+	OpFamilyMembers           []SnapOpFamilyMember `json:"op_family_members,omitempty"`
+}
+
+// SnapOpFamilyMember is one "loose" OPERATOR FAMILY member (RFC §14.4) —
+// the snapshot-side mirror of pipeline.OpFamilyMember.
+type SnapOpFamilyMember struct {
+	IsFunction       bool     `json:"is_function,omitempty"`
+	Number           int      `json:"number"`
+	NameSchema       string   `json:"name_schema,omitempty"`
+	Name             string   `json:"name"`
+	LeftType         string   `json:"left_type"`
+	RightType        string   `json:"right_type"`
+	FuncArgs         []string `json:"func_args,omitempty"`
+	OrderBy          bool     `json:"order_by,omitempty"`
+	SortFamilySchema string   `json:"sort_family_schema,omitempty"`
+	SortFamilyName   string   `json:"sort_family_name,omitempty"`
 }
 
 // SnapOptionKV is one OPTIONS (...) key/value entry, used by the

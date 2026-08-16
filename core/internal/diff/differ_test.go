@@ -6550,6 +6550,156 @@ func TestDiffDropOperatorFamilyUsesRecordedAccessMethod(t *testing.T) {
 	}
 }
 
+// ── Operator family loose members (RFC §14.4) ─────────────────────────────────
+
+func opFamilyMemberObj(members ...pipeline.OpFamilyMember) *ir.OperatorFamily {
+	return &ir.OperatorFamily{
+		Schema: "public", Name: "member_fam", AccessMethod: "btree",
+		Body:          `CREATE OPERATOR FAMILY "public"."member_fam" USING btree`,
+		Reconstructed: true, Members: members,
+	}
+}
+
+func opFamilyMemberSnap(structured bool, members ...snapshot.SnapOpFamilyMember) *snapshot.SnapObject {
+	return &snapshot.SnapObject{Kind: "operator_family", Opaque: &snapshot.SnapOpaque{
+		Kind: "operator_family", Schema: "public", Name: "member_fam", Using: "btree",
+		OpFamilyMembersStructured: structured, OpFamilyMembers: members,
+	}}
+}
+
+func TestDiffOpFamilyMemberAddOnly(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.member_fam USING btree FAMILY", opFamilyMemberSnap(true))
+	m := pipeline.OpFamilyMember{Number: 1, Name: pipeline.Identifier{Name: "<"}, LeftType: "integer", RightType: "bigint"}
+	ops, err := d.Diff([]pipeline.IRObject{opFamilyMemberObj(m)}, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ops) != 1 || ops[0].Safety() != pipeline.Safe || !strings.Contains(ops[0].SQL(), "ADD OPERATOR 1") {
+		t.Fatalf("expected 1 SAFE ADD op, got %v", sqlList(ops))
+	}
+}
+
+func TestDiffOpFamilyMemberRemoveOnly(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	sm := snapshot.SnapOpFamilyMember{Number: 1, Name: "<", LeftType: "integer", RightType: "bigint"}
+	_ = snap.SetObject("public.member_fam USING btree FAMILY", opFamilyMemberSnap(true, sm))
+	ops, err := d.Diff([]pipeline.IRObject{opFamilyMemberObj()}, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ops) != 1 || ops[0].Safety() != pipeline.Destructive || !strings.Contains(ops[0].SQL(), "DROP OPERATOR 1") {
+		t.Fatalf("expected 1 DESTRUCTIVE DROP op, got %v", sqlList(ops))
+	}
+}
+
+// TestDiffOpFamilyMemberInPlaceChange guards the "same slot, different
+// operator" case: Key() deliberately excludes operator identity (see its
+// doc comment), so a slot whose operator symbol changes must diff as
+// DROP-then-ADD, not silently match as unchanged.
+func TestDiffOpFamilyMemberInPlaceChange(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	sm := snapshot.SnapOpFamilyMember{Number: 1, Name: "<", LeftType: "integer", RightType: "bigint"}
+	_ = snap.SetObject("public.member_fam USING btree FAMILY", opFamilyMemberSnap(true, sm))
+	m := pipeline.OpFamilyMember{Number: 1, Name: pipeline.Identifier{Name: "<="}, LeftType: "integer", RightType: "bigint"}
+	ops, err := d.Diff([]pipeline.IRObject{opFamilyMemberObj(m)}, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ops) != 2 || ops[0].Safety() != pipeline.Destructive || ops[1].Safety() != pipeline.Safe {
+		t.Fatalf("expected DROP then ADD, got %v", sqlList(ops))
+	}
+}
+
+// TestDiffOpFamilyMemberUnqualifiedOperatorMatchesPgCatalog is a live-bug
+// regression guard: source commonly writes a bare "<" (no schema), while
+// introspection always returns the operator's real, fully qualified schema
+// (pg_catalog for a built-in) — a raw Identifier comparison flagged every
+// unqualified built-in operator as changed on every apply, even with zero
+// actual difference (caught by TestRoundtripOpFamilyLooseMembers, an
+// integration test, before this unit test existed).
+func TestDiffOpFamilyMemberUnqualifiedOperatorMatchesPgCatalog(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	sm := snapshot.SnapOpFamilyMember{Number: 1, NameSchema: "pg_catalog", Name: "<", LeftType: "integer", RightType: "bigint"}
+	_ = snap.SetObject("public.member_fam USING btree FAMILY", opFamilyMemberSnap(true, sm))
+	m := pipeline.OpFamilyMember{Number: 1, Name: pipeline.Identifier{Name: "<"}, LeftType: "integer", RightType: "bigint"}
+	ops, err := d.Diff([]pipeline.IRObject{opFamilyMemberObj(m)}, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ops) != 0 {
+		t.Fatalf("expected zero ops (unqualified '<' must match pg_catalog.<), got %v", sqlList(ops))
+	}
+}
+
+func TestDiffOpFamilyMemberNoChange(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	sm := snapshot.SnapOpFamilyMember{Number: 1, Name: "<", LeftType: "integer", RightType: "bigint"}
+	_ = snap.SetObject("public.member_fam USING btree FAMILY", opFamilyMemberSnap(true, sm))
+	m := pipeline.OpFamilyMember{Number: 1, Name: pipeline.Identifier{Name: "<"}, LeftType: "integer", RightType: "bigint"}
+	ops, err := d.Diff([]pipeline.IRObject{opFamilyMemberObj(m)}, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ops) != 0 {
+		t.Fatalf("expected zero ops, got %v", sqlList(ops))
+	}
+}
+
+// TestDiffOpFamilyMemberStaleSnapshotNoOp guards the mandatory
+// OpFamilyMembersStructured sentinel: a snapshot written before this
+// feature existed must never be treated as "genuinely zero members" — that
+// would emit an ADD for a member PostgreSQL may already have, which
+// actually errors live (no "ADD ... IF NOT EXISTS").
+func TestDiffOpFamilyMemberStaleSnapshotNoOp(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.member_fam USING btree FAMILY", opFamilyMemberSnap(false))
+	m := pipeline.OpFamilyMember{Number: 1, Name: pipeline.Identifier{Name: "<"}, LeftType: "integer", RightType: "bigint"}
+	ops, err := d.Diff([]pipeline.IRObject{opFamilyMemberObj(m)}, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ops) != 0 {
+		t.Fatalf("expected zero ops for stale (unstructured) snapshot, got %v", sqlList(ops))
+	}
+}
+
+// TestDiffOpFamilyMemberDeterministicOrder guards diffOpFamilyMembers's
+// sorted-key iteration — unlike diffTSConfigMappings's plain map iteration,
+// this must produce identical plan text across repeated runs.
+func TestDiffOpFamilyMemberDeterministicOrder(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.member_fam USING btree FAMILY", opFamilyMemberSnap(true))
+	members := []pipeline.OpFamilyMember{
+		{Number: 5, Name: pipeline.Identifier{Name: ">"}, LeftType: "integer", RightType: "bigint"},
+		{Number: 1, Name: pipeline.Identifier{Name: "<"}, LeftType: "integer", RightType: "bigint"},
+		{IsFunction: true, Number: 1, Name: pipeline.Identifier{Name: "cmp"}, LeftType: "integer", RightType: "bigint", FuncArgs: []string{"integer", "bigint"}},
+	}
+	var first string
+	for i := range 5 {
+		ops, err := d.Diff([]pipeline.IRObject{opFamilyMemberObj(members...)}, snap)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var sb strings.Builder
+		for _, op := range ops {
+			sb.WriteString(op.SQL())
+		}
+		if i == 0 {
+			first = sb.String()
+		} else if sb.String() != first {
+			t.Fatalf("run %d produced different plan text:\n%s\nvs first run:\n%s", i, sb.String(), first)
+		}
+	}
+}
+
 // Legacy snapshots predate the access-method field; DROP falls back to btree.
 func TestDiffDropOperatorClassLegacyFallsBackToBtree(t *testing.T) {
 	d := New()

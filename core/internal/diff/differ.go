@@ -781,7 +781,15 @@ func createObject(obj pipeline.IRObject, vtypes map[string]string) ([]pipeline.D
 		return appendCommentOp(ops, err, "operator_class", o.Schema, o.Name, "", o.AccessMethod, o.Comment, o.SrcPos)
 	case *ir.OperatorFamily:
 		ops, err := createOpaque(o.QualifiedName(), o.Body, "OPERATOR FAMILY", o.Schema, o.SrcPos)
-		return appendCommentOp(ops, err, "operator_family", o.Schema, o.Name, "", o.AccessMethod, o.Comment, o.SrcPos)
+		ops, err = appendCommentOp(ops, err, "operator_family", o.Schema, o.Name, "", o.AccessMethod, o.Comment, o.SrcPos)
+		if err != nil {
+			return ops, err
+		}
+		famIdent := qualIdent(o.Schema, o.Name)
+		for _, m := range o.Members {
+			ops = append(ops, safeOp(opFamilyAddSQL(famIdent, o.AccessMethod, m), o.SrcPos))
+		}
+		return ops, nil
 	case *ir.Cast:
 		ops, err := createOpaque(o.QualifiedName(), o.Body, "CAST", "", o.SrcPos)
 		return appendCommentOp(ops, err, "cast", "", o.QualifiedName(), "", "", o.Comment, o.SrcPos)
@@ -3028,7 +3036,7 @@ func diffObject(desired pipeline.IRObject, snap *snapshot.SnapObject, fullSnap *
 		if snap.Opaque == nil {
 			return nil, nil
 		}
-		return diffOpaqueIR(o.QualifiedName(), o.Body, o.Reconstructed, o.Comment, snap.Opaque, o.SrcPos)
+		return diffOperatorFamily(o, snap.Opaque)
 	case *ir.Cast:
 		if snap.Opaque == nil {
 			return nil, nil
@@ -3106,6 +3114,136 @@ func tsMappingAlterSQLStrings(configIdent string, tokenTypes, dictionaries []str
 // FOR tok;" for a token type whose mapping was removed from source.
 func tsMappingDropSQL(configIdent, tokenType string) string {
 	return fmt.Sprintf("ALTER TEXT SEARCH CONFIGURATION %s DROP MAPPING FOR %s;", configIdent, tokenType)
+}
+
+// opFamilyAddSQL/opFamilyDropSQL render a single-member "ALTER OPERATOR
+// FAMILY ... ADD/DROP ..." statement (RFC §14.4) — one statement per
+// member, not batched, so each DiffOp carries its own safety classification
+// and can be individually reviewed or skipped, matching how every other
+// per-element diff in this file (constraints, columns, grants) is emitted.
+func opFamilyAddSQL(famIdent, am string, m pipeline.OpFamilyMember) string {
+	return fmt.Sprintf("ALTER OPERATOR FAMILY %s USING %s ADD %s;", famIdent, am, m.AddClause())
+}
+
+func opFamilyDropSQL(famIdent, am string, m snapshot.SnapOpFamilyMember) string {
+	kind := "OPERATOR"
+	if m.IsFunction {
+		kind = "FUNCTION"
+	}
+	return fmt.Sprintf("ALTER OPERATOR FAMILY %s USING %s DROP %s %d (%s, %s);",
+		famIdent, am, kind, m.Number, m.LeftType, m.RightType)
+}
+
+// opFamilyMemberSnapKey is snapshot.SnapOpFamilyMember's counterpart to
+// pipeline.OpFamilyMember.Key() — must stay byte-identical to it (same
+// kind/number/op_type components) so a desired-side and snapshot-side
+// member at the same catalog slot compare as the same map key.
+func opFamilyMemberSnapKey(m snapshot.SnapOpFamilyMember) string {
+	kind := "OPERATOR"
+	if m.IsFunction {
+		kind = "FUNCTION"
+	}
+	return kind + "|" + strconv.Itoa(m.Number) + "|" + m.LeftType + "|" + m.RightType
+}
+
+// qualifyOpFamilyOperandForCompare normalizes a loose member's operand
+// identity (RFC §14.4) for comparison purposes only — mirroring
+// qualifyFuncForCompare's own reasoning (introspection always returns a
+// fully schema-qualified name; hand-written source commonly doesn't) and,
+// critically, its symmetric application: called on BOTH the desired and
+// snapshot side before comparing, so a pure-offline diff (both sides
+// unqualified) still matches, not just the live-catalog path. Function
+// members and sort-family targets default like every other DPG object
+// reference (the family's own declaring schema, matching graph.go's
+// defaultSchema for the identical reference); operator members default to
+// pg_catalog instead — an unqualified operator symbol overwhelmingly means
+// a built-in, unlike a function or family reference.
+func qualifyOpFamilyOperandForCompare(isOperator bool, famSchema, schema, name string) string {
+	if schema != "" {
+		return schema + "." + name
+	}
+	if isOperator {
+		return "pg_catalog." + name
+	}
+	return famSchema + "." + name
+}
+
+// opFamilyMemberEqual compares the "payload" of a same-slot member pair —
+// the parts Key() deliberately excludes (see its doc comment): operator/
+// function identity, FOR ORDER BY, and (for FUNCTION) the argument list.
+func opFamilyMemberEqual(famSchema string, d pipeline.OpFamilyMember, s snapshot.SnapOpFamilyMember) bool {
+	dName := qualifyOpFamilyOperandForCompare(!d.IsFunction, famSchema, d.Name.Schema, d.Name.Name)
+	sName := qualifyOpFamilyOperandForCompare(!s.IsFunction, famSchema, s.NameSchema, s.Name)
+	if dName != sName {
+		return false
+	}
+	if d.OrderBy != s.OrderBy {
+		return false
+	}
+	if d.OrderBy {
+		dSort := qualifyOpFamilyOperandForCompare(false, famSchema, d.SortFamily.Schema, d.SortFamily.Name)
+		sSort := qualifyOpFamilyOperandForCompare(false, famSchema, s.SortFamilySchema, s.SortFamilyName)
+		if dSort != sSort {
+			return false
+		}
+	}
+	return slices.Equal(d.FuncArgs, s.FuncArgs)
+}
+
+// diffOpFamilyMembers diffs an operator family's loose members (RFC §14.4)
+// at the per-slot level (Key(): kind+number+op_types — see
+// pipeline.OpFamilyMember.Key's doc comment: two members at the same slot
+// are the same catalog row changing shape, not independent members).
+// structured is the same stale-snapshot guard pattern as
+// OptionsStructured/StatisticsStructured elsewhere in this file: a snapshot
+// written before this feature existed has OpFamilyMembersStructured ==
+// false, so this returns nil rather than proposing an ADD for a member
+// PostgreSQL may already have — that ADD would genuinely error live (there
+// is no "ADD ... IF NOT EXISTS"), so silence is the only safe default until
+// the next apply/verify populates the sentinel. Keys are iterated in sorted
+// order (unlike diffTSConfigMappings's plain map iteration) so plan output
+// is stable across repeated runs.
+func diffOpFamilyMembers(famSchema, famIdent, am string, desired []pipeline.OpFamilyMember, snap []snapshot.SnapOpFamilyMember, structured bool, pos pipeline.SourcePos) []pipeline.DiffOp {
+	if !structured {
+		return nil
+	}
+	desiredByKey := make(map[string]pipeline.OpFamilyMember, len(desired))
+	for _, m := range desired {
+		desiredByKey[m.Key()] = m
+	}
+	snapByKey := make(map[string]snapshot.SnapOpFamilyMember, len(snap))
+	for _, m := range snap {
+		snapByKey[opFamilyMemberSnapKey(m)] = m
+	}
+
+	keys := make(map[string]bool, len(desiredByKey)+len(snapByKey))
+	for k := range desiredByKey {
+		keys[k] = true
+	}
+	for k := range snapByKey {
+		keys[k] = true
+	}
+	sortedKeys := make([]string, 0, len(keys))
+	for k := range keys {
+		sortedKeys = append(sortedKeys, k)
+	}
+	sort.Strings(sortedKeys)
+
+	var ops []pipeline.DiffOp
+	for _, key := range sortedKeys {
+		d, inDesired := desiredByKey[key]
+		s, inSnap := snapByKey[key]
+		switch {
+		case inDesired && !inSnap:
+			ops = append(ops, safeOp(opFamilyAddSQL(famIdent, am, d), pos))
+		case !inDesired && inSnap:
+			ops = append(ops, destructiveOp(opFamilyDropSQL(famIdent, am, s), pos))
+		case inDesired && inSnap && !opFamilyMemberEqual(famSchema, d, s):
+			ops = append(ops, destructiveOp(opFamilyDropSQL(famIdent, am, s), pos))
+			ops = append(ops, safeOp(opFamilyAddSQL(famIdent, am, d), pos))
+		}
+	}
+	return ops
 }
 
 // diffTSConfigMappings diffs MAPPING FOR entries at the per-token-type level
@@ -3214,6 +3352,37 @@ func diffTSConfig(o *ir.TSConfig, snap *snapshot.SnapOpaque) ([]pipeline.DiffOp,
 		}
 	}
 	ops = append(ops, diffTSConfigMappings(configIdent, o.Mappings, snap.Mappings, o.SrcPos)...)
+	return ops, nil
+}
+
+// diffOperatorFamily is diffOpaqueIR's OperatorFamily-specific wrapper,
+// cloning diffTSConfig's own DROP+CREATE-vs-incremental-diff structure
+// exactly: loose members (RFC §14.4) are a family-only concern diffOpaqueIR
+// knows nothing about. When the base diff triggers a full DROP+CREATE
+// (body/AccessMethod changed — diffOpaqueIR calls createOpaque directly,
+// not createObject, so none of o.Members gets applied automatically), every
+// declared member is unconditionally re-added: the just-recreated family
+// has none of the old snapshot's members anymore, so diffing against them
+// would be comparing against nothing real. Otherwise members are diffed
+// incrementally (diffOpFamilyMembers) — unlike an operator class's
+// AS-list, PostgreSQL genuinely supports incremental
+// ALTER OPERATOR FAMILY ... ADD/DROP for family-level members, so there is
+// no need to force a full drop+recreate here the way OperatorClass does.
+func diffOperatorFamily(o *ir.OperatorFamily, snap *snapshot.SnapOpaque) ([]pipeline.DiffOp, error) {
+	ops, err := diffOpaqueIR(o.QualifiedName(), o.Body, o.Reconstructed, o.Comment, snap, o.SrcPos)
+	if err != nil {
+		return nil, err
+	}
+	famIdent := qualIdent(o.Schema, o.Name)
+	for _, op := range ops {
+		if op.Safety() == pipeline.Destructive {
+			for _, m := range o.Members {
+				ops = append(ops, safeOp(opFamilyAddSQL(famIdent, o.AccessMethod, m), o.SrcPos))
+			}
+			return ops, nil
+		}
+	}
+	ops = append(ops, diffOpFamilyMembers(o.Schema, famIdent, o.AccessMethod, o.Members, snap.OpFamilyMembers, snap.OpFamilyMembersStructured, o.SrcPos)...)
 	return ops, nil
 }
 

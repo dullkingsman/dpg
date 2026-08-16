@@ -32,6 +32,8 @@ var blockDirectiveKeywords = []string{
 	"GRANTS", "REVOCATIONS", "PARTITIONS",
 	"MIGRATE REMOVE",
 	"PREFERRED JSON FORMAT",
+	// OPERATOR FAMILY { } loose members only (RFC §14.4).
+	"OPERATOR", "FUNCTION",
 }
 
 var pgBuiltinTypes = []string{

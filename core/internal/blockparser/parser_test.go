@@ -1314,3 +1314,125 @@ func TestIndexSortOrderAndInclude(t *testing.T) {
 		t.Errorf("INCLUDE: got %+v, want unquoted [c d]", idx.Include)
 	}
 }
+
+// ── OPERATOR FAMILY loose members (RFC §14.4) ─────────────────────────────────
+
+// TestOpFamilyMemberCommaSeparatedList guards the approved source style: a
+// whole block is one comma-separated list of OPERATOR/FUNCTION items, each
+// restating its own keyword (unlike real PG's ALTER ... ADD, which states
+// ADD once) — no trailing ';' on the last item.
+func TestOpFamilyMemberCommaSeparatedList(t *testing.T) {
+	ast := parse(t, `
+		OPERATOR 1 <(int4, int8),
+		OPERATOR 3 =(int4, int8),
+		FUNCTION 1 (int4, int8) btint48cmp(int4, int8)
+	`)
+	if len(ast.OpFamilyMembers) != 3 {
+		t.Fatalf("expected 3 members, got %d: %+v", len(ast.OpFamilyMembers), ast.OpFamilyMembers)
+	}
+	m0 := ast.OpFamilyMembers[0]
+	if m0.IsFunction || m0.Number != 1 || m0.Name.Name != "<" || m0.LeftType != "int4" || m0.RightType != "int8" {
+		t.Errorf("member 0: got %+v", m0)
+	}
+	m2 := ast.OpFamilyMembers[2]
+	if !m2.IsFunction || m2.Number != 1 || m2.Name.Name != "btint48cmp" ||
+		len(m2.FuncArgs) != 2 || m2.FuncArgs[0] != "int4" || m2.FuncArgs[1] != "int8" {
+		t.Errorf("member 2: got %+v", m2)
+	}
+}
+
+// TestOpFamilyMemberSemicolonPerMember guards the alternative, also-accepted
+// terminator style (';' per member, DPG's usual block-directive convention)
+// parsing identically to the comma-separated form.
+func TestOpFamilyMemberSemicolonPerMember(t *testing.T) {
+	ast := parse(t, `
+		OPERATOR 1 <(int4, int8);
+		FUNCTION 1 (int4, int8) btint48cmp(int4, int8);
+	`)
+	if len(ast.OpFamilyMembers) != 2 {
+		t.Fatalf("expected 2 members, got %d: %+v", len(ast.OpFamilyMembers), ast.OpFamilyMembers)
+	}
+}
+
+func TestOpFamilyMemberForSearchDefault(t *testing.T) {
+	ast := parse(t, `OPERATOR 1 <(int4, int8) FOR SEARCH`)
+	if ast.OpFamilyMembers[0].OrderBy {
+		t.Errorf("FOR SEARCH must not set OrderBy, got %+v", ast.OpFamilyMembers[0])
+	}
+}
+
+func TestOpFamilyMemberForOrderBy(t *testing.T) {
+	ast := parse(t, `OPERATOR 3 =(int4, int8) FOR ORDER BY public.my_family`)
+	m := ast.OpFamilyMembers[0]
+	if !m.OrderBy || m.SortFamily.Schema != "public" || m.SortFamily.Name != "my_family" {
+		t.Errorf("FOR ORDER BY: got %+v", m)
+	}
+}
+
+// TestOpFamilyMemberSchemaQualifiedOperator and TestOpFamilyMemberMultiCharSymbol
+// guard readOperatorSymbol's two halves: an optional "schema." prefix (word
+// characters, disjoint from operator characters so there's no lexing
+// ambiguity) and a run of real PG operator characters of any length.
+func TestOpFamilyMemberSchemaQualifiedOperator(t *testing.T) {
+	ast := parse(t, `OPERATOR 1 pg_catalog.<(int4, int8)`)
+	m := ast.OpFamilyMembers[0]
+	if m.Name.Schema != "pg_catalog" || m.Name.Name != "<" {
+		t.Errorf("got %+v, want schema=pg_catalog name=<", m.Name)
+	}
+}
+
+func TestOpFamilyMemberMultiCharSymbol(t *testing.T) {
+	ast := parse(t, `OPERATOR 1 @>(box, box)`)
+	if ast.OpFamilyMembers[0].Name.Name != "@>" {
+		t.Errorf("got %q, want @>", ast.OpFamilyMembers[0].Name.Name)
+	}
+}
+
+func TestOpFamilyMemberFunctionWithoutOpTypes(t *testing.T) {
+	ast := parse(t, `FUNCTION 1 btint48cmp(int4, int8)`)
+	m := ast.OpFamilyMembers[0]
+	if m.LeftType != "" || m.RightType != "" {
+		t.Errorf("omitted op_types should leave LeftType/RightType empty at the parser layer (the IR builder resolves defaults), got %+v", m)
+	}
+	if len(m.FuncArgs) != 2 || m.FuncArgs[0] != "int4" || m.FuncArgs[1] != "int8" {
+		t.Errorf("FuncArgs: got %v", m.FuncArgs)
+	}
+}
+
+func TestOpFamilyMemberFunctionWithOpTypes(t *testing.T) {
+	ast := parse(t, `FUNCTION 1 (int4, int8) btint48cmp(int4, int8)`)
+	m := ast.OpFamilyMembers[0]
+	if m.LeftType != "int4" || m.RightType != "int8" {
+		t.Errorf("got left=%q right=%q, want int4/int8", m.LeftType, m.RightType)
+	}
+}
+
+// TestOpFamilyMemberTypeModifiersSurviveParen guards readTypeListParen's
+// reuse of readRawUntil's paren-depth tracking: a modifier-bearing type like
+// numeric(10,2) must not have its internal comma mistaken for the type-list
+// separator.
+func TestOpFamilyMemberTypeModifiersSurviveParen(t *testing.T) {
+	ast := parse(t, `OPERATOR 1 <(numeric(10,2), character varying(20))`)
+	m := ast.OpFamilyMembers[0]
+	if m.LeftType != "numeric(10,2)" || m.RightType != "character varying(20)" {
+		t.Errorf("got left=%q right=%q", m.LeftType, m.RightType)
+	}
+}
+
+func TestOpFamilyMemberMissingOpTypesErrors(t *testing.T) {
+	if err := parseErr(t, `OPERATOR 1 <`); err == nil {
+		t.Fatal("expected an error for a missing (op_type, op_type) list")
+	}
+}
+
+func TestOpFamilyMemberForGarbageErrors(t *testing.T) {
+	if err := parseErr(t, `OPERATOR 1 <(int4, int8) FOR GARBAGE`); err == nil {
+		t.Fatal("expected an error for FOR not followed by SEARCH or ORDER BY")
+	}
+}
+
+func TestOpFamilyMemberNonNumericNumberErrors(t *testing.T) {
+	if err := parseErr(t, `OPERATOR x <(int4, int8)`); err == nil {
+		t.Fatal("expected an error for a non-numeric strategy number")
+	}
+}

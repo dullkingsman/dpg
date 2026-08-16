@@ -1149,6 +1149,197 @@ STATISTICS gl_stats2 (ndistinct) ON id, val FROM gl_stats_t2;`
 	}
 }
 
+// ── Operator family loose members (RFC §14.4) ─────────────────────────────────
+
+// TestRoundtripOpFamilyLooseMembers proves reconstruction matches source
+// exactly for a family with loose (ALTER OPERATOR FAMILY ... ADD-shaped)
+// members: two OPERATOR members reusing real pg_catalog operators plus a
+// FUNCTION member with a fresh, DPG-declared cross-type function.
+// Adversarially declares the family BEFORE the function it references, to
+// prove the graph.go dependency edges added for this feature (not just the
+// declaration order happening to work) are load-bearing.
+func TestRoundtripOpFamilyLooseMembers(t *testing.T) {
+	fixture := `SCHEMA opfam_rt {
+	OPERATOR FAMILY opfam_rt.cross_fam USING btree {
+		OPERATOR 1 <(int4, int8),
+		OPERATOR 3 =(int4, int8),
+		FUNCTION 1 (int4, int8) opfam_rt.cross_cmp(int4, int8)
+	};
+
+	FUNCTION cross_cmp(a int4, b int8) RETURNS int4
+	LANGUAGE sql IMMUTABLE AS $$ SELECT 0; $$ {}
+}`
+	assertOpaqueRoundtrip(t, fixture)
+}
+
+// TestGLiveOpFamilyLooseMemberAddDetected is the G-live guard for RFC
+// §14.4's loose members: a member added directly against the live catalog
+// (bypassing DPG) must show up as a DESTRUCTIVE DROP in plan --live's drift
+// output (the declared state has no such member, so the differ proposes
+// removing it) — before this feature, loose members were never introspected
+// at all, so this drift was completely invisible.
+func TestGLiveOpFamilyLooseMemberAddDetected(t *testing.T) {
+	connStr := testpg.Start(t)
+	ctx := context.Background()
+
+	differ := diff.New()
+	emitter := emit.New()
+	applyExec := executor.New()
+	ci := introspect.New()
+	store := newMemStore()
+
+	conn, err := executor.Connect(ctx, connStr)
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	defer conn.Close(ctx)
+
+	dir := t.TempDir()
+	f := filepath.Join(dir, "schema.dpg")
+	fixture := `SCHEMA opfam_glive1 {
+	OPERATOR FAMILY opfam_glive1.fam USING btree {
+		OPERATOR 1 <(int4, int8)
+	};
+}`
+	if err := os.WriteFile(f, []byte(fixture), 0o644); err != nil {
+		t.Fatalf("write schema: %v", err)
+	}
+	applyFixture(t, ctx, conn, []string{f}, dir, differ, emitter, applyExec, store)
+
+	desired, err := compiler.Compile([]string{f}, dir, pipeline.Default)
+	if err != nil {
+		t.Fatalf("compile: %v", err)
+	}
+
+	// Mutate directly via raw SQL: add a second loose member DPG never
+	// declared — real PostgreSQL supports this incrementally, unlike a
+	// Cast/Collation/etc. body edit, which needs DROP+CREATE.
+	if _, err := conn.Exec(ctx, `ALTER OPERATOR FAMILY opfam_glive1.fam USING btree ADD OPERATOR 3 =(int4, int8);`); err != nil {
+		t.Fatalf("live ADD: %v", err)
+	}
+
+	liveObjects, err := ci.Introspect(ctx, conn)
+	if err != nil {
+		t.Fatalf("introspect: %v", err)
+	}
+	snap, _ := store.Load("test", "dpgtest")
+	var managedLive []pipeline.IRObject
+	for _, obj := range liveObjects {
+		if _, ok := snap.Objects[obj.QualifiedName()]; ok {
+			managedLive = append(managedLive, obj)
+		}
+	}
+	liveSnap := &pipeline.Snapshot{}
+	if err := snapshot.Populate(liveSnap, managedLive); err != nil {
+		t.Fatalf("populate live snapshot: %v", err)
+	}
+
+	driftOps, err := differ.Diff(desired, liveSnap)
+	if err != nil {
+		t.Fatalf("drift diff: %v", err)
+	}
+	var sql string
+	for _, op := range driftOps {
+		sql += op.SQL()
+	}
+	if !strings.Contains(sql, "DROP OPERATOR 3") {
+		t.Fatalf("G-live gap not closed: expected plan --live to detect the live-catalog-only loose member, got %d ops: %q", len(driftOps), sql)
+	}
+}
+
+// TestGLiveOpFamilyLooseMemberRemoveDetected is
+// TestGLiveOpFamilyLooseMemberAddDetected's mirror: a declared member
+// removed directly against the live catalog must show up as a SAFE ADD in
+// plan --live's drift output.
+func TestGLiveOpFamilyLooseMemberRemoveDetected(t *testing.T) {
+	connStr := testpg.Start(t)
+	ctx := context.Background()
+
+	differ := diff.New()
+	emitter := emit.New()
+	applyExec := executor.New()
+	ci := introspect.New()
+	store := newMemStore()
+
+	conn, err := executor.Connect(ctx, connStr)
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	defer conn.Close(ctx)
+
+	dir := t.TempDir()
+	f := filepath.Join(dir, "schema.dpg")
+	fixture := `SCHEMA opfam_glive2 {
+	OPERATOR FAMILY opfam_glive2.fam USING btree {
+		OPERATOR 1 <(int4, int8),
+		OPERATOR 3 =(int4, int8)
+	};
+}`
+	if err := os.WriteFile(f, []byte(fixture), 0o644); err != nil {
+		t.Fatalf("write schema: %v", err)
+	}
+	applyFixture(t, ctx, conn, []string{f}, dir, differ, emitter, applyExec, store)
+
+	desired, err := compiler.Compile([]string{f}, dir, pipeline.Default)
+	if err != nil {
+		t.Fatalf("compile: %v", err)
+	}
+
+	if _, err := conn.Exec(ctx, `ALTER OPERATOR FAMILY opfam_glive2.fam USING btree DROP OPERATOR 3 (int4, int8);`); err != nil {
+		t.Fatalf("live DROP: %v", err)
+	}
+
+	liveObjects, err := ci.Introspect(ctx, conn)
+	if err != nil {
+		t.Fatalf("introspect: %v", err)
+	}
+	snap, _ := store.Load("test", "dpgtest")
+	var managedLive []pipeline.IRObject
+	for _, obj := range liveObjects {
+		if _, ok := snap.Objects[obj.QualifiedName()]; ok {
+			managedLive = append(managedLive, obj)
+		}
+	}
+	liveSnap := &pipeline.Snapshot{}
+	if err := snapshot.Populate(liveSnap, managedLive); err != nil {
+		t.Fatalf("populate live snapshot: %v", err)
+	}
+
+	driftOps, err := differ.Diff(desired, liveSnap)
+	if err != nil {
+		t.Fatalf("drift diff: %v", err)
+	}
+	var sql string
+	for _, op := range driftOps {
+		sql += op.SQL()
+	}
+	if !strings.Contains(sql, "ADD OPERATOR 3") {
+		t.Fatalf("G-live gap not closed: expected plan --live to detect the missing loose member, got %d ops: %q", len(driftOps), sql)
+	}
+}
+
+// TestRoundtripOpFamilyClassOwnedMembersNotTreatedAsLoose is the single
+// highest-value regression guard for this whole feature: a full operator
+// class AS-list plus an empty-block family declared for the same family
+// must show zero drift — proving the pg_depend filter in
+// opFamilyLooseMembers correctly excludes class-owned members (deptype='i'
+// against pg_opclass) rather than proposing to DROP them as if they were
+// undeclared loose members.
+func TestRoundtripOpFamilyClassOwnedMembersNotTreatedAsLoose(t *testing.T) {
+	fixture := `SCHEMA opfam_classowned {
+	OPERATOR FAMILY opfam_classowned.myfam USING btree;
+
+	OPERATOR CLASS opfam_classowned.myops FOR TYPE int4 USING btree FAMILY opfam_classowned.myfam AS
+		OPERATOR 1 <,
+		OPERATOR 2 <=,
+		OPERATOR 3 =,
+		OPERATOR 4 >=,
+		OPERATOR 5 >,
+		FUNCTION 1 btint4cmp(int4, int4);
+}`
+	assertOpaqueRoundtrip(t, fixture)
+}
+
 // TestRoundtripOpaqueBodyEditAppliesLive is the live-catalog guard for #3
 // (real update path for opaque objects, internal/diff/differ.go diffOpaqueIR):
 // previously an offline body edit to an opaque object (here, a COLLATION's

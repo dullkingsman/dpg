@@ -993,7 +993,7 @@ func renderObjectDPG(b *strings.Builder, obj pipeline.IRObject, fmtOpts format.O
 	case *ir.OperatorClass:
 		renderOpaqueBody(b, ind, fmtOpts, o.Body, o.Comment)
 	case *ir.OperatorFamily:
-		renderOpaqueBody(b, ind, fmtOpts, o.Body, o.Comment)
+		renderOpFamilyBody(b, ind, fmtOpts, o)
 	case *ir.TSConfig:
 		renderTSConfigBody(b, ind, fmtOpts, o)
 	case *ir.TSDict:
@@ -1239,6 +1239,41 @@ func renderTSConfigBody(b *strings.Builder, ind string, fmtOpts format.Options, 
 		}
 		fmt.Fprintf(b, "%s%s %s %s %s %s;\n", ind, kw("MAPPING"), kw("FOR"),
 			strings.Join(m.TokenTypes, ", "), kw("WITH"), strings.Join(dicts, ", "))
+	}
+	b.WriteString("}\n")
+}
+
+// renderOpFamilyBody renders an OPERATOR FAMILY declaration, RFC §14.4:
+// bare CREATE OPERATOR FAMILY (Part 1, untouched real PG SQL) plus a { }
+// block for the family's loose members — the same shape renderTSConfigBody
+// uses for MAPPING FOR entries. Members render via m.AddClause(), the exact
+// same renderer the differ uses to build "ALTER ... ADD" statements, so
+// dumped source and generated SQL can never drift apart. Early-returns to
+// the bare "...;" form when there's no comment and no members, matching
+// today's output byte-for-byte for the common case (a family with only
+// class-owned members, e.g. the demo project's text_ci_ops) — zero output
+// churn for objects this feature doesn't touch.
+func renderOpFamilyBody(b *strings.Builder, ind string, fmtOpts format.Options, o *ir.OperatorFamily) {
+	kw := fmtOpts.Keyword
+	body := strings.TrimSpace(o.Body)
+	const createPrefix = "CREATE "
+	if len(body) >= len(createPrefix) && strings.EqualFold(body[:len(createPrefix)], createPrefix) {
+		body = strings.TrimSpace(body[len(createPrefix):])
+	}
+	if body == "" {
+		return
+	}
+	fmt.Fprintf(b, "\n%s", body)
+	if o.Comment == nil && len(o.Members) == 0 {
+		b.WriteString(";\n")
+		return
+	}
+	b.WriteString(" {\n")
+	if o.Comment != nil {
+		fmt.Fprintf(b, "%s%s %s;\n", ind, kw("COMMENT"), sqlStringLit(*o.Comment))
+	}
+	for _, m := range o.Members {
+		fmt.Fprintf(b, "%s%s;\n", ind, m.AddClause())
 	}
 	b.WriteString("}\n")
 }

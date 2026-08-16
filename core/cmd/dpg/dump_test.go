@@ -1065,6 +1065,75 @@ func TestRenderTSConfigMappingCompiles(t *testing.T) {
 	}
 }
 
+// ── Operator family loose members (RFC §14.4) ─────────────────────────────────
+
+// TestRenderOpFamilyBareFormNoChurn guards zero output churn for the common
+// case — a family with only class-owned members (e.g. the demo project's
+// text_ci_ops) — renderOpFamilyBody must still render the bare "...;" form,
+// exactly like a member-less family always did, not a spurious empty "{ }".
+func TestRenderOpFamilyBareFormNoChurn(t *testing.T) {
+	fmtOpts := format.Options{IndentSize: 4, KeywordCase: "upper"}
+	fam := &ir.OperatorFamily{
+		Schema: "public", Name: "text_ci_ops", AccessMethod: "btree",
+		Body: `CREATE OPERATOR FAMILY public.text_ci_ops USING btree`,
+	}
+	var b strings.Builder
+	renderObjectDPG(&b, fam, fmtOpts)
+	rendered := b.String()
+	if strings.Contains(rendered, "{") {
+		t.Errorf("expected bare form (no members, no comment), got:\n%s", rendered)
+	}
+	if !strings.Contains(rendered, "OPERATOR FAMILY public.text_ci_ops USING btree;") {
+		t.Errorf("expected the bare declaration, got:\n%s", rendered)
+	}
+}
+
+// TestRenderOpFamilyWithMembersRoundtrips guards the full spine: rendered
+// source must not begin with "CREATE" (the no-verb mandate) and must
+// recompile back to the same structured Members, using m.AddClause() — the
+// exact renderer the differ itself uses — so dump output and generated SQL
+// can never drift apart.
+func TestRenderOpFamilyWithMembersRoundtrips(t *testing.T) {
+	fmtOpts := format.Options{IndentSize: 4, KeywordCase: "upper"}
+	fam := &ir.OperatorFamily{
+		Schema: "public", Name: "myfam", AccessMethod: "btree",
+		Body: `CREATE OPERATOR FAMILY public.myfam USING btree`,
+		Members: []pipeline.OpFamilyMember{
+			{Number: 1, Name: pipeline.Identifier{Name: "<"}, LeftType: "integer", RightType: "bigint"},
+			{IsFunction: true, Number: 1, Name: pipeline.Identifier{Schema: "public", Name: "btint48cmp"},
+				LeftType: "integer", RightType: "bigint", FuncArgs: []string{"integer", "bigint"}},
+		},
+	}
+	var b strings.Builder
+	renderObjectDPG(&b, fam, fmtOpts)
+	rendered := b.String()
+	if strings.Contains(rendered, "CREATE OPERATOR FAMILY") {
+		t.Errorf("DPG source must not begin a declaration with CREATE, got:\n%s", rendered)
+	}
+
+	dir := t.TempDir()
+	f := filepath.Join(dir, "objects.dpg")
+	if err := os.WriteFile(f, []byte(rendered), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	compiled, err := compiler.Compile([]string{f}, dir, pipeline.Default)
+	if err != nil {
+		t.Fatalf("dumped operator family failed to recompile: %v\n---\n%s", err, rendered)
+	}
+	var found *ir.OperatorFamily
+	for _, o := range compiled {
+		if of, ok := o.(*ir.OperatorFamily); ok && of.Name == "myfam" {
+			found = of
+		}
+	}
+	if found == nil {
+		t.Fatalf("operator family myfam missing after recompile\n---\n%s", rendered)
+	}
+	if len(found.Members) != 2 {
+		t.Fatalf("Members did not round-trip: got %d, want 2: %+v", len(found.Members), found.Members)
+	}
+}
+
 // TestRenderCompositeAndRangeTypesCompile guards a real bug found
 // live-testing a demo project: renderObjectDPG's *ir.Type switch only ever
 // had cases for "ENUM" and "DOMAIN" — COMPOSITE and RANGE both fell through

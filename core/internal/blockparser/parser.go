@@ -567,6 +567,16 @@ func (b *blockParser) parseBlock(pos pipeline.SourcePos) (pipeline.BlockAST, err
 			var m pipeline.TSMappingDef
 			m, err = b.parseTSMapping(dirPos)
 			ast.Mappings = append(ast.Mappings, m)
+		case "OPERATOR", "FUNCTION":
+			// RFC §14.4's OPERATOR FAMILY { } members — real PG's own
+			// ALTER OPERATOR FAMILY ... ADD list-item grammar, minus the
+			// ALTER/family header. Each item restates its own OPERATOR/
+			// FUNCTION keyword (unlike the real ALTER statement's single
+			// "ADD" prefix), so this is dispatched exactly like every other
+			// top-level directive rather than as a nested sub-list.
+			var m pipeline.OpFamilyMember
+			m, err = b.parseOpFamilyMember(dirPos, word == "FUNCTION")
+			ast.OpFamilyMembers = append(ast.OpFamilyMembers, m)
 		case "STATISTICS":
 			// STATISTICS can appear at column level; at object level it's unusual
 			// but parse it for error resilience.
@@ -2334,6 +2344,189 @@ func (b *blockParser) parseTSMapping(pos pipeline.SourcePos) (pipeline.TSMapping
 	}
 	if err := b.expectSemi(); err != nil {
 		return m, err
+	}
+	return m, nil
+}
+
+// ── OPERATOR FAMILY loose members ────────────────────────────────────────────
+
+// isOperatorChar reports whether ch is one of PostgreSQL's own operator
+// characters (real PG grammar, not a DPG invention).
+func isOperatorChar(ch byte) bool {
+	return strings.IndexByte("+-*/<>=~!@#%^&|`?", ch) >= 0
+}
+
+// readOperatorSymbol reads a (possibly schema-qualified) operator name —
+// real PG's "any_operator" production (ColId '.' any_operator | all_Op),
+// e.g. "<", "@>", "pg_catalog.=". Word characters and operator characters
+// are disjoint, so a leading schema and the operator symbol never collide.
+func (b *blockParser) readOperatorSymbol() (pipeline.Identifier, error) {
+	b.skipWS()
+	schema := ""
+	if isWordStart(b.peek()) {
+		c := b.cur()
+		w := b.readWord()
+		b.skipWS()
+		if b.peek() == '.' {
+			b.advance()
+			schema = w
+		} else {
+			b.restore(c)
+		}
+	}
+	b.skipWS()
+	var buf []byte
+	for !b.eof() && isOperatorChar(b.peek()) {
+		buf = append(buf, b.advance())
+	}
+	if len(buf) == 0 {
+		return pipeline.Identifier{}, b.errorf("expected an operator symbol, got %q", b.peek())
+	}
+	return pipeline.Identifier{Schema: schema, Name: string(buf)}, nil
+}
+
+// readTypeListParen reads a parenthesized, comma-separated list of raw type
+// text, e.g. "(int4, int8)" or "(numeric(10,2))" or "()" (empty). The
+// opening '(' must not have been consumed yet. readRawUntil is paren/brace/
+// quote-depth aware, so type modifiers like numeric(10,2) survive intact.
+func (b *blockParser) readTypeListParen() ([]string, error) {
+	b.skipWS()
+	if b.peek() != '(' {
+		return nil, b.errorf("expected '(', got %q", b.peek())
+	}
+	b.advance()
+	b.skipWS()
+	var types []string
+	if b.peek() == ')' {
+		b.advance()
+		return types, nil
+	}
+	for {
+		raw, err := b.readRawUntil(",)")
+		if err != nil {
+			return nil, err
+		}
+		types = append(types, strings.TrimSpace(raw))
+		b.skipWS()
+		if b.peek() == ',' {
+			b.advance()
+			continue
+		}
+		break
+	}
+	if b.peek() != ')' {
+		return nil, b.errorf("expected ')', got %q", b.peek())
+	}
+	b.advance()
+	return types, nil
+}
+
+// parseOpFamilyMember parses one OPERATOR/FUNCTION item inside an
+// OPERATOR FAMILY { } block (RFC §14.4) — real PG's own
+// "ALTER OPERATOR FAMILY ... ADD" list-item grammar, just without the
+// ALTER/family header (already stated by the family's own declaration). The
+// leading OPERATOR/FUNCTION keyword has already been consumed by the
+// caller's directive dispatch. Terminates on ',' (more members follow),
+// ';' (directive ends), or EOF (last member in the block) — all three are
+// accepted so both the approved comma-separated list style and DPG's usual
+// one-directive-per-';' style parse identically.
+func (b *blockParser) parseOpFamilyMember(pos pipeline.SourcePos, isFunction bool) (pipeline.OpFamilyMember, error) {
+	kind := "OPERATOR"
+	if isFunction {
+		kind = "FUNCTION"
+	}
+	m := pipeline.OpFamilyMember{IsFunction: isFunction, Pos: pos}
+
+	b.skipWS()
+	var numBuf []byte
+	for !b.eof() && isDigit(b.peek()) {
+		numBuf = append(numBuf, b.advance())
+	}
+	if len(numBuf) == 0 {
+		return m, b.errorf("expected a strategy/support number after %s", kind)
+	}
+	n, err := strconv.Atoi(string(numBuf))
+	if err != nil {
+		return m, b.errorf("invalid %s number: %v", kind, err)
+	}
+	m.Number = n
+
+	if isFunction {
+		// Optional "(op_type [, op_type])" — defaults are resolved later by
+		// the IR builder (ir.normalizeOpFamilyMembers), not here; the parser
+		// only records what was actually written.
+		b.skipWS()
+		if b.peek() == '(' {
+			types, err := b.readTypeListParen()
+			if err != nil {
+				return m, err
+			}
+			switch len(types) {
+			case 1:
+				m.LeftType, m.RightType = types[0], types[0]
+			case 2:
+				m.LeftType, m.RightType = types[0], types[1]
+			default:
+				return m, b.errorf("FUNCTION member's optional (op_type[, op_type]) must have 1 or 2 entries, got %d", len(types))
+			}
+		}
+		name, err := b.readIdentifier()
+		if err != nil {
+			return m, err
+		}
+		m.Name = name
+		args, err := b.readTypeListParen()
+		if err != nil {
+			return m, err
+		}
+		m.FuncArgs = args
+	} else {
+		sym, err := b.readOperatorSymbol()
+		if err != nil {
+			return m, err
+		}
+		m.Name = sym
+		types, err := b.readTypeListParen()
+		if err != nil {
+			return m, err
+		}
+		if len(types) != 2 {
+			return m, b.errorf("OPERATOR member requires exactly 2 op_types (left, right), got %d", len(types))
+		}
+		m.LeftType, m.RightType = types[0], types[1]
+
+		b.skipWS()
+		if strings.EqualFold(b.peekWord(), "FOR") {
+			b.readWord()
+			b.skipWS()
+			w2 := strings.ToUpper(b.readWord())
+			switch w2 {
+			case "SEARCH":
+				// Default; nothing to set.
+			case "ORDER":
+				if err := b.expect("BY"); err != nil {
+					return m, err
+				}
+				fam, err := b.readIdentifier()
+				if err != nil {
+					return m, err
+				}
+				m.OrderBy = true
+				m.SortFamily = fam
+			default:
+				return m, b.errorf("expected SEARCH or ORDER BY after FOR, got %q", w2)
+			}
+		}
+	}
+
+	b.skipWS()
+	switch b.peek() {
+	case ',', ';':
+		b.advance()
+	case 0:
+		// EOF: last member in the block, no trailing punctuation required.
+	default:
+		return m, b.errorf("expected ',' or ';' after operator family member, got %q", b.peek())
 	}
 	return m, nil
 }

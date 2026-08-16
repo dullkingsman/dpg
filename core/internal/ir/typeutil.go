@@ -60,6 +60,40 @@ func typeNameToRef(tn *pg_query.TypeName) TypeRef {
 	return ref
 }
 
+// ParseTypeText converts a source-written type name ("int4", "integer",
+// "varchar(20)", "myschema.mytype") into canonical TypeRef form, so a
+// hand-written OPERATOR FAMILY member's op_type (RFC §14.4) compares equal
+// to introspection's `::regtype::text` form. canonicalDDL/canonicalizeSQLBody
+// can't do this: pg_query only rewrites an explicit "pg_catalog.int4"
+// reference, never a bare "int4" (it has no catalog access at parse time to
+// know the two name the same type), so a bare cast round-trips through
+// Parse/Deparse unchanged. Going through TypeName directly — the same node
+// typeNameToRef already reads off a real column/cast — is the only way to
+// get the canonical form offline. Falls back to the raw, trimmed input on
+// any parse failure: this only affects op_type comparison, never a hard
+// error, so an input ParseTypeText can't handle just shows as ordinary
+// (harmless) drift rather than blocking compilation.
+func ParseTypeText(s string) TypeRef {
+	s = strings.TrimSpace(s)
+	res, err := pg_query.Parse("SELECT NULL::" + s)
+	if err != nil || len(res.Stmts) == 0 {
+		return TypeRef{Name: s}
+	}
+	sel := res.Stmts[0].GetStmt().GetSelectStmt()
+	if sel == nil || len(sel.TargetList) == 0 {
+		return TypeRef{Name: s}
+	}
+	rt := sel.TargetList[0].GetResTarget()
+	if rt == nil {
+		return TypeRef{Name: s}
+	}
+	tc := rt.GetVal().GetTypeCast()
+	if tc == nil {
+		return TypeRef{Name: s}
+	}
+	return typeNameToRef(tc.TypeName)
+}
+
 // pgCatalogName maps pg_catalog internal type names to their SQL equivalents.
 func pgCatalogName(internal string) string {
 	switch internal {

@@ -2479,3 +2479,113 @@ func TestBuildStatisticsObjectNoKindListDefaultsToAllThree(t *testing.T) {
 		}
 	}
 }
+
+// ── OPERATOR FAMILY loose members (RFC §14.4) ─────────────────────────────────
+
+func TestBuildOperatorFamilyMembers(t *testing.T) {
+	obj := buildObject(t, pipeline.KindOperatorFamily, `my_family USING btree`, `
+		OPERATOR 1 <(int4, int8),
+		OPERATOR 3 =(int4, int8) FOR ORDER BY public.my_family,
+		FUNCTION 1 (int4, int8) btint48cmp(int4, int8)
+	`)
+	of := obj.(*ir.OperatorFamily)
+	if len(of.Members) != 3 {
+		t.Fatalf("expected 3 members, got %d: %+v", len(of.Members), of.Members)
+	}
+	m1 := of.Members[1]
+	if !m1.OrderBy || m1.SortFamily.Schema != "public" || m1.SortFamily.Name != "my_family" {
+		t.Errorf("member 1 (FOR ORDER BY): got %+v", m1)
+	}
+}
+
+// TestBuildOperatorFamilyMemberTypesCanonicalized guards the whole reason
+// ir.ParseTypeText exists: a hand-written "int4"/"int8" must normalize to
+// the same canonical form ("integer"/"bigint") introspection's
+// ::regtype::text produces, or every source-declared member with a
+// non-canonical type name would show permanent spurious drift.
+func TestBuildOperatorFamilyMemberTypesCanonicalized(t *testing.T) {
+	obj := buildObject(t, pipeline.KindOperatorFamily, `my_family USING btree`,
+		`OPERATOR 1 <(int4, int8)`)
+	m := obj.(*ir.OperatorFamily).Members[0]
+	if m.LeftType != "integer" || m.RightType != "bigint" {
+		t.Errorf("got left=%q right=%q, want integer/bigint", m.LeftType, m.RightType)
+	}
+}
+
+// TestBuildOperatorFamilyFunctionDefaultsFromTwoArgs guards PostgreSQL's own
+// documented default for an omitted FUNCTION op_type list: the function's
+// own argument types, but ONLY when it takes exactly two arguments.
+func TestBuildOperatorFamilyFunctionDefaultsFromTwoArgs(t *testing.T) {
+	obj := buildObject(t, pipeline.KindOperatorFamily, `my_family USING btree`,
+		`FUNCTION 1 btint48cmp(int4, int8)`)
+	m := obj.(*ir.OperatorFamily).Members[0]
+	if m.LeftType != "integer" || m.RightType != "bigint" {
+		t.Errorf("got left=%q right=%q, want integer/bigint (defaulted from args)", m.LeftType, m.RightType)
+	}
+}
+
+// TestBuildOperatorFamilyFunctionOtherArityRequiresOpTypes guards the
+// documented refusal to guess: for GiST/GIN support functions like
+// consistent(internal, text, smallint, oid, internal), the true
+// amproclefttype is the opclass's own input type, not derivable from the
+// function's argument list at all.
+func TestBuildOperatorFamilyFunctionOtherArityRequiresOpTypes(t *testing.T) {
+	p := pgparser.New()
+	pgResult, err := p.Parse(pipeline.KindOperatorFamily, `my_family USING gist`, zeroPos)
+	if err != nil {
+		t.Fatalf("pg parse error: %v", err)
+	}
+	bp := blockparser.New()
+	blockAST, err := bp.Parse(pipeline.KindOperatorFamily,
+		`FUNCTION 1 consistent(internal, text, smallint, oid, internal)`, zeroPos)
+	if err != nil {
+		t.Fatalf("block parse error: %v", err)
+	}
+	builder := ir.NewBuilder()
+	if _, err := builder.Build(pgResult, blockAST); err == nil {
+		t.Fatal("expected a build error requiring explicit op_types for a non-2-arg function")
+	}
+}
+
+func TestBuildOperatorFamilyDuplicateMemberErrors(t *testing.T) {
+	p := pgparser.New()
+	pgResult, err := p.Parse(pipeline.KindOperatorFamily, `my_family USING btree`, zeroPos)
+	if err != nil {
+		t.Fatalf("pg parse error: %v", err)
+	}
+	bp := blockparser.New()
+	blockAST, err := bp.Parse(pipeline.KindOperatorFamily, `
+		OPERATOR 1 <(int4, int8),
+		OPERATOR 1 <=(int4, int8)
+	`, zeroPos)
+	if err != nil {
+		t.Fatalf("block parse error: %v", err)
+	}
+	builder := ir.NewBuilder()
+	if _, err := builder.Build(pgResult, blockAST); err == nil {
+		t.Fatal("expected a build error for two members at the same catalog slot")
+	}
+}
+
+// TestBuildOpFamilyMembersOnWrongKindErrors guards the compile-time gate
+// (Build's top-level check, not buildOpaque's) that catches OPERATOR/
+// FUNCTION block directives written on any object other than OPERATOR
+// FAMILY — the block parser itself has no per-kind gating, so this is the
+// one place both halves (Part 1's real kind, Part 2's parsed directives)
+// are visible together.
+func TestBuildOpFamilyMembersOnWrongKindErrors(t *testing.T) {
+	p := pgparser.New()
+	pgResult, err := p.Parse(pipeline.KindCast, `(int4 AS int8) WITHOUT FUNCTION`, zeroPos)
+	if err != nil {
+		t.Fatalf("pg parse error: %v", err)
+	}
+	bp := blockparser.New()
+	blockAST, err := bp.Parse(pipeline.KindCast, `OPERATOR 1 <(int4, int8)`, zeroPos)
+	if err != nil {
+		t.Fatalf("block parse error: %v", err)
+	}
+	builder := ir.NewBuilder()
+	if _, err := builder.Build(pgResult, blockAST); err == nil {
+		t.Fatal("expected a build error for OPERATOR/FUNCTION members on a non-family object")
+	}
+}
