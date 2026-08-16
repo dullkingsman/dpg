@@ -5863,12 +5863,13 @@ APP_SERVICE_PW="s3cr3t"
    | `hardcoded-password` | A table column's `DEFAULT` contains a hardcoded string, for a column whose name contains `password`, `passwd`, `pwd`, `secret`, or `passphrase` (case-insensitive). | Error |
    | `hardcoded-role-password` | A `ROLE`'s `PASSWORD` is a literal value with no `{{secret-uri}}` placeholder. A separate rule from `hardcoded-password` above — different check, different object kind — despite §19.1's table conflating both under one `hardcoded_password` entry. | Error |
    | `hardcoded-fdw-password` | A `USER MAPPING`'s `OPTIONS (password '...')` is a literal value with no `{{secret-uri}}` placeholder. | Error |
-   | `deprecated` | Object or column is marked `DEPRECATED`. Applied to tables, columns, views, functions. Narrower than §19.1's `deprecated_reference` entry, which describes a *different, unimplemented* check (a non-deprecated object referencing a deprecated one) — see the note below. | Warning |
+   | `deprecated` | Object or column is marked `DEPRECATED`. Applied to tables, columns, views, functions. A different check from `deprecated-reference` below (that object/column being deprecated, vs. something else referencing it) — see the note below. | Warning |
    | `missing-column-comment` | Column lacks a `COMMENT` when `require_column_comments = true`. Renamed from `require-column-comments` (§19.1 named this `missing_column_comment`; the actual code now matches that wording, kebab-cased). | Warning |
    | `column-count-exceeded` | Table exceeds `max_columns_per_table` columns. Renamed from `max-columns` (§19.1 named this `column_count_exceeded`; the actual code now matches that wording, kebab-cased). | Error |
    | `security-definer-search-path` | `SECURITY DEFINER` function body does not reference `search_path`. | Warning |
    | `serial-sequence-declared` | A hand-declared `SEQUENCE` collides with the name PostgreSQL auto-manages for a `GENERATED ... AS IDENTITY` column's sequence, or for a `SERIAL`/`BIGSERIAL`/`SMALLSERIAL` column's owned sequence (`<table>_<column>_seq` in both cases) in the same desired state. Renamed from §19.1's `serial_sequence_declared`; originally scoped to `IDENTITY` only, extended to cover `SERIAL` once `ir.Column.Serial` was added — see the note below and Appendix D.11. | Warning |
    | `unnecessary-revocation` | A `REVOCATIONS` entry names a (role, privilege) pair with no matching `GRANTS` entry in the *same object's own declaration*. Renamed from §19.1's `unnecessary_revocation`; narrower in scope than that entry's wording — see the note below. | Warning |
+   | `deprecated-reference` | A non-deprecated `FOREIGN KEY` references a deprecated table/column, or a non-deprecated column/function-parameter/function-return-type references a deprecated custom `TYPE`. Renamed from §19.1's `deprecated_reference`; deliberately narrower in scope than that entry's wording — see the note below. | Warning |
 
    **Implementation note on `hardcoded-password` vs. `hardcoded-role-password`:**
    the column rule checks a table column's `DEFAULT` expression: if the
@@ -5897,17 +5898,16 @@ APP_SERVICE_PW="s3cr3t"
    implementation anywhere; corrected after re-reading `differ.go`
    directly.)
 
-   Of the remaining three, `serial_sequence_declared` and
-   `unnecessary_revocation` are now implemented as real `Linter.Lint`
-   rules — see below for their exact, and in `unnecessary_revocation`'s
-   case deliberately narrowed, scope. `deprecated_reference` and
-   `scalar_merge_conflict` remain unimplemented under any name: both need
-   real new infrastructure before a lint check is even possible on top of
-   it (a payload-carrying reference graph with column-level tracking for
-   the former; before/after comparison logic in the merger, which
-   currently does blind unconditional last-file-wins overwrites with no
-   comparison at all, for the latter) — see `.dpg-notes/dpg-tracker.md`
-   for the scoped plan for each.
+   Of the remaining three, `serial_sequence_declared`,
+   `unnecessary_revocation`, and `deprecated_reference` are now implemented
+   as real `Linter.Lint` rules — see below for their exact, and in
+   `unnecessary_revocation`'s and `deprecated_reference`'s cases
+   deliberately narrowed, scope. `scalar_merge_conflict` remains
+   unimplemented under any name: it needs real new infrastructure before a
+   lint check is even possible on top of it (before/after comparison logic
+   in the merger, which currently does blind unconditional last-file-wins
+   overwrites with no comparison at all) — see `.dpg-notes/dpg-tracker.md`
+   for the scoped plan.
 
    **`serial_sequence_declared`:** warns when a hand-declared `SEQUENCE`
    object's name collides with the auto-managed sequence name PostgreSQL
@@ -5929,6 +5929,40 @@ APP_SERVICE_PW="s3cr3t"
    the linter does not have (see above) — the within-object scope still
    catches the common real mistake (a copy-pasted or typo'd revocation
    with no corresponding grant) without requiring an interface change.
+
+   **`deprecated_reference`:** warns when a non-deprecated object
+   references a deprecated one. Deliberately narrow v1 scope, chosen
+   because the alternative — a lint-rule false positive — is a visible
+   user-facing warning, unlike an over-matching edge in `internal/graph`'s
+   dependency-ordering heuristics (harmless there; wrong here):
+     - A `FOREIGN KEY` on a non-deprecated table referencing a deprecated
+       table, or referencing a specific deprecated column of the target
+       table (via `ir.Constraint.RefSchema`/`RefTable`/`RefColumns`,
+       structured fields populated directly from the parsed `REFERENCES`
+       clause at build time — not a re-parse of the constraint's rendered
+       SQL text).
+     - A non-deprecated column, `FUNCTION` parameter/return type, or
+       `PROCEDURE` parameter, whose declared type is a deprecated custom
+       `TYPE`. An unqualified type reference resolves against the
+       referencing object's own schema, the same convention
+       `ir.TypeRef.Schema` uses everywhere else; a real PostgreSQL built-in
+       type never accidentally matches, since matching requires an actual
+       index hit against a table of currently-deprecated custom types.
+     - The gating gate is per-referencing-object: an already-deprecated
+       table's own `FOREIGN KEY` to another deprecated table does not also
+       fire this rule (its own `deprecated` diagnostic already covers it),
+       and likewise for an already-deprecated column/function referencing
+       a deprecated type.
+
+   **NOT covered in v1** — flagged as a real, explicit residual rather
+   than silently out of scope: a `VIEW`'s query referencing a deprecated
+   table/column, a function/procedure *body* referencing a deprecated
+   object, and a column `DEFAULT` expression referencing a deprecated
+   object/function. All three would need either genuine SQL-AST analysis
+   (no parser exists today for any of these opaque text blobs — view
+   queries, function bodies, and default expressions are all stored as
+   raw text) or a regex/text-scan heuristic, which risks exactly the
+   false-positive-warning problem this rule design otherwise avoids.
 
    The `[linter.rules]` per-rule severity-override mechanism described in
    §19.2 is now implemented, following the existing `--strict` promotion

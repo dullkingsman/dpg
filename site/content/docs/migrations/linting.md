@@ -159,7 +159,7 @@ SEQUENCE t_id_seq;   -- triggers warning: collides with t's own identity sequenc
 warn  [serial-sequence-declared] sequence public.t_id_seq has the same name PostgreSQL auto-manages for an identity column's sequence in this schema
 ```
 
-Scoped to `GENERATED ... AS IDENTITY` columns only. `SERIAL`/`BIGSERIAL`/`SMALLSERIAL` are not covered — DPG does not model `SERIAL` as a distinct concept in the IR today, so there's no auto-sequence relationship to check it against.
+Covers both `GENERATED ... AS IDENTITY` columns and `SERIAL`/`BIGSERIAL`/`SMALLSERIAL` columns — both have an auto-managed owned sequence named `<table>_<column>_seq` to check against.
 
 ---
 
@@ -185,6 +185,35 @@ This is scoped to a single object's own declaration, not full grant history — 
 
 ---
 
+## `deprecated-reference`
+
+**Severity:** Warning — **Config:** `warn_on_deprecated` — **Default:** enabled
+
+Warns when a non-deprecated object references a deprecated one:
+
+- A `FOREIGN KEY` referencing a deprecated table, or a deprecated column of the target table.
+- A column, `FUNCTION` parameter/return type, or `PROCEDURE` parameter, typed as a deprecated custom `TYPE`.
+
+```sql
+TABLE users ( id integer PRIMARY KEY )
+{
+    DEPRECATED 'use accounts instead';
+}
+
+TABLE orders (
+    id      integer PRIMARY KEY,
+    user_id integer REFERENCES users (id)   -- triggers warning: users is deprecated
+);
+```
+
+```
+warn  [deprecated-reference] foreign key (unnamed) on public.orders references deprecated table public.users: use accounts instead
+```
+
+Scoped to `FOREIGN KEY` and `TYPE` references only — a `VIEW` query, a function/procedure body, or a `DEFAULT` expression referencing a deprecated object is not covered, since none of those has a real SQL parser in DPG today and a text-scan heuristic risks a false-positive warning. An already-deprecated referencing object never double-fires this rule — its own `deprecated` diagnostic already covers it.
+
+---
+
 ## `[linter.rules]` — per-rule severity overrides
 
 Individual rules can be set to `"error"`, `"warning"`, or `"off"`, overriding their own default level:
@@ -199,7 +228,7 @@ An `"off"` rule is suppressed entirely (no diagnostic emitted at all). An `"erro
 
 ---
 
-**Not yet implemented:** RFC §19.1 also documents `deprecated_reference` (a non-deprecated object referencing a deprecated one) and `scalar_merge_conflict` (conflicting scalar values for the same property across multiple files — despite `warn_on_scalar_merge_conflict` existing as a `dpg.toml` field, it isn't read anywhere yet). Both need real new infrastructure before they're checkable — see `rfc/dpg-1.md` Appendix D.3 for the scoped explanation.
+**Not yet implemented:** RFC §19.1 also documents `scalar_merge_conflict` (conflicting scalar values for the same property across multiple files — despite `warn_on_scalar_merge_conflict` existing as a `dpg.toml` field, it isn't read anywhere yet). It needs real new infrastructure before it's checkable — see `rfc/dpg-1.md` Appendix D.3 for the scoped explanation.
 
 ---
 

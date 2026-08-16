@@ -418,7 +418,12 @@ func (b *Builder) buildColumn(cd *pg_query.ColumnDef, pos pipeline.SourcePos) (*
 				Deferrable:        cst.Deferrable,
 				InitiallyDeferred: cst.Initdeferred,
 				Expr:              fkBuf.String(),
+				RefColumns:        refCols,
 				Pos:               pos,
+			}
+			if cst.Pktable != nil {
+				tc.RefSchema = cst.Pktable.Schemaname
+				tc.RefTable = cst.Pktable.Relname
 			}
 			promoted = append(promoted, tc)
 		}
@@ -500,6 +505,11 @@ func buildConstraint(c *pg_query.Constraint, pos pipeline.SourcePos) *Constraint
 			}
 		}
 		cst.Expr = b.String()
+		cst.RefColumns = refCols
+		if c.Pktable != nil {
+			cst.RefSchema = c.Pktable.Schemaname
+			cst.RefTable = c.Pktable.Relname
+		}
 
 	case pg_query.ConstrType_CONSTR_EXCLUSION:
 		cst.Type = "EXCLUDE"

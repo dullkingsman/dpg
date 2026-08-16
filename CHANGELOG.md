@@ -182,13 +182,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   wording ("never granted... by DPG", which would need snapshot/grant-
   history access the linter doesn't have), but still catches the common
   real mistake (a copy-pasted or typo'd revocation with no corresponding
-  grant). The remaining two RFC-documented-but-unimplemented rules,
-  `deprecated_reference` and `scalar_merge_conflict`, need real new
-  infrastructure before either is checkable at all (a payload-carrying,
-  column-level-aware reference graph the topological-sort graph doesn't
-  provide; before/after comparison logic in the merger, which today does
-  blind unconditional last-file-wins overwrites with no comparison at all)
-  — scoped, not implemented, see `.dpg-notes/dpg-tracker.md`.
+  grant). Of the remaining two RFC-documented-but-unimplemented rules,
+  `scalar_merge_conflict` still needs real new infrastructure (before/after
+  comparison logic in the merger, which today does blind unconditional
+  last-file-wins overwrites with no comparison at all) — scoped, not
+  implemented, see `.dpg-notes/dpg-tracker.md`. `deprecated_reference` is
+  now implemented too — see below.
 - `[linter.rules]` per-rule severity overrides (RFC §19.2), previously
   documented but entirely unimplemented: `dpg.toml`'s `[linter.rules]`
   subtable maps a rule ID to `"error"`, `"warning"`, or `"off"`, applied
@@ -210,6 +209,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   is now `SAFE`, matching identity columns. `serial-sequence-declared`
   (see above) now also triggers on `Column.Serial`, not `Column.Identity`
   only. See RFC Appendix D.11 for the full specification.
+- `deprecated-reference` built-in linter rule, closing the other half of the
+  RFC-vs-code linter rule-ID gap left after `serial-sequence-declared`/
+  `unnecessary-revocation` above: warns when a non-deprecated `FOREIGN KEY`
+  references a deprecated table or column, or a non-deprecated column/
+  function-parameter/function-return-type references a deprecated custom
+  `TYPE`. Deliberately v1-scoped to these structured cases only — a `VIEW`
+  query, a function/procedure body, or a `DEFAULT` expression referencing a
+  deprecated object is NOT covered, since none of those opaque text blobs
+  has a real SQL-AST parser today and a text-scan heuristic risks a
+  user-visible false-positive warning (an acceptable tradeoff for
+  `internal/graph`'s ordering edges, where an over-match is harmless, but
+  not for a lint diagnostic). `ir.Constraint` gained structured
+  `RefSchema`/`RefTable`/`RefColumns` fields (populated at build time from
+  the already-parsed `REFERENCES` clause, alongside the existing rendered
+  `Expr` text) so this rule — and any future consumer — doesn't need to
+  re-parse SQL text to recover an FK's target. Gated by the same
+  `warn_on_deprecated` config flag as the base `deprecated` rule; an
+  already-deprecated referencing object never double-fires (its own
+  `deprecated` diagnostic already covers it).
 
 ### Fixed
 

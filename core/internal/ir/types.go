@@ -162,7 +162,20 @@ type Constraint struct {
 	// the EXCLUDE-naming reconciliation (see pgConstraintNameLabel/
 	// predictName's "excl" case in internal/diff) needs the element list
 	// directly, not a re-parse of rendered SQL.
-	Exclude           *ExcludeSpec
+	Exclude *ExcludeSpec
+	// RefSchema/RefTable/RefColumns hold the structured REFERENCES target
+	// when Type == "FOREIGN KEY" (all zero otherwise) — structured siblings
+	// of Expr, the same "keep the rendered SQL text AND the structured data
+	// separately" shape Exclude already uses. RefSchema is "" when the
+	// reference was written unqualified in source (resolves against the
+	// referencing table's own schema, same convention as ir.TypeRef.Schema).
+	// Populated straight from the already-parsed Pktable/PkAttrs AST data at
+	// build time; exists so consumers like the deprecated-reference lint
+	// rule don't need to re-parse Expr's rendered SQL text to recover the FK
+	// target.
+	RefSchema         string
+	RefTable          string
+	RefColumns        []string
 	NotValid          bool
 	Deferrable        bool
 	InitiallyDeferred bool

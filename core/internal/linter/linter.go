@@ -266,7 +266,15 @@ func checkUserMapping(u *ir.UserMapping, cfg pipeline.LinterConfig) []pipeline.L
 // checkCrossObjectRules runs rules that need to see the whole desired
 // object set at once, not just one object in isolation.
 func checkCrossObjectRules(objects []pipeline.IRObject, cfg pipeline.LinterConfig) []pipeline.LintDiagnostic {
-	return checkSerialSequenceDeclared(objects)
+	diags := checkSerialSequenceDeclared(objects)
+	// deprecated-reference has no dedicated RFC-documented config toggle —
+	// kept under the same WarnOnDeprecated gate as the base "deprecated"
+	// rule (checkTable/checkView/checkFunction), while [linter.rules] still
+	// allows independent per-rule override via applyRuleSeverityOverrides.
+	if cfg.WarnOnDeprecated {
+		diags = append(diags, checkDeprecatedReference(objects)...)
+	}
+	return diags
 }
 
 // checkSerialSequenceDeclared implements RFC §19.1's serial_sequence_declared

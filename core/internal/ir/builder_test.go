@@ -1300,6 +1300,62 @@ func TestBuildCheckConstraintPromotedColumnLevelReferencesOtherColumn(t *testing
 	}
 }
 
+// ── FOREIGN KEY structured ref fields ────────────────────────────────────────────
+
+func findFK(cs []*ir.Constraint) *ir.Constraint {
+	for _, c := range cs {
+		if c.Type == "FOREIGN KEY" {
+			return c
+		}
+	}
+	return nil
+}
+
+// TestBuildConstraintForeignKeyRefColumns proves an inline column-level
+// REFERENCES clause (promoted to a table-level constraint by buildColumn)
+// populates the structured RefSchema/RefTable/RefColumns fields, not just
+// the rendered Expr text — these exist specifically so a consumer like the
+// deprecated-reference lint rule doesn't need to re-parse Expr.
+func TestBuildConstraintForeignKeyRefColumns(t *testing.T) {
+	obj := buildObject(t, pipeline.KindTable,
+		`t (id INTEGER, user_id INTEGER REFERENCES app.users (id))`, ``)
+	tbl := obj.(*ir.Table)
+	fk := findFK(tbl.Constraints)
+	if fk == nil {
+		t.Fatal("FK constraint not found")
+	}
+	if fk.RefSchema != "app" || fk.RefTable != "users" {
+		t.Errorf("RefSchema/RefTable: got %q/%q, want app/users", fk.RefSchema, fk.RefTable)
+	}
+	if len(fk.RefColumns) != 1 || fk.RefColumns[0] != "id" {
+		t.Errorf("RefColumns: got %v, want [id]", fk.RefColumns)
+	}
+}
+
+// TestBuildConstraintForeignKeyRefColumnsTableLevelUnqualified covers the
+// table-level CONSTRAINT ... FOREIGN KEY form (the other of the two FK
+// build sites) and the unqualified-reference case: RefSchema must stay ""
+// (never guessed) so a consumer resolves it against the referencing
+// table's own schema itself, matching ir.TypeRef.Schema's convention.
+func TestBuildConstraintForeignKeyRefColumnsTableLevelUnqualified(t *testing.T) {
+	obj := buildObject(t, pipeline.KindTable,
+		`t (id INTEGER, org_id INTEGER, CONSTRAINT fk_org FOREIGN KEY (org_id) REFERENCES orgs (id))`, ``)
+	tbl := obj.(*ir.Table)
+	fk := findFK(tbl.Constraints)
+	if fk == nil {
+		t.Fatal("FK constraint not found")
+	}
+	if fk.RefSchema != "" {
+		t.Errorf("RefSchema: got %q, want empty (unqualified reference)", fk.RefSchema)
+	}
+	if fk.RefTable != "orgs" {
+		t.Errorf("RefTable: got %q, want orgs", fk.RefTable)
+	}
+	if len(fk.RefColumns) != 1 || fk.RefColumns[0] != "id" {
+		t.Errorf("RefColumns: got %v, want [id]", fk.RefColumns)
+	}
+}
+
 // ── EXCLUDE constraint round-tripping ────────────────────────────────────────────
 
 func findExclude(cs []*ir.Constraint) *ir.Constraint {
