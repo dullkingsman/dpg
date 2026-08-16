@@ -1035,6 +1035,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `serial_sequence_declared`, `unnecessary_revocation`,
   `stale_renamed_from`, `unguarded_enum_removal`) have no implementation
   under any name and remain aspirational/roadmap entries only.
+- `LANGUAGE plpgsql` function/procedure body canonicalisation now also
+  covers embedded expression fragments (conditions, assignment left- and
+  right-hand sides, `RETURN` expressions, `RAISE` parameters, embedded SQL),
+  closing the residual gap the earlier plpgsql body-hash fix left open: a
+  whitespace-only change *inside* one of these fragments (e.g. `a||b`
+  reformatted to `a || b`) no longer causes spurious drift. Each fragment
+  is independently re-parsed and re-deparsed using the exact raw-parser
+  mode `libpg_query` itself records for it (`RAW_PARSE_PLPGSQL_EXPR` for a
+  bare expression, `RAW_PARSE_PLPGSQL_ASSIGN1`/`2`/`3` for a dotted
+  assignment target) — the same modes PostgreSQL's own PL/pgSQL compiler
+  uses, not an approximation. These raw-parse modes already existed as
+  public, stable C functions in `pg_query_go`'s vendored `libpg_query`, but
+  were never exposed in Go; closing this required a small, purely additive
+  fork (`github.com/thec1oud/dpg_query_go`, wired in via a `go.mod`
+  `replace` directive under the same import path, so no source file
+  anywhere needed to change) adding four new parse functions and their
+  protobuf-level mirrors — zero changes to any existing function, zero
+  grammar/deparser changes. Assignment statements needed one additional
+  workaround: `libpg_query`'s deparser has no support for the assignment
+  node type at all, so the target and right-hand side are decomposed and
+  re-deparsed independently (reusing the library's own existing
+  `MakeColumnRefNode` helper for the target) rather than deparsing the
+  assignment as a single unit.
 
 ### Changed
 
@@ -1118,6 +1141,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   implemented, so nothing reads them as configuration keys today. Any
   external tooling that greps/matches CLI output or JSON diagnostics on
   the old rule ID strings needs updating.
+- **`LANGUAGE plpgsql` `BodyHash` self-heals a second time, one more safe
+  re-`CREATE OR REPLACE` per affected object.** The plpgsql hashing
+  algorithm changed again (see Fixed above) to also canonicalise embedded
+  expression fragments, not just the outer control-flow shape. Any existing
+  snapshot's stored `BodyHash` computed under the *previous* round's
+  algorithm no longer matches what this round computes for the same,
+  unchanged body — but only for a function/procedure whose body actually
+  has a whitespace/formatting quirk inside an embedded expression fragment
+  that the previous round didn't normalise; a body with no such quirk
+  re-hashes identically and sees zero churn. As before, this is a one-time,
+  `SAFE` re-apply per affected object on the first `plan`/`apply` after
+  upgrading; the snapshot re-heals immediately.
+- **New dependency: `github.com/thec1oud/dpg_query_go/v6`**, a fork of
+  `github.com/pganalyze/pg_query_go/v6` adding four PL/pgSQL raw-parse-mode
+  functions (see Fixed above). Wired in via a `replace` directive under the
+  *same* import path as upstream, so this is invisible to source code
+  anywhere in the repo; visible only as a `replace` line in `core/go.mod`
+  pointing at a specific fork commit.
 
 ## [idea-v0.5.2-alpha.13] — 2026-05-22
 

@@ -2668,15 +2668,31 @@ SCHEMA public {
        tree is stripped of its one confirmed source-position field
        (`lineno`) before hashing. This absorbs whitespace, blank-line,
        and comment differences in the outer control-flow shape
-       (statement ordering/nesting, declarations, labels, flags). It
-       does **not** normalise the text of embedded SQL/expression
-       fragments (conditions, assignment right-hand sides, `RETURN`
-       expressions, embedded SQL) — those are carried as raw,
-       unre-parsed source substrings by the PL/pgSQL compiler itself, so
-       a whitespace-only change *inside* one of these fragments still
-       changes the hash. On any failure (a body the PL/pgSQL compiler
-       rejects, or a compile error from a mismatched shim), the compiler
-       falls back to the plain normalisation below rather than erroring.
+       (statement ordering/nesting, declarations, labels, flags).
+       Every embedded expression fragment (a condition, an assignment's
+       left- and right-hand sides, a `RETURN` expression, a `RAISE`
+       parameter, an embedded SQL statement) is *also* independently
+       re-parsed and re-deparsed before hashing, using the exact raw
+       parser mode `libpg_query` itself records for that fragment
+       (`RAW_PARSE_PLPGSQL_EXPR` for a bare expression,
+       `RAW_PARSE_PLPGSQL_ASSIGN1`/`2`/`3` for a one-, two-, or
+       three-part dotted assignment target, or the ordinary statement
+       parser for a fragment that is already a complete standalone
+       statement) — the same modes PostgreSQL's own PL/pgSQL compiler
+       uses for these fragments, exposed via a small, purely additive
+       patch to `libpg_query`'s Go bindings (these raw-parse-mode entry
+       points already existed as public, stable C functions; they had
+       simply never been wrapped in Go). This closes the previous gap
+       where only the outer control-flow shape was canonicalised: a
+       whitespace-only change inside an embedded fragment (e.g.
+       `a||b` reformatted to `a || b`) is now absorbed too, for every
+       fragment shape the current `libpg_query` version actually
+       produces. On any failure at any step — a body the PL/pgSQL
+       compiler rejects, a compile error from a mismatched shim, or an
+       individual fragment that fails to re-parse — the affected
+       fragment (or, if the failure is at the whole-body level, the
+       entire body) falls back to the plain normalisation below rather
+       than erroring; a hashing nicety must never block a build.
    -   **Every other language** (`c`, `internal`, and any procedural-
        language extension other than `plpgsql`): plain text
        normalisation only —
@@ -2687,9 +2703,7 @@ SCHEMA public {
    Any change to the body that survives normalisation — including,
    for languages with no canonicalisation, changes that are cosmetic but
    not reducible to whitespace alone (comment wording, quote style,
-   capitalisation), and, for `plpgsql` specifically, a whitespace-only
-   change inside a single embedded expression/SQL fragment (see above)
-   — changes the hash and causes the compiler to emit:
+   capitalisation) — changes the hash and causes the compiler to emit:
 
    ```sql
    CREATE OR REPLACE FUNCTION schema.name(...) RETURNS ... AS $$...$$;
@@ -2701,13 +2715,17 @@ SCHEMA public {
    genuinely equivalent but differently-*structured* SQL (e.g. a
    rewritten join order) is still detected as changed, by design — this
    is syntactic canonicalisation, not semantic equivalence. For
-   `LANGUAGE plpgsql`, the outer control-flow shape is canonicalised the
-   same way, but embedded expression/SQL fragment text is not — those
-   fragments are not, in general, valid standalone SQL statements (a
-   bare condition such as `n IS NULL` cannot be independently
-   parsed/deparsed), so normalising them would need a materially larger,
-   separate fragment-vs-statement heuristic; left for a future pass if
-   real false-positive reports justify it. For every other language, no
+   `LANGUAGE plpgsql`, both the outer control-flow shape and every
+   embedded expression fragment are canonicalised, on the same
+   syntactic (not semantic) basis: a genuinely equivalent but
+   differently-*structured* fragment (e.g. rewriting `a OR b` to the
+   logically equivalent `NOT (NOT a AND NOT b)`) is still detected as
+   changed, by design. This canonicalisation covers every fragment shape
+   the current `libpg_query` version's PL/pgSQL parser actually
+   produces (verified directly against the grammar source, not assumed)
+   — a future `libpg_query` version introducing a new fragment shape
+   would fail open (that fragment's raw text retained, same as before
+   this fix) rather than error. For every other language, no
    canonicalisation is performed at all: the compiler does not detect
    semantically (or even cosmetically, beyond whitespace) equivalent
    reformulations.

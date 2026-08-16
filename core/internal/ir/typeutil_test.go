@@ -138,6 +138,143 @@ func TestHashFunctionBodyPlpgsqlTriggerNewOld(t *testing.T) {
 	}
 }
 
+// TestHashFunctionBodyPlpgsqlEmbeddedExpressionWhitespaceIsNoop is the
+// motivating case for embedded-fragment canonicalisation: a whitespace-only
+// change *inside* a RETURN expression (not just the outer control-flow
+// shape) must now be absorbed too.
+func TestHashFunctionBodyPlpgsqlEmbeddedExpressionWhitespaceIsNoop(t *testing.T) {
+	a := "BEGIN RETURN v_name || '/' || v_version; END;"
+	b := "BEGIN RETURN v_name||'/'||v_version; END;"
+	full := func(body string) string { return plpgsqlShim("v_name text, v_version text", "text", body) }
+	if ir.HashFunctionBody("plpgsql", a, full(a)) != ir.HashFunctionBody("plpgsql", b, full(b)) {
+		t.Errorf("whitespace-only change inside an embedded expression should hash equal: %q vs %q", a, b)
+	}
+}
+
+// TestHashFunctionBodyPlpgsqlEmbeddedConditionWhitespaceIsNoop covers a
+// bare condition fragment (parseMode 2), the other common embedded shape.
+func TestHashFunctionBodyPlpgsqlEmbeddedConditionWhitespaceIsNoop(t *testing.T) {
+	a := "BEGIN IF v_version IS NULL THEN RETURN v_name; END IF; RETURN v_name; END;"
+	b := "BEGIN IF v_version   IS   NULL THEN RETURN v_name; END IF; RETURN v_name; END;"
+	full := func(body string) string { return plpgsqlShim("v_name text, v_version text", "text", body) }
+	if ir.HashFunctionBody("plpgsql", a, full(a)) != ir.HashFunctionBody("plpgsql", b, full(b)) {
+		t.Errorf("whitespace-only change inside an embedded condition should hash equal: %q vs %q", a, b)
+	}
+}
+
+// TestHashFunctionBodyPlpgsqlAssignmentWhitespaceIsNoop covers an
+// assignment statement (parseMode 3) — the query text libpg_query captures
+// for these includes the target ("n := ..."), not just the right-hand
+// side, which canonicalizePlpgsqlAssign has to split back apart.
+func TestHashFunctionBodyPlpgsqlAssignmentWhitespaceIsNoop(t *testing.T) {
+	a := "DECLARE n text; BEGIN n := v_name || '/' || v_version; RETURN n; END;"
+	b := "DECLARE n text; BEGIN n  :=  v_name||'/'||v_version; RETURN n; END;"
+	full := func(body string) string { return plpgsqlShim("v_name text, v_version text", "text", body) }
+	if ir.HashFunctionBody("plpgsql", a, full(a)) != ir.HashFunctionBody("plpgsql", b, full(b)) {
+		t.Errorf("whitespace-only change in an assignment should hash equal: %q vs %q", a, b)
+	}
+}
+
+// TestHashFunctionBodyPlpgsqlDottedAssignmentTargetWhitespaceIsNoop covers
+// a two-part dotted assignment target (parseMode 4) — a record field
+// assignment, the shape whose target is *not* just a plain name.
+func TestHashFunctionBodyPlpgsqlDottedAssignmentTargetWhitespaceIsNoop(t *testing.T) {
+	a := "DECLARE rec record; BEGIN rec.field := rec.field + 1; RETURN rec; END;"
+	b := "DECLARE rec record; BEGIN rec.field  :=  rec.field+1; RETURN rec; END;"
+	full := func(body string) string { return plpgsqlShim("", "record", body) }
+	if ir.HashFunctionBody("plpgsql", a, full(a)) != ir.HashFunctionBody("plpgsql", b, full(b)) {
+		t.Errorf("whitespace-only change in a dotted assignment target should hash equal: %q vs %q", a, b)
+	}
+}
+
+// TestHashFunctionBodyPlpgsqlForLoopQueryWhitespaceIsNoop covers a
+// full-statement embedded fragment (parseMode 0, a FOR-loop query) — the
+// path that reuses canonicalizeSQLBody, the same mechanism already used
+// for LANGUAGE SQL bodies.
+func TestHashFunctionBodyPlpgsqlForLoopQueryWhitespaceIsNoop(t *testing.T) {
+	a := "DECLARE r record; total integer := 0; BEGIN FOR r IN SELECT * FROM t WHERE x = 1 LOOP total := total + 1; END LOOP; RETURN total; END;"
+	b := "DECLARE r record; total integer := 0; BEGIN FOR r IN select   *   from   t   where   x=1 LOOP total := total + 1; END LOOP; RETURN total; END;"
+	full := func(body string) string { return plpgsqlShim("", "integer", body) }
+	if ir.HashFunctionBody("plpgsql", a, full(a)) != ir.HashFunctionBody("plpgsql", b, full(b)) {
+		t.Errorf("whitespace-only change in an embedded FOR-loop query should hash equal: %q vs %q", a, b)
+	}
+}
+
+// TestHashFunctionBodyPlpgsqlEmbeddedExpressionGenuineChangeStillDetected
+// is the false-negative guard for the fix above: canonicalising embedded
+// fragments must never mask a real logic change inside one.
+func TestHashFunctionBodyPlpgsqlEmbeddedExpressionGenuineChangeStillDetected(t *testing.T) {
+	a := "BEGIN RETURN v_name || '/' || v_version; END;"
+	b := "BEGIN RETURN v_name || '-' || v_version; END;"
+	full := func(body string) string { return plpgsqlShim("v_name text, v_version text", "text", body) }
+	if ir.HashFunctionBody("plpgsql", a, full(a)) == ir.HashFunctionBody("plpgsql", b, full(b)) {
+		t.Errorf("a genuine change inside an embedded expression must still be detected: %q vs %q", a, b)
+	}
+}
+
+// ── Embedded-fragment coverage beyond the core cases above ─────────────────────
+//
+// canonicalizePlpgsqlExprFragments doesn't dispatch on statement type (IF,
+// RAISE, assignment, ...) — it structurally matches any JSON node carrying
+// both a "query" and a "parseMode" key, wherever it occurs. Confirmed by
+// reading libpg_query's parser/pg_query_json_plpgsql.c directly: dump_expr
+// (the function that writes those two keys together) is the ONLY place in
+// the entire emitter that does so — grepped the whole file, one match. So
+// coverage here isn't an enumeration of every plpgsql construct; it's
+// spot-checking that constructs that reach the JSON output through paths
+// other than the core cases above (assignment, condition, RETURN, FOR-loop
+// query) still land on that same single emission shape and get
+// canonicalised the same way.
+
+func TestHashFunctionBodyPlpgsqlArraySubscriptAssignmentTargetWhitespaceIsNoop(t *testing.T) {
+	a := "DECLARE arr integer[] := ARRAY[1,2,3]; BEGIN arr[1] := arr[1] + 1; RETURN arr; END;"
+	b := "DECLARE arr integer[] := ARRAY[1,2,3]; BEGIN arr[1]  :=  arr[1]+1; RETURN arr; END;"
+	full := func(body string) string { return plpgsqlShim("", "integer[]", body) }
+	if ir.HashFunctionBody("plpgsql", a, full(a)) != ir.HashFunctionBody("plpgsql", b, full(b)) {
+		t.Errorf("whitespace-only change in an array-subscript assignment target should hash equal: %q vs %q", a, b)
+	}
+}
+
+// TestHashFunctionBodyPlpgsqlArrayOfCompositeAssignmentTargetWhitespaceIsNoop
+// covers a target with two indirection levels (subscript + field,
+// "arr[1].field") — a shape distinct from the plain dotted-name case
+// already covered elsewhere.
+func TestHashFunctionBodyPlpgsqlArrayOfCompositeAssignmentTargetWhitespaceIsNoop(t *testing.T) {
+	a := "DECLARE arr t_composite[]; BEGIN arr[1].field := arr[1].field + 1; RETURN arr; END;"
+	b := "DECLARE arr t_composite[]; BEGIN arr[1].field  :=  arr[1].field+1; RETURN arr; END;"
+	full := func(body string) string { return plpgsqlShim("", "t_composite[]", body) }
+	if ir.HashFunctionBody("plpgsql", a, full(a)) != ir.HashFunctionBody("plpgsql", b, full(b)) {
+		t.Errorf("whitespace-only change in an array-of-composite assignment target should hash equal: %q vs %q", a, b)
+	}
+}
+
+func TestHashFunctionBodyPlpgsqlReturnQueryWhitespaceIsNoop(t *testing.T) {
+	a := "BEGIN RETURN QUERY SELECT * FROM t WHERE x = 1; END;"
+	b := "BEGIN RETURN QUERY select   *   from   t   where   x=1; END;"
+	full := func(body string) string { return plpgsqlShim("", "SETOF t", body) }
+	if ir.HashFunctionBody("plpgsql", a, full(a)) != ir.HashFunctionBody("plpgsql", b, full(b)) {
+		t.Errorf("whitespace-only change in a RETURN QUERY fragment should hash equal: %q vs %q", a, b)
+	}
+}
+
+func TestHashFunctionBodyPlpgsqlCaseStatementWhitespaceIsNoop(t *testing.T) {
+	a := "DECLARE n integer := 1; BEGIN CASE n WHEN 1 THEN RETURN 'a'; ELSE RETURN 'b'; END CASE; END;"
+	b := "DECLARE n integer := 1; BEGIN CASE n WHEN 1 THEN RETURN   'a'; ELSE RETURN 'b'; END CASE; END;"
+	full := func(body string) string { return plpgsqlShim("", "text", body) }
+	if ir.HashFunctionBody("plpgsql", a, full(a)) != ir.HashFunctionBody("plpgsql", b, full(b)) {
+		t.Errorf("whitespace-only change in a CASE statement should hash equal: %q vs %q", a, b)
+	}
+}
+
+func TestHashFunctionBodyPlpgsqlExceptionHandlerWhitespaceIsNoop(t *testing.T) {
+	a := "BEGIN RETURN 1/0; EXCEPTION WHEN division_by_zero THEN RETURN -1; END;"
+	b := "BEGIN RETURN 1 / 0; EXCEPTION WHEN division_by_zero THEN RETURN   -1; END;"
+	full := func(body string) string { return plpgsqlShim("", "integer", body) }
+	if ir.HashFunctionBody("plpgsql", a, full(a)) != ir.HashFunctionBody("plpgsql", b, full(b)) {
+		t.Errorf("whitespace-only change in an exception handler should hash equal: %q vs %q", a, b)
+	}
+}
+
 func TestHashFunctionBodyNonSQLLanguageMatchesHashBody(t *testing.T) {
 	body := "BEGIN\n  RETURN 1;\nEND;"
 	if got, want := ir.HashFunctionBody("c", body, ""), ir.HashBody(body); got != want {

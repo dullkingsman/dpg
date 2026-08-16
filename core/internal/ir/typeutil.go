@@ -249,28 +249,31 @@ func HashFunctionBody(language, body, fullStatement string) string {
 // canonicalizePlpgsqlBody parses fullStatement via
 // pg_query.ParsePlPgSqlToJSON, strips the one confirmed-volatile field
 // ("lineno" — the PL/pgSQL compiler's source line number, which shifts
-// under pure reformatting with zero semantic change), and re-marshals the
-// result for hashing. Confirmed by direct inspection of libpg_query's
+// under pure reformatting with zero semantic change), canonicalises every
+// embedded PLpgSQL_expr fragment's "query" text in place (see
+// canonicalizePlpgsqlExprFragments), and re-marshals the result for
+// hashing. Confirmed by direct inspection of libpg_query's
 // parser/pg_query_json_plpgsql.c: "location" and "stmtid" were hypothesized
 // volatile before investigation but do not exist anywhere in this emitter's
 // output — "lineno" is the entire volatility surface. json.Marshal on a
 // map[string]any sorts keys alphabetically, so the re-marshaled output is
 // deterministic regardless of libpg_query's emission order.
 //
-// Known residual limitation, deliberately not addressed here: every
-// PLpgSQL_expr node's "query" field is a raw, unparsed substring of the
-// original source (conditions, assignment RHS, RETURN expressions, RAISE
-// params, cursor queries, embedded SQL) — this emitter does not re-parse or
-// normalize it. A whitespace-only change *inside* one of these fragments
-// (e.g. "a||b" vs "a || b") still changes the hash after this
-// canonicalization; only the outer control-flow shape (statement
-// ordering/nesting, declarations) is canonicalised. Many such fragments
-// (e.g. a bare condition like "n IS NULL") are not complete standalone SQL
-// statements, so pg_query.Parse/Deparse would routinely fail on them, and a
-// reliable fragment-vs-statement heuristic to make per-expression
-// sub-canonicalisation safe is materially more scope than this fix — left
-// for a future pass if real false-positive reports justify it. See RFC
-// §9.5.
+// Every PLpgSQL_expr node's "query" field is a raw, unparsed substring of
+// the original source (conditions, assignment left/right-hand sides,
+// RETURN expressions, RAISE params, cursor queries, embedded SQL) — this
+// emitter does not re-parse or normalize it on its own. This is closed by
+// separately re-parsing and re-deparsing each fragment according to its own
+// "parseMode", using github.com/dullkingsman/dpg_query_go's raw-parse-mode
+// entry points (RAW_PARSE_PLPGSQL_EXPR/ASSIGN1/2/3 — the exact modes
+// PostgreSQL's own PL/pgSQL compiler uses for these fragments, confirmed by
+// reading libpg_query's parser.h and pl_gram.c directly, not guessed) —
+// see canonicalizePlpgsqlExprFragments. This closes every parseMode this
+// version of libpg_query actually emits (confirmed empirically and by
+// reading pl_gram.c/pl_comp.c for every parseMode assignment site); a
+// future libpg_query version introducing a new parseMode would fail open
+// per-fragment (raw text retained for that one fragment) rather than block
+// canonicalization of the rest of the body.
 //
 // Returns ok=false — caller falls back to raw HashBody(body) — on any parse
 // error, an empty "[]" result (fullStatement didn't produce a compiled
@@ -294,6 +297,7 @@ func canonicalizePlpgsqlBody(fullStatement string) (string, bool) {
 		return "", false
 	}
 	stripPlpgsqlVolatileFields(parsed)
+	canonicalizePlpgsqlExprFragments(parsed)
 	out, err := json.Marshal(parsed)
 	if err != nil {
 		return "", false
@@ -316,6 +320,165 @@ func stripPlpgsqlVolatileFields(v any) {
 			stripPlpgsqlVolatileFields(child)
 		}
 	}
+}
+
+// canonicalizePlpgsqlExprFragments recursively walks v looking for
+// PLpgSQL_expr node value-maps — structurally, any map[string]any holding
+// both a "query" and a "parseMode" key, the exact shape libpg_query's
+// dump_expr (pg_query_json_plpgsql.c) emits for every expression field
+// ("cond"/"expr"/"value"/params/etc. each wrap a single "PLpgSQL_expr" key
+// whose value is {"query": "...", "parseMode": N}) — and replaces
+// "query"'s raw source-substring value with a canonical, re-deparsed form.
+// Mutates map[string]any values in place; recurses into []any elements.
+//
+// This match is structural, not an enumeration of plpgsql statement types:
+// confirmed by grepping the whole of pg_query_json_plpgsql.c that dump_expr
+// is the ONLY place in the file that ever writes "query" and "parseMode"
+// together, so any construct whose expression fields reach the JSON output
+// — including ones not specifically tested, e.g. RETURN QUERY, CASE
+// statements, exception handlers, array-subscript or array-of-composite
+// assignment targets, all confirmed working — is covered by this walk the
+// same way, without needing a case for each one. See
+// TestHashFunctionBodyPlpgsql* in typeutil_test.go for the verified shapes.
+func canonicalizePlpgsqlExprFragments(v any) {
+	switch t := v.(type) {
+	case map[string]any:
+		if q, hasQuery := t["query"]; hasQuery {
+			if pm, hasMode := t["parseMode"]; hasMode {
+				if qs, ok := q.(string); ok {
+					if canon, ok := canonicalizePlpgsqlExprQuery(qs, pm); ok {
+						t["query"] = canon
+					}
+				}
+			}
+		}
+		for _, child := range t {
+			canonicalizePlpgsqlExprFragments(child)
+		}
+	case []any:
+		for _, child := range t {
+			canonicalizePlpgsqlExprFragments(child)
+		}
+	}
+}
+
+// canonicalizePlpgsqlExprQuery canonicalizes a single PLpgSQL_expr
+// fragment's raw query text, dispatched on its own parseMode (unmarshaled
+// from JSON as float64, not int — a real pitfall, guarded explicitly
+// below):
+//   - 0 (RAW_PARSE_DEFAULT): a full, standalone SQL statement (a FOR-loop
+//     query, a cursor's query) — canonicalise via the same
+//     Parse/Deparse pattern canonicalizeSQLBody already uses.
+//   - 2 (RAW_PARSE_PLPGSQL_EXPR): a bare expression fragment (condition,
+//     RETURN value, RAISE/ASSERT param, default value, ...) — not valid
+//     standalone SQL — canonicalise via pg_query.ParsePlPgSqlExpr/Deparse.
+//   - 3/4/5 (RAW_PARSE_PLPGSQL_ASSIGN1/2/3): an assignment statement whose
+//     query text is the whole "target := expr", not just the RHS —
+//     canonicalise via canonicalizePlpgsqlAssign.
+//   - anything else (confirmed by reading libpg_query's pl_gram.c/pl_comp.c
+//     that no other value ever occurs here — kept only as a defensive
+//     no-op, matching this file's fail-open philosophy): left untouched.
+//
+// Returns ok=false on any failure, so the caller leaves that one fragment's
+// query text as raw source rather than aborting the whole body's
+// canonicalization.
+func canonicalizePlpgsqlExprQuery(query string, parseModeRaw any) (string, bool) {
+	pm, ok := parseModeRaw.(float64)
+	if !ok {
+		return "", false
+	}
+	switch int(pm) {
+	case 0:
+		return canonicalizeSQLBody(query)
+	case 2:
+		res, err := pg_query.ParsePlPgSqlExpr(query)
+		if err != nil || len(res.Stmts) == 0 {
+			return "", false
+		}
+		out, err := pg_query.Deparse(res)
+		if err != nil {
+			return "", false
+		}
+		return out, true
+	case 3, 4, 5:
+		return canonicalizePlpgsqlAssign(query, int(pm))
+	default:
+		return "", false
+	}
+}
+
+// canonicalizePlpgsqlAssign canonicalizes a PL/pgSQL assignment statement's
+// raw "target := expr" text (parseMode 3/4/5 = a single-part, two-part, or
+// three-part dotted target respectively). Parses via the matching
+// pg_query.ParsePlPgSqlAssign{1,2,3} raw-parse mode, which returns a
+// PLAssignStmt whose Val field is already an ordinary *pg_query.SelectStmt
+// (deparseable directly) and whose Name/Indirection fields hold the
+// target — reconstructed back to text via pg_query.MakeColumnRefNode,
+// reusing the exact same dotted/subscripted-reference deparse logic
+// PostgreSQL already uses for ordinary column references. libpg_query's own
+// deparser has no support for PLAssignStmt as a top-level node at all
+// (confirmed: no such case exists in postgres_deparse.c), so the target and
+// value are deparsed independently as two synthetic SELECT-shaped
+// ParseResults rather than deparsing the whole PLAssignStmt in one call.
+// The exact separator/spacing of the reassembled "<target> := <value>"
+// text doesn't need to match the original source: it is internal-only text
+// used solely as hash input, never rendered to a user.
+func canonicalizePlpgsqlAssign(query string, parseMode int) (string, bool) {
+	var tree *pg_query.ParseResult
+	var err error
+	switch parseMode {
+	case 3:
+		tree, err = pg_query.ParsePlPgSqlAssign1(query)
+	case 4:
+		tree, err = pg_query.ParsePlPgSqlAssign2(query)
+	case 5:
+		tree, err = pg_query.ParsePlPgSqlAssign3(query)
+	default:
+		return "", false
+	}
+	if err != nil || len(tree.Stmts) == 0 {
+		return "", false
+	}
+	assign := tree.Stmts[0].GetStmt().GetPlassignStmt()
+	if assign == nil || assign.Val == nil {
+		return "", false
+	}
+
+	// assign.Val is already a full *SelectStmt (the PL/pgSQL raw parser
+	// wraps the right-hand side of an assignment as one internally, the
+	// same way RAW_PARSE_PLPGSQL_EXPR does) — wrap it directly as a
+	// top-level statement, no ResTarget indirection needed.
+	valOut, err := pg_query.Deparse(&pg_query.ParseResult{
+		Stmts: []*pg_query.RawStmt{
+			{Stmt: &pg_query.Node{Node: &pg_query.Node_SelectStmt{SelectStmt: assign.Val}}},
+		},
+	})
+	if err != nil {
+		return "", false
+	}
+
+	// The target (Name + Indirection) is a bare reference, not a statement
+	// — wrap it as a ResTarget inside a synthetic SELECT to deparse it.
+	targetFields := append([]*pg_query.Node{pg_query.MakeStrNode(assign.Name)}, assign.Indirection...)
+	targetNode := pg_query.MakeColumnRefNode(targetFields, 0)
+	targetOut, err := pg_query.Deparse(&pg_query.ParseResult{
+		Stmts: []*pg_query.RawStmt{
+			{
+				Stmt: &pg_query.Node{
+					Node: &pg_query.Node_SelectStmt{
+						SelectStmt: &pg_query.SelectStmt{
+							TargetList: []*pg_query.Node{pg_query.MakeResTargetNodeWithVal(targetNode, 0)},
+						},
+					},
+				},
+			},
+		},
+	})
+	if err != nil {
+		return "", false
+	}
+
+	return targetOut + " := " + valOut, true
 }
 
 // canonicalizeSQLBody parses body as one or more SQL statements and

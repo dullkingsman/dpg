@@ -3639,6 +3639,116 @@ $$ {}`
 	}
 }
 
+// TestRoundtripFunctionPlpgsqlEmbeddedExpressionReformattingLiveNoSpuriousDrift
+// is TestRoundtripFunctionPlpgsqlBodyReformattingLiveNoSpuriousDrift's
+// sibling for the embedded-expression canonicalisation gap: instead of
+// reformatting the outer control-flow shape (blank lines/comments around
+// statements), this reformats *inside* an expression fragment itself
+// (removing whitespace around concatenation operators) — the exact
+// scenario the original plpgsql body-hash fix didn't cover, closed by
+// canonicalizePlpgsqlExprFragments re-parsing/re-deparsing each
+// PLpgSQL_expr fragment via github.com/dullkingsman/dpg_query_go's
+// raw-parse-mode entry points.
+func TestRoundtripFunctionPlpgsqlEmbeddedExpressionReformattingLiveNoSpuriousDrift(t *testing.T) {
+	connStr := testpg.Start(t)
+	ctx := context.Background()
+
+	differ := diff.New()
+	emitter := emit.New()
+	applyExec := executor.New()
+	ci := introspect.New()
+	store := newMemStore()
+
+	conn, err := executor.Connect(ctx, connStr)
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	defer conn.Close(ctx)
+
+	dir := t.TempDir()
+	f := filepath.Join(dir, "schema.dpg")
+	original := `FUNCTION f_pl_expr_live(v_name text, v_version text) RETURNS text
+LANGUAGE plpgsql AS $$
+BEGIN
+    RETURN v_name || '/' || v_version;
+END;
+$$ {}`
+	if err := os.WriteFile(f, []byte(original), 0o644); err != nil {
+		t.Fatalf("write schema: %v", err)
+	}
+	applyFixture(t, ctx, conn, []string{f}, dir, differ, emitter, applyExec, store)
+
+	liveSnapFor := func() *pipeline.Snapshot {
+		liveObjects, err := ci.Introspect(ctx, conn)
+		if err != nil {
+			t.Fatalf("introspect: %v", err)
+		}
+		snap, _ := store.Load("test", "dpgtest")
+		var managedLive []pipeline.IRObject
+		for _, obj := range liveObjects {
+			if _, ok := snap.Objects[obj.QualifiedName()]; ok {
+				managedLive = append(managedLive, obj)
+			}
+		}
+		liveSnap := &pipeline.Snapshot{}
+		if err := snapshot.Populate(liveSnap, managedLive); err != nil {
+			t.Fatalf("populate live snapshot: %v", err)
+		}
+		return liveSnap
+	}
+
+	// Source-only reformatting, and *only* inside the RETURN expression —
+	// the live catalog body is untouched.
+	reformatted := `FUNCTION f_pl_expr_live(v_name text, v_version text) RETURNS text
+LANGUAGE plpgsql AS $$
+BEGIN
+    RETURN v_name||'/'||v_version;
+END;
+$$ {}`
+	if err := os.WriteFile(f, []byte(reformatted), 0o644); err != nil {
+		t.Fatalf("write reformatted: %v", err)
+	}
+	desired, err := compiler.Compile([]string{f}, dir, pipeline.Default)
+	if err != nil {
+		t.Fatalf("compile reformatted: %v", err)
+	}
+	driftOps, err := differ.Diff(desired, liveSnapFor())
+	if err != nil {
+		t.Fatalf("drift diff (reformatted): %v", err)
+	}
+	if len(driftOps) != 0 {
+		t.Errorf("expected zero live drift for whitespace reformatted only inside an embedded expression, got %d ops:", len(driftOps))
+		for _, op := range driftOps {
+			t.Errorf("  [%s] %s", op.Safety(), op.SQL())
+		}
+	}
+
+	// A genuine change inside the same expression must still be detected.
+	changed := `FUNCTION f_pl_expr_live(v_name text, v_version text) RETURNS text
+LANGUAGE plpgsql AS $$
+BEGIN
+    RETURN v_name || '-' || v_version;
+END;
+$$ {}`
+	if err := os.WriteFile(f, []byte(changed), 0o644); err != nil {
+		t.Fatalf("write changed: %v", err)
+	}
+	desired2, err := compiler.Compile([]string{f}, dir, pipeline.Default)
+	if err != nil {
+		t.Fatalf("compile changed: %v", err)
+	}
+	changeOps, err := differ.Diff(desired2, liveSnapFor())
+	if err != nil {
+		t.Fatalf("drift diff (changed): %v", err)
+	}
+	if len(changeOps) == 0 {
+		t.Fatal("expected a CREATE OR REPLACE FUNCTION op for a genuine change inside an embedded expression against the live catalog, got none")
+	}
+	if !strings.Contains(changeOps[0].SQL(), "CREATE OR REPLACE FUNCTION") {
+		t.Errorf("expected CREATE OR REPLACE FUNCTION, got: %s", changeOps[0].SQL())
+	}
+}
+
 // TestRoundtripProcedurePlpgsqlBodyReformattingLiveNoSpuriousDrift is
 // TestRoundtripFunctionPlpgsqlBodyReformattingLiveNoSpuriousDrift's
 // PROCEDURE sibling. Procedure shares HashFunctionBody's exact call path

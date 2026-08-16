@@ -127,3 +127,5 @@ require (
 	google.golang.org/grpc v1.82.0 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
+
+replace github.com/pganalyze/pg_query_go/v6 => github.com/thec1oud/dpg_query_go/v6 v6.0.0-20260816135812-1d6f30c054ae
