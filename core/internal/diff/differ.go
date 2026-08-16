@@ -332,6 +332,18 @@ func qualIdent(schema, name string) string {
 	return quoteIdent(schema) + "." + quoteIdent(name)
 }
 
+// quoteQualIdent quotes a possibly schema-qualified "schema.name" string
+// (as stored in ir.Table.Inherits) part by part, rather than wrapping the
+// whole dotted string in one identifier, which would produce a single
+// malformed quoted identifier instead of a schema-qualified one.
+func quoteQualIdent(s string) string {
+	schema, name, ok := strings.Cut(s, ".")
+	if !ok {
+		return quoteIdent(s)
+	}
+	return qualIdent(schema, name)
+}
+
 // qualOperatorIdent qualifies an operator symbol with its schema, like
 // qualIdent, except the symbol itself (e.g. "===", "@>") is never quoted —
 // unlike a regular identifier, it's a lexical operator token, and quoting it
@@ -2183,6 +2195,16 @@ func createTable(o *ir.Table, vtypes map[string]string) []pipeline.DiffOp {
 		b.WriteString(cst.Expr)
 	}
 	b.WriteString("\n)")
+	if len(o.Inherits) > 0 && !o.Foreign {
+		b.WriteString(" INHERITS (")
+		for i, p := range o.Inherits {
+			if i > 0 {
+				b.WriteString(", ")
+			}
+			b.WriteString(quoteQualIdent(p))
+		}
+		b.WriteString(")")
+	}
 	if o.PartitionBy != nil && !o.Foreign {
 		b.WriteString(" PARTITION BY ")
 		b.WriteString(o.PartitionBy.Strategy)
@@ -4320,26 +4342,39 @@ func diffPartitionList(schema, parent string, desired []*ir.Partition, snap []sn
 	return ops
 }
 
+// normalizeInheritRef canonicalises a possibly-bare parent-table reference
+// (as written by the user, e.g. "base_logs") to the same fully-qualified
+// "schema.name" form introspection always produces (e.g. "public.base_logs")
+// — otherwise an unqualified same-schema reference in desired never
+// string-matches its qualified snapshot counterpart, and diffTableInherits
+// churns out a spurious NO INHERIT + INHERIT pair on every plan.
+func normalizeInheritRef(defaultSchema, ref string) string {
+	if strings.Contains(ref, ".") {
+		return ref
+	}
+	return defaultSchema + "." + ref
+}
+
 func diffTableInherits(tbl string, o *ir.Table, snap *snapshot.SnapTable, pos pipeline.SourcePos) []pipeline.DiffOp {
 	var ops []pipeline.DiffOp
 
 	snapSet := make(map[string]bool, len(snap.Inherits))
 	for _, p := range snap.Inherits {
-		snapSet[p] = true
+		snapSet[normalizeInheritRef(o.Schema, p)] = true
 	}
 	desiredSet := make(map[string]bool, len(o.Inherits))
 	for _, p := range o.Inherits {
-		desiredSet[p] = true
+		desiredSet[normalizeInheritRef(o.Schema, p)] = true
 	}
 
 	for _, p := range o.Inherits {
-		if !snapSet[p] {
-			ops = append(ops, safeOp(fmt.Sprintf("ALTER TABLE %s INHERIT %s;", tbl, quoteIdent(p)), pos))
+		if !snapSet[normalizeInheritRef(o.Schema, p)] {
+			ops = append(ops, safeOp(fmt.Sprintf("ALTER TABLE %s INHERIT %s;", tbl, quoteQualIdent(normalizeInheritRef(o.Schema, p))), pos))
 		}
 	}
 	for _, p := range snap.Inherits {
-		if !desiredSet[p] {
-			ops = append(ops, cautionOp(fmt.Sprintf("ALTER TABLE %s NO INHERIT %s;", tbl, quoteIdent(p)), pos))
+		if !desiredSet[normalizeInheritRef(o.Schema, p)] {
+			ops = append(ops, cautionOp(fmt.Sprintf("ALTER TABLE %s NO INHERIT %s;", tbl, quoteQualIdent(normalizeInheritRef(o.Schema, p))), pos))
 		}
 	}
 	return ops

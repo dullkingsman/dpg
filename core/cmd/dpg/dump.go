@@ -590,6 +590,13 @@ func renderObjectDPG(b *strings.Builder, obj pipeline.IRObject, fmtOpts format.O
 		} else if o.Tablespace != nil {
 			fmt.Fprintf(b, " %s %s", kw("TABLESPACE"), quoteIdentIfNeeded(*o.Tablespace))
 		}
+		if len(o.Inherits) > 0 {
+			parents := make([]string, len(o.Inherits))
+			for i, p := range o.Inherits {
+				parents[i] = quoteQualIdentIfNeeded(p)
+			}
+			fmt.Fprintf(b, " %s (%s)", kw("INHERITS"), strings.Join(parents, ", "))
+		}
 		var colsWithAttrs []*ir.Column
 		for _, col := range o.Columns {
 			hasStorage := col.Storage != nil && !col.StorageIsTypeDefault
@@ -1453,6 +1460,18 @@ func quoteIdentIfNeeded(s string) string {
 		return s
 	}
 	return `"` + strings.ReplaceAll(s, `"`, `""`) + `"`
+}
+
+// quoteQualIdentIfNeeded quotes-if-needed a possibly schema-qualified name
+// ("schema.name", as stored in ir.Table.Inherits) part by part, rather than
+// wrapping the whole dotted string in one identifier — which would produce
+// a single malformed quoted identifier instead of a schema-qualified one.
+func quoteQualIdentIfNeeded(s string) string {
+	schema, name, ok := strings.Cut(s, ".")
+	if !ok {
+		return quoteIdentIfNeeded(s)
+	}
+	return quoteIdentIfNeeded(schema) + "." + quoteIdentIfNeeded(name)
 }
 
 // joinIdentsIfNeeded quotes-if-needed and comma-joins a list of identifiers
