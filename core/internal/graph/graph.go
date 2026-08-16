@@ -261,6 +261,38 @@ func (r *Resolver) Sort(objects []pipeline.IRObject) ([]pipeline.IRObject, error
 				}
 			}
 
+			// Table depends on its INHERITS parent table(s) — a child created
+			// before its parent exists fails at apply time ("relation ...
+			// does not exist"), and nothing else in the pipeline orders these
+			// relative to each other (unlike FK refs below, which have their
+			// own dependency edge). Unresolved refs are reported the same way
+			// as FK refs: a real error only when the target schema is itself
+			// managed in source, never for an external/pre-existing parent.
+			for _, ref := range o.Inherits {
+				refSchema, refTable := "", ref
+				if schema, table, ok := strings.Cut(ref, "."); ok {
+					refSchema, refTable = schema, table
+				}
+				resolvedKey, ok := resolveFKTarget(idx, refSchema, refTable, o.Schema)
+				if ok {
+					dependsOn(i, idx[resolvedKey])
+					continue
+				}
+				effectiveSchema := refSchema
+				if effectiveSchema == "" {
+					effectiveSchema = o.Schema
+				}
+				if effectiveSchema == "" || schemaSet[effectiveSchema] {
+					displayRef := refTable
+					if effectiveSchema != "" {
+						displayRef = effectiveSchema + "." + refTable
+					}
+					diags = append(diags, pipeline.Errorf(o.SrcPos,
+						"unresolved INHERITS reference %q from %s — no such table defined in source",
+						displayRef, o.QualifiedName()))
+				}
+			}
+
 			// Table depends on FK-referenced tables. Like type refs, if the
 			// referenced schema is managed in source, an unresolved FK target is
 			// reported as an error so user typos surface at plan time.

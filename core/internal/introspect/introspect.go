@@ -684,6 +684,10 @@ JOIN   pg_type t      ON t.oid = a.atttypid
 LEFT   JOIN pg_attrdef d ON d.adrelid = a.attrelid AND d.adnum = a.attnum
 WHERE  a.attnum > 0
 AND    NOT a.attisdropped
+-- attislocal excludes columns present only via classic table INHERITS
+-- (not partitioning, already excluded above) — Table.Columns mirrors what
+-- a DPG declaration itself lists, not what a parent contributes implicitly.
+AND    a.attislocal
 AND    c.relkind IN ('r', 'p', 'f')
 AND    n.nspname NOT IN ('pg_catalog','information_schema','pg_toast')
 ORDER  BY n.nspname, c.relname, a.attnum`
@@ -779,6 +783,12 @@ JOIN   pg_class c     ON c.oid = con.conrelid
 JOIN   pg_namespace n ON n.oid = c.relnamespace
 WHERE  c.relkind IN ('r', 'p', 'f')
 AND    con.contype != 'n'
+-- conislocal excludes a CHECK constraint present on a child only because it's
+-- inherited from a parent under classic INHERITS (PRIMARY KEY/UNIQUE/FOREIGN
+-- KEY/EXCLUDE never propagate to children this way, so this only ever
+-- filters CHECK rows) — mirrors introspectColumns' attislocal filter above,
+-- same reasoning.
+AND    con.conislocal
 AND    n.nspname NOT IN ('pg_catalog','information_schema','pg_toast')
 ORDER  BY n.nspname, c.relname, con.conname`
 
