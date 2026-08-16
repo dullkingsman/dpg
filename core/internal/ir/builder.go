@@ -578,7 +578,7 @@ func qualifiedNameText(nodes []*pg_query.Node) string {
 // operatorNameText renders an EXCLUDE element's WITH operator name. PG's
 // grammar allows a schema-qualified operator (OPERATOR(schema.=)); the
 // pg_catalog schema is stripped since it's the implicit default for a
-// built-in operator, mirroring pgCatalogName's treatment of built-in types.
+// built-in operator, mirroring PGCatalogName's treatment of built-in types.
 func operatorNameText(nodes []*pg_query.Node) string {
 	parts := nodeListToNames(nodes)
 	if len(parts) == 2 && parts[0] == "pg_catalog" {

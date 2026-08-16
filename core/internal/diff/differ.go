@@ -4477,20 +4477,31 @@ func diffColumns(tbl string, o *ir.Table, snap *snapshot.SnapTable, vtypes map[s
 			// internal/ir/typeutil.go's canonicalizePlpgsqlBody).
 		} else if resolvedType != sc.Type {
 			using := ""
-			// RFC §7.2 "Column type change diffing": a type change requiring
-			// an explicit cast is DESTRUCTIVE unless a USING expression is
-			// present, in which case it's CAUTION — the user has supplied
-			// their own safe conversion. Found live-testing a demo project:
-			// this was hardcoded destructiveOp unconditionally, so a
-			// correctly-supplied USING clause still got treated as
-			// potential data loss requiring --allow-destructive. Whether an
-			// *implicit* cast exists for a bare (no-USING) change is not
-			// knowable offline (would need PostgreSQL's own pg_cast
-			// resolution), so that case is deliberately left DESTRUCTIVE —
-			// the safe, conservative default when we can't determine it.
+			// RFC §7.2/§17.2 "Column type change diffing": a type change is
+			// CAUTION when the user supplies an explicit USING expression
+			// (their own safe conversion), OR when no USING is given but
+			// PostgreSQL itself has an implicit cast (pg_cast.castcontext =
+			// 'i') between the old and new base types — RFC §17.2's own
+			// "ALTER TABLE ALTER COLUMN TYPE (implicit cast) -> CAUTION" row.
+			// An implicit cast is PostgreSQL's own strongest cast-safety
+			// guarantee (safe to apply automatically in any context, never
+			// lossy) — see implicit_casts.go for the full "why this is
+			// knowable offline" writeup and the live-catalog extraction this
+			// table is built from. Anything else (no USING, no implicit cast
+			// — including any typmod-only change like widening a varchar's
+			// length, deliberately NOT special-cased here, since that would
+			// need type-specific precision/scale comparison logic this
+			// change doesn't add) stays the safe, conservative DESTRUCTIVE
+			// default. Found live-testing a demo project: this was once
+			// hardcoded destructiveOp unconditionally, so even a
+			// correctly-supplied USING clause got treated as potential data
+			// loss requiring --allow-destructive.
 			safety := pipeline.Destructive
-			if col.Using != nil {
+			switch {
+			case col.Using != nil:
 				using = " USING " + *col.Using
+				safety = pipeline.Caution
+			case hasImplicitCast(sc.Type, resolvedType):
 				safety = pipeline.Caution
 			}
 			ops = append(ops, &op{

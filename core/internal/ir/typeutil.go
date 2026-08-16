@@ -91,14 +91,14 @@ func typeNameToRef(tn *pg_query.TypeName) TypeRef {
 		} else {
 			// pg_query emits some built-in aliases (e.g. "timestamptz") as
 			// a single-part name rather than ["pg_catalog", "timestamptz"].
-			// Run them through pgCatalogName so the canonical form always
+			// Run them through PGCatalogName so the canonical form always
 			// matches what format_type() returns during introspection.
-			ref.Name = pgCatalogName(names[0])
+			ref.Name = PGCatalogName(names[0])
 		}
 	case 2:
 		if names[0] == "pg_catalog" {
 			// Built-in: strip the catalog prefix and use the canonical name.
-			ref.Name = pgCatalogName(names[1])
+			ref.Name = PGCatalogName(names[1])
 		} else {
 			ref.Schema = names[0]
 			ref.Name = names[1]
@@ -152,8 +152,14 @@ func ParseTypeText(s string) TypeRef {
 	return typeNameToRef(tc.TypeName)
 }
 
-// pgCatalogName maps pg_catalog internal type names to their SQL equivalents.
-func pgCatalogName(internal string) string {
+// PGCatalogName maps pg_catalog internal type names to their SQL equivalents
+// (e.g. "int4" -> "integer", "varchar" -> "character varying") — the same
+// canonical form format_type() returns, for the subset of built-in aliases
+// this function currently handles. Exported so other packages (e.g.
+// internal/diff's implicit-cast table) can normalize a raw pg_catalog type
+// name into the exact string TypeRef.String() would itself produce, rather
+// than duplicating this mapping.
+func PGCatalogName(internal string) string {
 	switch internal {
 	case "int2":
 		return "smallint"
@@ -236,13 +242,13 @@ func typmodString(typeName string, mods []*pg_query.Node) string {
 			"timestamp", "timestamptz", "timestamp with time zone", "interval":
 			// timetz/timestamptz never actually reach this switch under their
 			// short internal name: typeNameToRef runs ref.Name through
-			// pgCatalogName first, which maps both to their long canonical
+			// PGCatalogName first, which maps both to their long canonical
 			// form ("time with time zone" / "timestamp with time zone")
 			// before typmodString ever sees it — confirmed live via the same
 			// pg_query.Parse probe used for the A_Const fix above. Both forms
 			// are kept here (matching the varchar/bpchar case's existing
 			// belt-and-suspenders style) rather than relying solely on
-			// pgCatalogName's current behavior.
+			// PGCatalogName's current behavior.
 			if val >= 0 {
 				return fmt.Sprintf("(%d)", val)
 			}

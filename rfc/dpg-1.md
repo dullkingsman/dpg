@@ -1658,6 +1658,27 @@ TABLE order_items (
        statement acquires an `ACCESS EXCLUSIVE` lock for the duration
        of the rewrite, which is why it is always at least `CAUTION`.
 
+   **Implementation status of "PostgreSQL can apply implicitly" (as of
+   this writing):** this bullet's own example, `VARCHAR(10)` →
+   `VARCHAR(20)`, is a same-base-type typmod (length/precision) widening
+   — real PostgreSQL permits it with no `USING` and no data loss because
+   the *type itself* hasn't changed, only its length constraint, which is
+   a different mechanism from `pg_cast`. This specific case is **NOT YET
+   implemented** — it still falls through to the conservative
+   `DESTRUCTIVE` default until DPG has type-specific typmod
+   comparison logic (comparing two `numeric(p,s)` precision/scale pairs,
+   two `varchar(n)` lengths, etc. — genuinely different per type, unlike
+   the different-base-type case below). What **IS** implemented: a type
+   change between two genuinely *different* base types (e.g. `smallint`
+   → `integer`, `real` → `double precision`) is classified `CAUTION`
+   when PostgreSQL has a real implicit cast (`pg_cast.castcontext = 'i'`)
+   between them, and `DESTRUCTIVE` otherwise — see `internal/diff/
+   implicit_casts.go` for the full table (extracted verbatim from a live
+   PostgreSQL 17 catalog, not reconstructed from memory, with a live
+   integration test cross-checking it against a fresh container so it can
+   never silently drift out of sync with a future PostgreSQL version) and
+   `.dpg-notes/dpg-tracker.md` for the closure writeup.
+
 ### 7.3. Constraints
 
    Table constraints may appear in the `( )` list, in the `{ }` block,

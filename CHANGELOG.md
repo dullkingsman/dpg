@@ -1212,6 +1212,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`TestDumpRefusesToOverwriteWithoutConfirmation`) proving the real
   `os.Stdin`-driven prompt genuinely blocks a re-dump and leaves the
   existing file byte-identical when declined.
+- **A bare column type change with no `USING` clause was always classified
+  `DESTRUCTIVE`, even when PostgreSQL has a real implicit cast between the
+  old and new type** (e.g. `smallint` to `integer`) — RFC §17.2's own
+  "`ALTER TABLE ALTER COLUMN TYPE` (implicit cast) -> `CAUTION`" row was
+  simply unimplemented for this half of the rule (the `USING`-present half
+  was already fixed separately). Determining implicit-cast-ness offline
+  had been treated as unknowable without a live catalog connection; turned
+  out not to be — `internal/diff/implicit_casts.go` now hardcodes the
+  exact implicit-cast set (`pg_cast.castcontext = 'i'`), extracted
+  verbatim from a live PostgreSQL 17 catalog (not reconstructed from
+  memory, the version/edge-case risk this project's conventions
+  deliberately avoid), and a new live integration test
+  (`TestImplicitCastsMatchesLiveCatalog`) re-queries a fresh container and
+  asserts an exact match on every run, so the table can never silently
+  drift out of sync with a future PostgreSQL version without a test
+  failing first. Also confirmed live and handled correctly: array-to-array
+  widening (`integer[]` to `bigint[]`) derives its implicit-cast status
+  from the element type, matching PostgreSQL's own array-coercion
+  behavior. `ir.pgCatalogName` promoted to exported `ir.PGCatalogName` so
+  the new table can normalize its raw `pg_catalog` type names into the
+  exact strings the differ itself compares, rather than duplicating that
+  mapping. Not yet covered (a real, separate residual, not silently
+  folded into this fix): a same-base-type typmod-only widening (e.g.
+  `varchar(10)` to `varchar(20)`, actually RFC §7.2's own primary example
+  for this rule) is a different mechanism entirely (`pg_cast` has no entry
+  for a type to itself) and still falls through to `DESTRUCTIVE`.
 
 ### Changed
 

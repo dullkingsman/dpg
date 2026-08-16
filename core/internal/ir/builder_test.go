@@ -832,7 +832,7 @@ func TestBuildFunctionArgTypeNeverSetOf(t *testing.T) {
 //     ever fed from source-parsed TypeName nodes, never a live atttypmod).
 //  3. Once (1) and (2) were fixed, timestamptz/timetz's switch case only
 //     matched their short internal name, but typeNameToRef always runs the
-//     name through pgCatalogName first, which renames them to the long form
+//     name through PGCatalogName first, which renames them to the long form
 //     ("timestamp with time zone") before typmodString ever sees it — so the
 //     case never matched and the modifier was dropped a third way.
 //
@@ -1494,7 +1494,7 @@ func TestBuildExcludeCollationOpclassSortNulls(t *testing.T) {
 
 // TestBuildExcludeOperatorSchemaQualificationStripped proves an explicitly
 // schema-qualified built-in operator (OPERATOR(pg_catalog.=)) renders
-// without the redundant "pg_catalog." prefix, mirroring pgCatalogName's
+// without the redundant "pg_catalog." prefix, mirroring PGCatalogName's
 // identical treatment of built-in type names.
 func TestBuildExcludeOperatorSchemaQualificationStripped(t *testing.T) {
 	obj := buildObject(t, pipeline.KindTable,

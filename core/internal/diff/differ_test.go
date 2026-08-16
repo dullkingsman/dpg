@@ -11018,3 +11018,126 @@ func TestCompositeAttrsChanged(t *testing.T) {
 		t.Error("expected a change when an attribute type differs")
 	}
 }
+
+// ── Column type change: implicit-cast safety classification ────────────────
+
+// TestDiffColumnTypeImplicitCastNoUsingIsCaution proves RFC §17.2's
+// "ALTER TABLE ALTER COLUMN TYPE (implicit cast) -> CAUTION" row: widening
+// smallint -> integer with no USING clause must be CAUTION, not the
+// previous hardcoded DESTRUCTIVE default, since PostgreSQL has a real
+// implicit cast between them (verified live against a real pg_cast, see
+// implicit_casts.go).
+func TestDiffColumnTypeImplicitCastNoUsingIsCaution(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.widgets", &snapshot.SnapObject{
+		Kind: "table",
+		Table: &snapshot.SnapTable{
+			Schema:  "public",
+			Name:    "widgets",
+			Columns: []snapshot.SnapColumn{{Name: "qty", Type: "smallint"}},
+		},
+	})
+	desired := []pipeline.IRObject{
+		&ir.Table{
+			Schema:  "public",
+			Name:    "widgets",
+			Columns: []*ir.Column{{Name: "qty", Type: ir.TypeRef{Name: "integer"}}},
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsSQL(ops, `ALTER COLUMN "qty" TYPE integer`) {
+		t.Fatalf("expected an ALTER COLUMN TYPE op, got: %v", sqlList(ops))
+	}
+	for _, op := range ops {
+		if strings.Contains(op.SQL(), `ALTER COLUMN "qty" TYPE integer`) {
+			if op.Safety() != pipeline.Caution {
+				t.Errorf("expected Caution for an implicit-cast widening with no USING, got %s", op.Safety())
+			}
+		}
+	}
+}
+
+// TestDiffColumnTypeNoImplicitCastNoUsingStaysDestructive is the negative
+// case: text -> integer has no implicit cast (can fail at runtime on
+// non-numeric data) and no USING clause is given, so it must stay the
+// conservative DESTRUCTIVE default — proving the implicit-cast table only
+// ever ADDS precision, never silently downgrades a genuinely risky change.
+func TestDiffColumnTypeNoImplicitCastNoUsingStaysDestructive(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.widgets", &snapshot.SnapObject{
+		Kind: "table",
+		Table: &snapshot.SnapTable{
+			Schema:  "public",
+			Name:    "widgets",
+			Columns: []snapshot.SnapColumn{{Name: "code", Type: "text"}},
+		},
+	})
+	desired := []pipeline.IRObject{
+		&ir.Table{
+			Schema:  "public",
+			Name:    "widgets",
+			Columns: []*ir.Column{{Name: "code", Type: ir.TypeRef{Name: "integer"}}},
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsSQL(ops, `ALTER COLUMN "code" TYPE integer`) {
+		t.Fatalf("expected an ALTER COLUMN TYPE op, got: %v", sqlList(ops))
+	}
+	for _, op := range ops {
+		if strings.Contains(op.SQL(), `ALTER COLUMN "code" TYPE integer`) {
+			if op.Safety() != pipeline.Destructive {
+				t.Errorf("expected Destructive when no implicit cast exists and no USING is given, got %s", op.Safety())
+			}
+		}
+	}
+}
+
+// TestDiffColumnTypeExplicitUsingStillCautionRegardlessOfImplicitCast proves
+// an explicit USING clause is still respected exactly as before — CAUTION —
+// even for a pair that also happens to have no implicit cast, and that the
+// USING clause's own SQL text still renders (the implicit-cast table must
+// never suppress a user-supplied USING expression).
+func TestDiffColumnTypeExplicitUsingStillCautionRegardlessOfImplicitCast(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.widgets", &snapshot.SnapObject{
+		Kind: "table",
+		Table: &snapshot.SnapTable{
+			Schema:  "public",
+			Name:    "widgets",
+			Columns: []snapshot.SnapColumn{{Name: "code", Type: "text"}},
+		},
+	})
+	using := "code::integer"
+	desired := []pipeline.IRObject{
+		&ir.Table{
+			Schema: "public",
+			Name:   "widgets",
+			Columns: []*ir.Column{
+				{Name: "code", Type: ir.TypeRef{Name: "integer"}, Using: &using},
+			},
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsSQL(ops, "USING code::integer") {
+		t.Fatalf("expected the explicit USING clause to render, got: %v", sqlList(ops))
+	}
+	for _, op := range ops {
+		if strings.Contains(op.SQL(), `ALTER COLUMN "code" TYPE integer`) {
+			if op.Safety() != pipeline.Caution {
+				t.Errorf("expected Caution for an explicit USING clause, got %s", op.Safety())
+			}
+		}
+	}
+}
