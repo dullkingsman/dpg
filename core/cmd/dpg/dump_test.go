@@ -47,7 +47,7 @@ func TestRenderColumnSerialCompiles(t *testing.T) {
 	if err := os.WriteFile(f, []byte(rendered), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := compiler.Compile([]string{f}, dir, pipeline.Default); err != nil {
+	if _, _, err := compiler.Compile([]string{f}, dir, pipeline.Default); err != nil {
 		t.Fatalf("dumped table with a SERIAL column failed to recompile: %v\n---\n%s", err, rendered)
 	}
 }
@@ -84,7 +84,7 @@ func TestRenderIndexUsingMethodCompiles(t *testing.T) {
 	if err := os.WriteFile(f, []byte(rendered), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := compiler.Compile([]string{f}, dir, pipeline.Default); err != nil {
+	if _, _, err := compiler.Compile([]string{f}, dir, pipeline.Default); err != nil {
 		t.Fatalf("dumped table with a USING-method index failed to recompile: %v\n---\n%s", err, rendered)
 	}
 }
@@ -137,7 +137,7 @@ func TestRenderForeignTableCompiles(t *testing.T) {
 	if err := os.WriteFile(f, []byte(rendered), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	compiled, err := compiler.Compile([]string{f}, dir, pipeline.Default)
+	compiled, _, err := compiler.Compile([]string{f}, dir, pipeline.Default)
 	if err != nil {
 		t.Fatalf("dumped foreign table failed to recompile: %v\n---\n%s", err, rendered)
 	}
@@ -182,7 +182,7 @@ func TestRenderUnloggedTableCompiles(t *testing.T) {
 	if err := os.WriteFile(f, []byte(rendered), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	compiled, err := compiler.Compile([]string{f}, dir, pipeline.Default)
+	compiled, _, err := compiler.Compile([]string{f}, dir, pipeline.Default)
 	if err != nil {
 		t.Fatalf("dumped unlogged table failed to recompile: %v\n---\n%s", err, rendered)
 	}
@@ -230,7 +230,7 @@ func TestRenderTableAndIndexTablespaceCompiles(t *testing.T) {
 	if err := os.WriteFile(f, []byte(rendered), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	compiled, err := compiler.Compile([]string{f}, dir, pipeline.Default)
+	compiled, _, err := compiler.Compile([]string{f}, dir, pipeline.Default)
 	if err != nil {
 		t.Fatalf("dumped table/index tablespace failed to recompile: %v\n---\n%s", err, rendered)
 	}
@@ -303,7 +303,7 @@ func TestRenderVirtualTypeCompiles(t *testing.T) {
 	if err := os.WriteFile(f, []byte(rendered), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	compiled, err := compiler.Compile([]string{f}, dir, pipeline.Default)
+	compiled, _, err := compiler.Compile([]string{f}, dir, pipeline.Default)
 	if err != nil {
 		t.Fatalf("dumped virtual type failed to recompile: %v\n---\n%s", err, rendered)
 	}
@@ -374,7 +374,7 @@ func TestRenderDomainCompiles(t *testing.T) {
 	if err := os.WriteFile(f, []byte(rendered), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	compiled, err := compiler.Compile([]string{f}, dir, pipeline.Default)
+	compiled, _, err := compiler.Compile([]string{f}, dir, pipeline.Default)
 	if err != nil {
 		t.Fatalf("dumped domain failed to recompile: %v\n---\n%s", err, rendered)
 	}
@@ -497,7 +497,7 @@ func TestRenderTableGrantsAndRevocationsCompiles(t *testing.T) {
 	if err := os.WriteFile(f, []byte(rendered), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	compiled, err := compiler.Compile([]string{f}, dir, pipeline.Default)
+	compiled, _, err := compiler.Compile([]string{f}, dir, pipeline.Default)
 	if err != nil {
 		t.Fatalf("dumped table grants/revocations failed to recompile: %v\n---\n%s", err, rendered)
 	}
@@ -580,7 +580,7 @@ func TestRenderSubPartitionedTableCompiles(t *testing.T) {
 	if err := os.WriteFile(f, []byte(rendered), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	compiled, err := compiler.Compile([]string{f}, dir, pipeline.Default)
+	compiled, _, err := compiler.Compile([]string{f}, dir, pipeline.Default)
 	if err != nil {
 		t.Fatalf("dumped sub-partitioned table failed to recompile: %v\n---\n%s", err, rendered)
 	}
@@ -666,7 +666,7 @@ func TestRenderMaterializedViewCompiles(t *testing.T) {
 	if err := os.WriteFile(f, []byte(rendered), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	compiled, err := compiler.Compile([]string{f}, dir, pipeline.Default)
+	compiled, _, err := compiler.Compile([]string{f}, dir, pipeline.Default)
 	if err != nil {
 		t.Fatalf("dumped materialized view failed to recompile: %v\n---\n%s", err, rendered)
 	}
@@ -736,7 +736,7 @@ func TestRenderRecursiveViewRendersAsPlainViewCompiles(t *testing.T) {
 	if err := os.WriteFile(f, []byte(rendered), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	compiled, err := compiler.Compile([]string{f}, dir, pipeline.Default)
+	compiled, _, err := compiler.Compile([]string{f}, dir, pipeline.Default)
 	if err != nil {
 		t.Fatalf("dumped recursive view failed to recompile: %v\n---\n%s", err, rendered)
 	}
@@ -774,7 +774,7 @@ func TestRenderIndexUniqueConcurrentlyPrefixCompiles(t *testing.T) {
 	if err := os.WriteFile(f, []byte(rendered), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	compiled, err := compiler.Compile([]string{f}, dir, pipeline.Default)
+	compiled, _, err := compiler.Compile([]string{f}, dir, pipeline.Default)
 	if err != nil {
 		t.Fatalf("dumped table with a UNIQUE CONCURRENTLY index failed to recompile: %v\n---\n%s", err, rendered)
 	}
@@ -876,7 +876,7 @@ func TestRenderOpaqueObjectsCompile(t *testing.T) {
 	if err := os.WriteFile(f, []byte(rendered), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	compiled, err := compiler.Compile([]string{f}, dir, pipeline.Default)
+	compiled, _, err := compiler.Compile([]string{f}, dir, pipeline.Default)
 	if err != nil {
 		t.Fatalf("dumped .dpg failed to recompile: %v\n---\n%s", err, rendered)
 	}
@@ -968,7 +968,7 @@ func TestRenderOpaqueObjectsWithCommentCompile(t *testing.T) {
 	if err := os.WriteFile(f, []byte(rendered), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	compiled, err := compiler.Compile([]string{f}, dir, pipeline.Default)
+	compiled, _, err := compiler.Compile([]string{f}, dir, pipeline.Default)
 	if err != nil {
 		t.Fatalf("dumped .dpg (with comments) failed to recompile: %v\n---\n%s", err, rendered)
 	}
@@ -1069,7 +1069,7 @@ func TestRenderTSConfigMappingCompiles(t *testing.T) {
 	if err := os.WriteFile(f, []byte(rendered), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	compiled, err := compiler.Compile([]string{f}, dir, pipeline.Default)
+	compiled, _, err := compiler.Compile([]string{f}, dir, pipeline.Default)
 	if err != nil {
 		t.Fatalf("dumped ts config failed to recompile: %v\n---\n%s", err, rendered)
 	}
@@ -1153,7 +1153,7 @@ func TestRenderOpFamilyWithMembersRoundtrips(t *testing.T) {
 	if err := os.WriteFile(f, []byte(rendered), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	compiled, err := compiler.Compile([]string{f}, dir, pipeline.Default)
+	compiled, _, err := compiler.Compile([]string{f}, dir, pipeline.Default)
 	if err != nil {
 		t.Fatalf("dumped operator family failed to recompile: %v\n---\n%s", err, rendered)
 	}
@@ -1218,7 +1218,7 @@ func TestRenderCompositeAndRangeTypesCompile(t *testing.T) {
 	if err := os.WriteFile(f, []byte(rendered), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	compiled, err := compiler.Compile([]string{f}, dir, pipeline.Default)
+	compiled, _, err := compiler.Compile([]string{f}, dir, pipeline.Default)
 	if err != nil {
 		t.Fatalf("dumped .dpg failed to recompile: %v\n---\n%s", err, rendered)
 	}
@@ -1287,7 +1287,7 @@ func TestRenderRoleAttributesCompile(t *testing.T) {
 	if err := os.WriteFile(f, []byte(rendered), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	compiled, err := compiler.Compile([]string{f}, dir, pipeline.Default)
+	compiled, _, err := compiler.Compile([]string{f}, dir, pipeline.Default)
 	if err != nil {
 		t.Fatalf("dumped Role failed to recompile: %v\n---\n%s", err, rendered)
 	}
@@ -1354,7 +1354,7 @@ func TestRenderBareRoleCompile(t *testing.T) {
 	if err := os.WriteFile(f, []byte(rendered), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	compiled, err := compiler.Compile([]string{f}, dir, pipeline.Default)
+	compiled, _, err := compiler.Compile([]string{f}, dir, pipeline.Default)
 	if err != nil {
 		t.Fatalf("dumped bare Role failed to recompile: %v\n---\n%s", err, rendered)
 	}
@@ -1464,7 +1464,7 @@ func TestRenderReservedWordAndStructuralCompile(t *testing.T) {
 	if err := os.WriteFile(f, []byte(rendered), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	compiled, err := compiler.Compile([]string{f}, dir, pipeline.Default)
+	compiled, _, err := compiler.Compile([]string{f}, dir, pipeline.Default)
 	if err != nil {
 		t.Fatalf("reserved-word/structural dump did not recompile: %v\n---\n%s", err, rendered)
 	}
@@ -1586,7 +1586,7 @@ func TestRenderOwnerAndColumnStorage(t *testing.T) {
 	if err := os.WriteFile(f, []byte(rendered), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	compiled, err := compiler.Compile([]string{f}, dir, pipeline.Default)
+	compiled, _, err := compiler.Compile([]string{f}, dir, pipeline.Default)
 	if err != nil {
 		t.Fatalf("owner/storage dump did not recompile: %v\n---\n%s", err, rendered)
 	}
@@ -1695,7 +1695,7 @@ func TestRenderFunctionAndProcedureBody(t *testing.T) {
 	if err := os.WriteFile(f, []byte(rendered), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	compiled, err := compiler.Compile([]string{f}, dir, pipeline.Default)
+	compiled, _, err := compiler.Compile([]string{f}, dir, pipeline.Default)
 	if err != nil {
 		t.Fatalf("function/procedure dump did not recompile: %v\n---\n%s", err, rendered)
 	}
@@ -1779,7 +1779,7 @@ func TestRenderDefaultPrivilegesCompiles(t *testing.T) {
 	if err := os.WriteFile(f, []byte(rendered), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	compiled, err := compiler.Compile([]string{f}, dir, pipeline.Default)
+	compiled, _, err := compiler.Compile([]string{f}, dir, pipeline.Default)
 	if err != nil {
 		t.Fatalf("dumped default privileges failed to recompile: %v\n---\n%s", err, rendered)
 	}
@@ -1837,7 +1837,7 @@ func TestRenderAggregateCompiles(t *testing.T) {
 	if err := os.WriteFile(f, []byte(rendered), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	compiled, err := compiler.Compile([]string{f}, dir, pipeline.Default)
+	compiled, _, err := compiler.Compile([]string{f}, dir, pipeline.Default)
 	if err != nil {
 		t.Fatalf("dumped aggregate failed to recompile: %v\n---\n%s", err, rendered)
 	}
@@ -1911,7 +1911,7 @@ func TestRenderFunctionParallelCostRowsRoundtrip(t *testing.T) {
 	if err := os.WriteFile(f, []byte(rendered), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	compiled, err := compiler.Compile([]string{f}, dir, pipeline.Default)
+	compiled, _, err := compiler.Compile([]string{f}, dir, pipeline.Default)
 	if err != nil {
 		t.Fatalf("did not recompile: %v\n---\n%s", err, rendered)
 	}
@@ -1982,7 +1982,7 @@ func TestRenderFunctionSetOfRoundtrip(t *testing.T) {
 	if err := os.WriteFile(f, []byte(rendered), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	compiled, err := compiler.Compile([]string{f}, dir, pipeline.Default)
+	compiled, _, err := compiler.Compile([]string{f}, dir, pipeline.Default)
 	if err != nil {
 		t.Fatalf("did not recompile: %v\n---\n%s", err, rendered)
 	}
@@ -2041,7 +2041,7 @@ func TestRenderFunctionReturnsTableRoundtrip(t *testing.T) {
 	if err := os.WriteFile(f, []byte(rendered), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	compiled, err := compiler.Compile([]string{f}, dir, pipeline.Default)
+	compiled, _, err := compiler.Compile([]string{f}, dir, pipeline.Default)
 	if err != nil {
 		t.Fatalf("did not recompile: %v\n---\n%s", err, rendered)
 	}
@@ -2095,7 +2095,7 @@ func TestRenderIndexVariantsRoundtrip(t *testing.T) {
 	if err := os.WriteFile(f, []byte(rendered), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	compiled, err := compiler.Compile([]string{f}, dir, pipeline.Default)
+	compiled, _, err := compiler.Compile([]string{f}, dir, pipeline.Default)
 	if err != nil {
 		t.Fatalf("index variants did not recompile: %v\n---\n%s", err, rendered)
 	}
@@ -2195,7 +2195,7 @@ func TestRenderPolicyAndTriggerRoundtrip(t *testing.T) {
 	if err := os.WriteFile(f, []byte(rendered), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	compiled, err := compiler.Compile([]string{f}, dir, pipeline.Default)
+	compiled, _, err := compiler.Compile([]string{f}, dir, pipeline.Default)
 	if err != nil {
 		t.Fatalf("dumped policies/triggers failed to recompile: %v\n---\n%s", err, rendered)
 	}
@@ -2277,7 +2277,7 @@ func TestRenderExcludeConstraintRoundtrip(t *testing.T) {
 	if err := os.WriteFile(f, []byte(rendered), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	compiled, err := compiler.Compile([]string{f}, dir, pipeline.Default)
+	compiled, _, err := compiler.Compile([]string{f}, dir, pipeline.Default)
 	if err != nil {
 		t.Fatalf("EXCLUDE constraint did not recompile: %v\n---\n%s", err, rendered)
 	}

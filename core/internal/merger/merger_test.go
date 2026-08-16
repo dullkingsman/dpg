@@ -1,6 +1,7 @@
 package merger_test
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/dullkingsman/dpg/internal/ir"
@@ -10,16 +11,23 @@ import (
 
 var pos = pipeline.SourcePos{File: "a.dpg", Line: 1, Col: 1}
 var pos2 = pipeline.SourcePos{File: "b.dpg", Line: 1, Col: 1}
+var pos3 = pipeline.SourcePos{File: "c.dpg", Line: 1, Col: 1}
 
 func ptr[T any](v T) *T { return &v }
 
-func merge(t *testing.T, objects ...pipeline.IRObject) []pipeline.IRObject {
+func mergeAll(t *testing.T, objects ...pipeline.IRObject) ([]pipeline.IRObject, []pipeline.LintDiagnostic) {
 	t.Helper()
 	m := merger.New()
-	out, err := m.Merge(objects)
+	out, diags, err := m.Merge(objects)
 	if err != nil {
 		t.Fatalf("Merge: %v", err)
 	}
+	return out, diags
+}
+
+func merge(t *testing.T, objects ...pipeline.IRObject) []pipeline.IRObject {
+	t.Helper()
+	out, _ := mergeAll(t, objects...)
 	return out
 }
 
@@ -210,5 +218,255 @@ func TestMerge_ColumnScalarLastWins(t *testing.T) {
 	tbl := out[0].(*ir.Table)
 	if *tbl.Columns[0].Comment != "new" {
 		t.Errorf("Column.Comment (last-wins): got %q", *tbl.Columns[0].Comment)
+	}
+}
+
+// ── scalar-merge-conflict detection (RFC §3.7) ─────────────────────────────────
+
+func findRule(diags []pipeline.LintDiagnostic, rule string) []pipeline.LintDiagnostic {
+	var out []pipeline.LintDiagnostic
+	for _, d := range diags {
+		if d.Rule == rule {
+			out = append(out, d)
+		}
+	}
+	return out
+}
+
+func TestMergeTablesOwnerConflict(t *testing.T) {
+	a := &ir.Table{Schema: "app", Name: "t", SrcPos: pos, Owner: ptr("alice")}
+	b := &ir.Table{Schema: "app", Name: "t", SrcPos: pos2, Owner: ptr("bob")}
+	out, diags := mergeAll(t, a, b)
+
+	conflicts := findRule(diags, "scalar-merge-conflict")
+	if len(conflicts) != 1 {
+		t.Fatalf("expected 1 scalar-merge-conflict diagnostic, got %d: %v", len(conflicts), diags)
+	}
+	if conflicts[0].IsError {
+		t.Error("scalar-merge-conflict should be a warning by default, not an error")
+	}
+
+	// Winning value is unaffected by the diagnostic: last-file-wins still applies.
+	tbl := out[0].(*ir.Table)
+	if *tbl.Owner != "bob" {
+		t.Errorf("Owner (last-wins, regardless of conflict): got %q", *tbl.Owner)
+	}
+}
+
+func TestMergeTablesOwnerNoConflictSameValue(t *testing.T) {
+	a := &ir.Table{Schema: "app", Name: "t", SrcPos: pos, Owner: ptr("alice")}
+	b := &ir.Table{Schema: "app", Name: "t", SrcPos: pos2, Owner: ptr("alice")}
+	_, diags := mergeAll(t, a, b)
+
+	if conflicts := findRule(diags, "scalar-merge-conflict"); len(conflicts) != 0 {
+		t.Errorf("identical values across files should not be flagged as a conflict: %v", conflicts)
+	}
+}
+
+// TestMergeTablesOwnerThreeFileLastSetByTracking proves conflictTracker's
+// lastFile bookkeeping is load-bearing, not just "compare to the previous
+// file": file1 and file2 agree on Owner, file3 disagrees — the resulting
+// diagnostic must cite file2 (the file that most recently set the current
+// value) as the source of the conflicting value, not file1 (which set it
+// first but was then reconfirmed, not overridden, by file2).
+func TestMergeTablesOwnerThreeFileLastSetByTracking(t *testing.T) {
+	a := &ir.Table{Schema: "app", Name: "t", SrcPos: pos, Owner: ptr("alice")}
+	b := &ir.Table{Schema: "app", Name: "t", SrcPos: pos2, Owner: ptr("alice")}
+	c := &ir.Table{Schema: "app", Name: "t", SrcPos: pos3, Owner: ptr("carol")}
+	_, diags := mergeAll(t, a, b, c)
+
+	conflicts := findRule(diags, "scalar-merge-conflict")
+	if len(conflicts) != 1 {
+		t.Fatalf("expected exactly 1 conflict (b agreeing with a is not itself a conflict), got %d: %v", len(conflicts), diags)
+	}
+	msg := conflicts[0].Message
+	if !strings.Contains(msg, pos2.File) {
+		t.Errorf("conflict should be attributed to %s (the file that last set the value), got: %s", pos2.File, msg)
+	}
+	if strings.Contains(msg, "in "+pos.File) {
+		t.Errorf("conflict should NOT be attributed to %s (superseded by %s before the real conflict), got: %s", pos.File, pos2.File, msg)
+	}
+}
+
+func TestMergeProceduresCommentConflict(t *testing.T) {
+	a := &ir.Procedure{Schema: "app", Name: "p", SrcPos: pos, Comment: ptr("old")}
+	b := &ir.Procedure{Schema: "app", Name: "p", SrcPos: pos2, Comment: ptr("new")}
+	out, diags := mergeAll(t, a, b)
+	if len(findRule(diags, "scalar-merge-conflict")) != 1 {
+		t.Fatalf("expected 1 conflict, got: %v", diags)
+	}
+	if *out[0].(*ir.Procedure).Comment != "new" {
+		t.Errorf("Comment (last-wins): got %q", *out[0].(*ir.Procedure).Comment)
+	}
+}
+
+func TestMergeAggregatesCommentConflict(t *testing.T) {
+	a := &ir.Aggregate{Schema: "app", Name: "agg", SrcPos: pos, Comment: ptr("old")}
+	b := &ir.Aggregate{Schema: "app", Name: "agg", SrcPos: pos2, Comment: ptr("new")}
+	out, diags := mergeAll(t, a, b)
+	if len(findRule(diags, "scalar-merge-conflict")) != 1 {
+		t.Fatalf("expected 1 conflict, got: %v", diags)
+	}
+	if *out[0].(*ir.Aggregate).Comment != "new" {
+		t.Errorf("Comment (last-wins): got %q", *out[0].(*ir.Aggregate).Comment)
+	}
+}
+
+func TestMergeSequencesConflict(t *testing.T) {
+	a := &ir.Sequence{Schema: "app", Name: "s", SrcPos: pos, IncrementBy: ptr(int64(1))}
+	b := &ir.Sequence{Schema: "app", Name: "s", SrcPos: pos2, IncrementBy: ptr(int64(2))}
+	out, diags := mergeAll(t, a, b)
+	if len(findRule(diags, "scalar-merge-conflict")) != 1 {
+		t.Fatalf("expected 1 conflict, got: %v", diags)
+	}
+	if *out[0].(*ir.Sequence).IncrementBy != 2 {
+		t.Errorf("IncrementBy (last-wins): got %d", *out[0].(*ir.Sequence).IncrementBy)
+	}
+}
+
+func TestMergeExtensionsVersionConflict(t *testing.T) {
+	a := &ir.Extension{Name: "pgcrypto", SrcPos: pos, Version: ptr("1.1")}
+	b := &ir.Extension{Name: "pgcrypto", SrcPos: pos2, Version: ptr("1.2")}
+	out, diags := mergeAll(t, a, b)
+	if len(findRule(diags, "scalar-merge-conflict")) != 1 {
+		t.Fatalf("expected 1 conflict, got: %v", diags)
+	}
+	if *out[0].(*ir.Extension).Version != "1.2" {
+		t.Errorf("Version (last-wins): got %q", *out[0].(*ir.Extension).Version)
+	}
+}
+
+func TestMergeRolesConnectionLimitConflict(t *testing.T) {
+	a := &ir.Role{Name: "app_user", SrcPos: pos, ConnectionLimit: ptr(5)}
+	b := &ir.Role{Name: "app_user", SrcPos: pos2, ConnectionLimit: ptr(10)}
+	out, diags := mergeAll(t, a, b)
+	if len(findRule(diags, "scalar-merge-conflict")) != 1 {
+		t.Fatalf("expected 1 conflict, got: %v", diags)
+	}
+	if *out[0].(*ir.Role).ConnectionLimit != 10 {
+		t.Errorf("ConnectionLimit (last-wins): got %d", *out[0].(*ir.Role).ConnectionLimit)
+	}
+}
+
+func TestMergeRolesInRoleUnionedNotConflicted(t *testing.T) {
+	a := &ir.Role{Name: "app_user", SrcPos: pos, InRole: []string{"readonly"}}
+	b := &ir.Role{Name: "app_user", SrcPos: pos2, InRole: []string{"readwrite"}}
+	out, diags := mergeAll(t, a, b)
+	if len(findRule(diags, "scalar-merge-conflict")) != 0 {
+		t.Errorf("InRole is set-valued (union), not a scalar conflict: %v", diags)
+	}
+	role := out[0].(*ir.Role)
+	if len(role.InRole) != 2 {
+		t.Errorf("InRole: expected union of 2, got %d: %v", len(role.InRole), role.InRole)
+	}
+}
+
+func TestMergeTablespacesLocationConflict(t *testing.T) {
+	a := &ir.Tablespace{Name: "fast_ssd", SrcPos: pos, Location: "/data/ssd1"}
+	b := &ir.Tablespace{Name: "fast_ssd", SrcPos: pos2, Location: "/data/ssd2"}
+	out, diags := mergeAll(t, a, b)
+	if len(findRule(diags, "scalar-merge-conflict")) != 1 {
+		t.Fatalf("expected 1 conflict, got: %v", diags)
+	}
+	if out[0].(*ir.Tablespace).Location != "/data/ssd2" {
+		t.Errorf("Location (last-wins): got %q", out[0].(*ir.Tablespace).Location)
+	}
+}
+
+func TestMergeForeignDataWrappersHandlerConflict(t *testing.T) {
+	a := &ir.ForeignDataWrapper{Name: "my_fdw", SrcPos: pos, Handler: "handler_a"}
+	b := &ir.ForeignDataWrapper{Name: "my_fdw", SrcPos: pos2, Handler: "handler_b"}
+	out, diags := mergeAll(t, a, b)
+	if len(findRule(diags, "scalar-merge-conflict")) != 1 {
+		t.Fatalf("expected 1 conflict, got: %v", diags)
+	}
+	if out[0].(*ir.ForeignDataWrapper).Handler != "handler_b" {
+		t.Errorf("Handler (last-wins): got %q", out[0].(*ir.ForeignDataWrapper).Handler)
+	}
+}
+
+func TestMergeForeignDataWrappersEmptyHandlerNotAConflict(t *testing.T) {
+	// "" means NO HANDLER/omitted — a later file saying nothing about
+	// Handler must never look like a conflict with an earlier real value,
+	// and must never clobber it either.
+	a := &ir.ForeignDataWrapper{Name: "my_fdw", SrcPos: pos, Handler: "handler_a"}
+	b := &ir.ForeignDataWrapper{Name: "my_fdw", SrcPos: pos2, Handler: ""}
+	out, diags := mergeAll(t, a, b)
+	if len(findRule(diags, "scalar-merge-conflict")) != 0 {
+		t.Errorf("empty Handler should never be treated as a conflicting value: %v", diags)
+	}
+	if out[0].(*ir.ForeignDataWrapper).Handler != "handler_a" {
+		t.Errorf("Handler: empty value from a later file must not clobber an earlier real value, got %q", out[0].(*ir.ForeignDataWrapper).Handler)
+	}
+}
+
+func TestMergeForeignServersTypeConflict(t *testing.T) {
+	a := &ir.ForeignServer{Name: "srv", SrcPos: pos, FDWName: "postgres_fdw", Type: ptr("primary")}
+	b := &ir.ForeignServer{Name: "srv", SrcPos: pos2, FDWName: "postgres_fdw", Type: ptr("replica")}
+	out, diags := mergeAll(t, a, b)
+	if len(findRule(diags, "scalar-merge-conflict")) != 1 {
+		t.Fatalf("expected 1 conflict, got: %v", diags)
+	}
+	if *out[0].(*ir.ForeignServer).Type != "replica" {
+		t.Errorf("Type (last-wins): got %q", *out[0].(*ir.ForeignServer).Type)
+	}
+}
+
+func TestMergeUserMappingsOptionsConflict(t *testing.T) {
+	a := &ir.UserMapping{User: "alice", Server: "srv", SrcPos: pos,
+		Options: []pipeline.StorageParam{{Key: "host", Value: "db1.internal"}}}
+	b := &ir.UserMapping{User: "alice", Server: "srv", SrcPos: pos2,
+		Options: []pipeline.StorageParam{{Key: "host", Value: "db2.internal"}}}
+	out, diags := mergeAll(t, a, b)
+	if len(findRule(diags, "scalar-merge-conflict")) != 1 {
+		t.Fatalf("expected 1 conflict, got: %v", diags)
+	}
+	um := out[0].(*ir.UserMapping)
+	if len(um.Options) != 1 || um.Options[0].Value != "db2.internal" {
+		t.Errorf("Options[host] (last-wins): got %+v", um.Options)
+	}
+}
+
+func TestMergeUserMappingsOptionsDistinctKeysNoConflict(t *testing.T) {
+	a := &ir.UserMapping{User: "alice", Server: "srv", SrcPos: pos,
+		Options: []pipeline.StorageParam{{Key: "host", Value: "db1.internal"}}}
+	b := &ir.UserMapping{User: "alice", Server: "srv", SrcPos: pos2,
+		Options: []pipeline.StorageParam{{Key: "port", Value: "5432"}}}
+	out, diags := mergeAll(t, a, b)
+	if len(findRule(diags, "scalar-merge-conflict")) != 0 {
+		t.Errorf("distinct OPTIONS keys across files should never conflict: %v", diags)
+	}
+	um := out[0].(*ir.UserMapping)
+	if len(um.Options) != 2 {
+		t.Errorf("Options: expected both keys present, got %+v", um.Options)
+	}
+}
+
+func TestMergeTypesDomainBaseTypeConflict(t *testing.T) {
+	a := &ir.Type{Schema: "app", Name: "positive_int", Variant: "DOMAIN", SrcPos: pos,
+		DomainBaseType: ir.TypeRef{Name: "int4"}}
+	b := &ir.Type{Schema: "app", Name: "positive_int", Variant: "DOMAIN", SrcPos: pos2,
+		DomainBaseType: ir.TypeRef{Name: "int8"}}
+	out, diags := mergeAll(t, a, b)
+	if len(findRule(diags, "scalar-merge-conflict")) != 1 {
+		t.Fatalf("expected 1 conflict, got: %v", diags)
+	}
+	if out[0].(*ir.Type).DomainBaseType.Name != "int8" {
+		t.Errorf("DomainBaseType (last-wins): got %q", out[0].(*ir.Type).DomainBaseType.Name)
+	}
+}
+
+func TestMergeTypesDomainDefaultAndNotNullNotConflicted(t *testing.T) {
+	// NotNull is OR-merged like Table's Protected/DropCascade booleans, not
+	// last-wins — two files disagreeing (false vs true) isn't a conflict,
+	// it's an accumulation, matching every other OR-merged bool in this file.
+	a := &ir.Type{Schema: "app", Name: "d", Variant: "DOMAIN", SrcPos: pos, DomainNotNull: false}
+	b := &ir.Type{Schema: "app", Name: "d", Variant: "DOMAIN", SrcPos: pos2, DomainNotNull: true}
+	out, diags := mergeAll(t, a, b)
+	if len(findRule(diags, "scalar-merge-conflict")) != 0 {
+		t.Errorf("DomainNotNull is OR-merged, not conflict-checked: %v", diags)
+	}
+	if !out[0].(*ir.Type).DomainNotNull {
+		t.Error("DomainNotNull should be true (OR-merged)")
 	}
 }

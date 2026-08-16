@@ -62,7 +62,7 @@ Use --format json for machine-readable output suitable for CI or tooling.`,
 
 			for _, cl := range clusters {
 				if len(cl.SourceFiles) > 0 {
-					objects, err := compiler.Compile(cl.SourceFiles, cl.ObjectsDir, pipeline.Default)
+					objects, _, err := compiler.Compile(cl.SourceFiles, cl.ObjectsDir, pipeline.Default)
 					if err != nil {
 						return fmt.Errorf("%s (cluster): %w", cl.Name(), err)
 					}
@@ -95,7 +95,7 @@ Use --format json for machine-readable output suitable for CI or tooling.`,
 					return err
 				}
 				for _, db := range databases {
-					objects, err := compiler.Compile(db.SourceFiles, db.Dir, pipeline.Default)
+					objects, _, err := compiler.Compile(db.SourceFiles, db.Dir, pipeline.Default)
 					if err != nil {
 						return fmt.Errorf("%s/%s: %w", cl.Name(), db.Name(), err)
 					}

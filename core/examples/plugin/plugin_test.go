@@ -41,7 +41,7 @@ func (l *tableCommentLinter) Lint(objects []dpg.IRObject, _ dpg.LinterConfig) ([
 // TestCustomLinter registers a custom linter that replaces the built-in one
 // and verifies it flags the table without a comment.
 func TestCustomLinter(t *testing.T) {
-	objects, err := dpg.Compile([]string{"testdata/schema.dpg"}, ".")
+	objects, _, err := dpg.Compile([]string{"testdata/schema.dpg"}, ".")
 	if err != nil {
 		t.Fatalf("compile: %v", err)
 	}
@@ -72,7 +72,7 @@ func TestCustomLinter(t *testing.T) {
 // TestChainLinter shows how to augment the built-in linter rather than replace
 // it, using dpg.NewChainLinter.
 func TestChainLinter(t *testing.T) {
-	objects, err := dpg.Compile([]string{"testdata/schema.dpg"}, ".")
+	objects, _, err := dpg.Compile([]string{"testdata/schema.dpg"}, ".")
 	if err != nil {
 		t.Fatalf("compile: %v", err)
 	}

@@ -59,7 +59,7 @@ func TestRoleIntrospectionZeroDrift(t *testing.T) {
 		t.Fatalf("write fixture: %v", err)
 	}
 
-	desired, err := compiler.Compile([]string{f}, dir, pipeline.Default)
+	desired, _, err := compiler.Compile([]string{f}, dir, pipeline.Default)
 	if err != nil {
 		t.Fatalf("compile: %v", err)
 	}
@@ -161,7 +161,7 @@ func TestRoleAttributesAndPasswordSecretRoundtrip(t *testing.T) {
 		t.Fatalf("write fixture: %v", err)
 	}
 
-	desired1, err := compiler.Compile([]string{f}, dir, pipeline.Default)
+	desired1, _, err := compiler.Compile([]string{f}, dir, pipeline.Default)
 	if err != nil {
 		t.Fatalf("compile: %v", err)
 	}
@@ -283,7 +283,7 @@ WHERE member.rolname = 'app_service'`)
 	if err := os.WriteFile(f, []byte(fixture2), 0o644); err != nil {
 		t.Fatalf("write fixture2: %v", err)
 	}
-	desired2, err := compiler.Compile([]string{f}, dir, pipeline.Default)
+	desired2, _, err := compiler.Compile([]string{f}, dir, pipeline.Default)
 	if err != nil {
 		t.Fatalf("compile2: %v", err)
 	}

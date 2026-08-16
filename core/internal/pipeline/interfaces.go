@@ -57,10 +57,16 @@ type IRBuilder interface {
 }
 
 // Merger merges same-object IRObject declarations from multiple .dpg files
-// according to RFC §2.7 set/scalar merge rules.
+// according to RFC §3.7 set/scalar merge rules. The second return value
+// holds "scalar-merge-conflict" LintDiagnostics (RFC §19.1) — always
+// computed, unconditionally of any config: gating by WarnOnScalarMergeConflict
+// and [linter.rules] severity overrides happens once, centrally, in
+// internal/linter.FilterMergeDiagnostics, not here. Merger itself never
+// changes what wins (last-file-wins per RFC §3.7 always applies); the
+// diagnostics only add visibility into when that rule actually fired.
 // Default implementation: internal/merger.
 type Merger interface {
-	Merge(objects []IRObject) ([]IRObject, error)
+	Merge(objects []IRObject) ([]IRObject, []LintDiagnostic, error)
 }
 
 // DependencyResolver performs topological sort and circular-FK resolution

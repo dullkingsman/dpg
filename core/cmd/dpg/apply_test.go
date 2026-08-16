@@ -200,3 +200,58 @@ TABLE legacy_data (
 		t.Errorf("executor called %d time(s); want 0 when blocked by --strict", exec.applyCount)
 	}
 }
+
+// TestApplyPrintsScalarMergeConflict proves a scalar-merge-conflict
+// diagnostic (RFC §19.1, surfaced via compiler.Compile's second return
+// value) reaches runApply's print/--strict logic and can block apply on its
+// own — no Linter-registered rule involved at all (no DEPRECATED, no
+// hardcoded password, nothing checkTable/checkCrossObjectRules would ever
+// fire on) — proving the combined-diagnostics wiring plan.go/apply.go/
+// validate.go all share doesn't depend on a Linter being present, matching
+// the "unconditional, not nested inside 'if a Linter happens to be
+// registered'" requirement.
+func TestApplyPrintsScalarMergeConflict(t *testing.T) {
+	dir := t.TempDir()
+	f1 := filepath.Join(dir, "a.dpg")
+	f2 := filepath.Join(dir, "b.dpg")
+	if err := os.WriteFile(f1, []byte(`TABLE users (id BIGINT NOT NULL) { OWNER "alice"; }`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(f2, []byte(`TABLE users (email TEXT NOT NULL) { OWNER "bob"; }`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cl := &project.Cluster{
+		Dir:        dir,
+		Config:     config.ClusterConfig{Cluster: config.ClusterDef{Name: "test-cluster"}},
+		ObjectsDir: dir,
+	}
+	db := &project.Database{
+		Dir:         dir,
+		Config:      config.DatabaseConfig{Database: config.DatabaseDef{Name: "test-db"}},
+		SourceFiles: []string{f1, f2},
+	}
+
+	store := &mockStore{}
+	exec := &mockApplyExec{}
+
+	err := runApply(cl, db, store,
+		&mockDiffer{ops: []pipeline.DiffOp{mockDiffOp{}}},
+		&mockEmitter{},
+		exec,
+		&mockSecretResolver{},
+		applyOptions{
+			yes:           true,
+			strict:        true,
+			migrationsDir: t.TempDir(),
+			lintCfg:       pipeline.LinterConfig{WarnOnScalarMergeConflict: true},
+		},
+	)
+
+	if err != ui.ErrSilent {
+		t.Fatalf("expected ui.ErrSilent (blocked by --strict on a scalar-merge-conflict warning), got: %v", err)
+	}
+	if exec.applyCount != 0 {
+		t.Errorf("executor called %d time(s); want 0 when blocked by --strict", exec.applyCount)
+	}
+}

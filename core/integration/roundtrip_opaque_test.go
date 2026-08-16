@@ -66,7 +66,7 @@ func assertOpaqueRoundtrip(t *testing.T, schema string) {
 		t.Fatalf("populate live snapshot: %v", err)
 	}
 
-	desired, err := compiler.Compile([]string{f}, dir, pipeline.Default)
+	desired, _, err := compiler.Compile([]string{f}, dir, pipeline.Default)
 	if err != nil {
 		t.Fatalf("compile: %v", err)
 	}
@@ -138,7 +138,7 @@ CAST (cast_src_enum AS cast_tgt_enum) WITH FUNCTION cast_fn_v1(cast_src_enum);`
 	}
 	applyFixture(t, ctx, conn, []string{f}, dir, differ, emitter, applyExec, store)
 
-	desired, err := compiler.Compile([]string{f}, dir, pipeline.Default)
+	desired, _, err := compiler.Compile([]string{f}, dir, pipeline.Default)
 	if err != nil {
 		t.Fatalf("compile: %v", err)
 	}
@@ -217,7 +217,7 @@ EVENT TRIGGER evt_test ON sql_drop
 	}
 	applyFixture(t, ctx, conn, []string{f}, dir, differ, emitter, applyExec, store)
 
-	desired, err := compiler.Compile([]string{f}, dir, pipeline.Default)
+	desired, _, err := compiler.Compile([]string{f}, dir, pipeline.Default)
 	if err != nil {
 		t.Fatalf("compile: %v", err)
 	}
@@ -306,7 +306,7 @@ func TestGLiveTablespaceLocationChangeDetected(t *testing.T) {
 	}
 	applyFixture(t, ctx, conn, []string{f}, dir, differ, emitter, applyExec, store)
 
-	desired, err := compiler.Compile([]string{f}, dir, pipeline.Default)
+	desired, _, err := compiler.Compile([]string{f}, dir, pipeline.Default)
 	if err != nil {
 		t.Fatalf("compile: %v", err)
 	}
@@ -385,7 +385,7 @@ func TestGLiveFDWHandlerChangeDetected(t *testing.T) {
 	}
 	applyFixture(t, ctx, conn, []string{f}, dir, differ, emitter, applyExec, store)
 
-	desired, err := compiler.Compile([]string{f}, dir, pipeline.Default)
+	desired, _, err := compiler.Compile([]string{f}, dir, pipeline.Default)
 	if err != nil {
 		t.Fatalf("compile: %v", err)
 	}
@@ -464,7 +464,7 @@ SERVER gl_srv FOREIGN DATA WRAPPER gl_fdw2 OPTIONS (host 'a');`
 	}
 	applyFixture(t, ctx, conn, []string{f}, dir, differ, emitter, applyExec, store)
 
-	desired, err := compiler.Compile([]string{f}, dir, pipeline.Default)
+	desired, _, err := compiler.Compile([]string{f}, dir, pipeline.Default)
 	if err != nil {
 		t.Fatalf("compile: %v", err)
 	}
@@ -568,7 +568,7 @@ USER MAPPING FOR PUBLIC SERVER gl_srv3 OPTIONS (user 'app_v1');`
 	}
 	applyFixture(t, ctx, conn, []string{f}, dir, differ, emitter, applyExec, store)
 
-	desired, err := compiler.Compile([]string{f}, dir, pipeline.Default)
+	desired, _, err := compiler.Compile([]string{f}, dir, pipeline.Default)
 	if err != nil {
 		t.Fatalf("compile: %v", err)
 	}
@@ -645,7 +645,7 @@ PUBLICATION gl_pub FOR TABLE gl_t1;`
 	}
 	applyFixture(t, ctx, conn, []string{f}, dir, differ, emitter, applyExec, store)
 
-	desired, err := compiler.Compile([]string{f}, dir, pipeline.Default)
+	desired, _, err := compiler.Compile([]string{f}, dir, pipeline.Default)
 	if err != nil {
 		t.Fatalf("compile: %v", err)
 	}
@@ -750,7 +750,7 @@ PUBLICATION gl_pub2 FOR TABLE gl_t3;`
 	}
 	applyFixture(t, ctx, conn, []string{f}, dir, differ, emitter, applyExec, store)
 
-	desired, err := compiler.Compile([]string{f}, dir, pipeline.Default)
+	desired, _, err := compiler.Compile([]string{f}, dir, pipeline.Default)
 	if err != nil {
 		t.Fatalf("compile: %v", err)
 	}
@@ -850,7 +850,7 @@ PUBLICATION gl_filtered_pub
 		t.Fatalf("expected the applied publication to have a real row filter, got: %v", rowfilter)
 	}
 
-	desired, err := compiler.Compile([]string{f}, dir, pipeline.Default)
+	desired, _, err := compiler.Compile([]string{f}, dir, pipeline.Default)
 	if err != nil {
 		t.Fatalf("compile: %v", err)
 	}
@@ -923,7 +923,7 @@ func TestGLiveCollationLocaleChangeDetected(t *testing.T) {
 	}
 	applyFixture(t, ctx, conn, []string{f}, dir, differ, emitter, applyExec, store)
 
-	desired, err := compiler.Compile([]string{f}, dir, pipeline.Default)
+	desired, _, err := compiler.Compile([]string{f}, dir, pipeline.Default)
 	if err != nil {
 		t.Fatalf("compile: %v", err)
 	}
@@ -1001,7 +1001,7 @@ STATISTICS gl_stats (ndistinct) ON id, val FROM gl_stats_t;`
 	}
 	applyFixture(t, ctx, conn, []string{f}, dir, differ, emitter, applyExec, store)
 
-	desired, err := compiler.Compile([]string{f}, dir, pipeline.Default)
+	desired, _, err := compiler.Compile([]string{f}, dir, pipeline.Default)
 	if err != nil {
 		t.Fatalf("compile: %v", err)
 	}
@@ -1105,7 +1105,7 @@ STATISTICS gl_stats2 (ndistinct) ON id, val FROM gl_stats_t2;`
 	}
 	applyFixture(t, ctx, conn, []string{f}, dir, differ, emitter, applyExec, store)
 
-	desired, err := compiler.Compile([]string{f}, dir, pipeline.Default)
+	desired, _, err := compiler.Compile([]string{f}, dir, pipeline.Default)
 	if err != nil {
 		t.Fatalf("compile: %v", err)
 	}
@@ -1206,7 +1206,7 @@ func TestGLiveOpFamilyLooseMemberAddDetected(t *testing.T) {
 	}
 	applyFixture(t, ctx, conn, []string{f}, dir, differ, emitter, applyExec, store)
 
-	desired, err := compiler.Compile([]string{f}, dir, pipeline.Default)
+	desired, _, err := compiler.Compile([]string{f}, dir, pipeline.Default)
 	if err != nil {
 		t.Fatalf("compile: %v", err)
 	}
@@ -1280,7 +1280,7 @@ func TestGLiveOpFamilyLooseMemberRemoveDetected(t *testing.T) {
 	}
 	applyFixture(t, ctx, conn, []string{f}, dir, differ, emitter, applyExec, store)
 
-	desired, err := compiler.Compile([]string{f}, dir, pipeline.Default)
+	desired, _, err := compiler.Compile([]string{f}, dir, pipeline.Default)
 	if err != nil {
 		t.Fatalf("compile: %v", err)
 	}
@@ -1380,7 +1380,7 @@ func TestRoundtripOpaqueBodyEditAppliesLive(t *testing.T) {
 	if err := os.WriteFile(f, []byte(v2), 0o644); err != nil {
 		t.Fatalf("write v2: %v", err)
 	}
-	desired2, err := compiler.Compile([]string{f}, dir, pipeline.Default)
+	desired2, _, err := compiler.Compile([]string{f}, dir, pipeline.Default)
 	if err != nil {
 		t.Fatalf("compile v2: %v", err)
 	}
@@ -1697,7 +1697,7 @@ func TestRoundtripGrantRevocationModeBAppliesLive(t *testing.T) {
 	if err := os.WriteFile(f, []byte(v2), 0o644); err != nil {
 		t.Fatalf("write v2: %v", err)
 	}
-	desired2, err := compiler.Compile([]string{f}, dir, pipeline.Default)
+	desired2, _, err := compiler.Compile([]string{f}, dir, pipeline.Default)
 	if err != nil {
 		t.Fatalf("compile v2: %v", err)
 	}
@@ -1792,7 +1792,7 @@ func TestRoundtripColumnRevocationAppliesLive(t *testing.T) {
 	if err := os.WriteFile(f, []byte(v2), 0o644); err != nil {
 		t.Fatalf("write v2: %v", err)
 	}
-	desired2, err := compiler.Compile([]string{f}, dir, pipeline.Default)
+	desired2, _, err := compiler.Compile([]string{f}, dir, pipeline.Default)
 	if err != nil {
 		t.Fatalf("compile v2: %v", err)
 	}
@@ -1870,7 +1870,7 @@ func TestRoundtripIndexDefinitionChangeAppliesLive(t *testing.T) {
 	if err := os.WriteFile(f, []byte(v2), 0o644); err != nil {
 		t.Fatalf("write v2: %v", err)
 	}
-	desired2, err := compiler.Compile([]string{f}, dir, pipeline.Default)
+	desired2, _, err := compiler.Compile([]string{f}, dir, pipeline.Default)
 	if err != nil {
 		t.Fatalf("compile v2: %v", err)
 	}
@@ -2002,7 +2002,7 @@ $$ {}`
 	if err := os.WriteFile(f, []byte(v2), 0o644); err != nil {
 		t.Fatalf("write v2: %v", err)
 	}
-	desired2, err := compiler.Compile([]string{f}, dir, pipeline.Default)
+	desired2, _, err := compiler.Compile([]string{f}, dir, pipeline.Default)
 	if err != nil {
 		t.Fatalf("compile v2: %v", err)
 	}
@@ -2150,7 +2150,7 @@ func TestRoundtripSequenceOwner(t *testing.T) {
 	if err := os.WriteFile(f, []byte(v2), 0o644); err != nil {
 		t.Fatalf("write v2: %v", err)
 	}
-	desired2, err := compiler.Compile([]string{f}, dir, pipeline.Default)
+	desired2, _, err := compiler.Compile([]string{f}, dir, pipeline.Default)
 	if err != nil {
 		t.Fatalf("compile v2: %v", err)
 	}
@@ -2254,7 +2254,7 @@ TABLE orders (
 	if err := os.WriteFile(f, []byte(v1), 0o644); err != nil {
 		t.Fatalf("write v1: %v", err)
 	}
-	desired, err := compiler.Compile([]string{f}, dir, pipeline.Default)
+	desired, _, err := compiler.Compile([]string{f}, dir, pipeline.Default)
 	if err != nil {
 		t.Fatalf("compile: %v", err)
 	}
@@ -2326,7 +2326,7 @@ func TestRoundtripUnnamedCheckConstraintNoLiveDrift(t *testing.T) {
 	if err := os.WriteFile(f, []byte(v1), 0o644); err != nil {
 		t.Fatalf("write v1: %v", err)
 	}
-	desired, err := compiler.Compile([]string{f}, dir, pipeline.Default)
+	desired, _, err := compiler.Compile([]string{f}, dir, pipeline.Default)
 	if err != nil {
 		t.Fatalf("compile: %v", err)
 	}
@@ -2427,7 +2427,7 @@ func TestRoundtripOperatorBodyEditAppliesLive(t *testing.T) {
 	if err := os.WriteFile(f, []byte(v2), 0o644); err != nil {
 		t.Fatalf("write v2: %v", err)
 	}
-	desired2, err := compiler.Compile([]string{f}, dir, pipeline.Default)
+	desired2, _, err := compiler.Compile([]string{f}, dir, pipeline.Default)
 	if err != nil {
 		t.Fatalf("compile v2: %v", err)
 	}
@@ -2551,7 +2551,7 @@ TABLE singles (
 	}
 	applyFixture(t, ctx, conn, []string{f}, dir, differ, emitter, applyExec, store)
 
-	desired, err := compiler.Compile([]string{f}, dir, pipeline.Default)
+	desired, _, err := compiler.Compile([]string{f}, dir, pipeline.Default)
 	if err != nil {
 		t.Fatalf("compile: %v", err)
 	}
@@ -2664,7 +2664,7 @@ TABLE singles (
 	}
 	applyFixture(t, ctx, conn, []string{f}, dir, differ, emitter, applyExec, store)
 
-	desired, err := compiler.Compile([]string{f}, dir, pipeline.Default)
+	desired, _, err := compiler.Compile([]string{f}, dir, pipeline.Default)
 	if err != nil {
 		t.Fatalf("compile: %v", err)
 	}
@@ -2766,7 +2766,7 @@ TABLE t2 (
 	}
 	applyFixture(t, ctx, conn, []string{f}, dir, differ, emitter, applyExec, store)
 
-	desired, err := compiler.Compile([]string{f}, dir, pipeline.Default)
+	desired, _, err := compiler.Compile([]string{f}, dir, pipeline.Default)
 	if err != nil {
 		t.Fatalf("compile: %v", err)
 	}
@@ -2869,7 +2869,7 @@ TABLE t2 (
 	}
 	applyFixture(t, ctx, conn, []string{f}, dir, differ, emitter, applyExec, store)
 
-	desired, err := compiler.Compile([]string{f}, dir, pipeline.Default)
+	desired, _, err := compiler.Compile([]string{f}, dir, pipeline.Default)
 	if err != nil {
 		t.Fatalf("compile: %v", err)
 	}
@@ -2975,7 +2975,7 @@ TABLE t4 (
 	}
 	applyFixture(t, ctx, conn, []string{f}, dir, differ, emitter, applyExec, store)
 
-	desired, err := compiler.Compile([]string{f}, dir, pipeline.Default)
+	desired, _, err := compiler.Compile([]string{f}, dir, pipeline.Default)
 	if err != nil {
 		t.Fatalf("compile: %v", err)
 	}
@@ -3095,7 +3095,7 @@ TABLE t3 (
 	}
 	applyFixture(t, ctx, conn, []string{f}, dir, differ, emitter, applyExec, store)
 
-	desired, err := compiler.Compile([]string{f}, dir, pipeline.Default)
+	desired, _, err := compiler.Compile([]string{f}, dir, pipeline.Default)
 	if err != nil {
 		t.Fatalf("compile: %v", err)
 	}
@@ -3208,7 +3208,7 @@ $$ {}`
 	}
 	applyFixture(t, ctx, conn, []string{f}, dir, differ, emitter, applyExec, store)
 
-	desired, err := compiler.Compile([]string{f}, dir, pipeline.Default)
+	desired, _, err := compiler.Compile([]string{f}, dir, pipeline.Default)
 	if err != nil {
 		t.Fatalf("compile: %v", err)
 	}
@@ -3288,7 +3288,7 @@ $$ {}`
 	if err := os.WriteFile(f, []byte(v2), 0o644); err != nil {
 		t.Fatalf("write v2: %v", err)
 	}
-	desired2, err := compiler.Compile([]string{f}, dir, pipeline.Default)
+	desired2, _, err := compiler.Compile([]string{f}, dir, pipeline.Default)
 	if err != nil {
 		t.Fatalf("compile v2: %v", err)
 	}
@@ -3380,7 +3380,7 @@ $$ {}`
 	if err := os.WriteFile(f, []byte(reformatted), 0o644); err != nil {
 		t.Fatalf("write reformatted: %v", err)
 	}
-	desired, err := compiler.Compile([]string{f}, dir, pipeline.Default)
+	desired, _, err := compiler.Compile([]string{f}, dir, pipeline.Default)
 	if err != nil {
 		t.Fatalf("compile reformatted: %v", err)
 	}
@@ -3405,7 +3405,7 @@ $$ {}`
 	if err := os.WriteFile(f, []byte(changed), 0o644); err != nil {
 		t.Fatalf("write changed: %v", err)
 	}
-	desired2, err := compiler.Compile([]string{f}, dir, pipeline.Default)
+	desired2, _, err := compiler.Compile([]string{f}, dir, pipeline.Default)
 	if err != nil {
 		t.Fatalf("compile changed: %v", err)
 	}
@@ -3478,7 +3478,7 @@ $$ {}`
 	if err := os.WriteFile(f, []byte(reformatted), 0o644); err != nil {
 		t.Fatalf("write reformatted: %v", err)
 	}
-	desired, err := compiler.Compile([]string{f}, dir, pipeline.Default)
+	desired, _, err := compiler.Compile([]string{f}, dir, pipeline.Default)
 	if err != nil {
 		t.Fatalf("compile reformatted: %v", err)
 	}
@@ -3506,7 +3506,7 @@ $$ {}`
 	if err := os.WriteFile(f, []byte(changed), 0o644); err != nil {
 		t.Fatalf("write changed: %v", err)
 	}
-	desired2, err := compiler.Compile([]string{f}, dir, pipeline.Default)
+	desired2, _, err := compiler.Compile([]string{f}, dir, pipeline.Default)
 	if err != nil {
 		t.Fatalf("compile changed: %v", err)
 	}
@@ -3597,7 +3597,7 @@ $$ {}`
 	if err := os.WriteFile(f, []byte(reformatted), 0o644); err != nil {
 		t.Fatalf("write reformatted: %v", err)
 	}
-	desired, err := compiler.Compile([]string{f}, dir, pipeline.Default)
+	desired, _, err := compiler.Compile([]string{f}, dir, pipeline.Default)
 	if err != nil {
 		t.Fatalf("compile reformatted: %v", err)
 	}
@@ -3623,7 +3623,7 @@ $$ {}`
 	if err := os.WriteFile(f, []byte(changed), 0o644); err != nil {
 		t.Fatalf("write changed: %v", err)
 	}
-	desired2, err := compiler.Compile([]string{f}, dir, pipeline.Default)
+	desired2, _, err := compiler.Compile([]string{f}, dir, pipeline.Default)
 	if err != nil {
 		t.Fatalf("compile changed: %v", err)
 	}
@@ -3708,7 +3708,7 @@ $$ {}`
 	if err := os.WriteFile(f, []byte(reformatted), 0o644); err != nil {
 		t.Fatalf("write reformatted: %v", err)
 	}
-	desired, err := compiler.Compile([]string{f}, dir, pipeline.Default)
+	desired, _, err := compiler.Compile([]string{f}, dir, pipeline.Default)
 	if err != nil {
 		t.Fatalf("compile reformatted: %v", err)
 	}
@@ -3733,7 +3733,7 @@ $$ {}`
 	if err := os.WriteFile(f, []byte(changed), 0o644); err != nil {
 		t.Fatalf("write changed: %v", err)
 	}
-	desired2, err := compiler.Compile([]string{f}, dir, pipeline.Default)
+	desired2, _, err := compiler.Compile([]string{f}, dir, pipeline.Default)
 	if err != nil {
 		t.Fatalf("compile changed: %v", err)
 	}
@@ -3815,7 +3815,7 @@ $$ {}`
 	if err := os.WriteFile(f, []byte(reformatted), 0o644); err != nil {
 		t.Fatalf("write reformatted: %v", err)
 	}
-	desired, err := compiler.Compile([]string{f}, dir, pipeline.Default)
+	desired, _, err := compiler.Compile([]string{f}, dir, pipeline.Default)
 	if err != nil {
 		t.Fatalf("compile reformatted: %v", err)
 	}
@@ -3838,7 +3838,7 @@ $$ {}`
 	if err := os.WriteFile(f, []byte(changed), 0o644); err != nil {
 		t.Fatalf("write changed: %v", err)
 	}
-	desired2, err := compiler.Compile([]string{f}, dir, pipeline.Default)
+	desired2, _, err := compiler.Compile([]string{f}, dir, pipeline.Default)
 	if err != nil {
 		t.Fatalf("compile changed: %v", err)
 	}
@@ -3904,7 +3904,7 @@ $$ {}`
 	}
 	applyFixture(t, ctx, conn, []string{f}, dir, differ, emitter, applyExec, store)
 
-	desired, err := compiler.Compile([]string{f}, dir, pipeline.Default)
+	desired, _, err := compiler.Compile([]string{f}, dir, pipeline.Default)
 	if err != nil {
 		t.Fatalf("compile: %v", err)
 	}
@@ -3981,7 +3981,7 @@ $$ {}`
 	if err := os.WriteFile(f, []byte(v2), 0o644); err != nil {
 		t.Fatalf("write v2: %v", err)
 	}
-	desired2, err := compiler.Compile([]string{f}, dir, pipeline.Default)
+	desired2, _, err := compiler.Compile([]string{f}, dir, pipeline.Default)
 	if err != nil {
 		t.Fatalf("compile v2: %v", err)
 	}
@@ -4060,7 +4060,7 @@ $$ {}`
 	}
 	applyFixture(t, ctx, conn, []string{f}, dir, differ, emitter, applyExec, store)
 
-	desired, err := compiler.Compile([]string{f}, dir, pipeline.Default)
+	desired, _, err := compiler.Compile([]string{f}, dir, pipeline.Default)
 	if err != nil {
 		t.Fatalf("compile: %v", err)
 	}
@@ -4144,7 +4144,7 @@ $$ {}`
 	if err := os.WriteFile(f, []byte(v2), 0o644); err != nil {
 		t.Fatalf("write v2: %v", err)
 	}
-	desired2, err := compiler.Compile([]string{f}, dir, pipeline.Default)
+	desired2, _, err := compiler.Compile([]string{f}, dir, pipeline.Default)
 	if err != nil {
 		t.Fatalf("compile v2: %v", err)
 	}
@@ -4248,7 +4248,7 @@ $$ {}`
 	}
 	applyFixture(t, ctx, conn, []string{f}, dir, differ, emitter, applyExec, store)
 
-	desired, err := compiler.Compile([]string{f}, dir, pipeline.Default)
+	desired, _, err := compiler.Compile([]string{f}, dir, pipeline.Default)
 	if err != nil {
 		t.Fatalf("compile: %v", err)
 	}
@@ -4355,7 +4355,7 @@ $$ {}`
 	}
 	applyFixture(t, ctx, conn, []string{f}, dir, differ, emitter, applyExec, store)
 
-	desired, err := compiler.Compile([]string{f}, dir, pipeline.Default)
+	desired, _, err := compiler.Compile([]string{f}, dir, pipeline.Default)
 	if err != nil {
 		t.Fatalf("compile: %v", err)
 	}

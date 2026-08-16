@@ -33,7 +33,7 @@ func writeDPG(t *testing.T, path, content string) {
 
 func compile(t *testing.T, dbDir string, files []string) []pipeline.IRObject {
 	t.Helper()
-	out, err := compiler.Compile(files, dbDir, pipeline.Default)
+	out, _, err := compiler.Compile(files, dbDir, pipeline.Default)
 	if err != nil {
 		t.Fatalf("Compile: %v", err)
 	}
@@ -295,7 +295,7 @@ func TestCompile_SchemaBlockInSchemasDirErrors(t *testing.T) {
 	f := filepath.Join(dbDir, "schemas", "iam", "schema.dpg")
 	writeDPG(t, f, `SCHEMA iam {}`)
 
-	_, err := compiler.Compile([]string{f}, dbDir, pipeline.Default)
+	_, _, err := compiler.Compile([]string{f}, dbDir, pipeline.Default)
 	if err == nil {
 		t.Fatal("expected error for SCHEMA block inside schemas/ directory")
 	}
@@ -324,6 +324,51 @@ func TestCompile_MultiFileTableMerge(t *testing.T) {
 	}
 	if len(tbl.Columns) != 2 {
 		t.Errorf("merged Columns: expected 2, got %d", len(tbl.Columns))
+	}
+}
+
+// TestCompile_MultiFileScalarMergeConflict proves Compile's second return
+// value surfaces a real scalar-merge-conflict diagnostic (RFC §19.1) when
+// two files declare the same table with a conflicting OWNER — the same
+// last-file-wins-plus-diagnostic behavior internal/merger's own unit tests
+// exercise directly, verified here end-to-end through the real compiler
+// pipeline (scan/parse/build), not a hand-built IR fixture.
+func TestCompile_MultiFileScalarMergeConflict(t *testing.T) {
+	dbDir := t.TempDir()
+	f1 := filepath.Join(dbDir, "schemas", "app", "a_tables.dpg")
+	f2 := filepath.Join(dbDir, "schemas", "app", "b_tables.dpg")
+	writeDPG(t, f1, `TABLE users (id BIGINT NOT NULL) { OWNER "alice"; }`)
+	writeDPG(t, f2, `TABLE users (email TEXT NOT NULL) { OWNER "bob"; }`)
+
+	objects, mergeDiags, err := compiler.Compile([]string{f1, f2}, dbDir, pipeline.Default)
+	if err != nil {
+		t.Fatalf("Compile: %v", err)
+	}
+
+	var conflicts []pipeline.LintDiagnostic
+	for _, d := range mergeDiags {
+		if d.Rule == "scalar-merge-conflict" {
+			conflicts = append(conflicts, d)
+		}
+	}
+	if len(conflicts) != 1 {
+		t.Fatalf("expected 1 scalar-merge-conflict diagnostic, got %d: %v", len(conflicts), mergeDiags)
+	}
+
+	var tbl *ir.Table
+	for _, o := range objects {
+		if t2, ok := o.(*ir.Table); ok && t2.Name == "users" {
+			tbl = t2
+			break
+		}
+	}
+	if tbl == nil {
+		t.Fatal("merged 'users' table not found")
+	}
+	// Last-file-wins is unaffected by the diagnostic (RFC §3.7: "the winning
+	// value is used regardless").
+	if tbl.Owner == nil || *tbl.Owner != "bob" {
+		t.Errorf("Owner (last-wins, regardless of conflict): got %v", tbl.Owner)
 	}
 }
 
@@ -366,7 +411,7 @@ TABLE users (
 // ── File not found ────────────────────────────────────────────────────────────
 
 func TestCompile_MissingFileErrors(t *testing.T) {
-	_, err := compiler.Compile([]string{"/nonexistent/file.dpg"}, "/nonexistent", pipeline.Default)
+	_, _, err := compiler.Compile([]string{"/nonexistent/file.dpg"}, "/nonexistent", pipeline.Default)
 	if err == nil {
 		t.Fatal("expected error for missing file")
 	}
@@ -375,7 +420,7 @@ func TestCompile_MissingFileErrors(t *testing.T) {
 // ── No files ──────────────────────────────────────────────────────────────────
 
 func TestCompile_EmptyFileList(t *testing.T) {
-	objects, err := compiler.Compile(nil, t.TempDir(), pipeline.Default)
+	objects, _, err := compiler.Compile(nil, t.TempDir(), pipeline.Default)
 	if err != nil {
 		t.Fatalf("Compile with nil files: %v", err)
 	}

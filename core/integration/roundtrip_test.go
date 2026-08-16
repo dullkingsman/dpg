@@ -88,7 +88,7 @@ func TestRoundtrip(t *testing.T) {
 	schemaDir := filepath.Dir(schemaFile)
 
 	// ── Step 1: Compile desired state ────────────────────────────────────────
-	desired, err := compiler.Compile([]string{schemaFile}, schemaDir, pipeline.Default)
+	desired, _, err := compiler.Compile([]string{schemaFile}, schemaDir, pipeline.Default)
 	if err != nil {
 		t.Fatalf("compile: %v", err)
 	}
@@ -224,7 +224,7 @@ VIEW active_users AS
 		t.Fatalf("write extended schema: %v", err)
 	}
 
-	desired2, err := compiler.Compile([]string{extFile}, dir, pipeline.Default)
+	desired2, _, err := compiler.Compile([]string{extFile}, dir, pipeline.Default)
 	if err != nil {
 		t.Fatalf("compile extended: %v", err)
 	}
@@ -337,7 +337,7 @@ VIEW active_users AS
 		t.Fatalf("write extended schema: %v", err)
 	}
 
-	desired2, err := compiler.Compile([]string{extFile}, dir, pipeline.Default)
+	desired2, _, err := compiler.Compile([]string{extFile}, dir, pipeline.Default)
 	if err != nil {
 		t.Fatalf("compile extended: %v", err)
 	}
@@ -451,7 +451,7 @@ $$ {}`
 		t.Fatalf("populate live snapshot: %v", err)
 	}
 
-	desired, err := compiler.Compile([]string{f}, dir, pipeline.Default)
+	desired, _, err := compiler.Compile([]string{f}, dir, pipeline.Default)
 	if err != nil {
 		t.Fatalf("compile: %v", err)
 	}
@@ -512,7 +512,7 @@ func TestRoundtripSequence(t *testing.T) {
 		t.Fatalf("populate live snapshot: %v", err)
 	}
 
-	desired, err := compiler.Compile([]string{f}, dir, pipeline.Default)
+	desired, _, err := compiler.Compile([]string{f}, dir, pipeline.Default)
 	if err != nil {
 		t.Fatalf("compile: %v", err)
 	}
@@ -542,7 +542,7 @@ func applyFixture(
 ) {
 	t.Helper()
 
-	desired, err := compiler.Compile(files, dbDir, pipeline.Default)
+	desired, _, err := compiler.Compile(files, dbDir, pipeline.Default)
 	if err != nil {
 		t.Fatalf("compile: %v", err)
 	}

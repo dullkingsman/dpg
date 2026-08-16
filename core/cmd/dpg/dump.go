@@ -212,7 +212,7 @@ func runDump(
 	// what `plan` reads back).
 	dbSnapObjects := dbObjects
 	if len(dpgFiles) > 0 {
-		if compiled, compileErr := compiler.Compile(dpgFiles, outDir, pipeline.Default); compileErr == nil {
+		if compiled, _, compileErr := compiler.Compile(dpgFiles, outDir, pipeline.Default); compileErr == nil {
 			dbSnapObjects = compiled
 		} else {
 			fmt.Fprintf(os.Stderr, "%s  dumped source did not recompile for %s/%s; snapshot built from live catalog instead: %v\n",
@@ -233,7 +233,7 @@ func runDump(
 	if len(clusterObjects) > 0 {
 		clusterSnapObjects := clusterObjects
 		if len(clusterDPGFiles) > 0 {
-			if compiled, compileErr := compiler.Compile(clusterDPGFiles, cl.ObjectsDir, pipeline.Default); compileErr == nil {
+			if compiled, _, compileErr := compiler.Compile(clusterDPGFiles, cl.ObjectsDir, pipeline.Default); compileErr == nil {
 				clusterSnapObjects = compiled
 			} else {
 				fmt.Fprintf(os.Stderr, "%s  dumped cluster source did not recompile for %s; snapshot built from live catalog instead: %v\n",
@@ -269,7 +269,7 @@ func mergeExistingVirtualTypes(db *project.Database) []pipeline.IRObject {
 	if len(db.SourceFiles) == 0 {
 		return nil
 	}
-	compiled, err := compiler.Compile(db.SourceFiles, db.Dir, pipeline.Default)
+	compiled, _, err := compiler.Compile(db.SourceFiles, db.Dir, pipeline.Default)
 	if err != nil {
 		// Not fatal to the dump itself — the live catalog's own objects are
 		// still valid and worth writing. Surfaced so the loss isn't silent.

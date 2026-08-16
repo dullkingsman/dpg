@@ -228,6 +228,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `warn_on_deprecated` config flag as the base `deprecated` rule; an
   already-deprecated referencing object never double-fires (its own
   `deprecated` diagnostic already covers it).
+- `scalar-merge-conflict` built-in linter rule, closing the last RFC-§19.1
+  rule that had no implementation anywhere: warns when two `.dpg` files
+  declare the same object and set the same scalar property (owner,
+  comment, RLS flags, `PROTECTED`, `DEPRECATED`, sequence options, role
+  attributes, `OPTIONS` entries, `DOMAIN`'s base type/default, ...) to
+  different values. Unlike every other rule, this one is computed by
+  `pipeline.Merger.Merge` itself (`internal/merger`'s new
+  `conflictTracker`), not `internal/linter`'s per-object dispatch — the
+  merge stage is the only place that still has each file's individual
+  value before they collapse into one. Real per-field merge logic (with
+  conflict tracking) was written for the first time for 9 object kinds
+  that previously fell through to a blind whole-object last-wins default
+  with no field-level merging at all: `PROCEDURE`, `AGGREGATE`,
+  `SEQUENCE`, `EXTENSION`, `ROLE`, `TABLESPACE`,
+  `FOREIGN DATA WRAPPER`, `SERVER`, `USER MAPPING`; `DOMAIN`'s base
+  type/default/not-null were bundled into the same pass. Gated by
+  `warn_on_scalar_merge_conflict` (already existed as a `dpg.toml` field
+  since early in the project, previously dead code — read nowhere) via
+  the new `internal/linter.FilterMergeDiagnostics`, applied uniformly by
+  `plan`/`apply`/`validate` alongside `Linter.Lint`'s own diagnostics
+  (including under `--strict` and `[linter.rules]`). The opaque/
+  reconstruction-tier object kinds (`PUBLICATION`, `EVENT TRIGGER`,
+  `CAST`, `OPERATOR`/`OPERATOR CLASS`/`FAMILY`, `TEXT SEARCH` kinds,
+  `STATISTICS`) are NOT covered — still the old blind last-object-wins
+  default, a real explicit residual, not an oversight. See RFC §3.7 and
+  Appendix D.3 for the full specification.
+
+### Changed
+
+- **BREAKING:** `pipeline.Merger.Merge` and `internal/compiler.Compile`
+  (and therefore `pkg/dpg.Compile`) each gained a second return value,
+  `[]pipeline.LintDiagnostic` (`[]dpg.LintDiagnostic` for the public SDK) —
+  the `scalar-merge-conflict` diagnostics described above. Any code calling
+  `compiler.Compile`/`dpg.Compile`/a custom `pipeline.Merger` implementation
+  directly needs to accept the new middle return value; a custom
+  `pipeline.Merger` implementation needs to update its `Merge` signature to
+  match and may return `nil` for the new value if it has nothing to report.
+  `pkg/dpg` gained `FilterMergeDiagnostics`/`ApplyRuleSeverityOverrides`
+  wrapper functions so external consumers can replicate the CLI's gating
+  logic without importing `internal/linter`, which is inaccessible to them.
 
 ### Fixed
 

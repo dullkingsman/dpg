@@ -500,6 +500,54 @@ func TestLintRuleSeverityOverrideUnrelatedRuleUnaffected(t *testing.T) {
 	}
 }
 
+// ── FilterMergeDiagnostics (scalar-merge-conflict gating) ──────────────────────
+
+func TestFilterMergeDiagnosticsGatingDisabled(t *testing.T) {
+	mergeDiags := []pipeline.LintDiagnostic{
+		{Rule: "scalar-merge-conflict", Message: "table public.t: owner conflicts"},
+	}
+	got := FilterMergeDiagnostics(mergeDiags, pipeline.LinterConfig{WarnOnScalarMergeConflict: false})
+	if len(got) != 0 {
+		t.Errorf("WarnOnScalarMergeConflict=false should drop all merge diagnostics, got %v", got)
+	}
+}
+
+func TestFilterMergeDiagnosticsGatingEnabled(t *testing.T) {
+	mergeDiags := []pipeline.LintDiagnostic{
+		{Rule: "scalar-merge-conflict", Message: "table public.t: owner conflicts"},
+	}
+	got := FilterMergeDiagnostics(mergeDiags, pipeline.LinterConfig{WarnOnScalarMergeConflict: true})
+	if len(got) != 1 {
+		t.Errorf("WarnOnScalarMergeConflict=true should pass merge diagnostics through, got %v", got)
+	}
+}
+
+func TestFilterMergeDiagnosticsRuleSeverityOverrideOff(t *testing.T) {
+	mergeDiags := []pipeline.LintDiagnostic{
+		{Rule: "scalar-merge-conflict", Message: "table public.t: owner conflicts"},
+	}
+	got := FilterMergeDiagnostics(mergeDiags, pipeline.LinterConfig{
+		WarnOnScalarMergeConflict: true,
+		Rules:                     map[string]string{"scalar-merge-conflict": "off"},
+	})
+	if len(got) != 0 {
+		t.Errorf("[linter.rules] \"off\" should independently suppress scalar-merge-conflict, got %v", got)
+	}
+}
+
+func TestFilterMergeDiagnosticsRuleSeverityOverrideError(t *testing.T) {
+	mergeDiags := []pipeline.LintDiagnostic{
+		{Rule: "scalar-merge-conflict", Message: "table public.t: owner conflicts"},
+	}
+	got := FilterMergeDiagnostics(mergeDiags, pipeline.LinterConfig{
+		WarnOnScalarMergeConflict: true,
+		Rules:                     map[string]string{"scalar-merge-conflict": "error"},
+	})
+	if len(got) != 1 || !got[0].IsError {
+		t.Errorf("[linter.rules] \"error\" should promote scalar-merge-conflict, got %v", got)
+	}
+}
+
 func TestLintRegistration(t *testing.T) {
 	l, ok := pipeline.Resolve[pipeline.Linter](pipeline.Default, pipeline.KeyLinter)
 	if !ok {

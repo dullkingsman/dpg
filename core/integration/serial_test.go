@@ -48,7 +48,7 @@ func TestRoundtripSerialColumn(t *testing.T) {
 		t.Fatalf("write schema: %v", err)
 	}
 
-	desired, err := compiler.Compile([]string{schemaFile}, dir, pipeline.Default)
+	desired, _, err := compiler.Compile([]string{schemaFile}, dir, pipeline.Default)
 	if err != nil {
 		t.Fatalf("compile: %v", err)
 	}

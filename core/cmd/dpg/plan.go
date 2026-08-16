@@ -14,6 +14,7 @@ import (
 	"github.com/dullkingsman/dpg/internal/config"
 	"github.com/dullkingsman/dpg/internal/emit"
 	"github.com/dullkingsman/dpg/internal/executor"
+	"github.com/dullkingsman/dpg/internal/linter"
 	"github.com/dullkingsman/dpg/internal/pipeline"
 	"github.com/dullkingsman/dpg/internal/project"
 	snapshotpkg "github.com/dullkingsman/dpg/internal/snapshot"
@@ -239,19 +240,21 @@ func buildPlan(
 ) (pipeline.Migration, error) {
 	errColor := ui.IsColorEnabled(os.Stderr)
 
-	desired, err := compiler.Compile(db.SourceFiles, db.Dir, pipeline.Default)
+	desired, mergeDiags, err := compiler.Compile(db.SourceFiles, db.Dir, pipeline.Default)
 	if err != nil {
 		return pipeline.Migration{}, err
 	}
 
-	if linter, ok := pipeline.Resolve[pipeline.Linter](pipeline.Default, pipeline.KeyLinter); ok {
-		diags, lintErr := linter.Lint(desired, lintCfg)
+	diags := linter.FilterMergeDiagnostics(mergeDiags, lintCfg)
+	if l, ok := pipeline.Resolve[pipeline.Linter](pipeline.Default, pipeline.KeyLinter); ok {
+		lintDiags, lintErr := l.Lint(desired, lintCfg)
 		if lintErr != nil {
 			return pipeline.Migration{}, lintErr
 		}
-		if ui.PrintLintDiagnostics(os.Stderr, diags, errColor) {
-			return pipeline.Migration{}, ui.ErrSilent
-		}
+		diags = append(diags, lintDiags...)
+	}
+	if ui.PrintLintDiagnostics(os.Stderr, diags, errColor) {
+		return pipeline.Migration{}, ui.ErrSilent
 	}
 
 	ops, err := differ.Diff(desired, snap)
@@ -306,19 +309,21 @@ func buildClusterPlan(
 ) (pipeline.Migration, error) {
 	errColor := ui.IsColorEnabled(os.Stderr)
 
-	desired, err := compiler.Compile(cl.SourceFiles, cl.ObjectsDir, pipeline.Default)
+	desired, mergeDiags, err := compiler.Compile(cl.SourceFiles, cl.ObjectsDir, pipeline.Default)
 	if err != nil {
 		return pipeline.Migration{}, err
 	}
 
-	if linter, ok := pipeline.Resolve[pipeline.Linter](pipeline.Default, pipeline.KeyLinter); ok {
-		diags, lintErr := linter.Lint(desired, lintCfg)
+	diags := linter.FilterMergeDiagnostics(mergeDiags, lintCfg)
+	if l, ok := pipeline.Resolve[pipeline.Linter](pipeline.Default, pipeline.KeyLinter); ok {
+		lintDiags, lintErr := l.Lint(desired, lintCfg)
 		if lintErr != nil {
 			return pipeline.Migration{}, lintErr
 		}
-		if ui.PrintLintDiagnostics(os.Stderr, diags, errColor) {
-			return pipeline.Migration{}, ui.ErrSilent
-		}
+		diags = append(diags, lintDiags...)
+	}
+	if ui.PrintLintDiagnostics(os.Stderr, diags, errColor) {
+		return pipeline.Migration{}, ui.ErrSilent
 	}
 
 	ops, err := differ.Diff(desired, snap)

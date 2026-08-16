@@ -52,7 +52,7 @@ func TestDumpSerialColumnReapplies(t *testing.T) {
 		t.Fatalf("write schema: %v", err)
 	}
 
-	desired, err := compiler.Compile([]string{schemaFile}, dir, pipeline.Default)
+	desired, _, err := compiler.Compile([]string{schemaFile}, dir, pipeline.Default)
 	if err != nil {
 		t.Fatalf("compile: %v", err)
 	}
@@ -109,7 +109,7 @@ func TestDumpSerialColumnReapplies(t *testing.T) {
 		t.Fatalf("write dumped source: %v", err)
 	}
 
-	redesired, err := compiler.Compile([]string{dumpFile}, dumpDir, pipeline.Default)
+	redesired, _, err := compiler.Compile([]string{dumpFile}, dumpDir, pipeline.Default)
 	if err != nil {
 		t.Fatalf("dumped source failed to recompile: %v\n---\n%s", err, rendered)
 	}

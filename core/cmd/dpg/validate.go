@@ -9,6 +9,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/dullkingsman/dpg/internal/compiler"
+	dpglinter "github.com/dullkingsman/dpg/internal/linter"
 	"github.com/dullkingsman/dpg/internal/pipeline"
 	"github.com/dullkingsman/dpg/internal/ui"
 )
@@ -132,7 +133,7 @@ func runValidate(
 ) (bool, error) {
 	color := ui.IsColorEnabled(os.Stderr)
 
-	desired, err := compiler.Compile(files, dbDir, pipeline.Default)
+	desired, mergeDiags, err := compiler.Compile(files, dbDir, pipeline.Default)
 	if err != nil {
 		if format == "json" {
 			errors := compileErrsToDiagnostics(err)
@@ -147,12 +148,13 @@ func runValidate(
 		return true, err
 	}
 
-	var diags []pipeline.LintDiagnostic
+	diags := dpglinter.FilterMergeDiagnostics(mergeDiags, lintCfg)
 	if linter != nil {
-		diags, err = linter.Lint(desired, lintCfg)
+		lintDiags, err := linter.Lint(desired, lintCfg)
 		if err != nil {
 			return true, err
 		}
+		diags = append(diags, lintDiags...)
 	}
 
 	// --strict promotes all warnings to errors.

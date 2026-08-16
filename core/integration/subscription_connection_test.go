@@ -178,7 +178,7 @@ func TestSubscriptionConnectionSecretRoundtrip(t *testing.T) {
 		t.Fatalf("write fixture: %v", err)
 	}
 
-	desired, err := compiler.Compile([]string{f}, dir, pipeline.Default)
+	desired, _, err := compiler.Compile([]string{f}, dir, pipeline.Default)
 	if err != nil {
 		t.Fatalf("compile: %v", err)
 	}

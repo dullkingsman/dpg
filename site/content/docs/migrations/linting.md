@@ -214,6 +214,36 @@ Scoped to `FOREIGN KEY` and `TYPE` references only — a `VIEW` query, a functio
 
 ---
 
+## `scalar-merge-conflict`
+
+**Severity:** Warning — **Config:** `warn_on_scalar_merge_conflict` — **Default:** enabled
+
+Warns when two `.dpg` files declare the same object and set the same scalar property to different values — the alphabetically-last file's value always wins (Section 3.7), this rule only adds visibility into when that happened:
+
+```sql
+-- a_users.dpg
+TABLE users ( id integer PRIMARY KEY )
+{
+    OWNER "alice";
+}
+
+-- b_users.dpg
+TABLE users ( email text )
+{
+    OWNER "bob";   -- conflicts with a_users.dpg's OWNER "alice"
+}
+```
+
+```
+warn  [scalar-merge-conflict] table public.users: owner set to "alice" in a_users.dpg, overridden by "bob" from b_users.dpg
+```
+
+Unlike every other rule on this page, this one is computed by the merge stage itself (`pipeline.Merger.Merge`), not the linter's own per-object checks — the merge stage is the only place that still has each file's individual value; by the time `Linter.Lint` runs, the files have already been merged into one value per property. `dpg plan`/`apply`/`validate` all surface it identically to any other lint warning, including under `--strict` and `[linter.rules]`.
+
+Covers every property already documented as last-file-wins in Section 3.7 (owner, comment, RLS flags, `PROTECTED`, `DEPRECATED`, `DROP CASCADE`, `RENAMED FROM`, drop behaviour) across `TABLE`, `VIEW`, `FUNCTION`, `PROCEDURE`, `AGGREGATE`, `SCHEMA`, `TYPE` (including `DOMAIN`'s base type and default), `SEQUENCE`, `EXTENSION`, `ROLE`, `TABLESPACE`, `FOREIGN DATA WRAPPER`, `SERVER`, and `USER MAPPING` — a `USER MAPPING`/FDW/`SERVER`'s `OPTIONS` are checked key by key, so two files setting different keys never conflict. Set-valued properties (indexes, constraints, grants, role membership lists, etc.) already use union semantics and are never flagged. The opaque/reconstruction-tier object kinds (`PUBLICATION`, `EVENT TRIGGER`, `CAST`, `OPERATOR` and friends, `TEXT SEARCH` kinds, `STATISTICS`) are not yet covered — a real, explicit residual, see `rfc/dpg-1.md` Appendix D.3.
+
+---
+
 ## `[linter.rules]` — per-rule severity overrides
 
 Individual rules can be set to `"error"`, `"warning"`, or `"off"`, overriding their own default level:
@@ -225,10 +255,6 @@ deprecated                   = "off"
 ```
 
 An `"off"` rule is suppressed entirely (no diagnostic emitted at all). An `"error"` override behaves like `--strict`, but scoped to just that rule.
-
----
-
-**Not yet implemented:** RFC §19.1 also documents `scalar_merge_conflict` (conflicting scalar values for the same property across multiple files — despite `warn_on_scalar_merge_conflict` existing as a `dpg.toml` field, it isn't read anywhere yet). It needs real new infrastructure before it's checkable — see `rfc/dpg-1.md` Appendix D.3 for the scoped explanation.
 
 ---
 

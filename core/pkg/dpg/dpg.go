@@ -3,6 +3,7 @@ package dpg
 import (
 	"github.com/dullkingsman/dpg/internal/compiler"
 	"github.com/dullkingsman/dpg/internal/ir"
+	"github.com/dullkingsman/dpg/internal/linter"
 	"github.com/dullkingsman/dpg/internal/pipeline"
 	"github.com/dullkingsman/dpg/internal/project"
 
@@ -11,7 +12,6 @@ import (
 	_ "github.com/dullkingsman/dpg/internal/diff"
 	_ "github.com/dullkingsman/dpg/internal/emit"
 	_ "github.com/dullkingsman/dpg/internal/graph"
-	_ "github.com/dullkingsman/dpg/internal/linter"
 	_ "github.com/dullkingsman/dpg/internal/merger"
 	_ "github.com/dullkingsman/dpg/internal/pgparser"
 	_ "github.com/dullkingsman/dpg/internal/scanner"
@@ -528,20 +528,44 @@ func (c *chainLinter) Lint(objects []IRObject, cfg LinterConfig) ([]LintDiagnost
 // through the full compilation pipeline (scan → parse → IR → merge →
 // topological sort), and returns a sorted slice of fully-resolved IRObjects.
 //
+// The second return value holds "scalar-merge-conflict" LintDiagnostics
+// (RFC §19.1) surfaced by the merge stage — always populated regardless of
+// LinterConfig; pass it through FilterMergeDiagnostics (with the same
+// LinterConfig later given to Lint) before combining it with Lint's own
+// diagnostics, the same gating the built-in CLI applies.
+//
 // The Default registry is used. All built-in pipeline stages are registered
 // automatically via init() when this package is imported.
-func Compile(files []string, dbDir string) ([]IRObject, error) {
+func Compile(files []string, dbDir string) ([]IRObject, []LintDiagnostic, error) {
 	return compiler.Compile(files, dbDir, pipeline.Default)
 }
 
 // Lint runs the built-in linter rules over the compiled IR and returns
 // diagnostics. It uses the Linter registered in the Default registry.
 func Lint(objects []IRObject, cfg LinterConfig) ([]LintDiagnostic, error) {
-	linter, err := pipeline.MustResolve[pipeline.Linter](pipeline.Default, pipeline.KeyLinter)
+	l, err := pipeline.MustResolve[pipeline.Linter](pipeline.Default, pipeline.KeyLinter)
 	if err != nil {
 		return nil, err
 	}
-	return linter.Lint(objects, cfg)
+	return l.Lint(objects, cfg)
+}
+
+// FilterMergeDiagnostics applies scalar-merge-conflict's gating
+// (LinterConfig.WarnOnScalarMergeConflict and any [linter.rules] override)
+// to the diagnostics Compile's second return value carries. Thin wrapper
+// around internal/linter.FilterMergeDiagnostics, re-exported here because
+// external consumers of this package cannot import internal/linter
+// directly — see that function's doc comment for the full gating rationale.
+func FilterMergeDiagnostics(mergeDiags []LintDiagnostic, cfg LinterConfig) []LintDiagnostic {
+	return linter.FilterMergeDiagnostics(mergeDiags, cfg)
+}
+
+// ApplyRuleSeverityOverrides applies [linter.rules] (RFC §19.2) per-rule
+// severity overrides ("error"/"warning"/"off") to diags, matched by
+// d.Rule. Thin wrapper around internal/linter.ApplyRuleSeverityOverrides,
+// re-exported for the same reason as FilterMergeDiagnostics above.
+func ApplyRuleSeverityOverrides(diags []LintDiagnostic, rules map[string]string) []LintDiagnostic {
+	return linter.ApplyRuleSeverityOverrides(diags, rules)
 }
 
 // Diff compares desired IR state against snap and returns the ordered set of

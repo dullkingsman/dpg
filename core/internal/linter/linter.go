@@ -30,18 +30,39 @@ func (l *BuiltinLinter) Lint(objects []pipeline.IRObject, cfg pipeline.LinterCon
 	}
 	diags = append(diags, checkCrossObjectRules(objects, cfg)...)
 
-	return applyRuleSeverityOverrides(diags, cfg.Rules), nil
+	return ApplyRuleSeverityOverrides(diags, cfg.Rules), nil
 }
 
-// applyRuleSeverityOverrides applies RFC §19.2's [linter.rules] per-rule
+// FilterMergeDiagnostics applies scalar-merge-conflict's own gating to the
+// diagnostics returned by pipeline.Merger.Merge (via compiler.Compile's
+// second return value): dropped entirely when
+// cfg.WarnOnScalarMergeConflict is false, otherwise passed through
+// ApplyRuleSeverityOverrides so [linter.rules] can still independently
+// promote/demote/silence the rule by ID, same as every other rule. The
+// merger itself is deliberately config-unaware (no algorithmic reason to
+// couple it to LinterConfig) — this is the one place that gating logic
+// lives, mirroring how ApplyRuleSeverityOverrides is itself the one place
+// [linter.rules] gating lives for Lint's own diagnostics.
+func FilterMergeDiagnostics(mergeDiags []pipeline.LintDiagnostic, cfg pipeline.LinterConfig) []pipeline.LintDiagnostic {
+	if !cfg.WarnOnScalarMergeConflict {
+		return nil
+	}
+	return ApplyRuleSeverityOverrides(mergeDiags, cfg.Rules)
+}
+
+// ApplyRuleSeverityOverrides applies RFC §19.2's [linter.rules] per-rule
 // severity overrides ("error", "warning", or "off") to diags, matched by
 // d.Rule. A rule ID absent from rules is left at its own default severity.
 // This runs once here, inside the one function every external Lint caller
 // (plan/apply/validate/pkg/dpg) converges on, rather than being duplicated
 // at each call site — the same reasoning --strict's existing per-command
 // IsError-promotion loops don't apply to, since those only run at 2 of the
-// 5 call sites today.
-func applyRuleSeverityOverrides(diags []pipeline.LintDiagnostic, rules map[string]string) []pipeline.LintDiagnostic {
+// 5 call sites today. Exported so callers combining Lint's diagnostics with
+// Merger.Merge's (via FilterMergeDiagnostics above) can apply the identical
+// override logic to both without duplicating it — also re-exported from
+// pkg/dpg for external Go-API consumers, who can't import this internal
+// package directly.
+func ApplyRuleSeverityOverrides(diags []pipeline.LintDiagnostic, rules map[string]string) []pipeline.LintDiagnostic {
 	if len(rules) == 0 {
 		return diags
 	}
@@ -270,7 +291,7 @@ func checkCrossObjectRules(objects []pipeline.IRObject, cfg pipeline.LinterConfi
 	// deprecated-reference has no dedicated RFC-documented config toggle —
 	// kept under the same WarnOnDeprecated gate as the base "deprecated"
 	// rule (checkTable/checkView/checkFunction), while [linter.rules] still
-	// allows independent per-rule override via applyRuleSeverityOverrides.
+	// allows independent per-rule override via ApplyRuleSeverityOverrides.
 	if cfg.WarnOnDeprecated {
 		diags = append(diags, checkDeprecatedReference(objects)...)
 	}

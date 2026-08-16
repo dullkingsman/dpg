@@ -15,6 +15,7 @@ import (
 	"github.com/dullkingsman/dpg/internal/emit"
 	"github.com/dullkingsman/dpg/internal/executor"
 	"github.com/dullkingsman/dpg/internal/ir"
+	"github.com/dullkingsman/dpg/internal/linter"
 	"github.com/dullkingsman/dpg/internal/pipeline"
 	"github.com/dullkingsman/dpg/internal/project"
 	snapshotpkg "github.com/dullkingsman/dpg/internal/snapshot"
@@ -157,24 +158,26 @@ func runApply(
 	color := ui.IsColorEnabled(os.Stdout)
 	errColor := ui.IsColorEnabled(os.Stderr)
 
-	desired, err := compiler.Compile(db.SourceFiles, db.Dir, pipeline.Default)
+	desired, mergeDiags, err := compiler.Compile(db.SourceFiles, db.Dir, pipeline.Default)
 	if err != nil {
 		return err
 	}
 
-	if linter, ok := pipeline.Resolve[pipeline.Linter](pipeline.Default, pipeline.KeyLinter); ok {
-		diags, lintErr := linter.Lint(desired, opts.lintCfg)
+	diags := linter.FilterMergeDiagnostics(mergeDiags, opts.lintCfg)
+	if l, ok := pipeline.Resolve[pipeline.Linter](pipeline.Default, pipeline.KeyLinter); ok {
+		lintDiags, lintErr := l.Lint(desired, opts.lintCfg)
 		if lintErr != nil {
 			return lintErr
 		}
-		if opts.strict {
-			for i := range diags {
-				diags[i].IsError = true
-			}
+		diags = append(diags, lintDiags...)
+	}
+	if opts.strict {
+		for i := range diags {
+			diags[i].IsError = true
 		}
-		if ui.PrintLintDiagnostics(os.Stderr, diags, errColor) {
-			return ui.ErrSilent
-		}
+	}
+	if ui.PrintLintDiagnostics(os.Stderr, diags, errColor) {
+		return ui.ErrSilent
 	}
 
 	snap, err := store.Load(cl.Name(), db.Name())
@@ -337,24 +340,26 @@ func runClusterApply(
 	color := ui.IsColorEnabled(os.Stdout)
 	errColor := ui.IsColorEnabled(os.Stderr)
 
-	desired, err := compiler.Compile(cl.SourceFiles, cl.ObjectsDir, pipeline.Default)
+	desired, mergeDiags, err := compiler.Compile(cl.SourceFiles, cl.ObjectsDir, pipeline.Default)
 	if err != nil {
 		return err
 	}
 
-	if linter, ok := pipeline.Resolve[pipeline.Linter](pipeline.Default, pipeline.KeyLinter); ok {
-		diags, lintErr := linter.Lint(desired, opts.lintCfg)
+	diags := linter.FilterMergeDiagnostics(mergeDiags, opts.lintCfg)
+	if l, ok := pipeline.Resolve[pipeline.Linter](pipeline.Default, pipeline.KeyLinter); ok {
+		lintDiags, lintErr := l.Lint(desired, opts.lintCfg)
 		if lintErr != nil {
 			return lintErr
 		}
-		if opts.strict {
-			for i := range diags {
-				diags[i].IsError = true
-			}
+		diags = append(diags, lintDiags...)
+	}
+	if opts.strict {
+		for i := range diags {
+			diags[i].IsError = true
 		}
-		if ui.PrintLintDiagnostics(os.Stderr, diags, errColor) {
-			return ui.ErrSilent
-		}
+	}
+	if ui.PrintLintDiagnostics(os.Stderr, diags, errColor) {
+		return ui.ErrSilent
 	}
 
 	snap, err := store.Load(cl.Name(), cl.ClusterSnapshotKey())

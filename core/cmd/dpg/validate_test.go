@@ -90,6 +90,63 @@ func TestRunValidateStrictNoErrorsOrWarnings(t *testing.T) {
 	}
 }
 
+// TestRunValidatePrintsScalarMergeConflict proves the scalar-merge-conflict
+// diagnostic (RFC §19.1) surfaced by compiler.Compile's merge stage is
+// actually visible in real `dpg validate` output — not just detected
+// internally by internal/merger's own unit tests — using real multi-file
+// .dpg source (two files declaring the same table with a conflicting
+// OWNER), no stub linter, and linter left nil to prove the diagnostic
+// doesn't depend on a Linter being registered at all.
+func TestRunValidatePrintsScalarMergeConflict(t *testing.T) {
+	dir := t.TempDir()
+	f1 := filepath.Join(dir, "a.dpg")
+	f2 := filepath.Join(dir, "b.dpg")
+	if err := os.WriteFile(f1, []byte(`TABLE users (id BIGINT NOT NULL) { OWNER "alice"; }`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(f2, []byte(`TABLE users (email TEXT NOT NULL) { OWNER "bob"; }`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	r, w, _ := os.Pipe()
+	orig := os.Stdout
+	os.Stdout = w
+
+	_, err := runValidate("cl", "db", []string{f1, f2}, dir, nil,
+		pipeline.LinterConfig{WarnOnScalarMergeConflict: true}, "json", false)
+
+	w.Close()
+	os.Stdout = orig
+
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var out strings.Builder
+	buf := make([]byte, 4096)
+	for {
+		n, _ := r.Read(buf)
+		if n == 0 {
+			break
+		}
+		out.Write(buf[:n])
+	}
+
+	var parsed validateJSON
+	if jsonErr := json.Unmarshal([]byte(strings.TrimSpace(out.String())), &parsed); jsonErr != nil {
+		t.Fatalf("output is not valid JSON: %v\noutput: %s", jsonErr, out.String())
+	}
+	var found bool
+	for _, w := range parsed.Warnings {
+		if w.Rule == "scalar-merge-conflict" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected a scalar-merge-conflict warning in output, got: %+v", parsed.Warnings)
+	}
+}
+
 func TestRunValidateJSONFormat(t *testing.T) {
 	file, dir := dpgTempFile(t, "")
 	stub := &stubLinter{diags: []pipeline.LintDiagnostic{

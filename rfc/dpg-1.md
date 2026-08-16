@@ -5870,6 +5870,7 @@ APP_SERVICE_PW="s3cr3t"
    | `serial-sequence-declared` | A hand-declared `SEQUENCE` collides with the name PostgreSQL auto-manages for a `GENERATED ... AS IDENTITY` column's sequence, or for a `SERIAL`/`BIGSERIAL`/`SMALLSERIAL` column's owned sequence (`<table>_<column>_seq` in both cases) in the same desired state. Renamed from §19.1's `serial_sequence_declared`; originally scoped to `IDENTITY` only, extended to cover `SERIAL` once `ir.Column.Serial` was added — see the note below and Appendix D.11. | Warning |
    | `unnecessary-revocation` | A `REVOCATIONS` entry names a (role, privilege) pair with no matching `GRANTS` entry in the *same object's own declaration*. Renamed from §19.1's `unnecessary_revocation`; narrower in scope than that entry's wording — see the note below. | Warning |
    | `deprecated-reference` | A non-deprecated `FOREIGN KEY` references a deprecated table/column, or a non-deprecated column/function-parameter/function-return-type references a deprecated custom `TYPE`. Renamed from §19.1's `deprecated_reference`; deliberately narrower in scope than that entry's wording — see the note below. | Warning |
+   | `scalar-merge-conflict` | Two files declare the same object and provide different values for the same scalar property (e.g. two files each set `TABLE t`'s `OWNER` to a different role). Renamed from §19.1's `scalar_merge_conflict`; the winning (alphabetically-last-file) value is applied regardless — this rule only adds visibility, per §3.7. See the note below for exact per-kind scope. | Warning |
 
    **Implementation note on `hardcoded-password` vs. `hardcoded-role-password`:**
    the column rule checks a table column's `DEFAULT` expression: if the
@@ -5898,16 +5899,18 @@ APP_SERVICE_PW="s3cr3t"
    implementation anywhere; corrected after re-reading `differ.go`
    directly.)
 
-   Of the remaining three, `serial_sequence_declared`,
-   `unnecessary_revocation`, and `deprecated_reference` are now implemented
-   as real `Linter.Lint` rules — see below for their exact, and in
+   Of the remaining four, `serial_sequence_declared`,
+   `unnecessary_revocation`, `deprecated_reference`, and
+   `scalar_merge_conflict` are now all implemented — the first three as
+   `Linter.Lint`-interface rules (see below for their exact, and in
    `unnecessary_revocation`'s and `deprecated_reference`'s cases
-   deliberately narrowed, scope. `scalar_merge_conflict` remains
-   unimplemented under any name: it needs real new infrastructure before a
-   lint check is even possible on top of it (before/after comparison logic
-   in the merger, which currently does blind unconditional last-file-wins
-   overwrites with no comparison at all) — see `.dpg-notes/dpg-tracker.md`
-   for the scoped plan.
+   deliberately narrowed, scope). `scalar_merge_conflict` is architecturally
+   different: it is computed by `pipeline.Merger.Merge` itself (the merge
+   stage runs before `Linter.Lint` ever sees the objects, and the conflict
+   needs to see the pre-merge, per-file values `Linter.Lint`'s
+   already-merged `[]IRObject` input has thrown away), not by
+   `internal/linter`'s own `checkObject`/`checkCrossObjectRules` dispatch —
+   see below for the full architecture.
 
    **`serial_sequence_declared`:** warns when a hand-declared `SEQUENCE`
    object's name collides with the auto-managed sequence name PostgreSQL
@@ -5968,6 +5971,64 @@ APP_SERVICE_PW="s3cr3t"
    §19.2 is now implemented, following the existing `--strict` promotion
    pattern (`LintDiagnostic.IsError`) for `"error"`, and a post-filter
    step for `"off"`.
+
+   **`scalar_merge_conflict`:** unlike every other rule in this table,
+   this one is computed inside `pipeline.Merger.Merge` (`internal/merger`),
+   not `internal/linter`'s object-dispatch. `Merger.Merge` returns a second
+   value, `[]LintDiagnostic`, always populated regardless of
+   `warn_on_scalar_merge_conflict` — gating (the config flag, and any
+   `[linter.rules]` override) happens once, centrally, in
+   `internal/linter.FilterMergeDiagnostics`, mirroring how
+   `ApplyRuleSeverityOverrides` is the one place `[linter.rules]` gating
+   lives for `Linter.Lint`'s own diagnostics. Every CLI command that calls
+   `compiler.Compile` (`plan`, `apply`, `validate`) combines
+   `FilterMergeDiagnostics`'s output with `Linter.Lint`'s diagnostics into
+   one slice before printing/`--strict`-promoting, so a `scalar-merge-conflict`
+   warning behaves identically to any other lint warning from the user's
+   perspective, including under `--strict`, despite the different
+   implementation location. `pkg/dpg`'s public Go API re-exports both
+   `FilterMergeDiagnostics` and `ApplyRuleSeverityOverrides` so external
+   consumers of `dpg.Compile` can replicate the same gating without
+   reaching into `internal/linter`, which they cannot import.
+
+   A `conflictTracker` (`internal/merger/merger.go`) is threaded through
+   every scalar field this package merges: for each property, it records
+   which file most recently supplied the property's current value, and
+   emits a diagnostic whenever a later file supplies a genuinely different
+   value for the same property — while still always applying last-file-wins
+   regardless (§3.7: "the winning value is used regardless"). Tracking is
+   by *last setter*, not merely "compare to the immediately preceding
+   file": if file A sets a property, file B reconfirms the same value, and
+   file C then disagrees, the diagnostic correctly attributes the conflict
+   to file B (the file that actually owns the current value), not file A.
+
+   Scope, mirroring exactly which fields each `mergeX` function already
+   treats as a last-file-wins scalar (§3.7's own examples — owner,
+   comment, tablespace, RLS flags, `PROTECTED`, `DEPRECATED`,
+   `DROP CASCADE`, `RENAMED FROM`, drop behaviour — plus the equivalent
+   settable properties for kinds not in that list): `TABLE`, `VIEW`,
+   `FUNCTION`, `SCHEMA`, `TYPE` (including `DOMAIN`'s `BaseType`/`Default`
+   fields — `NotNull` is OR-merged like every other boolean flag, not
+   last-wins, so it is never conflict-checked), `PROCEDURE`, `AGGREGATE`,
+   `SEQUENCE`, `EXTENSION`, `ROLE`, `TABLESPACE`, `FOREIGN DATA WRAPPER`,
+   `SERVER`, and `USER MAPPING`. A `USER MAPPING`/FDW/`SERVER`'s `OPTIONS`
+   list is checked key-by-key (each key is its own scalar property,
+   addressed as `options[key]` in the diagnostic) rather than as one
+   opaque blob, so two files setting different, non-colliding keys never
+   conflict. Set-valued properties (indexes, constraints, grants,
+   `ROLE`'s `IN ROLE`/`ROLE`/`ADMIN` membership lists, etc.) are unaffected
+   — they already use §3.7's union semantics, not last-wins, so there is
+   nothing to conflict-check.
+
+   **NOT covered** — the opaque/reconstruction-tier object kinds
+   (`PUBLICATION`, `EVENT TRIGGER`, `COLLATION`, `CAST`, `OPERATOR` and
+   `OPERATOR CLASS`/`FAMILY`, the `TEXT SEARCH` kinds, `STATISTICS`, and
+   similarly-shaped kinds) still fall through to `mergeGroup`'s blind
+   `grp[len(grp)-1]` last-object-wins default with no field-level merging
+   or conflict detection at all — unchanged from before this rule existed,
+   and a real, explicit residual rather than an oversight: extending
+   `conflictTracker` to these kinds is future work, not attempted in this
+   round.
 
 ---
 

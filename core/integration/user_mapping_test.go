@@ -81,7 +81,7 @@ func TestUserMappingPasswordSecretRoundtrip(t *testing.T) {
 		t.Fatalf("write fixture: %v", err)
 	}
 
-	desired, err := compiler.Compile([]string{f}, dir, pipeline.Default)
+	desired, _, err := compiler.Compile([]string{f}, dir, pipeline.Default)
 	if err != nil {
 		t.Fatalf("compile: %v", err)
 	}
@@ -205,7 +205,7 @@ func TestUserMappingPasswordRedactedOnDump(t *testing.T) {
 	if err := os.WriteFile(f, []byte(fixture), 0o644); err != nil {
 		t.Fatalf("write fixture: %v", err)
 	}
-	desired, err := compiler.Compile([]string{f}, dir, pipeline.Default)
+	desired, _, err := compiler.Compile([]string{f}, dir, pipeline.Default)
 	if err != nil {
 		t.Fatalf("compile: %v", err)
 	}

@@ -18,30 +18,37 @@ import (
 // dbDir/schemas/<name>/... have their schema context inferred from the directory
 // name when no explicit SCHEMA block is present. A SCHEMA block inside the
 // schemas/ hierarchy is a compile error.
-func Compile(files []string, dbDir string, reg *pipeline.Registry) ([]pipeline.IRObject, error) {
+//
+// The second return value holds "scalar-merge-conflict" LintDiagnostics
+// (RFC §19.1) surfaced by the merge stage — always populated regardless of
+// config, same as pipeline.Merger.Merge itself; see that interface's doc
+// comment for why gating (WarnOnScalarMergeConflict, [linter.rules]) is the
+// caller's job via internal/linter.FilterMergeDiagnostics, not this
+// function's.
+func Compile(files []string, dbDir string, reg *pipeline.Registry) ([]pipeline.IRObject, []pipeline.LintDiagnostic, error) {
 	tokenizer, err := pipeline.MustResolve[pipeline.Tokenizer](reg, pipeline.KeyTokenizer)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	pgParser, err := pipeline.MustResolve[pipeline.PGSQLParser](reg, pipeline.KeyPGSQLParser)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	blockParser, err := pipeline.MustResolve[pipeline.BlockParser](reg, pipeline.KeyBlockParser)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	irBuilder, err := pipeline.MustResolve[pipeline.IRBuilder](reg, pipeline.KeyIRBuilder)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	merger, err := pipeline.MustResolve[pipeline.Merger](reg, pipeline.KeyMerger)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	resolver, err := pipeline.MustResolve[pipeline.DependencyResolver](reg, pipeline.KeyDependencyResolver)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	var rawObjects []pipeline.RawObject
@@ -55,10 +62,10 @@ func Compile(files []string, dbDir string, reg *pipeline.Registry) ([]pipeline.I
 		for _, path := range files {
 			src, readErr := os.ReadFile(path)
 			if readErr != nil {
-				return nil, fmt.Errorf("compiler: reading %s: %w", path, readErr)
+				return nil, nil, fmt.Errorf("compiler: reading %s: %w", path, readErr)
 			}
 			if seedErr := seeder.AddGlobalMacros(src); seedErr != nil {
-				return nil, fmt.Errorf("compiler: collecting macros from %s: %w", path, seedErr)
+				return nil, nil, fmt.Errorf("compiler: collecting macros from %s: %w", path, seedErr)
 			}
 		}
 	}
@@ -67,7 +74,7 @@ func Compile(files []string, dbDir string, reg *pipeline.Registry) ([]pipeline.I
 	for _, path := range files {
 		src, readErr := os.ReadFile(path)
 		if readErr != nil {
-			return nil, fmt.Errorf("compiler: reading %s: %w", path, readErr)
+			return nil, nil, fmt.Errorf("compiler: reading %s: %w", path, readErr)
 		}
 		raws, scanErr := tokenizer.Scan(path, src)
 		if scanErr != nil {
@@ -75,7 +82,7 @@ func Compile(files []string, dbDir string, reg *pipeline.Registry) ([]pipeline.I
 				diags = append(diags, d...)
 				continue
 			}
-			return nil, fmt.Errorf("compiler: scanning %s: %w", path, scanErr)
+			return nil, nil, fmt.Errorf("compiler: scanning %s: %w", path, scanErr)
 		}
 
 		dirSchema := inferSchemaFromPath(dbDir, path)
@@ -133,7 +140,7 @@ func Compile(files []string, dbDir string, reg *pipeline.Registry) ([]pipeline.I
 	}
 
 	if diags.HasErrors() {
-		return nil, diags
+		return nil, nil, diags
 	}
 
 	// Stages 2–3: Parse Part1 (PG SQL) + Part2 ({ } block) and build IR.
@@ -154,7 +161,7 @@ func Compile(files []string, dbDir string, reg *pipeline.Registry) ([]pipeline.I
 					diags = append(diags, ce)
 					continue
 				}
-				return nil, dpErr
+				return nil, nil, dpErr
 			}
 			if dpBlock.InSchema == nil && raw.Schema != "" {
 				dpBlock.InSchema = &pipeline.Identifier{Name: raw.Schema}
@@ -165,7 +172,7 @@ func Compile(files []string, dbDir string, reg *pipeline.Registry) ([]pipeline.I
 					diags = append(diags, ce)
 					continue
 				}
-				return nil, buildErr
+				return nil, nil, buildErr
 			}
 			irObjects = append(irObjects, objs...)
 			continue
@@ -178,7 +185,7 @@ func Compile(files []string, dbDir string, reg *pipeline.Registry) ([]pipeline.I
 				diags = append(diags, ce)
 				continue
 			}
-			return nil, pgErr
+			return nil, nil, pgErr
 		}
 
 		blockAST, blockErr := blockParser.Parse(raw.Kind, raw.Part2, raw.Pos)
@@ -187,7 +194,7 @@ func Compile(files []string, dbDir string, reg *pipeline.Registry) ([]pipeline.I
 				diags = append(diags, ce)
 				continue
 			}
-			return nil, blockErr
+			return nil, nil, blockErr
 		}
 
 		obj, buildErr := irBuilder.Build(pgResult, blockAST)
@@ -196,27 +203,27 @@ func Compile(files []string, dbDir string, reg *pipeline.Registry) ([]pipeline.I
 				diags = append(diags, ce)
 				continue
 			}
-			return nil, buildErr
+			return nil, nil, buildErr
 		}
 		irObjects = append(irObjects, obj)
 	}
 	if diags.HasErrors() {
-		return nil, diags
+		return nil, nil, diags
 	}
 
 	// Stage 4: Merge same-name declarations across files.
-	merged, mergeErr := merger.Merge(irObjects)
+	merged, mergeDiags, mergeErr := merger.Merge(irObjects)
 	if mergeErr != nil {
-		return nil, mergeErr
+		return nil, mergeDiags, mergeErr
 	}
 
 	// Stage 5: Topological sort with FK / type dependency resolution.
 	sorted, sortErr := resolver.Sort(merged)
 	if sortErr != nil {
-		return nil, sortErr
+		return nil, mergeDiags, sortErr
 	}
 
-	return sorted, nil
+	return sorted, mergeDiags, nil
 }
 
 // inferSchemaFromPath returns the schema name inferred from the file's position
