@@ -451,6 +451,7 @@ func toSnapColumn(col *ir.Column) SnapColumn {
 		Storage:     col.Storage,
 		Deprecated:  col.Deprecated,
 		RenamedFrom: col.RenamedFrom,
+		Serial:      col.Serial,
 	}
 	if col.Identity != nil {
 		var s string

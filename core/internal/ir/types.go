@@ -70,6 +70,23 @@ type Column struct {
 	Default     *string    // raw expression text
 	Generated   *Generated // GENERATED ALWAYS AS
 	Identity    *Identity  // GENERATED [ALWAYS|BY DEFAULT] AS IDENTITY
+	// Serial holds the SERIAL sugar kind ("SMALLSERIAL", "SERIAL", or
+	// "BIGSERIAL") when this column was declared (or introspected as) one
+	// of PostgreSQL's SERIAL pseudo-types. Type is always normalized to the
+	// real underlying integer type (smallint/integer/bigint) — Serial is a
+	// sibling marker, not an alternative to Type, mirroring how Identity is
+	// a sibling marker to Type rather than a replacement for it. Default is
+	// always nil when Serial is set (mirrors Identity's own Default==nil
+	// convention): the auto-managed nextval() default is never represented
+	// as an ir.Column scalar, on either the source-built or introspected
+	// side, so the differ never has anything to compare there. NotNull is
+	// always true when Serial is set (SERIAL implies NOT NULL in real
+	// PostgreSQL, independent of any PRIMARY KEY). RFC §10: the backing
+	// sequence itself is never declared in DPG and never appears as a
+	// separate ir.Sequence object — introspectSequences's existing
+	// deptype-'a'/'i'/'e' exclusion already (and correctly) excludes
+	// SERIAL-owned sequences the same way it excludes IDENTITY-owned ones.
+	Serial      *string
 	Comment     *string
 	Statistics  *int
 	Compression *string

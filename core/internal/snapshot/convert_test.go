@@ -28,6 +28,41 @@ func TestPopulateTable(t *testing.T) {
 	}
 }
 
+// TestPopulateColumnSerial proves Column.Serial threads through to the
+// snapshot unchanged and survives a JSON marshal/unmarshal round-trip (the
+// snapshot file is what's actually persisted to disk and compared against
+// on the next plan/apply).
+func TestPopulateColumnSerial(t *testing.T) {
+	marker := "SERIAL"
+	snap := &pipeline.Snapshot{}
+	objects := []pipeline.IRObject{
+		&ir.Table{Schema: "public", Name: "widgets", Columns: []*ir.Column{
+			{Name: "id", Type: ir.TypeRef{Name: "integer"}, Serial: &marker, NotNull: true},
+		}},
+	}
+	if err := Populate(snap, objects); err != nil {
+		t.Fatal(err)
+	}
+	raw, ok := snap.Objects["public.widgets"]
+	if !ok {
+		t.Fatal("expected public.widgets in snapshot")
+	}
+
+	// raw is already the persisted JSON form (json.RawMessage) — unmarshal
+	// it back the same way a fresh `dpg plan` reads the snapshot file.
+	var obj SnapObject
+	if err := json.Unmarshal(raw, &obj); err != nil {
+		t.Fatal(err)
+	}
+	if obj.Table == nil || len(obj.Table.Columns) != 1 {
+		t.Fatal("expected one column after round-trip")
+	}
+	col := obj.Table.Columns[0]
+	if col.Serial == nil || *col.Serial != "SERIAL" {
+		t.Errorf("Serial got %v after round-trip, want \"SERIAL\"", col.Serial)
+	}
+}
+
 func TestPopulateView(t *testing.T) {
 	snap := &pipeline.Snapshot{}
 	objects := []pipeline.IRObject{

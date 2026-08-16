@@ -554,6 +554,24 @@ ORDER  BY n.nspname, c.relname`
 // (ordinary table) and 'p' (partitioned parent) — a partitioned table's own
 // columns live in pg_attribute the same as an ordinary table's, but omitting
 // 'p' here silently left every partitioned table's Columns empty.
+// serialMarkerFromWidth maps a format_type() result to the canonical
+// ir.Column.Serial marker spelling for a SERIAL-owned column, mirroring
+// internal/ir/typeutil.go's serialUnderlyingType in reverse (that function
+// maps a source-declared SERIAL name to its underlying type; this one maps
+// the underlying type read back from a live catalog to the marker).
+func serialMarkerFromWidth(dataType string) (string, bool) {
+	switch dataType {
+	case "smallint":
+		return "SMALLSERIAL", true
+	case "integer":
+		return "SERIAL", true
+	case "bigint":
+		return "BIGSERIAL", true
+	default:
+		return "", false
+	}
+}
+
 func introspectColumns(ctx context.Context, conn pipeline.Querier, idx map[string]*ir.Table) error {
 	const q = `
 SELECT n.nspname, c.relname,
@@ -571,7 +589,16 @@ SELECT n.nspname, c.relname,
            WHEN 'm' THEN 'MAIN'  WHEN 'x' THEN 'EXTENDED'
            ELSE NULL
        END AS storage,
-       a.attstorage = t.typstorage AS storage_is_type_default
+       a.attstorage = t.typstorage AS storage_is_type_default,
+       EXISTS (
+           SELECT 1 FROM pg_depend dep
+           JOIN pg_class sc ON sc.oid = dep.objid AND sc.relkind = 'S'
+           WHERE dep.deptype = 'a'
+             AND dep.classid = 'pg_class'::regclass
+             AND dep.refclassid = 'pg_class'::regclass
+             AND dep.refobjid = a.attrelid
+             AND dep.refobjsubid = a.attnum
+       ) AS serial_owned
 FROM   pg_attribute a
 JOIN   pg_class c     ON c.oid = a.attrelid
 JOIN   pg_namespace n ON n.oid = c.relnamespace
@@ -591,10 +618,10 @@ ORDER  BY n.nspname, c.relname, a.attnum`
 
 	for rs.Next() {
 		var schema, table, name, dataType string
-		var notNull, storageIsDefault bool
+		var notNull, storageIsDefault, serialOwned bool
 		var identityKind, generatedKind, def, comment, compression, storage *string
 		var stats *int
-		if err := rs.Scan(&schema, &table, &name, &dataType, &notNull, &identityKind, &generatedKind, &def, &comment, &stats, &compression, &storage, &storageIsDefault); err != nil {
+		if err := rs.Scan(&schema, &table, &name, &dataType, &notNull, &identityKind, &generatedKind, &def, &comment, &stats, &compression, &storage, &storageIsDefault, &serialOwned); err != nil {
 			return err
 		}
 		t, ok := idx[schema+"."+table]
@@ -615,6 +642,25 @@ ORDER  BY n.nspname, c.relname, a.attnum`
 			col.Identity = &ir.Identity{Always: true}
 		case identityKind != nil && *identityKind == "d":
 			col.Identity = &ir.Identity{Always: false}
+		case serialOwned && def != nil:
+			// dataType is already the real underlying type (format_type()
+			// on atttypid never returns "serial" — that's a source-syntax
+			// pseudo-type, PostgreSQL's own catalog never stores it), so no
+			// Type translation is needed, only picking the Serial marker
+			// off the underlying width. Default stays nil, mirroring the
+			// Identity branches above — a column whose default is a
+			// deptype-'a'-owned-sequence nextval() is DPG's SERIAL shape,
+			// never rendered/diffed as an ordinary Default expression.
+			if marker, ok := serialMarkerFromWidth(dataType); ok {
+				col.Serial = &marker
+			} else if def != nil {
+				// A hand-rolled owned-sequence-plus-nextval-default on a
+				// non-integer column is legal PG but not SERIAL sugar —
+				// falls through to plain Default handling, same as before
+				// this change.
+				stripped := stripStringLiteralCasts(*def)
+				col.Default = &stripped
+			}
 		case generatedKind != nil && *generatedKind == "s" && def != nil:
 			col.Generated = &ir.Generated{Expr: *def, Stored: true}
 		default:

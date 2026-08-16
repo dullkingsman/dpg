@@ -15,6 +15,43 @@ import (
 	"github.com/dullkingsman/dpg/internal/project"
 )
 
+// TestRenderColumnSerialCompiles proves a column with Serial set renders the
+// literal SERIAL keyword (not the normalized underlying type with a
+// hand-reconstructed NOT NULL/DEFAULT nextval(...) referencing a sequence
+// dump never declares — the exact "genuinely broken, non-reapplicable
+// output" bug this workstream closes), and that the result recompiles.
+func TestRenderColumnSerialCompiles(t *testing.T) {
+	fmtOpts := format.Options{IndentSize: 4, KeywordCase: "upper"}
+	serial := "SERIAL"
+	tbl := &ir.Table{
+		Schema: "public", Name: "widgets",
+		Columns: []*ir.Column{
+			{Name: "id", Type: ir.TypeRef{Name: "integer"}, Serial: &serial, NotNull: true},
+			{Name: "name", Type: ir.TypeRef{Name: "text"}},
+		},
+	}
+
+	var b strings.Builder
+	renderObjectDPG(&b, tbl, fmtOpts)
+	rendered := b.String()
+
+	if !strings.Contains(rendered, "id SERIAL") {
+		t.Errorf("rendered column does not use the literal SERIAL keyword: %q", rendered)
+	}
+	if strings.Contains(rendered, "nextval") {
+		t.Errorf("rendered column must not reference nextval(...) directly: %q", rendered)
+	}
+
+	dir := t.TempDir()
+	f := filepath.Join(dir, "objects.dpg")
+	if err := os.WriteFile(f, []byte(rendered), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := compiler.Compile([]string{f}, dir, pipeline.Default); err != nil {
+		t.Fatalf("dumped table with a SERIAL column failed to recompile: %v\n---\n%s", err, rendered)
+	}
+}
+
 // TestRenderIndexUsingMethodCompiles guards a real bug found live-testing a
 // demo project: the RFC's ABNF and every one of its worked examples
 // (rfc/dpg-1.md §7.7, e.g. "idx_location USING gist (location);") place

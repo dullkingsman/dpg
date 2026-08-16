@@ -270,17 +270,18 @@ func checkCrossObjectRules(objects []pipeline.IRObject, cfg pipeline.LinterConfi
 }
 
 // checkSerialSequenceDeclared implements RFC §19.1's serial_sequence_declared
-// rule, scoped to GENERATED ... AS IDENTITY columns only (see the rule's
-// entry in rfc/dpg-1.md Appendix D.3 for why SERIAL itself is out of
-// scope: DPG has no distinct IR representation for it at all today). Warns
-// when a hand-declared SEQUENCE's name collides with the name PostgreSQL
-// auto-generates for an identity column in the same desired state
+// rule, covering both GENERATED ... AS IDENTITY columns and SERIAL/
+// BIGSERIAL/SMALLSERIAL columns (SERIAL now has a distinct IR representation
+// via ir.Column.Serial, so it's no longer out of scope the way an earlier
+// version of this rule's Appendix D.3 entry noted). Warns when a
+// hand-declared SEQUENCE's name collides with the name PostgreSQL
+// auto-generates for an identity or serial column in the same desired state
 // ("<table>_<column>_seq", PostgreSQL's own naming convention for a
 // column's implicit sequence) — such a sequence is either redundant (it's
-// the identity column's own auto-managed sequence, which DPG and
-// PostgreSQL already handle without a separate declaration) or a genuine
-// naming collision PostgreSQL will reject at apply time; either way, it's
-// worth flagging before that happens.
+// the column's own auto-managed sequence, which DPG and PostgreSQL already
+// handle without a separate declaration) or a genuine naming collision
+// PostgreSQL will reject at apply time; either way, it's worth flagging
+// before that happens.
 func checkSerialSequenceDeclared(objects []pipeline.IRObject) []pipeline.LintDiagnostic {
 	var diags []pipeline.LintDiagnostic
 
@@ -291,7 +292,7 @@ func checkSerialSequenceDeclared(objects []pipeline.IRObject) []pipeline.LintDia
 			continue
 		}
 		for _, col := range t.Columns {
-			if col.Identity != nil {
+			if col.Identity != nil || col.Serial != nil {
 				identityNames[t.Schema+"."+t.Name+"_"+col.Name+"_seq"] = true
 			}
 		}

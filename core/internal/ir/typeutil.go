@@ -9,6 +9,59 @@ import (
 	pg_query "github.com/pganalyze/pg_query_go/v6"
 )
 
+// typeNameParts extracts the dotted name parts from a pg_query TypeName's
+// Names list (e.g. ["pg_catalog", "int4"] or ["myschema", "mytype"] or just
+// ["mytype"]). Shared by typeNameToRef and serialMarkerFromTypeName so both
+// walk the same AST shape exactly once.
+func typeNameParts(tn *pg_query.TypeName) []string {
+	if tn == nil {
+		return nil
+	}
+	names := make([]string, 0, len(tn.Names))
+	for _, n := range tn.Names {
+		if sv := n.GetString_(); sv != nil {
+			names = append(names, sv.Sval)
+		}
+	}
+	return names
+}
+
+// serialUnderlyingType maps a SERIAL-family type name (case-insensitive) to
+// its real underlying integer type and canonical marker spelling, or returns
+// ok=false if name isn't one. PostgreSQL's grammar recognizes SERIAL/
+// SERIAL2/SERIAL4/SERIAL8/SMALLSERIAL/BIGSERIAL only as a bare, unqualified
+// type name — pg_catalog has no such type at the catalog level, it's a
+// parser-level macro expanded at CREATE TABLE time — so this is only ever
+// meaningful against a single, unqualified name part.
+func serialUnderlyingType(name string) (underlying, marker string, ok bool) {
+	switch strings.ToLower(name) {
+	case "smallserial", "serial2":
+		return "smallint", "SMALLSERIAL", true
+	case "serial", "serial4":
+		return "integer", "SERIAL", true
+	case "bigserial", "serial8":
+		return "bigint", "BIGSERIAL", true
+	default:
+		return "", "", false
+	}
+}
+
+// serialMarkerFromTypeName detects whether tn is one of the SERIAL-family
+// pseudo-types and, if so, returns the canonical marker to store on
+// ir.Column.Serial. Returns nil for every other type, including a
+// schema-qualified reference to a real user type that happens to be named
+// "serial" (SERIAL is only ever written bare in real PostgreSQL DDL).
+func serialMarkerFromTypeName(tn *pg_query.TypeName) *string {
+	names := typeNameParts(tn)
+	if len(names) != 1 {
+		return nil
+	}
+	if _, marker, ok := serialUnderlyingType(names[0]); ok {
+		return &marker
+	}
+	return nil
+}
+
 // typeNameToRef converts a pg_query TypeName node into an ir.TypeRef.
 func typeNameToRef(tn *pg_query.TypeName) TypeRef {
 	if tn == nil {
@@ -19,25 +72,29 @@ func typeNameToRef(tn *pg_query.TypeName) TypeRef {
 		SetOf:     tn.Setof,
 	}
 
-	// Extract schema and type name from the Names list.
-	// For built-in types pg_query emits ["pg_catalog", "int4"] etc.
-	// For custom types it emits ["myschema", "mytype"] or just ["mytype"].
-	names := make([]string, 0, len(tn.Names))
-	for _, n := range tn.Names {
-		if sv := n.GetString_(); sv != nil {
-			names = append(names, sv.Sval)
-		}
-	}
+	names := typeNameParts(tn)
 
 	switch len(names) {
 	case 0:
 		ref.Name = "unknown"
 	case 1:
-		// pg_query emits some built-in aliases (e.g. "timestamptz") as a
-		// single-part name rather than ["pg_catalog", "timestamptz"]. Run
-		// them through pgCatalogName so the canonical form always matches
-		// what format_type() returns during introspection.
-		ref.Name = pgCatalogName(names[0])
+		// SERIAL/BIGSERIAL/SMALLSERIAL are parser-level macros, not real
+		// pg_catalog types: normalize to the real underlying integer type
+		// here so Column.Type always matches what introspection reads back
+		// from a live catalog (format_type() never returns "serial"). The
+		// Serial marker itself is derived separately in buildColumn via
+		// serialMarkerFromTypeName, since TypeRef has no room for it and
+		// every other typeNameToRef caller (casts, function args unrelated
+		// to columns) has no use for a Serial marker at all.
+		if underlying, _, ok := serialUnderlyingType(names[0]); ok {
+			ref.Name = underlying
+		} else {
+			// pg_query emits some built-in aliases (e.g. "timestamptz") as
+			// a single-part name rather than ["pg_catalog", "timestamptz"].
+			// Run them through pgCatalogName so the canonical form always
+			// matches what format_type() returns during introspection.
+			ref.Name = pgCatalogName(names[0])
+		}
 	case 2:
 		if names[0] == "pg_catalog" {
 			// Built-in: strip the catalog prefix and use the canonical name.

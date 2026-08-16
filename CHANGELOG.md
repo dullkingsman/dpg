@@ -197,6 +197,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   own promotion logic (unlike `--strict`'s existing per-command
   `IsError = true` loops, which today only run at 2 of the linter's 5
   call sites).
+- `SERIAL`/`BIGSERIAL`/`SMALLSERIAL` are now modeled as a first-class IR
+  concept (`Column.Serial`, a sibling marker to `Column.Type`, mirroring
+  `Column.Identity`) instead of passing through as a literal, non-real
+  type named `"serial"`. Every `SERIAL`-family spelling (including the
+  `SERIAL2`/`SERIAL4`/`SERIAL8` forms) normalises `Column.Type` to the
+  real underlying integer type while recording the sugar kind separately;
+  `CREATE TABLE`/`ADD COLUMN`/`dpg dump` all render the literal keyword
+  form and suppress the synthesized `NOT NULL`/`DEFAULT`; introspection
+  detects the shape via the same `pg_depend` owned-sequence pattern
+  already used for identity columns. `ADD COLUMN` for a `SERIAL` column
+  is now `SAFE`, matching identity columns. `serial-sequence-declared`
+  (see above) now also triggers on `Column.Serial`, not `Column.Identity`
+  only. See RFC Appendix D.11 for the full specification.
 
 ### Fixed
 
@@ -1089,6 +1102,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   re-deparsed independently (reusing the library's own existing
   `MakeColumnRefNode` helper for the target) rather than deparsing the
   assignment as a single unit.
+- **A bare `SERIAL`/`BIGSERIAL`/`SMALLSERIAL` column with no `PRIMARY KEY`
+  got `NotNull = false` in the IR.** Real PostgreSQL makes every
+  `SERIAL`-family column `NOT NULL` unconditionally, independent of
+  `PRIMARY KEY` — the builder only applied that inference for the
+  primary-key case. Fixed as part of the `Column.Serial` IR modeling
+  above.
+- **`dpg dump` produced genuinely broken, non-reapplicable output for a
+  `SERIAL` column.** It rendered the normalized underlying integer type
+  plus a hand-written `DEFAULT nextval('<table>_<column>_seq'::regclass)`
+  referencing a sequence dump never actually declares as its own object —
+  recompiling and reapplying that dumped source failed outright. Fixed by
+  rendering the literal `SERIAL`-family keyword instead, the same
+  treatment identity-backed sequences already received.
 
 ### Changed
 
@@ -1190,6 +1216,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   *same* import path as upstream, so this is invisible to source code
   anywhere in the repo; visible only as a `replace` line in `core/go.mod`
   pointing at a specific fork commit.
+- **Existing snapshots with a `SERIAL`-family column self-heal on the
+  first `plan`/`apply` after upgrading, no destructive drift.** A snapshot
+  written before this release stores the literal, non-real type name
+  `"serial"`/`"bigserial"`/`"smallserial"` for such a column instead of
+  the now-normalized underlying integer type; the differ recognizes this
+  specific legacy shape and treats it as already matching rather than
+  emitting a destructive `ALTER COLUMN TYPE`. The next snapshot write
+  after any successful `plan`/`apply` stores the normalized type and
+  `Column.Serial` marker going forward, and the legacy-name check never
+  applies again for that column.
 
 ## [idea-v0.5.2-alpha.13] — 2026-05-22
 

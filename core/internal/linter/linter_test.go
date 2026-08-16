@@ -348,6 +348,34 @@ func TestLintSerialSequenceDeclaredNoCollisionOK(t *testing.T) {
 	}
 }
 
+// TestLintSerialSequenceDeclaredCoversSerial extends the identity-only
+// serial_sequence_declared rule to SERIAL columns too, now that SERIAL has
+// a distinct IR representation (ir.Column.Serial) — this was flagged as
+// out of scope for the rule until now.
+func TestLintSerialSequenceDeclaredCoversSerial(t *testing.T) {
+	l := New()
+	marker := "SERIAL"
+	objects := []pipeline.IRObject{
+		&ir.Table{Schema: "public", Name: "users", Columns: []*ir.Column{
+			{Name: "id", Type: ir.TypeRef{Name: "integer"}, Serial: &marker, NotNull: true},
+		}},
+		&ir.Sequence{Schema: "public", Name: "users_id_seq"},
+	}
+	diags, err := l.Lint(objects, pipeline.LinterConfig{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, d := range diags {
+		if d.Rule == "serial-sequence-declared" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("expected serial-sequence-declared warning for a SERIAL column")
+	}
+}
+
 func TestLintUnnecessaryRevocation(t *testing.T) {
 	l := New()
 	objects := []pipeline.IRObject{

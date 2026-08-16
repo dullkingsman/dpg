@@ -3483,6 +3483,134 @@ func TestVirtualTypeNoSQLOnChange(t *testing.T) {
 	}
 }
 
+// ── SERIAL/BIGSERIAL/SMALLSERIAL ────────────────────────────────────────────
+
+func serialPtr(s string) *string { return &s }
+
+// TestCreateTableSerialEmitsLiteralKeyword proves createTable emits the
+// literal SERIAL keyword (letting PostgreSQL's own macro-expansion create
+// the sequence/default/ownership/NOT NULL) rather than the resolved
+// underlying type with a hand-reconstructed NOT NULL/DEFAULT.
+func TestCreateTableSerialEmitsLiteralKeyword(t *testing.T) {
+	d := New()
+	desired := []pipeline.IRObject{
+		&ir.Table{
+			Schema: "public",
+			Name:   "widgets",
+			Columns: []*ir.Column{
+				{Name: "id", Type: ir.TypeRef{Name: "integer"}, Serial: serialPtr("SERIAL"), NotNull: true},
+			},
+		},
+	}
+	ops, err := d.Diff(desired, &pipeline.Snapshot{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sql := ops[0].SQL()
+	if !strings.Contains(sql, `"id" SERIAL`) {
+		t.Errorf("expected literal SERIAL keyword, got: %s", sql)
+	}
+	if strings.Contains(sql, "NOT NULL") {
+		t.Errorf("expected NOT NULL to be suppressed for SERIAL (PG implies it), got: %s", sql)
+	}
+	if strings.Contains(sql, "nextval") || strings.Contains(sql, "DEFAULT") {
+		t.Errorf("expected no DEFAULT clause for SERIAL, got: %s", sql)
+	}
+}
+
+// TestDiffColumnsAddSerialColumnSafe proves a new SERIAL column added to an
+// existing table classifies SAFE (PostgreSQL auto-populates it via the
+// sequence default), the same exemption Identity/Generated already get, and
+// emits the literal SERIAL keyword rather than "integer ... NOT NULL".
+func TestDiffColumnsAddSerialColumnSafe(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.widgets", &snapshot.SnapObject{
+		Kind: "table",
+		Table: &snapshot.SnapTable{
+			Schema:  "public",
+			Name:    "widgets",
+			Columns: []snapshot.SnapColumn{{Name: "name", Type: "text"}},
+		},
+	})
+	desired := []pipeline.IRObject{
+		&ir.Table{
+			Schema: "public",
+			Name:   "widgets",
+			Columns: []*ir.Column{
+				{Name: "name", Type: ir.TypeRef{Name: "text"}},
+				{Name: "id", Type: ir.TypeRef{Name: "integer"}, Serial: serialPtr("SERIAL"), NotNull: true},
+			},
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var addOp pipeline.DiffOp
+	for _, o := range ops {
+		if strings.Contains(o.SQL(), "ADD COLUMN") {
+			addOp = o
+			break
+		}
+	}
+	if addOp == nil {
+		t.Fatal("expected ADD COLUMN op")
+	}
+	if !strings.Contains(addOp.SQL(), `"id" SERIAL`) {
+		t.Errorf("expected literal SERIAL keyword, got: %s", addOp.SQL())
+	}
+	if strings.Contains(addOp.SQL(), "NOT NULL") {
+		t.Errorf("expected NOT NULL suppressed, got: %s", addOp.SQL())
+	}
+	if addOp.Safety() != pipeline.Safe {
+		t.Errorf("expected SAFE, got %v", addOp.Safety())
+	}
+}
+
+// TestDiffColumnsLegacySerialSnapshotNoDrift is a regression guard for the
+// stale-snapshot self-healing path: a pre-upgrade snapshot stores the
+// literal, un-normalized "serial" type name (before Column.Serial existed).
+// Without the isLegacySerialTypeName guard in diffColumns, comparing the
+// new normalized "integer" against the old literal "serial" would emit a
+// spurious destructive ALTER COLUMN TYPE on the very first plan after
+// upgrading, even though the live column hasn't changed shape at all.
+func TestDiffColumnsLegacySerialSnapshotNoDrift(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.widgets", &snapshot.SnapObject{
+		Kind: "table",
+		Table: &snapshot.SnapTable{
+			Schema: "public",
+			Name:   "widgets",
+			Columns: []snapshot.SnapColumn{
+				{Name: "id", Type: "serial", NotNull: true},
+			},
+		},
+	})
+	desired := []pipeline.IRObject{
+		&ir.Table{
+			Schema: "public",
+			Name:   "widgets",
+			Columns: []*ir.Column{
+				{Name: "id", Type: ir.TypeRef{Name: "integer"}, Serial: serialPtr("SERIAL"), NotNull: true},
+			},
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, o := range ops {
+		if strings.Contains(o.SQL(), "ALTER COLUMN") && strings.Contains(o.SQL(), "TYPE") {
+			t.Errorf("expected no ALTER COLUMN TYPE against a legacy 'serial' snapshot, got: %s", o.SQL())
+		}
+		if o.Safety() == pipeline.Destructive {
+			t.Errorf("expected no destructive ops against a legacy 'serial' snapshot, got: %s", o.SQL())
+		}
+	}
+}
+
 func TestCreateTableWithVirtualTypeColumn(t *testing.T) {
 	// A column typed as a virtual type must emit jsonb in CREATE TABLE.
 	d := New()

@@ -205,7 +205,8 @@ Appendix D.  Corrections and Additions to Earlier Sections ....... 138
     D.8.  Root dpg.toml Missing Sections ......................... 148
     D.9.  CLI Command Corrections ................................ 149
     D.10. Name Maps .............................................. 150
-Appendix E.  Revision History ..................................... 151
+    D.11. SERIAL / BIGSERIAL / SMALLSERIAL Column Sugar ........... 151
+Appendix E.  Revision History ..................................... 152
 Normative References .............................................. 152
 Informative References ............................................ 153
 Author's Address .................................................. 154
@@ -5866,7 +5867,7 @@ APP_SERVICE_PW="s3cr3t"
    | `missing-column-comment` | Column lacks a `COMMENT` when `require_column_comments = true`. Renamed from `require-column-comments` (§19.1 named this `missing_column_comment`; the actual code now matches that wording, kebab-cased). | Warning |
    | `column-count-exceeded` | Table exceeds `max_columns_per_table` columns. Renamed from `max-columns` (§19.1 named this `column_count_exceeded`; the actual code now matches that wording, kebab-cased). | Error |
    | `security-definer-search-path` | `SECURITY DEFINER` function body does not reference `search_path`. | Warning |
-   | `serial-sequence-declared` | A hand-declared `SEQUENCE` collides with the name PostgreSQL auto-manages for a `GENERATED ... AS IDENTITY` column's sequence (`<table>_<column>_seq`) in the same desired state. Renamed from §19.1's `serial_sequence_declared`; scoped to `IDENTITY` only — see the note below. | Warning |
+   | `serial-sequence-declared` | A hand-declared `SEQUENCE` collides with the name PostgreSQL auto-manages for a `GENERATED ... AS IDENTITY` column's sequence, or for a `SERIAL`/`BIGSERIAL`/`SMALLSERIAL` column's owned sequence (`<table>_<column>_seq` in both cases) in the same desired state. Renamed from §19.1's `serial_sequence_declared`; originally scoped to `IDENTITY` only, extended to cover `SERIAL` once `ir.Column.Serial` was added — see the note below and Appendix D.11. | Warning |
    | `unnecessary-revocation` | A `REVOCATIONS` entry names a (role, privilege) pair with no matching `GRANTS` entry in the *same object's own declaration*. Renamed from §19.1's `unnecessary_revocation`; narrower in scope than that entry's wording — see the note below. | Warning |
 
    **Implementation note on `hardcoded-password` vs. `hardcoded-role-password`:**
@@ -5908,17 +5909,16 @@ APP_SERVICE_PW="s3cr3t"
    comparison at all, for the latter) — see `.dpg-notes/dpg-tracker.md`
    for the scoped plan for each.
 
-   **`serial_sequence_declared`:** scoped to `GENERATED ... AS IDENTITY`
-   columns only, using the existing `ir.Column.Identity` field — warns
-   when a hand-declared `SEQUENCE` object's name collides with the
-   auto-managed sequence name PostgreSQL generates for an identity column
-   in the same desired state (`<table>_<column>_seq`). `SERIAL`/
-   `BIGSERIAL`/`SMALLSERIAL` columns are deliberately out of scope: DPG
-   does not model `SERIAL` as a distinct concept anywhere in the IR today
-   (a column declared `SERIAL` passes through as a literal type named
-   `"serial"`, with no auto-sequence relationship recorded at all) — a
-   separate, pre-existing gap, not something this rule's scope was
-   narrowed to avoid fixing incidentally.
+   **`serial_sequence_declared`:** warns when a hand-declared `SEQUENCE`
+   object's name collides with the auto-managed sequence name PostgreSQL
+   generates for an identity or `SERIAL`-family column in the same desired
+   state (`<table>_<column>_seq`). Originally scoped to `GENERATED ... AS
+   IDENTITY` columns only, using `ir.Column.Identity`; now also triggers on
+   `ir.Column.Serial` now that `SERIAL`/`BIGSERIAL`/`SMALLSERIAL` are
+   modeled as a distinct IR concept — see Appendix D.11 for the full
+   `Column.Serial` specification, including why this was previously
+   out of scope (SERIAL passed through as a literal type named `"serial"`
+   with no auto-sequence relationship recorded at all).
 
    **`unnecessary_revocation`:** scoped to a single object's own
    declaration — warns when a `REVOCATIONS` entry names a
@@ -6485,6 +6485,105 @@ ENUM user_status ('active', 'inactive', 'banned') {
 
 ---
 
+### D.11. SERIAL / BIGSERIAL / SMALLSERIAL Column Sugar (amends §7.2)
+
+   §7.2's `col-constraint` ABNF and surrounding prose describe
+   `GENERATED ALWAYS/BY DEFAULT AS IDENTITY` in detail but say nothing
+   about PostgreSQL's older `SERIAL`/`BIGSERIAL`/`SMALLSERIAL`
+   pseudo-types, which are syntactically just an ordinary `type-ref`
+   (§Appendix A) and so were always accepted by the parser. Until this
+   revision, DPG gave them no distinct treatment anywhere past parsing:
+   a column declared `SERIAL` passed through the compiler as a literal
+   type named `"serial"` — not a real PostgreSQL catalog type — with no
+   record of the owned-sequence relationship, and diffing a live
+   `SERIAL` column against such a snapshot produced spurious
+   `ALTER COLUMN TYPE` drift. This section specifies the sugar's actual
+   modeled behavior.
+
+   **Normalization:** the compiler MUST rewrite a column's declared
+   type from a `SERIAL`-family spelling to the real underlying integer
+   type PostgreSQL itself stores, per the following table, and record
+   which spelling was used as a sibling marker rather than replacing
+   `Column.Type`:
+
+   | Declared spelling(s) | Underlying `Column.Type` | Marker (`Column.Serial`) |
+   |---|---|---|
+   | `SERIAL`, `SERIAL4` | `integer` | `"SERIAL"` |
+   | `SMALLSERIAL`, `SERIAL2` | `smallint` | `"SMALLSERIAL"` |
+   | `BIGSERIAL`, `SERIAL8` | `bigint` | `"BIGSERIAL"` |
+
+   `Column.Serial` is a sibling marker on the IR `Column` type,
+   analogous to `Column.Identity`: it augments `Column.Type` rather than
+   replacing it, so every other part of the pipeline that reasons about
+   a column's real storage type (index/constraint compatibility checks,
+   cast validation, dump rendering of dependent objects) continues to
+   see the true underlying integer type. A schema-qualified type merely
+   named `serial` (e.g. `myschema.serial`) is a real user type reference
+   and MUST NOT be mistaken for the pseudo-type — only an unqualified,
+   case-insensitive match against the table above triggers this rule.
+
+   **`SERIAL` implies `NOT NULL`:** real PostgreSQL makes every
+   `SERIAL`-family column `NOT NULL` unconditionally, independent of
+   whether it is also `PRIMARY KEY` — the same shape as the existing
+   PRIMARY-KEY-implies-NOT-NULL rule in §7.2. The compiler MUST set
+   `Column.NotNull = true` for any `SERIAL`-family column regardless of
+   other constraints present in source.
+
+   **Emitted DDL:** `CREATE TABLE` and `ADD COLUMN` MUST render the
+   literal `SERIAL`/`BIGSERIAL`/`SMALLSERIAL` keyword for a column with
+   `Column.Serial` set, in place of the normalized underlying type, and
+   MUST suppress the `NOT NULL` and `DEFAULT` clauses that would
+   otherwise be rendered — PostgreSQL synthesizes both itself as part of
+   expanding the pseudo-type. This mirrors how `GENERATED AS IDENTITY`
+   columns already suppress those same clauses. `ADD COLUMN` for a
+   `SERIAL`-family column is classified `SAFE` (not `CAUTION`), the same
+   exemption already given to identity columns, since no data rewrite or
+   implicit cast is involved.
+
+   **Introspection:** a column is reconstructed as `SERIAL`-family when
+   its owning table has a `pg_depend` entry of deptype `'a'`
+   ("auto", i.e. internally-created and owned) linking it to a sequence
+   whose default expression is a `nextval(...)` call on that same
+   sequence, mirroring the existing `GENERATED AS IDENTITY` detection
+   shape. `Column.Default` is left `nil` in this case, exactly as it
+   already is for identity columns — the owned-sequence default is not
+   surfaced as an ordinary `Default` expression. A hand-rolled
+   owned-sequence-plus-`nextval()`-default on a non-integer column (legal
+   PostgreSQL, not `SERIAL` sugar) MUST fall through to ordinary
+   `Default` handling rather than being misdetected.
+
+   **Dump reconstruction:** `dpg dump` MUST render a reconstructed
+   `SERIAL`-family column using the literal keyword form above, not the
+   normalized underlying type with a hand-written
+   `DEFAULT nextval('<table>_<column>_seq')` — the latter is
+   non-reapplicable output, since dump does not separately declare the
+   owned sequence as its own `SEQUENCE` object (the same treatment
+   identity-backed sequences already receive).
+
+   **Snapshot representation:** `SnapColumn` gains an optional `serial`
+   string field (JSON key `"serial"`, `omitempty`), populated with the
+   same three-value marker as `Column.Serial`. A snapshot written before
+   this revision has no `serial` field on any column and, for a
+   previously-declared `SERIAL` column, stores the literal type name
+   `"serial"`/`"bigserial"`/`"smallserial"` instead of the normalized
+   underlying type — the differ MUST recognize this legacy shape
+   specifically (declared column has `Column.Serial` set and the
+   snapshot's stored type name is one of those three legacy spellings)
+   and treat it as already matching, rather than emitting a destructive
+   `ALTER COLUMN TYPE`. This is a one-time self-healing comparison: the
+   next snapshot write after any successful `plan`/`apply` stores the
+   normalized type and marker going forward, and the legacy-name check
+   never applies again for that column.
+
+   **Linter interaction:** the `serial-sequence-declared` rule
+   (Appendix D.3) triggers on `Column.Serial` in addition to
+   `Column.Identity` — a hand-declared `SEQUENCE` colliding with a
+   `SERIAL` column's auto-managed sequence name is exactly as much a
+   mistake as the identity case, and both share the same
+   `<table>_<column>_seq` naming collision surface.
+
+---
+
 ## Appendix E. Revision History
 
    This appendix records all substantive changes to this document after
@@ -6496,6 +6595,7 @@ ENUM user_status ('active', 'inactive', 'banned') {
    | E.2 | 2026-05-13 | Appendix D added. Corrections to §16 (snapshot wire format: `SnapObject` discriminated union, `SnapOpaque`, corrected field names), §18 (`--format text` default, `--watch` flag, `.env` loading protocol, `planJSON` schema, target auto-selection), §19 (linter rule IDs use hyphens). Pipeline Registry key constants table and SecretResolver protocol specification added. Source revision detection algorithm formalised. |
    | E.3 | 2026-05-13 | §D.8–§D.9 added. Root `dpg.toml` `[fmt]` and `[migrations]` sections documented. CLI corrections: `dpg validate` JSON schema, `dpg portability` flag set, `dpg init` default cluster name (`"production"`), `dpg fmt` TOML key names. ToC updated to include Appendix D subsections. |
    | E.4 | 2026-05-17 | §D.10 added. Name Maps feature specified: ten rule keywords, `[namemaps]` TOML config at all three levels (global + per-object-type rules), inline `NAME MAP` and `NAME MAPS` block directives, literal target name support via double-quoted identifiers, resolution order (block > database > cluster > root), snapshot `name_maps` array field on all object types, error codes DPG-E030 and DPG-E031. |
+   | E.5 | 2026-08-16 | §D.11 added. `SERIAL`/`BIGSERIAL`/`SMALLSERIAL` column sugar specified as a first-class IR concept (`Column.Serial`, sibling marker to `Column.Type`): normalization table, `SERIAL`-implies-`NOT NULL` rule, literal-keyword emission with suppressed `NOT NULL`/`DEFAULT`, `pg_depend`-based introspection detection mirroring identity columns, non-reapplicable dump output fixed, `SnapColumn.serial` field, and a legacy-snapshot self-healing comparison for pre-existing snapshots that stored the literal `"serial"` type name. §D.3's `serial-sequence-declared` entry updated: now also triggers on `Column.Serial`, not `Column.Identity` only. |
 
 ---
 

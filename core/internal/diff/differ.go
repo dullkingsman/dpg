@@ -213,6 +213,21 @@ func buildVTypeSet(desired []pipeline.IRObject) map[string]string {
 // resolveColType returns the SQL type string for a column TypeRef.  When the
 // type refers to a declared virtual type it is replaced by the virtual type's
 // preferred JSON format (json or jsonb), with [] repeated for array dimensions.
+// isLegacySerialTypeName reports whether typeName is the literal,
+// un-normalized SERIAL-family type name a pre-upgrade snapshot may have
+// stored (before Column.Serial existed, typeNameToRef passed "serial"/
+// "bigserial"/"smallserial"/their serialN spellings straight through
+// unchanged). Used solely as a one-time, self-clearing stale-snapshot guard
+// in diffColumns — see the call site for the full explanation.
+func isLegacySerialTypeName(typeName string) bool {
+	switch strings.ToLower(typeName) {
+	case "smallserial", "serial2", "serial", "serial4", "bigserial", "serial8":
+		return true
+	default:
+		return false
+	}
+}
+
 func resolveColType(t ir.TypeRef, vtypes map[string]string) string {
 	key := t.Name
 	if t.Schema != "" {
@@ -2077,12 +2092,21 @@ func createTable(o *ir.Table, vtypes map[string]string) []pipeline.DiffOp {
 		b.WriteString("\n    ")
 		b.WriteString(quoteIdent(col.Name))
 		b.WriteString(" ")
-		b.WriteString(resolveColType(col.Type, vtypes))
+		if col.Serial != nil {
+			// Emit the literal SERIAL/BIGSERIAL/SMALLSERIAL keyword and let
+			// PostgreSQL's own server-side macro-expansion create the
+			// backing sequence, default, ownership, and implicit NOT NULL —
+			// rather than DPG hand-reconstructing that expansion itself.
+			b.WriteString(*col.Serial)
+		} else {
+			b.WriteString(resolveColType(col.Type, vtypes))
+		}
 		// Suppress NOT NULL for PK columns — PRIMARY KEY already implies it.
-		if col.NotNull && !pkColSet[col.Name] {
+		// Also suppress for SERIAL — PG's own macro-expansion adds it.
+		if col.NotNull && !pkColSet[col.Name] && col.Serial == nil {
 			b.WriteString(" NOT NULL")
 		}
-		if col.Default != nil {
+		if col.Default != nil && col.Serial == nil {
 			b.WriteString(" DEFAULT ")
 			b.WriteString(*col.Default)
 		}
@@ -4391,11 +4415,15 @@ func diffColumns(tbl string, o *ir.Table, snap *snapshot.SnapTable, vtypes map[s
 		if !exists {
 			// ADD COLUMN
 			var b strings.Builder
-			fmt.Fprintf(&b, "ALTER TABLE %s ADD COLUMN %s %s", tbl, quoteIdent(col.Name), resolveColType(col.Type, vtypes))
-			if col.NotNull {
+			if col.Serial != nil {
+				fmt.Fprintf(&b, "ALTER TABLE %s ADD COLUMN %s %s", tbl, quoteIdent(col.Name), *col.Serial)
+			} else {
+				fmt.Fprintf(&b, "ALTER TABLE %s ADD COLUMN %s %s", tbl, quoteIdent(col.Name), resolveColType(col.Type, vtypes))
+			}
+			if col.NotNull && col.Serial == nil {
 				b.WriteString(" NOT NULL")
 			}
-			if col.Default != nil {
+			if col.Default != nil && col.Serial == nil {
 				b.WriteString(" DEFAULT ")
 				b.WriteString(*col.Default)
 			}
@@ -4412,9 +4440,11 @@ func diffColumns(tbl string, o *ir.Table, snap *snapshot.SnapTable, vtypes map[s
 				b.WriteString(") STORED")
 			}
 			b.WriteString(";")
-			// NOT NULL without a volatile default risks failing on existing rows.
+			// NOT NULL without a volatile default risks failing on existing
+			// rows. SERIAL is exempt — PostgreSQL auto-populates it via the
+			// sequence default, same exemption Identity/Generated already get.
 			safety := pipeline.Safe
-			if col.NotNull && col.Default == nil && col.Identity == nil && col.Generated == nil {
+			if col.NotNull && col.Default == nil && col.Identity == nil && col.Generated == nil && col.Serial == nil {
 				safety = pipeline.Caution
 			}
 			ops = append(ops, &op{sql: b.String(), safety: safety, pos: col.SrcPos, txn: true})
@@ -4435,7 +4465,17 @@ func diffColumns(tbl string, o *ir.Table, snap *snapshot.SnapTable, vtypes map[s
 
 		// Alter existing column.
 		resolvedType := resolveColType(col.Type, vtypes)
-		if resolvedType != sc.Type {
+		if col.Serial != nil && isLegacySerialTypeName(sc.Type) {
+			// Pre-upgrade snapshot stored the literal, un-normalized
+			// "serial"/"bigserial"/"smallserial" type name (this project's
+			// own prior representation, before SERIAL got a distinct IR
+			// marker) — the live column hasn't actually changed shape, only
+			// DPG's own internal representation of it has. Treat as no
+			// drift; the snapshot self-heals to the new normalized shape
+			// ("integer"+Serial marker etc.) on this run's save, the same
+			// way a plpgsql BodyHash-algorithm upgrade self-heals (see
+			// internal/ir/typeutil.go's canonicalizePlpgsqlBody).
+		} else if resolvedType != sc.Type {
 			using := ""
 			// RFC §7.2 "Column type change diffing": a type change requiring
 			// an explicit cast is DESTRUCTIVE unless a USING expression is

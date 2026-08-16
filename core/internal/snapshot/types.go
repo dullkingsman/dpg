@@ -229,6 +229,7 @@ type SnapColumn struct {
 	NotNull     bool               `json:"not_null,omitempty"`
 	Default     *string            `json:"default,omitempty"`
 	Identity    *string            `json:"identity,omitempty"` // "ALWAYS" or "BY DEFAULT"
+	Serial      *string            `json:"serial,omitempty"`   // "SMALLSERIAL"/"SERIAL"/"BIGSERIAL"
 	Generated   *string            `json:"generated,omitempty"`
 	Comment     *string            `json:"comment,omitempty"`
 	Statistics  *int               `json:"statistics,omitempty"`

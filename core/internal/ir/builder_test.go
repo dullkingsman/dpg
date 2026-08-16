@@ -864,6 +864,128 @@ func TestBuildColumnTypeModifiers(t *testing.T) {
 	}
 }
 
+// ── SERIAL/BIGSERIAL/SMALLSERIAL ────────────────────────────────────────────
+
+// TestBuildColumnSerial proves every SERIAL-family spelling normalizes
+// Column.Type to the real underlying integer type while recording the
+// original sugar kind on Column.Serial — mirrors how Identity is a sibling
+// marker to Type rather than a replacement for it.
+func TestBuildColumnSerial(t *testing.T) {
+	obj := buildObject(t, pipeline.KindTable,
+		`t (
+			a SERIAL,
+			b SERIAL4,
+			c BIGSERIAL,
+			d SERIAL8,
+			e SMALLSERIAL,
+			f SERIAL2
+		)`,
+		``,
+	)
+	tbl := obj.(*ir.Table)
+	want := map[string]struct {
+		typeName string
+		marker   string
+	}{
+		"a": {"integer", "SERIAL"},
+		"b": {"integer", "SERIAL"},
+		"c": {"bigint", "BIGSERIAL"},
+		"d": {"bigint", "BIGSERIAL"},
+		"e": {"smallint", "SMALLSERIAL"},
+		"f": {"smallint", "SMALLSERIAL"},
+	}
+	if len(tbl.Columns) != len(want) {
+		t.Fatalf("got %d columns, want %d", len(tbl.Columns), len(want))
+	}
+	for _, col := range tbl.Columns {
+		w, ok := want[col.Name]
+		if !ok {
+			t.Fatalf("unexpected column %s", col.Name)
+		}
+		if col.Type.Name != w.typeName {
+			t.Errorf("column %s: Type.Name got %q, want %q", col.Name, col.Type.Name, w.typeName)
+		}
+		if col.Serial == nil || *col.Serial != w.marker {
+			t.Errorf("column %s: Serial got %v, want %q", col.Name, col.Serial, w.marker)
+		}
+		if !col.NotNull {
+			t.Errorf("column %s: NotNull got false, want true (SERIAL implies NOT NULL)", col.Name)
+		}
+		if col.Default != nil {
+			t.Errorf("column %s: Default got %q, want nil", col.Name, *col.Default)
+		}
+	}
+}
+
+// TestBuildColumnSerialImpliesNotNullWithoutPK is a regression guard for a
+// real live bug: a bare SERIAL column with no PRIMARY KEY and no explicit
+// NOT NULL still must be NotNull==true in the IR, since PostgreSQL's real
+// SERIAL macro-expansion implies NOT NULL independent of any PK. Before this
+// fix, only the CONSTR_PRIMARY branch ever set NotNull=true, so a bare
+// `qty SERIAL` column silently carried NotNull=false, causing permanent
+// phantom `ALTER COLUMN SET NOT NULL` drift against a live catalog (where
+// the column really is NOT NULL).
+func TestBuildColumnSerialImpliesNotNullWithoutPK(t *testing.T) {
+	obj := buildObject(t, pipeline.KindTable, `t (qty SERIAL)`, ``)
+	tbl := obj.(*ir.Table)
+	if len(tbl.Columns) != 1 {
+		t.Fatalf("got %d columns, want 1", len(tbl.Columns))
+	}
+	col := tbl.Columns[0]
+	if !col.NotNull {
+		t.Error("bare SERIAL column: NotNull got false, want true")
+	}
+	if col.Serial == nil || *col.Serial != "SERIAL" {
+		t.Errorf("bare SERIAL column: Serial got %v, want \"SERIAL\"", col.Serial)
+	}
+}
+
+// TestBuildColumnSerialPrimaryKey proves the common `id SERIAL PRIMARY KEY`
+// shape still works end to end: Serial set, NotNull true, and the inline
+// PRIMARY KEY still promotes to a table-level constraint as normal.
+func TestBuildColumnSerialPrimaryKey(t *testing.T) {
+	obj := buildObject(t, pipeline.KindTable, `t (id SERIAL PRIMARY KEY)`, ``)
+	tbl := obj.(*ir.Table)
+	if len(tbl.Columns) != 1 {
+		t.Fatalf("got %d columns, want 1", len(tbl.Columns))
+	}
+	col := tbl.Columns[0]
+	if col.Type.Name != "integer" {
+		t.Errorf("Type.Name got %q, want integer", col.Type.Name)
+	}
+	if col.Serial == nil || *col.Serial != "SERIAL" {
+		t.Errorf("Serial got %v, want \"SERIAL\"", col.Serial)
+	}
+	if !col.NotNull {
+		t.Error("NotNull got false, want true")
+	}
+	found := false
+	for _, cst := range tbl.Constraints {
+		if cst.Type == "PRIMARY KEY" {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("expected a promoted PRIMARY KEY constraint")
+	}
+}
+
+// TestBuildColumnCustomTypeNamedSerialNotMistaken proves a schema-qualified
+// reference to a real user type that happens to be named "serial" is never
+// mistaken for the SERIAL pseudo-type — SERIAL is only ever written bare in
+// real PostgreSQL DDL.
+func TestBuildColumnCustomTypeNamedSerialNotMistaken(t *testing.T) {
+	obj := buildObject(t, pipeline.KindTable, `t (a myschema.serial)`, ``)
+	tbl := obj.(*ir.Table)
+	col := tbl.Columns[0]
+	if col.Serial != nil {
+		t.Errorf("Serial got %v, want nil for a schema-qualified custom type", col.Serial)
+	}
+	if col.Type.Name != "serial" || col.Type.Schema != "myschema" {
+		t.Errorf("Type got {Schema:%q Name:%q}, want {Schema:myschema Name:serial}", col.Type.Schema, col.Type.Name)
+	}
+}
+
 // TestBuildFunctionImplicitReturnsSingleOut proves that omitting RETURNS
 // entirely (valid PostgreSQL when at least one OUT/INOUT parameter is
 // present) infers the correct return type from that single OUT parameter —

@@ -296,6 +296,10 @@ func (b *Builder) buildColumn(cd *pg_query.ColumnDef, pos pipeline.SourcePos) (*
 	}
 	if cd.TypeName != nil {
 		col.Type = typeNameToRef(cd.TypeName)
+		if marker := serialMarkerFromTypeName(cd.TypeName); marker != nil {
+			col.Serial = marker
+			col.NotNull = true // SERIAL implies NOT NULL in PG, independent of PRIMARY KEY
+		}
 	}
 
 	var promoted []*Constraint

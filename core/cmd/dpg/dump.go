@@ -384,11 +384,21 @@ func renderObjectDPG(b *strings.Builder, obj pipeline.IRObject, fmtOpts format.O
 
 		renderColText := func(col *ir.Column) string {
 			var sb strings.Builder
-			fmt.Fprintf(&sb, "%s%s %s", ind, quoteIdentIfNeeded(col.Name), col.Type.String())
-			if col.NotNull && col.Identity == nil {
+			if col.Serial != nil {
+				// Render the SERIAL sugar keyword directly rather than the
+				// normalized underlying type — this is what makes a dumped
+				// SERIAL column reapply cleanly (the underlying-type form
+				// alone would need a manually-declared sequence + DEFAULT
+				// nextval(...) that dump never emits, since the owned
+				// sequence is deliberately excluded from introspection).
+				fmt.Fprintf(&sb, "%s%s %s", ind, quoteIdentIfNeeded(col.Name), kw(*col.Serial))
+			} else {
+				fmt.Fprintf(&sb, "%s%s %s", ind, quoteIdentIfNeeded(col.Name), col.Type.String())
+			}
+			if col.NotNull && col.Identity == nil && col.Serial == nil {
 				fmt.Fprintf(&sb, " %s %s", kw("NOT"), kw("NULL"))
 			}
-			if col.Default != nil {
+			if col.Default != nil && col.Serial == nil {
 				fmt.Fprintf(&sb, " %s %s", kw("DEFAULT"), *col.Default)
 			}
 			if col.Identity != nil {
