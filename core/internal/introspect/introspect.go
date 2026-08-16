@@ -1568,7 +1568,8 @@ SELECT n.nspname, t.typname,
            WHEN 'r' THEN 'RANGE'     WHEN 'd' THEN 'DOMAIN'
            WHEN 'b' THEN 'BASE'      ELSE 'UNKNOWN'
        END AS variant,
-       obj_description(t.oid, 'pg_type') AS comment
+       obj_description(t.oid, 'pg_type') AS comment,
+       pg_get_userbyid(t.typowner) AS owner
 FROM   pg_type t
 JOIN   pg_namespace n ON n.oid = t.typnamespace
 WHERE  t.typtype IN ('e','c','r','d')
@@ -1587,12 +1588,12 @@ ORDER  BY n.nspname, t.typname`
 
 	var out []pipeline.IRObject
 	for rs.Next() {
-		var schema, name, variant string
+		var schema, name, variant, owner string
 		var comment *string
-		if err := rs.Scan(&schema, &name, &variant, &comment); err != nil {
+		if err := rs.Scan(&schema, &name, &variant, &comment, &owner); err != nil {
 			return nil, err
 		}
-		out = append(out, &ir.Type{Schema: schema, Name: name, Variant: variant, Comment: comment})
+		out = append(out, &ir.Type{Schema: schema, Name: name, Variant: variant, Comment: comment, Owner: &owner})
 	}
 	if err := rs.Err(); err != nil {
 		return nil, err

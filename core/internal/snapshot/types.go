@@ -346,6 +346,7 @@ type SnapType struct {
 	DomainNotNull     bool               `json:"domain_not_null,omitempty"`
 	DomainConstraints []SnapConstraint   `json:"domain_constraints,omitempty"`
 	Comment           *string            `json:"comment,omitempty"`
+	Owner             *string            `json:"owner,omitempty"`
 	NameMaps          []SnapNameMapEntry `json:"name_maps,omitempty"`
 }
 

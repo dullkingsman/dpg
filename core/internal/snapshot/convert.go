@@ -654,6 +654,7 @@ func toSnapType(o *ir.Type) *SnapType {
 		Variant: o.Variant,
 		Values:  o.EnumValues,
 		Comment: o.Comment,
+		Owner:   o.Owner,
 	}
 	if o.Variant == "RANGE" || o.Variant == "BASE" {
 		st.BodyHash = sourceBodyHash(o.Body, o.Reconstructed)

@@ -890,7 +890,8 @@ func renderObjectDPG(b *strings.Builder, obj pipeline.IRObject, fmtOpts format.O
 				}
 				b.WriteString(sqlStringLit(v))
 			}
-			b.WriteString(");\n")
+			b.WriteString(")")
+			writeTypeOwnerCommentBlock(b, ind, fmtOpts, o.Owner, o.Comment)
 		case "DOMAIN":
 			// Renders via the structured Domain* fields (RFC §5.4's block
 			// syntax), not o.Body — previously the entire domain (base type,
@@ -901,8 +902,11 @@ func renderObjectDPG(b *strings.Builder, obj pipeline.IRObject, fmtOpts format.O
 			// diff property-by-property (an inline blob round-trips back
 			// into Body, not into DomainDefault/DomainConstraints/etc.).
 			fmt.Fprintf(b, "\n%s %s %s %s", kw("DOMAIN"), quoteIdentIfNeeded(o.Name), kw("AS"), o.DomainBaseType.String())
-			if o.DomainDefault != nil || o.DomainNotNull || len(o.DomainConstraints) > 0 || o.Comment != nil {
+			if o.DomainDefault != nil || o.DomainNotNull || len(o.DomainConstraints) > 0 || o.Comment != nil || o.Owner != nil {
 				b.WriteString(" {\n")
+				if o.Owner != nil {
+					fmt.Fprintf(b, "%s%s %s;\n", ind, kw("OWNER"), quoteIdentIfNeeded(*o.Owner))
+				}
 				if o.DomainDefault != nil {
 					fmt.Fprintf(b, "%s%s %s;\n", ind, kw("DEFAULT"), *o.DomainDefault)
 				}
@@ -933,13 +937,15 @@ func renderObjectDPG(b *strings.Builder, obj pipeline.IRObject, fmtOpts format.O
 				}
 				fmt.Fprintf(b, "%s %s", quoteIdentIfNeeded(attr.Name), attr.Type.String())
 			}
-			b.WriteString(");\n")
+			b.WriteString(")")
+			writeTypeOwnerCommentBlock(b, ind, fmtOpts, o.Owner, o.Comment)
 		case "RANGE":
 			// o.Body is introspectRangeBodies' reconstructed options text
 			// (e.g. "SUBTYPE = numeric") — same trailing-clause-only shape
 			// DOMAIN's Body already uses, no "CREATE TYPE ... AS RANGE"
 			// prefix baked in.
-			fmt.Fprintf(b, "\n%s %s %s %s (%s);\n", kw("TYPE"), quoteIdentIfNeeded(o.Name), kw("AS"), kw("RANGE"), o.Body)
+			fmt.Fprintf(b, "\n%s %s %s %s (%s)", kw("TYPE"), quoteIdentIfNeeded(o.Name), kw("AS"), kw("RANGE"), o.Body)
+			writeTypeOwnerCommentBlock(b, ind, fmtOpts, o.Owner, o.Comment)
 		case "BASE":
 			// No live introspection reconstructs a base type's body today
 			// (would need to recover the original CREATE TYPE(...) options
@@ -949,7 +955,8 @@ func renderObjectDPG(b *strings.Builder, obj pipeline.IRObject, fmtOpts format.O
 			// introspection fix doesn't ALSO need to remember dump — same
 			// options-only shape as RANGE, consistent with o.Body's doc
 			// comment ("raw Part1 for range/domain/base").
-			fmt.Fprintf(b, "\n%s %s (%s);\n", kw("TYPE"), quoteIdentIfNeeded(o.Name), o.Body)
+			fmt.Fprintf(b, "\n%s %s (%s)", kw("TYPE"), quoteIdentIfNeeded(o.Name), o.Body)
+			writeTypeOwnerCommentBlock(b, ind, fmtOpts, o.Owner, o.Comment)
 		default:
 			fmt.Fprintf(b, "\n-- type %s (%s) omitted\n", o.Name, o.Variant)
 		}
@@ -1229,6 +1236,26 @@ func writeViewBlock(b *strings.Builder, ind string, fmtOpts format.Options, o *i
 			renderIndex(b, idx, fmtOpts)
 		}
 		fmt.Fprintf(b, "%s}\n", ind)
+	}
+	b.WriteString("}\n")
+}
+
+// writeTypeOwnerCommentBlock terminates an ENUM/COMPOSITE/RANGE/BASE type
+// declaration: a bare ";" when there's no OWNER/COMMENT to declare, or a
+// "{ }" block carrying them when there is. DOMAIN has its own richer block
+// (DEFAULT/NOT NULL/CONSTRAINT alongside OWNER/COMMENT) and doesn't use this.
+func writeTypeOwnerCommentBlock(b *strings.Builder, ind string, fmtOpts format.Options, owner, comment *string) {
+	kw := fmtOpts.Keyword
+	if owner == nil && comment == nil {
+		b.WriteString(";\n")
+		return
+	}
+	b.WriteString(" {\n")
+	if owner != nil {
+		fmt.Fprintf(b, "%s%s %s;\n", ind, kw("OWNER"), quoteIdentIfNeeded(*owner))
+	}
+	if comment != nil {
+		fmt.Fprintf(b, "%s%s %s;\n", ind, kw("COMMENT"), sqlStringLit(*comment))
 	}
 	b.WriteString("}\n")
 }

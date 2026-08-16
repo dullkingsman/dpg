@@ -2700,6 +2700,12 @@ func createType(o *ir.Type, vtypes map[string]string) []pipeline.DiffOp {
 		ops = append(ops, safeOp(buildCompositeTypeSQL(o, vtypes), o.SrcPos))
 	case "DOMAIN":
 		ops = append(ops, safeOp(buildDomainSQL(o), o.SrcPos))
+		if o.Owner != nil {
+			ops = append(ops, safeOp(
+				fmt.Sprintf("ALTER DOMAIN %s OWNER TO %s;", qualIdent(o.Schema, o.Name), quoteIdent(*o.Owner)),
+				o.SrcPos,
+			))
+		}
 		if o.Comment != nil {
 			ops = append(ops, safeOp(
 				fmt.Sprintf("COMMENT ON DOMAIN %s IS %s;", qualIdent(o.Schema, o.Name), quoteLit(*o.Comment)),
@@ -2711,6 +2717,12 @@ func createType(o *ir.Type, vtypes map[string]string) []pipeline.DiffOp {
 		if o.Body != "" {
 			ops = append(ops, safeOp(o.Body+";", o.SrcPos))
 		}
+	}
+	if o.Owner != nil {
+		ops = append(ops, safeOp(
+			fmt.Sprintf("ALTER TYPE %s OWNER TO %s;", qualIdent(o.Schema, o.Name), quoteIdent(*o.Owner)),
+			o.SrcPos,
+		))
 	}
 	if o.Comment != nil {
 		ops = append(ops, safeOp(
@@ -3803,6 +3815,18 @@ func diffType(o *ir.Type, snap *snapshot.SnapType, fullSnap *pipeline.Snapshot, 
 	var ops []pipeline.DiffOp
 	pos := o.SrcPos
 	typeIdent := qualIdent(o.Schema, o.Name)
+
+	// OWNER TO applies identically across every variant (only DOMAIN uses a
+	// distinct ALTER verb, matching the COMMENT ON DOMAIN/TYPE split already
+	// used per-branch below), so it's diffed once here rather than
+	// duplicated into each variant branch.
+	if !ptrEq(o.Owner, snap.Owner) && o.Owner != nil {
+		alterKW := "TYPE"
+		if o.Variant == "DOMAIN" {
+			alterKW = "DOMAIN"
+		}
+		ops = append(ops, safeOp(fmt.Sprintf("ALTER %s %s OWNER TO %s;", alterKW, typeIdent, quoteIdent(*o.Owner)), pos))
+	}
 
 	if o.Variant == "COMPOSITE" && snap.Variant == "COMPOSITE" {
 		if compositeAttrsChanged(o.CompositeAttrs, snap.CompositeAttrs) {

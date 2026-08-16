@@ -1851,6 +1851,9 @@ func (b *Builder) buildDomain(cs *pg_query.CreateDomainStmt, block pipeline.Bloc
 	if block.Comment != nil {
 		t.Comment = &block.Comment.Value
 	}
+	if block.Owner != nil {
+		t.Owner = &block.Owner.Name
+	}
 	if block.DomainDefault != nil {
 		t.DomainDefault = &block.DomainDefault.Text
 	}
@@ -1897,6 +1900,9 @@ func (b *Builder) buildRangeType(cs *pg_query.CreateRangeStmt, block pipeline.Bl
 	}
 	if block.Comment != nil {
 		t.Comment = &block.Comment.Value
+	}
+	if block.Owner != nil {
+		t.Owner = &block.Owner.Name
 	}
 	t.NameMaps = block.NameMaps
 	return t, nil
@@ -1958,6 +1964,9 @@ func (b *Builder) buildDefineStmt(ds *pg_query.DefineStmt, block pipeline.BlockA
 		t := &Type{Schema: schema, Name: name, SrcPos: pos}
 		if block.Comment != nil {
 			t.Comment = &block.Comment.Value
+		}
+		if block.Owner != nil {
+			t.Owner = &block.Owner.Name
 		}
 		// Distinguish composite/range/base by the definition elements.
 		// Composite: has list of column defs
