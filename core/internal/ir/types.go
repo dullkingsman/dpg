@@ -927,7 +927,23 @@ type OperatorClass struct {
 	// created before one of its support functions exists fails at apply
 	// time, and nothing else in the IR records these references since the
 	// class is otherwise fully opaque.
-	Functions     []string
+	Functions []string
+	// Members and StorageType are the AS-list's OPERATOR/FUNCTION items and
+	// optional STORAGE clause, captured structurally (previously the builder
+	// captured only FUNCTION items, and only as bare names via Functions
+	// above — OPERATOR and STORAGETYPE items were silently dropped, while
+	// introspection captured all three but only as flattened clause text
+	// folded into Body, never structurally — an asymmetry that left the same
+	// class represented inconsistently depending on which path produced it).
+	// Diffing still can't be incremental the way OperatorFamily's loose
+	// members are (PostgreSQL has no ALTER OPERATOR CLASS ADD/DROP at all —
+	// RFC §14.4), so Body remains the source of truth for DROP+CREATE SQL;
+	// Members/StorageType exist so the differ can compare structurally
+	// instead of on raw BodyHash, avoiding a false DESTRUCTIVE diff when
+	// hand-written source and an introspected reconstruction differ only in
+	// cosmetic text (whitespace, operator qualification, type spelling).
+	Members       []pipeline.OpFamilyMember
+	StorageType   string  // STORAGE clause's type name; "" if the class declares none
 	Comment       *string // see EventTrigger.Comment
 	Body          string
 	Reconstructed bool // Body rebuilt from the catalog; see Tablespace.Reconstructed

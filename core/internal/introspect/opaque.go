@@ -1722,10 +1722,22 @@ ORDER  BY n.nspname, c.opcname`
 		if err != nil {
 			return nil, err
 		}
-		if r.storageType != nil {
-			members = append(members, "STORAGE "+*r.storageType)
+		storageType := deref(r.storageType)
+		// clauses is Body's AS-list text, rendered from the same structured
+		// members the IR object carries — Body and Members can never drift
+		// apart from each other the way the old string-only opClassMembers
+		// and the builder's FUNCTION-only Functions capture could (the
+		// asymmetry this structured rewrite closes): both now come from a
+		// single AddClause() call per member, the exact renderer diffOperator
+		// Family/dump already use for OperatorFamily's loose members.
+		clauses := make([]string, len(members))
+		for i, m := range members {
+			clauses[i] = m.AddClause()
 		}
-		if len(members) == 0 {
+		if storageType != "" {
+			clauses = append(clauses, "STORAGE "+storageType)
+		}
+		if len(clauses) == 0 {
 			// An operator class with no reconstructable members cannot be emitted
 			// as valid DDL; skip rather than produce an empty AS clause.
 			continue
@@ -1749,23 +1761,28 @@ ORDER  BY n.nspname, c.opcname`
 		// merely wrong in a rare case.
 		famSchema, famName := deref(r.famSchema), deref(r.famName)
 		fmt.Fprintf(&sb, " FAMILY %s", qualIdentQ(famSchema, famName))
-		fmt.Fprintf(&sb, " AS %s", strings.Join(members, ", "))
+		fmt.Fprintf(&sb, " AS %s", strings.Join(clauses, ", "))
 		out = append(out, &ir.OperatorClass{
 			Schema: r.schema, Name: r.name, AccessMethod: r.am,
 			FamilySchema: famSchema, FamilyName: famName,
+			Members: members, StorageType: storageType,
 			Body: canonicalDDL(sb.String()), Comment: r.comment, Reconstructed: true,
 		})
 	}
 	return out, nil
 }
 
-// opClassMembers returns the rendered OPERATOR and FUNCTION member clauses that
-// belong to the operator class identified by opcOID. Membership is determined by
-// an internal pg_depend link from the pg_amop/pg_amproc row to the opclass, which
-// is exactly the set a CREATE OPERATOR CLASS ... AS clause established (members
-// later added at family scope via ALTER depend on the family, not the class).
-func opClassMembers(ctx context.Context, conn pipeline.Querier, opcOID uint32) ([]string, error) {
-	var members []string
+// opClassMembers returns the structured OPERATOR and FUNCTION members that
+// belong to the operator class identified by opcOID, in the same
+// pipeline.OpFamilyMember shape opFamilyLooseMembers produces for
+// OperatorFamily (the two are catalog-identical rows, distinguished only by
+// which pg_depend link identifies them — deptype 'i' here vs "no such link"
+// there). Membership is determined by an internal pg_depend link from the
+// pg_amop/pg_amproc row to the opclass, which is exactly the set a CREATE
+// OPERATOR CLASS ... AS clause established (members later added at family
+// scope via ALTER depend on the family, not the class).
+func opClassMembers(ctx context.Context, conn pipeline.Querier, opcOID uint32) ([]pipeline.OpFamilyMember, error) {
+	var members []pipeline.OpFamilyMember
 
 	const opQ = `
 SELECT ao.amopstrategy,
@@ -1773,16 +1790,15 @@ SELECT ao.amopstrategy,
        ao.amoplefttype::regtype::text  AS lt,
        ao.amoprighttype::regtype::text AS rt,
        ao.amoppurpose::text,
-       (SELECT sfn.nspname || '.' || sf.opfname
-        FROM   pg_opfamily sf
-        JOIN   pg_namespace sfn ON sfn.oid = sf.opfnamespace
-        WHERE  sf.oid = ao.amopsortfamily) AS sort_family
+       sfn.nspname AS sort_family_schema, sf.opfname AS sort_family_name
 FROM   pg_amop ao
 JOIN   pg_depend d  ON d.classid = 'pg_amop'::regclass AND d.objid = ao.oid
                    AND d.refclassid = 'pg_opclass'::regclass AND d.refobjid = $1
                    AND d.deptype = 'i'
-JOIN   pg_operator op  ON op.oid = ao.amopopr
-JOIN   pg_namespace opn ON opn.oid = op.oprnamespace
+JOIN   pg_operator op    ON op.oid = ao.amopopr
+JOIN   pg_namespace opn  ON opn.oid = op.oprnamespace
+LEFT JOIN pg_opfamily sf   ON sf.oid = ao.amopsortfamily
+LEFT JOIN pg_namespace sfn ON sfn.oid = sf.opfnamespace
 ORDER  BY ao.amopstrategy, ao.amoplefttype, ao.amoprighttype`
 
 	rs, err := conn.QueryRows(ctx, opQ, opcOID)
@@ -1791,18 +1807,23 @@ ORDER  BY ao.amopstrategy, ao.amoplefttype, ao.amoprighttype`
 	}
 	for rs.Next() {
 		var strategy int
-		var oprSchema, oprName, lt, rt string
-		var purpose string
-		var sortFamily *string
-		if err := rs.Scan(&strategy, &oprSchema, &oprName, &lt, &rt, &purpose, &sortFamily); err != nil {
+		var oprSchema, oprName, lt, rt, purpose string
+		var sortSchema, sortName *string
+		if err := rs.Scan(&strategy, &oprSchema, &oprName, &lt, &rt, &purpose, &sortSchema, &sortName); err != nil {
 			rs.Close()
 			return nil, err
 		}
-		clause := fmt.Sprintf("OPERATOR %d %s (%s, %s)", strategy, operatorRef(oprSchema, oprName), lt, rt)
-		if purpose == "o" && sortFamily != nil {
-			clause += " FOR ORDER BY " + *sortFamily
+		m := pipeline.OpFamilyMember{
+			Number:    strategy,
+			Name:      pipeline.Identifier{Schema: oprSchema, Name: oprName},
+			LeftType:  lt,
+			RightType: rt,
 		}
-		members = append(members, clause)
+		if purpose == "o" && sortName != nil {
+			m.OrderBy = true
+			m.SortFamily = pipeline.Identifier{Schema: deref(sortSchema), Name: *sortName}
+		}
+		members = append(members, m)
 	}
 	if err := rs.Err(); err != nil {
 		rs.Close()
@@ -1812,13 +1833,17 @@ ORDER  BY ao.amopstrategy, ao.amoplefttype, ao.amoprighttype`
 
 	const fnQ = `
 SELECT ap.amprocnum,
-       ap.amproc::regprocedure::text  AS fn,
+       pn.nspname AS fn_schema, p.proname AS fn_name,
+       (SELECT array_agg(format_type(t, NULL) ORDER BY ord)
+        FROM   unnest(p.proargtypes) WITH ORDINALITY AS u(t, ord)) AS fn_args,
        ap.amproclefttype::regtype::text  AS lt,
        ap.amprocrighttype::regtype::text AS rt
 FROM   pg_amproc ap
 JOIN   pg_depend d ON d.classid = 'pg_amproc'::regclass AND d.objid = ap.oid
                   AND d.refclassid = 'pg_opclass'::regclass AND d.refobjid = $1
                   AND d.deptype = 'i'
+JOIN   pg_proc p       ON p.oid = ap.amproc
+JOIN   pg_namespace pn ON pn.oid = p.pronamespace
 ORDER  BY ap.amprocnum, ap.amproclefttype, ap.amprocrighttype`
 
 	rs2, err := conn.QueryRows(ctx, fnQ, opcOID)
@@ -1827,12 +1852,19 @@ ORDER  BY ap.amprocnum, ap.amproclefttype, ap.amprocrighttype`
 	}
 	for rs2.Next() {
 		var support int
-		var fn, lt, rt string
-		if err := rs2.Scan(&support, &fn, &lt, &rt); err != nil {
+		var fnSchema, fnName, lt, rt string
+		var fnArgs []string
+		if err := rs2.Scan(&support, &fnSchema, &fnName, &fnArgs, &lt, &rt); err != nil {
 			rs2.Close()
 			return nil, err
 		}
-		members = append(members, fmt.Sprintf("FUNCTION %d (%s, %s) %s", support, lt, rt, fn))
+		members = append(members, pipeline.OpFamilyMember{
+			IsFunction: true,
+			Number:     support,
+			Name:       pipeline.Identifier{Schema: fnSchema, Name: fnName},
+			LeftType:   lt, RightType: rt,
+			FuncArgs: fnArgs,
+		})
 	}
 	if err := rs2.Err(); err != nil {
 		rs2.Close()

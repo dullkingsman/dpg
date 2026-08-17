@@ -1,6 +1,7 @@
 package ir_test
 
 import (
+	"slices"
 	"strings"
 	"testing"
 
@@ -2251,6 +2252,70 @@ func TestBuildOperatorClassFamilyOmitted(t *testing.T) {
 	oc := obj.(*ir.OperatorClass)
 	if oc.FamilyName != "" {
 		t.Errorf("FamilyName: got %q, want empty (FAMILY omitted from source)", oc.FamilyName)
+	}
+}
+
+// ── Operator class structured member capture ────────────────────────────────
+// Regression guard for the builder/introspect member-capture asymmetry: the
+// builder previously only captured FUNCTION items (as a bare-name Functions
+// list, dependency-ordering only) and silently skipped OPERATOR and
+// STORAGETYPE items entirely — the same class introspection produced was
+// represented completely differently depending on which path built it.
+
+func TestBuildOperatorClassMembersDefaultToClassType(t *testing.T) {
+	obj := buildObject(t, pipeline.KindOperatorClass,
+		`my_ops FOR TYPE int4 USING btree AS
+			OPERATOR 1 <,
+			OPERATOR 3 =,
+			FUNCTION 1 btint4cmp(int4, int4),
+			STORAGE int4`, ``)
+	oc := obj.(*ir.OperatorClass)
+	if oc.StorageType != "integer" {
+		t.Errorf("StorageType: got %q, want %q", oc.StorageType, "integer")
+	}
+	if len(oc.Members) != 3 {
+		t.Fatalf("Members: got %d, want 3: %+v", len(oc.Members), oc.Members)
+	}
+	for _, m := range oc.Members {
+		if m.LeftType != "integer" || m.RightType != "integer" {
+			t.Errorf("member %+v: op_type should default to the class's own type (integer)", m)
+		}
+	}
+	if oc.Members[0].IsFunction || oc.Members[0].Number != 1 || oc.Members[0].Name.String() != "<" {
+		t.Errorf("Members[0]: got %+v, want OPERATOR 1 <", oc.Members[0])
+	}
+	fn := oc.Members[2]
+	if !fn.IsFunction || fn.Number != 1 || fn.Name.String() != "btint4cmp" {
+		t.Errorf("Members[2]: got %+v, want FUNCTION 1 btint4cmp", fn)
+	}
+	if !slices.Equal(fn.FuncArgs, []string{"integer", "integer"}) {
+		t.Errorf("Members[2].FuncArgs: got %v, want [integer integer]", fn.FuncArgs)
+	}
+	// Functions (dependency-edge ordering only) must still work unchanged.
+	if len(oc.Functions) != 1 || oc.Functions[0] != "btint4cmp" {
+		t.Errorf("Functions: got %v, want [btint4cmp]", oc.Functions)
+	}
+}
+
+// TestBuildOperatorClassMembersExplicitTypesAndOrderBy covers the parts of
+// the grammar that don't default to the class's own type: an OPERATOR/
+// FUNCTION item's explicit "(op_type, op_type)", and OPERATOR's FOR ORDER BY.
+func TestBuildOperatorClassMembersExplicitTypesAndOrderBy(t *testing.T) {
+	obj := buildObject(t, pipeline.KindOperatorClass,
+		`my_ops FOR TYPE box USING gist AS
+			OPERATOR 1 << (box, box) FOR ORDER BY float_ops,
+			FUNCTION 1 (box, box) my_cmp(box, box)`, ``)
+	oc := obj.(*ir.OperatorClass)
+	if len(oc.Members) != 2 {
+		t.Fatalf("Members: got %d, want 2: %+v", len(oc.Members), oc.Members)
+	}
+	op := oc.Members[0]
+	if !op.OrderBy || op.SortFamily.String() != "float_ops" {
+		t.Errorf("Members[0]: got OrderBy=%v SortFamily=%q, want OrderBy=true SortFamily=float_ops", op.OrderBy, op.SortFamily.String())
+	}
+	fn := oc.Members[1]
+	if fn.LeftType != "box" || fn.RightType != "box" {
+		t.Errorf("Members[1] explicit op_type: got left=%q right=%q, want box/box", fn.LeftType, fn.RightType)
 	}
 }
 

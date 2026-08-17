@@ -3096,7 +3096,7 @@ func diffObject(desired pipeline.IRObject, snap *snapshot.SnapObject, fullSnap *
 		if snap.Opaque == nil {
 			return nil, nil
 		}
-		return diffOpaqueIR(o.QualifiedName(), o.Body, o.Reconstructed, o.Comment, snap.Opaque, o.SrcPos)
+		return diffOperatorClass(o, snap.Opaque)
 	case *ir.OperatorFamily:
 		if snap.Opaque == nil {
 			return nil, nil
@@ -3253,6 +3253,60 @@ func opFamilyMemberEqual(famSchema string, d pipeline.OpFamilyMember, s snapshot
 		}
 	}
 	return slices.Equal(d.FuncArgs, s.FuncArgs)
+}
+
+// opClassMembersEqual is diffOperatorClass's structural-equality check: true
+// only when desired and snap carry the exact same set of members (by Key()
+// and opFamilyMemberEqual's payload comparison), with none added or removed.
+// Unlike diffOpFamilyMembers, this never produces per-member ADD/DROP ops —
+// PostgreSQL has no incremental ALTER OPERATOR CLASS at all (RFC §14.4), so
+// a real difference here can only ever mean DROP+CREATE, same as before this
+// fix. Its only purpose is telling "same members, cosmetically different
+// Body text" apart from "actually different members".
+func opClassMembersEqual(famSchema string, desired []pipeline.OpFamilyMember, snap []snapshot.SnapOpFamilyMember) bool {
+	if len(desired) != len(snap) {
+		return false
+	}
+	snapByKey := make(map[string]snapshot.SnapOpFamilyMember, len(snap))
+	for _, m := range snap {
+		snapByKey[opFamilyMemberSnapKey(m)] = m
+	}
+	for _, d := range desired {
+		s, ok := snapByKey[d.Key()]
+		if !ok || !opFamilyMemberEqual(famSchema, d, s) {
+			return false
+		}
+	}
+	return true
+}
+
+// diffOperatorClass is diffOpaqueIR's OperatorClass-specific wrapper. Unlike
+// diffOperatorFamily/diffTSConfig, it never adds incremental ops of its own —
+// PostgreSQL's AS-list has no incremental ALTER OPERATOR CLASS, so any real
+// member-list change still must resolve to diffOpaqueIR's ordinary
+// DROP+CREATE. Its only job is deciding *whether* that DROP+CREATE is
+// warranted: diffOpaqueIR triggers purely on raw BodyHash, which false-
+// positives on a hand-written AS-list that's structurally identical to the
+// snapshot's but spelled differently (whitespace, operator/type
+// qualification, item order). When Members/StorageType/FAMILY all compare
+// structurally equal, body is passed through as "" so diffOpaqueIR's hash
+// branch is skipped entirely and only Comment gets diffed — exactly as if
+// nothing about the AS-list had changed, because nothing catalog-relevant
+// has. A stale pre-feature snapshot (OperatorClassMembersStructured false)
+// or any genuine mismatch falls through to today's unmodified BodyHash path.
+func diffOperatorClass(o *ir.OperatorClass, snap *snapshot.SnapOpaque) ([]pipeline.DiffOp, error) {
+	famSchema := o.FamilySchema
+	if famSchema == "" {
+		famSchema = o.Schema
+	}
+	if snap.OperatorClassMembersStructured &&
+		o.StorageType == snap.OperatorClassStorageType &&
+		o.FamilySchema == snap.OperatorClassFamilySchema &&
+		o.FamilyName == snap.OperatorClassFamilyName &&
+		opClassMembersEqual(famSchema, o.Members, snap.OperatorClassMembers) {
+		return diffOpaqueIR(o.QualifiedName(), "", o.Reconstructed, o.Comment, snap, o.SrcPos)
+	}
+	return diffOpaqueIR(o.QualifiedName(), o.Body, o.Reconstructed, o.Comment, snap, o.SrcPos)
 }
 
 // diffOpFamilyMembers diffs an operator family's loose members (RFC §14.4)

@@ -7059,6 +7059,148 @@ func TestDiffDropOperatorClassLegacyFallsBackToBtree(t *testing.T) {
 	}
 }
 
+// ── OperatorClass structured-member comparison ─────────────────────────────
+// Regression guard for the builder/introspect member-capture asymmetry (the
+// builder previously captured only FUNCTION items via a bare-name Functions
+// list, dropping OPERATOR/STORAGETYPE entirely, while introspection captured
+// all three but only as flattened Body text) and the false-DESTRUCTIVE diff
+// it enabled: since PostgreSQL has no incremental ALTER OPERATOR CLASS (RFC
+// §14.4), any real AS-list change must fall back to DROP+CREATE — but a
+// purely cosmetic Body-text difference (whitespace, item order, spelling)
+// between hand-written source and the snapshot must NOT trigger one.
+
+// toSnapOpFamilyMembersTest mirrors snapshot.toSnapOpFamilyMembers (unexported,
+// so this package can't call it directly) purely for building test fixtures.
+func toSnapOpFamilyMembersTest(members []pipeline.OpFamilyMember) []snapshot.SnapOpFamilyMember {
+	out := make([]snapshot.SnapOpFamilyMember, len(members))
+	for i, m := range members {
+		out[i] = snapshot.SnapOpFamilyMember{
+			IsFunction: m.IsFunction, Number: m.Number,
+			NameSchema: m.Name.Schema, Name: m.Name.Name,
+			LeftType: m.LeftType, RightType: m.RightType,
+			FuncArgs: m.FuncArgs, OrderBy: m.OrderBy,
+			SortFamilySchema: m.SortFamily.Schema, SortFamilyName: m.SortFamily.Name,
+		}
+	}
+	return out
+}
+
+func opClassMemberFixture() []pipeline.OpFamilyMember {
+	return []pipeline.OpFamilyMember{
+		{Number: 1, Name: pipeline.Identifier{Name: "<"}, LeftType: "integer", RightType: "integer"},
+		{Number: 3, Name: pipeline.Identifier{Name: "="}, LeftType: "integer", RightType: "integer"},
+		{IsFunction: true, Number: 1, Name: pipeline.Identifier{Name: "btint4cmp"}, LeftType: "integer", RightType: "integer",
+			FuncArgs: []string{"integer", "integer"}},
+	}
+}
+
+func TestDiffOperatorClassCosmeticBodyDriftIsNoop(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.my_ops USING btree", &snapshot.SnapObject{
+		Kind: "operator_class",
+		Opaque: &snapshot.SnapOpaque{
+			Kind: "operator_class", Schema: "public", Name: "my_ops", Using: "btree",
+			BodyHash: fmt.Sprintf("%x", sha256Sum(
+				"CREATE OPERATOR CLASS public.my_ops FOR TYPE int4 USING btree FAMILY public.my_ops AS OPERATOR 1 <(integer, integer), OPERATOR 3 =(integer, integer), FUNCTION 1 (integer, integer) btint4cmp(integer, integer)")),
+			OperatorClassMembersStructured: true,
+			OperatorClassMembers:           toSnapOpFamilyMembersTest(opClassMemberFixture()),
+			OperatorClassFamilySchema:      "public", OperatorClassFamilyName: "my_ops",
+		},
+	})
+	desired := []pipeline.IRObject{
+		&ir.OperatorClass{
+			Schema: "public", Name: "my_ops", AccessMethod: "btree",
+			FamilySchema: "public", FamilyName: "my_ops",
+			// Same members, deliberately different Body text (extra
+			// whitespace, reordered STORAGE-free AS-list, no explicit
+			// op_types) — the exact drift a hand edit or a differently
+			// formatting introspection run would produce.
+			Body:    "CREATE OPERATOR CLASS public.my_ops   FOR TYPE int4 USING btree FAMILY public.my_ops AS OPERATOR 3 = , FUNCTION 1 btint4cmp(int4, int4), OPERATOR 1 <",
+			Members: opClassMemberFixture(),
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ops) != 0 {
+		t.Errorf("expected no ops for structurally-identical members, got: %v", sqlList(ops))
+	}
+}
+
+func TestDiffOperatorClassRealMemberChangeStillDropsAndRecreates(t *testing.T) {
+	d := New()
+	oldMembers := opClassMemberFixture()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.my_ops USING btree", &snapshot.SnapObject{
+		Kind: "operator_class",
+		Opaque: &snapshot.SnapOpaque{
+			Kind: "operator_class", Schema: "public", Name: "my_ops", Using: "btree",
+			BodyHash:                       fmt.Sprintf("%x", sha256Sum("CREATE OPERATOR CLASS public.my_ops FOR TYPE int4 USING btree FAMILY public.my_ops AS OPERATOR 1 <(integer, integer)")),
+			OperatorClassMembersStructured: true,
+			OperatorClassMembers:           toSnapOpFamilyMembersTest(oldMembers),
+			OperatorClassFamilySchema:      "public", OperatorClassFamilyName: "my_ops",
+		},
+	})
+	newMembers := opClassMemberFixture()
+	newMembers[1].Name = pipeline.Identifier{Name: "<="} // strategy 3 now maps to a different operator
+	desired := []pipeline.IRObject{
+		&ir.OperatorClass{
+			Schema: "public", Name: "my_ops", AccessMethod: "btree",
+			FamilySchema: "public", FamilyName: "my_ops",
+			Body:    "CREATE OPERATOR CLASS public.my_ops FOR TYPE int4 USING btree FAMILY public.my_ops AS OPERATOR 1 <(integer, integer), OPERATOR 3 <=(integer, integer), FUNCTION 1 (integer, integer) btint4cmp(integer, integer)",
+			Members: newMembers,
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ops) != 2 {
+		t.Fatalf("want 2 ops (structured DROP + CREATE) for a genuine member change, got %d: %v", len(ops), sqlList(ops))
+	}
+	if ops[0].Safety() != pipeline.Destructive {
+		t.Errorf("DROP op safety = %v, want Destructive", ops[0].Safety())
+	}
+	if !strings.Contains(ops[0].SQL(), `DROP OPERATOR CLASS IF EXISTS "public"."my_ops" USING btree;`) {
+		t.Errorf("op[0] = %q, want the structured DROP", ops[0].SQL())
+	}
+}
+
+func TestDiffOperatorClassStaleSnapshotFallsBackToBodyHash(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.my_ops USING btree", &snapshot.SnapObject{
+		Kind: "operator_class",
+		Opaque: &snapshot.SnapOpaque{
+			// Predates this feature: no OperatorClassMembersStructured, so
+			// the differ must fall back to the pre-existing raw-BodyHash
+			// comparison rather than trust an absent/empty Members list.
+			Kind: "operator_class", Schema: "public", Name: "my_ops", Using: "btree",
+			BodyHash: fmt.Sprintf("%x", sha256Sum("CREATE OPERATOR CLASS public.my_ops FOR TYPE int4 USING btree FAMILY public.my_ops AS OPERATOR 1 <(integer, integer)")),
+		},
+	})
+	desired := []pipeline.IRObject{
+		&ir.OperatorClass{
+			Schema: "public", Name: "my_ops", AccessMethod: "btree",
+			FamilySchema: "public", FamilyName: "my_ops",
+			Body: "CREATE OPERATOR CLASS public.my_ops FOR TYPE int4 USING btree FAMILY public.my_ops AS OPERATOR 1 <(integer, integer), OPERATOR 3 =(integer, integer)",
+			Members: []pipeline.OpFamilyMember{
+				{Number: 1, Name: pipeline.Identifier{Name: "<"}, LeftType: "integer", RightType: "integer"},
+				{Number: 3, Name: pipeline.Identifier{Name: "="}, LeftType: "integer", RightType: "integer"},
+			},
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ops) != 2 {
+		t.Fatalf("want 2 ops (structured DROP + CREATE) via BodyHash fallback, got %d: %v", len(ops), sqlList(ops))
+	}
+}
+
 // An introspected opaque object (used as the baseline by `plan --live`) may have
 // no body hash; comparing a real body against an empty snapshot hash must NOT
 // report spurious drift.
@@ -8195,9 +8337,31 @@ func TestDiffOpaqueOfflineEditEmitsStructuredDropRecreate(t *testing.T) {
 			wantNewInBody:  "f2",
 		},
 		{
-			name:           "operator_class",
-			oldObj:         &ir.OperatorClass{Schema: "public", Name: "oc", AccessMethod: "gin", Body: "CREATE OPERATOR CLASS public.oc FOR TYPE int4 USING gin AS OPERATOR 1 = FUNCTION 1 f1()"},
-			newObj:         &ir.OperatorClass{Schema: "public", Name: "oc", AccessMethod: "gin", Body: "CREATE OPERATOR CLASS public.oc FOR TYPE int4 USING gin AS OPERATOR 1 = FUNCTION 1 f2()"},
+			// Members must actually differ (not just Body text) here: since
+			// diffOperatorClass now compares Members structurally before
+			// falling back to raw BodyHash (see TestDiffOperatorClassMember*
+			// below), two fixtures with identical (here: empty) Members but
+			// different Body would wrongly short-circuit to a no-op —
+			// exercising that would only prove a synthetic-fixture blind
+			// spot, not real behavior (every real OperatorClass, from either
+			// the builder or introspection, always has Members mirroring
+			// Body). Populating both keeps this guarding a genuine member
+			// change, same as every other kind in this table.
+			name: "operator_class",
+			oldObj: &ir.OperatorClass{Schema: "public", Name: "oc", AccessMethod: "gin",
+				Body: "CREATE OPERATOR CLASS public.oc FOR TYPE int4 USING gin AS OPERATOR 1 = FUNCTION 1 f1()",
+				Members: []pipeline.OpFamilyMember{
+					{Number: 1, Name: pipeline.Identifier{Name: "="}, LeftType: "integer", RightType: "integer"},
+					{IsFunction: true, Number: 1, Name: pipeline.Identifier{Name: "f1"}, LeftType: "integer", RightType: "integer"},
+				},
+			},
+			newObj: &ir.OperatorClass{Schema: "public", Name: "oc", AccessMethod: "gin",
+				Body: "CREATE OPERATOR CLASS public.oc FOR TYPE int4 USING gin AS OPERATOR 1 = FUNCTION 1 f2()",
+				Members: []pipeline.OpFamilyMember{
+					{Number: 1, Name: pipeline.Identifier{Name: "="}, LeftType: "integer", RightType: "integer"},
+					{IsFunction: true, Number: 1, Name: pipeline.Identifier{Name: "f2"}, LeftType: "integer", RightType: "integer"},
+				},
+			},
 			wantDropSubstr: `DROP OPERATOR CLASS IF EXISTS "public"."oc" USING gin;`,
 			wantNewInBody:  "f2()",
 		},

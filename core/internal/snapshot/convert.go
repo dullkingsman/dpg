@@ -246,8 +246,14 @@ func toSnapObject(obj pipeline.IRObject) *SnapObject {
 			Comment:  o.Comment,
 		}}
 	case *ir.OperatorClass:
+		// Members/StorageType are populated unconditionally like OperatorFamily's
+		// Members above, not gated on Reconstructed — needed for the differ's
+		// structural comparison on both source-declared and introspected classes.
 		return &SnapObject{Kind: "operator_class", Opaque: &SnapOpaque{
 			Kind: "operator_class", Schema: o.Schema, Name: o.Name, Using: o.AccessMethod, BodyHash: sourceBodyHash(o.Body, o.Reconstructed), Comment: o.Comment,
+			OperatorClassMembersStructured: true, OperatorClassMembers: toSnapOpFamilyMembers(o.Members),
+			OperatorClassStorageType:  o.StorageType,
+			OperatorClassFamilySchema: o.FamilySchema, OperatorClassFamilyName: o.FamilyName,
 		}}
 	case *ir.OperatorFamily:
 		// Members are populated unconditionally, never routed through

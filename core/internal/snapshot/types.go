@@ -135,6 +135,28 @@ type SnapOpaque struct {
 	// convert.go's OperatorFamily case for why.
 	OpFamilyMembersStructured bool                 `json:"op_family_members_structured,omitempty"`
 	OpFamilyMembers           []SnapOpFamilyMember `json:"op_family_members,omitempty"`
+	// OperatorClassMembersStructured/OperatorClassMembers/OperatorClassStorageType
+	// mirror OpFamilyMembersStructured/OpFamilyMembers above, for an operator
+	// class's own AS-list (see ir.OperatorClass.Members's doc comment). Used
+	// only for a structural equality check in the differ — PostgreSQL has no
+	// incremental ALTER OPERATOR CLASS, so any genuine member-list change
+	// still resolves to DROP+CREATE; this exists solely to avoid a false
+	// DESTRUCTIVE diff when BodyHash differs for purely cosmetic reasons
+	// (whitespace, operator qualification, type spelling) between
+	// hand-written source and an introspected reconstruction. The sentinel
+	// distinguishes "snapshot predates this feature" (no structured
+	// comparison possible, fall back to raw BodyHash) from a class that
+	// genuinely has this data captured.
+	OperatorClassMembersStructured bool                 `json:"operator_class_members_structured,omitempty"`
+	OperatorClassMembers           []SnapOpFamilyMember `json:"operator_class_members,omitempty"`
+	OperatorClassStorageType       string               `json:"operator_class_storage_type,omitempty"`
+	// OperatorClassFamilySchema/Name mirror ir.OperatorClass.FamilySchema/
+	// FamilyName — captured so the differ's structural comparison can detect
+	// a FAMILY-clause-only change (which, like any AS-list change, has no
+	// incremental ALTER and must still resolve to DROP+CREATE) even though
+	// it wouldn't otherwise show up in Members/StorageType.
+	OperatorClassFamilySchema string `json:"operator_class_family_schema,omitempty"`
+	OperatorClassFamilyName   string `json:"operator_class_family_name,omitempty"`
 }
 
 // SnapOpFamilyMember is one "loose" OPERATOR FAMILY member (RFC §14.4) —

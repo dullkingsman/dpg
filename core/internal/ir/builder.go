@@ -2453,23 +2453,46 @@ func (b *Builder) buildOpaque(node *pg_query.Node, block pipeline.BlockAST, pos 
 		// itemtype 2 == OPCLASS_ITEM_FUNCTION (parsenodes.h; 1 == OPERATOR,
 		// 3 == STORAGETYPE — pg_query exposes no named constant, confirmed
 		// against PostgreSQL's own C source, not assumed from a probe alone).
-		const opclassItemFunction = 2
+		const (
+			opclassItemOperator    = 1
+			opclassItemFunction    = 2
+			opclassItemStorageType = 3
+		)
 		var functions []string
+		var members []pipeline.OpFamilyMember
+		var storageType string
 		for _, item := range n.CreateOpClassStmt.Items {
 			it := item.GetCreateOpClassItem()
-			if it == nil || it.Itemtype != opclassItemFunction || it.Name == nil {
+			if it == nil {
 				continue
 			}
-			fnSchema, fnName := extractTypeName(it.Name.Objname)
-			if fnSchema != "" {
-				functions = append(functions, fnSchema+"."+fnName)
-			} else {
-				functions = append(functions, fnName)
+			switch it.Itemtype {
+			case opclassItemFunction:
+				if it.Name == nil {
+					continue
+				}
+				fnSchema, fnName := extractTypeName(it.Name.Objname)
+				if fnSchema != "" {
+					functions = append(functions, fnSchema+"."+fnName)
+				} else {
+					functions = append(functions, fnName)
+				}
+				members = append(members, opClassFunctionMember(it, n.CreateOpClassStmt.Datatype, pos))
+			case opclassItemOperator:
+				if it.Name == nil {
+					continue
+				}
+				members = append(members, opClassOperatorMember(it, n.CreateOpClassStmt.Datatype, pos))
+			case opclassItemStorageType:
+				if it.Storedtype != nil {
+					storageType = typeNameToRef(it.Storedtype).String()
+				}
 			}
 		}
 		opc := &OperatorClass{
 			Schema: schema, Name: name, AccessMethod: n.CreateOpClassStmt.Amname,
 			FamilySchema: famSchema, FamilyName: famName, Functions: functions,
+			Members: members, StorageType: storageType,
 			Body: sql, SrcPos: pos,
 		}
 		if block.Comment != nil {
@@ -2547,6 +2570,57 @@ func normalizeOpFamilyMembers(raw []pipeline.OpFamilyMember) ([]pipeline.OpFamil
 		members[i] = m
 	}
 	return members, nil
+}
+
+// opClassOperandType converts an explicit "(op_type, op_type)" node pair from
+// a CreateOpClassItem into canonical left/right type strings; when types
+// weren't given explicitly, both default to the operator class's own
+// Datatype — the behavior documented for CREATE OPERATOR CLASS's OPERATOR and
+// FUNCTION items (unlike ALTER OPERATOR FAMILY ADD, which has no enclosing
+// class datatype to fall back to, see normalizeOpFamilyMembers).
+func opClassOperandType(explicit []*pg_query.Node, datatype *pg_query.TypeName) (left, right string) {
+	if len(explicit) == 2 {
+		return typeNameToRef(explicit[0].GetTypeName()).String(), typeNameToRef(explicit[1].GetTypeName()).String()
+	}
+	d := typeNameToRef(datatype).String()
+	return d, d
+}
+
+// opClassOperatorMember converts an OPCLASS_ITEM_OPERATOR item into the same
+// structured pipeline.OpFamilyMember shape ALTER OPERATOR FAMILY ADD members
+// use — the two are catalog-identical (pg_amop has no notion of "belongs to
+// a class" vs "belongs to a family directly").
+func opClassOperatorMember(it *pg_query.CreateOpClassItem, datatype *pg_query.TypeName, pos pipeline.SourcePos) pipeline.OpFamilyMember {
+	schema, name := extractTypeName(it.Name.Objname)
+	left, right := opClassOperandType(it.Name.Objargs, datatype)
+	m := pipeline.OpFamilyMember{
+		Number: int(it.Number), Name: pipeline.Identifier{Schema: schema, Name: name},
+		LeftType: left, RightType: right, Pos: pos,
+	}
+	if len(it.OrderFamily) > 0 {
+		m.OrderBy = true
+		sfSchema, sfName := extractTypeName(it.OrderFamily)
+		m.SortFamily = pipeline.Identifier{Schema: sfSchema, Name: sfName}
+	}
+	return m
+}
+
+// opClassFunctionMember is opClassOperatorMember's OPCLASS_ITEM_FUNCTION
+// counterpart. ClassArgs (not Name.Objargs) carries the item's explicit
+// "(op_type, op_type)" when given — that pair is the support function's
+// applicable operand types, a separate concept from Name.Objargs (the
+// function's own argument-type signature, captured here as FuncArgs).
+func opClassFunctionMember(it *pg_query.CreateOpClassItem, datatype *pg_query.TypeName, pos pipeline.SourcePos) pipeline.OpFamilyMember {
+	schema, name := extractTypeName(it.Name.Objname)
+	left, right := opClassOperandType(it.ClassArgs, datatype)
+	funcArgs := make([]string, len(it.Name.Objargs))
+	for i, a := range it.Name.Objargs {
+		funcArgs[i] = typeNameToRef(a.GetTypeName()).String()
+	}
+	return pipeline.OpFamilyMember{
+		IsFunction: true, Number: int(it.Number), Name: pipeline.Identifier{Schema: schema, Name: name},
+		LeftType: left, RightType: right, FuncArgs: funcArgs, Pos: pos,
+	}
 }
 
 // ── conversion helpers ────────────────────────────────────────────────────────
