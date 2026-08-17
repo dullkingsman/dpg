@@ -99,6 +99,39 @@ func Connect(ctx context.Context, connStr string) (*PgxConn, error) {
 	return &PgxConn{conn: conn}, nil
 }
 
+// resolveDatabaseConfig parses connStr and overrides its target database with
+// dbName. Split out from ConnectToDatabase so this can be unit tested without
+// a live Postgres connection (pgx.ParseConfig does no network I/O).
+func resolveDatabaseConfig(connStr, dbName string) (*pgx.ConnConfig, error) {
+	if dbName == "" {
+		return nil, fmt.Errorf("executor: connect to database: empty database name")
+	}
+	cfg, err := pgx.ParseConfig(connStr)
+	if err != nil {
+		return nil, fmt.Errorf("executor: parse connection string: %w", err)
+	}
+	cfg.Database = dbName
+	return cfg, nil
+}
+
+// ConnectToDatabase is Connect, except it overrides connStr's target database
+// with dbName before connecting. The cluster's connection string only ever
+// carries one database name; per-database commands (dump, plan, verify,
+// apply) must swap in the actual target database, or every database in a
+// multi-database cluster silently connects to whatever database happens to
+// be embedded in the cluster's url/link.
+func ConnectToDatabase(ctx context.Context, connStr, dbName string) (*PgxConn, error) {
+	cfg, err := resolveDatabaseConfig(connStr, dbName)
+	if err != nil {
+		return nil, err
+	}
+	conn, err := pgx.ConnectConfig(ctx, cfg)
+	if err != nil {
+		return nil, fmt.Errorf("executor: connect: %w", err)
+	}
+	return &PgxConn{conn: conn}, nil
+}
+
 func (c *PgxConn) Exec(ctx context.Context, sql string, args ...any) (int64, error) {
 	ct, err := c.conn.Exec(ctx, sql, args...)
 	return ct.RowsAffected(), err

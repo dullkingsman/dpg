@@ -78,8 +78,13 @@ func TestDumpDashOSandboxesClusterOutput(t *testing.T) {
 		ObjectsDir: realObjectsDir,
 	}
 	db := &project.Database{
-		Dir:    filepath.Join(realClusterDir, "db1"),
-		Config: config.DatabaseConfig{Database: config.DatabaseDef{Name: "db1"}},
+		Dir: filepath.Join(realClusterDir, "db1"),
+		// Name must be the database testpg's container actually has
+		// ("dpgtest") — runDump now connects to this exact database by name
+		// rather than whatever database happens to be embedded in the
+		// cluster URL, so an unrelated placeholder name here would fail to
+		// connect at all.
+		Config: config.DatabaseConfig{Database: config.DatabaseDef{Name: "dpgtest"}},
 	}
 
 	// Scratch -o target, structurally separate from realProjectDir.
@@ -179,7 +184,9 @@ func TestDumpRefusesToOverwriteWithoutConfirmation(t *testing.T) {
 	cl := &project.Cluster{
 		Config: config.ClusterConfig{Cluster: config.ClusterDef{Name: "cluster1", URL: connStr}},
 	}
-	db := &project.Database{Config: config.DatabaseConfig{Database: config.DatabaseDef{Name: "db1"}}}
+	// Name must be the database testpg's container actually has ("dpgtest") —
+	// see the comment on the equivalent Database literal above.
+	db := &project.Database{Config: config.DatabaseConfig{Database: config.DatabaseDef{Name: "dpgtest"}}}
 	fmtOpts := format.Options{IndentSize: 4, KeywordCase: "upper"}
 
 	// First dump: nothing exists yet, must succeed with zero confirmation

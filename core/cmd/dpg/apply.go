@@ -276,7 +276,7 @@ func runApply(
 		}
 	}
 
-	conn, err := executor.Connect(ctx, connStr)
+	conn, err := executor.ConnectToDatabase(ctx, connStr, db.Name())
 	if err != nil {
 		return ui.WrapDB(err)
 	}

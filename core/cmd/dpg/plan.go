@@ -136,7 +136,7 @@ func newPlanCmd() *cobra.Command {
 			for _, db := range databases {
 				var snap *pipeline.Snapshot
 				if live {
-					snap, err = introspectSnapshot(cmd.Context(), cl, secretResolver, introspector)
+					snap, err = introspectSnapshot(cmd.Context(), cl, db, secretResolver, introspector)
 					if err != nil {
 						return fmt.Errorf("%s/%s: %w", cl.Name(), db.Name(), err)
 					}
@@ -195,9 +195,9 @@ Use --watch to re-run automatically whenever source files change.`,
 	return cmd
 }
 
-// introspectSnapshot connects to the live database for cl, introspects its
-// catalog, and returns a Snapshot built from the live state.
-func introspectSnapshot(ctx context.Context, cl *project.Cluster, secretResolver pipeline.SecretResolver, introspector pipeline.Introspector) (*pipeline.Snapshot, error) {
+// introspectSnapshot connects to the live database db within cl, introspects
+// its catalog, and returns a Snapshot built from the live state.
+func introspectSnapshot(ctx context.Context, cl *project.Cluster, db *project.Database, secretResolver pipeline.SecretResolver, introspector pipeline.Introspector) (*pipeline.Snapshot, error) {
 	connStr := cl.ConnectionString()
 	if connStr == "" {
 		return nil, fmt.Errorf("cluster %q has no connection configured (set url or link in cluster dpg.toml)", cl.Name())
@@ -209,7 +209,7 @@ func introspectSnapshot(ctx context.Context, cl *project.Cluster, secretResolver
 			return nil, ui.WrapDB(fmt.Errorf("resolve connection secret: %w", err))
 		}
 	}
-	conn, err := executor.Connect(ctx, connStr)
+	conn, err := executor.ConnectToDatabase(ctx, connStr, db.Name())
 	if err != nil {
 		return nil, ui.WrapDB(err)
 	}

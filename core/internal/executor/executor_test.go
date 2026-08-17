@@ -275,3 +275,50 @@ func TestApplyNoResolverRegisteredErrorsClearly(t *testing.T) {
 		t.Fatal("expected an error when no SecretResolver is registered")
 	}
 }
+
+// ── resolveDatabaseConfig ────────────────────────────────────────────────────
+
+func TestResolveDatabaseConfigURIForm(t *testing.T) {
+	cfg, err := resolveDatabaseConfig("postgres://user:pass@host:5432/a?sslmode=disable", "b")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Database != "b" {
+		t.Errorf("Database = %q, want %q", cfg.Database, "b")
+	}
+	if cfg.Host != "host" || cfg.User != "user" {
+		t.Errorf("host/user not preserved: host=%q user=%q", cfg.Host, cfg.User)
+	}
+}
+
+func TestResolveDatabaseConfigKeywordValueForm(t *testing.T) {
+	cfg, err := resolveDatabaseConfig("host=host dbname=a user=user", "b")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Database != "b" {
+		t.Errorf("Database = %q, want %q", cfg.Database, "b")
+	}
+}
+
+func TestResolveDatabaseConfigNoOpWhenAlreadyCorrect(t *testing.T) {
+	cfg, err := resolveDatabaseConfig("postgres://host/b", "b")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Database != "b" {
+		t.Errorf("Database = %q, want %q", cfg.Database, "b")
+	}
+}
+
+func TestResolveDatabaseConfigEmptyDBNameErrors(t *testing.T) {
+	if _, err := resolveDatabaseConfig("postgres://host/a", ""); err == nil {
+		t.Fatal("expected error for empty database name")
+	}
+}
+
+func TestResolveDatabaseConfigMalformedConnStrErrors(t *testing.T) {
+	if _, err := resolveDatabaseConfig("://not a valid conn string", "b"); err == nil {
+		t.Fatal("expected parse error for a malformed connection string")
+	}
+}

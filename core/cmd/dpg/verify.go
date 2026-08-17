@@ -130,7 +130,7 @@ func runVerify(
 		}
 	}
 
-	conn, err := executor.Connect(ctx, connStr)
+	conn, err := executor.ConnectToDatabase(ctx, connStr, db.Name())
 	if err != nil {
 		return false, ui.WrapDB(err)
 	}
