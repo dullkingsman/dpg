@@ -5524,8 +5524,8 @@ func diffViewIndexes(schema, view string, desired []*ir.Index, snapIdx []snapsho
 		desiredSnap := snapshot.ToSnapIndex(idx)
 		definitionDesired, definitionSnap := desiredSnap, *si
 		definitionDesired.Comment, definitionSnap.Comment = "", ""
-		definitionDesired.Where = stripOuterParens(definitionDesired.Where)
-		definitionSnap.Where = stripOuterParens(definitionSnap.Where)
+		definitionDesired.Where = normalizeExprForCompare(definitionDesired.Where)
+		definitionSnap.Where = normalizeExprForCompare(definitionSnap.Where)
 		if definitionDesired != definitionSnap {
 			ops = append(ops, cautionOp(
 				fmt.Sprintf("DROP INDEX IF EXISTS %s;", quoteIdent(idx.Name)),
@@ -5625,8 +5625,8 @@ func diffIndexes(schema, table string, o *ir.Table, snap *snapshot.SnapTable, re
 		// of parens on reconstruction, which would otherwise compare
 		// unequal against an unchanged, hand-written predicate that never
 		// had them.
-		definitionDesired.Where = stripOuterParens(definitionDesired.Where)
-		definitionSnap.Where = stripOuterParens(definitionSnap.Where)
+		definitionDesired.Where = normalizeExprForCompare(definitionDesired.Where)
+		definitionSnap.Where = normalizeExprForCompare(definitionSnap.Where)
 		if definitionDesired != definitionSnap {
 			ops = append(ops, cautionOp(
 				fmt.Sprintf("DROP INDEX IF EXISTS %s;", quoteIdent(idx.Name)),
@@ -5829,6 +5829,144 @@ func stripOuterParens(s string) string {
 	return strings.TrimSpace(s[1 : len(s)-1])
 }
 
+// normalizeExprForCompare combines stripOuterParens with
+// stripStringLiteralCasts (below) — comparison-only normalization for the
+// same class of expression (policy USING/WITH CHECK, index WHERE, trigger
+// WHEN) that PostgreSQL's own deparser (pg_get_expr/pg_get_triggerdef)
+// reconstructs with both an added outer-paren pair and an explicit
+// "::type" cast on any string-literal operand that isn't already typed
+// unambiguously by context — confirmed live for all three call sites
+// (`(status = 'active'::text)` from a hand-written `status = 'active'`, no
+// cast, on a policy, an index predicate, and a trigger WHEN condition
+// alike). Applying only stripOuterParens (as the policy/index sites
+// originally did) still leaves the cast difference as a false positive for
+// any string-literal comparison — the single most common shape of a real
+// WHEN/USING/WHERE clause — so both normalizations always travel together.
+func normalizeExprForCompare(s string) string {
+	return stripStringLiteralCasts(stripOuterParens(s))
+}
+
+// stripStringLiteralCasts removes a trailing "::typename" (optionally
+// "::typename(args)", e.g. "::character varying(10)") immediately following
+// a single-quoted string literal, without touching anything inside a quoted
+// literal itself (including a doubled ” escaped quote). Comparison-only,
+// same "never change what's stored or emitted, only what's used to decide
+// drift" precedent as stripOuterParens/translateConstraintExpr.
+func stripStringLiteralCasts(s string) string {
+	var b strings.Builder
+	i := 0
+	for i < len(s) {
+		if s[i] != '\'' {
+			b.WriteByte(s[i])
+			i++
+			continue
+		}
+		j := i + 1
+		for j < len(s) {
+			if s[j] == '\'' {
+				if j+1 < len(s) && s[j+1] == '\'' {
+					j += 2
+					continue
+				}
+				break
+			}
+			j++
+		}
+		end := j
+		if end < len(s) {
+			end++ // include the closing quote
+		}
+		b.WriteString(s[i:end])
+		i = end
+		if i+1 < len(s) && s[i] == ':' && s[i+1] == ':' {
+			k := i + 2
+			for k < len(s) && (isIdentByte(s[k]) || s[k] == ' ') {
+				k++
+			}
+			for k > i+2 && s[k-1] == ' ' {
+				k--
+			}
+			if k < len(s) && s[k] == '(' {
+				depth := 0
+				for ; k < len(s); k++ {
+					if s[k] == '(' {
+						depth++
+					} else if s[k] == ')' {
+						depth--
+						if depth == 0 {
+							k++
+							break
+						}
+					}
+				}
+			}
+			i = k // skip the cast, don't write it
+		}
+	}
+	return b.String()
+}
+
+// foldTriggerPseudoRelNames lowercases whole-word "NEW"/"OLD" tokens outside
+// any quoted span, matching PostgreSQL's own identifier-folding behavior for
+// unquoted identifiers (pg_get_triggerdef always deparses a trigger's
+// transition-relation references as lowercase "new"/"old" regardless of how
+// the user originally cased them, confirmed live). Trigger-condition-only:
+// Policy/Index expressions have no NEW/OLD pseudo-relations to fold.
+// Comparison-only, same precedent as stripOuterParens/stripStringLiteralCasts.
+func foldTriggerPseudoRelNames(s string) string {
+	var b strings.Builder
+	i := 0
+	for i < len(s) {
+		c := s[i]
+		if c == '\'' || c == '"' {
+			j := i + 1
+			for j < len(s) {
+				if s[j] == c {
+					if j+1 < len(s) && s[j+1] == c {
+						j += 2
+						continue
+					}
+					break
+				}
+				j++
+			}
+			end := j
+			if end < len(s) {
+				end++
+			}
+			b.WriteString(s[i:end])
+			i = end
+			continue
+		}
+		if isIdentStart(c) {
+			j := i + 1
+			for j < len(s) && isIdentByte(s[j]) {
+				j++
+			}
+			word := s[i:j]
+			lower := strings.ToLower(word)
+			if lower == "new" || lower == "old" {
+				b.WriteString(lower)
+			} else {
+				b.WriteString(word)
+			}
+			i = j
+			continue
+		}
+		b.WriteByte(c)
+		i++
+	}
+	return b.String()
+}
+
+func isIdentStart(c byte) bool {
+	return c == '_' || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
+}
+
+func isIdentByte(c byte) bool {
+	return isIdentStart(c) || (c >= '0' && c <= '9')
+}
+
 // replaceQuotedIdents substitutes a renamed column's references in s, both
 // quoted ("old" → "new") and bare (old → new, at a word boundary — no
 // partial-identifier match, so renaming "a" never touches "cat"). The bare
@@ -5971,8 +6109,8 @@ func diffPolicies(schema, table string, o *ir.Table, snap *snapshot.SnapTable) [
 			ops = append(ops, createPolicy(schema, table, pol)...)
 		} else if pol.Command != existing.Command ||
 			pol.Permissive != existing.Permissive ||
-			stripOuterParens(ptrStr(pol.Using)) != stripOuterParens(existing.Using) ||
-			stripOuterParens(ptrStr(pol.WithCheck)) != stripOuterParens(existing.WithCheck) {
+			normalizeExprForCompare(ptrStr(pol.Using)) != normalizeExprForCompare(existing.Using) ||
+			normalizeExprForCompare(ptrStr(pol.WithCheck)) != normalizeExprForCompare(existing.WithCheck) {
 			ops = append(ops, safeOp(
 				fmt.Sprintf("DROP POLICY IF EXISTS %s ON %s;", quoteIdent(pol.Name), tblIdent),
 				pol.Pos,
@@ -6023,7 +6161,8 @@ func diffTriggers(schema, table string, o *ir.Table, snap *snapshot.SnapTable) [
 		} else if trg.When != existing.When ||
 			strings.Join(trg.Events, ", ") != existing.Events ||
 			trg.ForEach != existing.ForEach ||
-			qualifyFuncForCompare(trg.Function) != qualifyFuncForCompare(existing.Function) {
+			qualifyFuncForCompare(trg.Function) != qualifyFuncForCompare(existing.Function) ||
+			foldTriggerPseudoRelNames(normalizeExprForCompare(ptrStr(trg.Condition))) != foldTriggerPseudoRelNames(normalizeExprForCompare(existing.Condition)) {
 			ops = append(ops, safeOp(
 				fmt.Sprintf("DROP TRIGGER IF EXISTS %s ON %s;", quoteIdent(trg.Name), tblIdent),
 				trg.Pos,

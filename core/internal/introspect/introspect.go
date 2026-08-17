@@ -1208,6 +1208,7 @@ SELECT n.nspname, c.relname,
        ], ' OR ') AS events,
        p.proname AS func_name,
        pn.nspname AS func_schema,
+       pg_get_triggerdef(t.oid, true) AS triggerdef,
        obj_description(t.oid, 'pg_trigger') AS comment
 FROM   pg_trigger t
 JOIN   pg_class c     ON c.oid = t.tgrelid
@@ -1225,11 +1226,12 @@ ORDER  BY n.nspname, c.relname, t.tgname`
 	defer rs.Close()
 
 	for rs.Next() {
-		var schema, table, name, when, forEach, events, funcName, funcSchema string
+		var schema, table, name, when, forEach, events, funcName, funcSchema, triggerDef string
 		var comment *string
-		if err := rs.Scan(&schema, &table, &name, &when, &forEach, &events, &funcName, &funcSchema, &comment); err != nil {
+		if err := rs.Scan(&schema, &table, &name, &when, &forEach, &events, &funcName, &funcSchema, &triggerDef, &comment); err != nil {
 			return err
 		}
+		condition := extractTriggerWhenCondition(triggerDef)
 		t, ok := idx[schema+"."+table]
 		if !ok {
 			continue
@@ -1245,15 +1247,51 @@ ORDER  BY n.nspname, c.relname, t.tgname`
 			}
 		}
 		t.Triggers = append(t.Triggers, &ir.Trigger{
-			Name:     name,
-			When:     when,
-			Events:   cleanEvents,
-			ForEach:  forEach,
-			Function: fn,
-			Comment:  comment,
+			Name:      name,
+			When:      when,
+			Events:    cleanEvents,
+			ForEach:   forEach,
+			Function:  fn,
+			Condition: condition,
+			Comment:   comment,
 		})
 	}
 	return rs.Err()
+}
+
+// extractTriggerWhenCondition pulls a trigger's WHEN (...) condition out of
+// pg_get_triggerdef's full deparsed CREATE TRIGGER text. There is no direct
+// SQL-callable equivalent of pg_get_expr for a trigger qual: tgqual's Var
+// nodes resolve against the trigger's implicit OLD/NEW pseudo-relations, and
+// plain pg_get_expr(tgqual, tgrelid) errors with "expression contains
+// variables of more than one relation" for any condition that references
+// NEW or OLD (confirmed live — the common case for an UPDATE trigger's WHEN
+// clause). pg_get_triggerdef deparses the whole statement correctly because
+// it builds the OLD/NEW range-table context internally; this walks its
+// output the same way introspectConstraints already relies on
+// pg_get_constraintdef's text for a value the catalog doesn't expose more
+// directly.
+func extractTriggerWhenCondition(def string) *string {
+	const marker = " WHEN ("
+	idx := strings.Index(def, marker)
+	if idx == -1 {
+		return nil
+	}
+	start := idx + len(marker) - 1 // index of the opening '('
+	depth := 0
+	for i := start; i < len(def); i++ {
+		switch def[i] {
+		case '(':
+			depth++
+		case ')':
+			depth--
+			if depth == 0 {
+				cond := strings.TrimSpace(def[start+1 : i])
+				return &cond
+			}
+		}
+	}
+	return nil
 }
 
 // ── views ─────────────────────────────────────────────────────────────────────

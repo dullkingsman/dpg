@@ -310,12 +310,13 @@ type SnapPolicy struct {
 }
 
 type SnapTrigger struct {
-	Name     string `json:"name"`
-	When     string `json:"when"`
-	Events   string `json:"events"` // comma-separated
-	ForEach  string `json:"for_each"`
-	Function string `json:"function"`
-	Comment  string `json:"comment,omitempty"`
+	Name      string `json:"name"`
+	When      string `json:"when"`
+	Events    string `json:"events"` // comma-separated
+	ForEach   string `json:"for_each"`
+	Function  string `json:"function"`
+	Condition string `json:"condition,omitempty"`
+	Comment   string `json:"comment,omitempty"`
 }
 
 type SnapGrant struct {

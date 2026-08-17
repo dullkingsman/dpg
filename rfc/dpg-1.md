@@ -5059,6 +5059,40 @@ serial_sequence_declared      = "off"
    exactly the same reason `ALTER` is structurally excluded from DPG's
    no-verb object model (§4). Not planned for any future version.
 
+   **`CREATE ACCESS METHOD`:**
+   Out of scope. The motivating real-world case — installing a custom
+   index access method such as `pgvector`'s `hnsw`/`ivfflat` or
+   `bloom` — never actually requires a bare `CREATE ACCESS METHOD`
+   statement in practice: the access method is registered as a side
+   effect of `CREATE EXTENSION`, which DPG already manages, and is
+   then only ever *referenced* by name (`USING hnsw`) on an index or
+   operator class, both already supported. A bare `CREATE ACCESS
+   METHOD` only serves someone implementing a new access method in C
+   — extension authors, not DPG's application-schema audience. Not
+   planned for any future version unless a concrete use case outside
+   the extension-install path emerges.
+
+   **`CREATE CONVERSION`:**
+   Out of scope. Character-set conversions were relevant when a
+   cluster mixed encodings; the near-universal use of UTF-8 end to end
+   today leaves no realistic scenario where an application schema
+   hand-declares one. Not planned for any future version.
+
+   **`CREATE [PROCEDURAL] LANGUAGE`:**
+   Out of scope. Every commonly used procedural language
+   (`plpython3u`, `plperl`, `plv8`, etc.) installs via `CREATE
+   EXTENSION`, which DPG already manages, exactly as PostgreSQL's own
+   documentation recommends; a bare `CREATE LANGUAGE` statement is
+   largely a pre-9.1 pattern predating the extension mechanism. Not
+   planned for any future version.
+
+   **`CREATE TRANSFORM`:**
+   Out of scope. Type transforms (e.g. for PL/Python) are always
+   bundled with a specific extension pairing (`hstore_plpython`,
+   `ltree_plpython`) and are never hand-declared independently of
+   installing that extension, which DPG already manages. Not planned
+   for any future version.
+
 ---
 
 ## 24. Security Considerations
@@ -5251,6 +5285,10 @@ serial_sequence_declared      = "off"
    | Inline data seeding | Out of scope | DPG is a schema tool; data management is outside its scope |
    | Database management (`CREATE`/`ALTER`/`DROP DATABASE`) | Out of scope | Cluster-provisioning, not schema management; see §23 — permanent, not deferred |
    | `REASSIGN OWNED BY` / `DROP OWNED BY` | Out of scope | One-shot maintenance command, not a declarable object; see §23 |
+   | `CREATE ACCESS METHOD` | Out of scope | Covered by extension install (`CREATE EXTENSION`); see §23 |
+   | `CREATE CONVERSION` | Out of scope | No realistic use case under UTF-8 dominance; see §23 |
+   | `CREATE [PROCEDURAL] LANGUAGE` | Out of scope | Covered by extension install (`CREATE EXTENSION`); see §23 |
+   | `CREATE TRANSFORM` | Out of scope | Always bundled with a specific extension pairing; see §23 |
    | Minimum PG version targeting | Deferred | See §23; planned v1.1 |
 
 ---
@@ -6896,6 +6934,7 @@ ENUM user_status ('active', 'inactive', 'banned') {
    | E.3 | 2026-05-13 | §D.8–§D.9 added. Root `dpg.toml` `[fmt]` and `[migrations]` sections documented. CLI corrections: `dpg validate` JSON schema, `dpg portability` flag set, `dpg init` default cluster name (`"production"`), `dpg fmt` TOML key names. ToC updated to include Appendix D subsections. |
    | E.4 | 2026-05-17 | §D.10 added. Name Maps feature specified: ten rule keywords, `[namemaps]` TOML config at all three levels (global + per-object-type rules), inline `NAME MAP` and `NAME MAPS` block directives, literal target name support via double-quoted identifiers, resolution order (block > database > cluster > root), snapshot `name_maps` array field on all object types, error codes DPG-E030 and DPG-E031. |
    | E.5 | 2026-08-16 | §D.11 added. `SERIAL`/`BIGSERIAL`/`SMALLSERIAL` column sugar specified as a first-class IR concept (`Column.Serial`, sibling marker to `Column.Type`): normalization table, `SERIAL`-implies-`NOT NULL` rule, literal-keyword emission with suppressed `NOT NULL`/`DEFAULT`, `pg_depend`-based introspection detection mirroring identity columns, non-reapplicable dump output fixed, `SnapColumn.serial` field, and a legacy-snapshot self-healing comparison for pre-existing snapshots that stored the literal `"serial"` type name. §D.3's `serial-sequence-declared` entry updated: now also triggers on `Column.Serial`, not `Column.Identity` only. |
+   | E.6 | 2026-08-17 | §23 and §25 updated with four scope decisions that had previously been made and recorded only in project working notes, not in this document: `CREATE ACCESS METHOD`, `CREATE CONVERSION`, `CREATE [PROCEDURAL] LANGUAGE`, and `CREATE TRANSFORM` are all formally out of scope (covered either by the extension-install path DPG already manages, or by having no realistic hand-declared use case). Brings this document in line with the two sibling decisions (`CREATE DATABASE`, `REASSIGN OWNED BY`/`DROP OWNED BY`) it already documented. |
 
 ---
 

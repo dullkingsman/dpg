@@ -618,6 +618,9 @@ func toSnapTrigger(trg *ir.Trigger) SnapTrigger {
 		ForEach:  trg.ForEach,
 		Function: trg.Function,
 	}
+	if trg.Condition != nil {
+		st.Condition = *trg.Condition
+	}
 	if trg.Comment != nil {
 		st.Comment = *trg.Comment
 	}

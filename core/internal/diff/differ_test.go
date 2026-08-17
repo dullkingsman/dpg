@@ -4959,6 +4959,138 @@ func TestDiffTriggerFunctionGenuinelyChanged(t *testing.T) {
 	}
 }
 
+func TestDiffTriggerConditionParenNormalizationIsNoop(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.t", &snapshot.SnapObject{
+		Kind: "table",
+		Table: &snapshot.SnapTable{
+			Schema:  "public",
+			Name:    "t",
+			Columns: []snapshot.SnapColumn{{Name: "id", Type: "bigint"}},
+			Triggers: []snapshot.SnapTrigger{
+				// Simulates pg_get_expr's mandatory outer-paren wrapping on introspection.
+				{Name: "trg_a", When: "AFTER", Events: "UPDATE", ForEach: "ROW", Function: "public.trg_touch", Condition: "(status = 'active'::text)"},
+			},
+		},
+	})
+	desired := []pipeline.IRObject{
+		&ir.Table{
+			Schema:  "public",
+			Name:    "t",
+			Columns: []*ir.Column{{Name: "id", Type: ir.TypeRef{Name: "bigint"}}},
+			Triggers: []*ir.Trigger{
+				// Simulates the blockparser storing only the interior of WHEN (...), no parens.
+				{Name: "trg_a", When: "AFTER", Events: []string{"UPDATE"}, ForEach: "ROW", Function: "trg_touch", Condition: strPtr("status = 'active'::text")},
+			},
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if containsSQL(ops, "TRIGGER") {
+		t.Errorf("expected no trigger ops: a paren-wrapping-only difference between introspected and declared WHEN condition must not be treated as drift, got: %v", sqlList(ops))
+	}
+}
+
+func TestDiffTriggerConditionGenuinelyChanged(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.t", &snapshot.SnapObject{
+		Kind: "table",
+		Table: &snapshot.SnapTable{
+			Schema:  "public",
+			Name:    "t",
+			Columns: []snapshot.SnapColumn{{Name: "id", Type: "bigint"}},
+			Triggers: []snapshot.SnapTrigger{
+				{Name: "trg_a", When: "AFTER", Events: "UPDATE", ForEach: "ROW", Function: "public.trg_touch", Condition: "(status = 'active'::text)"},
+			},
+		},
+	})
+	desired := []pipeline.IRObject{
+		&ir.Table{
+			Schema:  "public",
+			Name:    "t",
+			Columns: []*ir.Column{{Name: "id", Type: ir.TypeRef{Name: "bigint"}}},
+			Triggers: []*ir.Trigger{
+				{Name: "trg_a", When: "AFTER", Events: []string{"UPDATE"}, ForEach: "ROW", Function: "trg_touch", Condition: strPtr("status = 'inactive'")},
+			},
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsSQL(ops, `DROP TRIGGER IF EXISTS "trg_a"`) || !containsSQL(ops, "WHEN (status = 'inactive')") {
+		t.Errorf("expected DROP+CREATE with the new WHEN condition for a genuinely changed condition, got: %v", sqlList(ops))
+	}
+}
+
+func TestDiffTriggerConditionAddedAndRemoved(t *testing.T) {
+	// Added: no condition in snapshot, one declared now.
+	snapAdded := &pipeline.Snapshot{}
+	_ = snapAdded.SetObject("public.t", &snapshot.SnapObject{
+		Kind: "table",
+		Table: &snapshot.SnapTable{
+			Schema:  "public",
+			Name:    "t",
+			Columns: []snapshot.SnapColumn{{Name: "id", Type: "bigint"}},
+			Triggers: []snapshot.SnapTrigger{
+				{Name: "trg_a", When: "AFTER", Events: "UPDATE", ForEach: "ROW", Function: "public.trg_touch"},
+			},
+		},
+	})
+	desiredAdded := []pipeline.IRObject{
+		&ir.Table{
+			Schema:  "public",
+			Name:    "t",
+			Columns: []*ir.Column{{Name: "id", Type: ir.TypeRef{Name: "bigint"}}},
+			Triggers: []*ir.Trigger{
+				{Name: "trg_a", When: "AFTER", Events: []string{"UPDATE"}, ForEach: "ROW", Function: "trg_touch", Condition: strPtr("status = 'active'")},
+			},
+		},
+	}
+	ops, err := New().Diff(desiredAdded, snapAdded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsSQL(ops, `DROP TRIGGER IF EXISTS "trg_a"`) || !containsSQL(ops, "WHEN (status = 'active')") {
+		t.Errorf("expected DROP+CREATE emitting the newly-added WHEN condition, got: %v", sqlList(ops))
+	}
+
+	// Removed: condition in snapshot, none declared now.
+	snapRemoved := &pipeline.Snapshot{}
+	_ = snapRemoved.SetObject("public.t", &snapshot.SnapObject{
+		Kind: "table",
+		Table: &snapshot.SnapTable{
+			Schema:  "public",
+			Name:    "t",
+			Columns: []snapshot.SnapColumn{{Name: "id", Type: "bigint"}},
+			Triggers: []snapshot.SnapTrigger{
+				{Name: "trg_a", When: "AFTER", Events: "UPDATE", ForEach: "ROW", Function: "public.trg_touch", Condition: "(status = 'active'::text)"},
+			},
+		},
+	})
+	desiredRemoved := []pipeline.IRObject{
+		&ir.Table{
+			Schema:  "public",
+			Name:    "t",
+			Columns: []*ir.Column{{Name: "id", Type: ir.TypeRef{Name: "bigint"}}},
+			Triggers: []*ir.Trigger{
+				{Name: "trg_a", When: "AFTER", Events: []string{"UPDATE"}, ForEach: "ROW", Function: "trg_touch"},
+			},
+		},
+	}
+	ops, err = New().Diff(desiredRemoved, snapRemoved)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsSQL(ops, `DROP TRIGGER IF EXISTS "trg_a"`) || containsSQL(ops, "WHEN") {
+		t.Errorf("expected DROP+CREATE with no WHEN clause for a removed condition, got: %v", sqlList(ops))
+	}
+}
+
 func TestDiffTriggerAdded(t *testing.T) {
 	d := New()
 	snap := &pipeline.Snapshot{}
