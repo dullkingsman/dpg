@@ -1523,6 +1523,35 @@ OPERATOR CLASS public.rt_same_name FOR TYPE integer USING btree FAMILY rt_same_n
     OPERATOR 3 =, FUNCTION 1 btint4cmp(integer, integer);`)
 }
 
+// TestRoundtripTableInherits is the permanent regression guard flagged as
+// missing by the 2026-08-17 audit-followup's Part D (process/test-coverage
+// gaps): Table.Inherits' dump round trip (§2b item 6) had only ever been
+// manually live-verified in-session, with nothing committed to CI to catch a
+// future regression the way integration/trigger_condition_test.go does for
+// its own fix. Exercises the full apply → introspect → diff pipeline for a
+// classic single-inheritance parent/child pair.
+func TestRoundtripTableInherits(t *testing.T) {
+	assertOpaqueRoundtrip(t, `TABLE rt_parent (id INTEGER PRIMARY KEY, label TEXT);
+TABLE rt_child (extra TEXT) INHERITS (rt_parent);`)
+}
+
+// TestRoundtripBaseType is the permanent regression guard flagged as missing
+// by the 2026-08-17 audit-followup's Part D: BASE type's dump round trip
+// (§2b item 7) had likewise only ever been manually live-verified in-
+// session. Built via PostgreSQL's own documented "reuse an existing
+// internal function" bootstrapping trick (a genuine C-extension base type
+// isn't buildable without a compiler in this environment) — the same
+// myint/int4in/int4out shape used for that session's manual verification,
+// now committed as a permanent test. The resolver must order the two
+// LANGUAGE internal I/O functions before the finalizing TYPE statement
+// (graph.go's BASE-type forward-reference exemption, see
+// isBaseTypeTarget's doc comment) for this to apply at all.
+func TestRoundtripBaseType(t *testing.T) {
+	assertOpaqueRoundtrip(t, `FUNCTION rt_base_in(cstring) RETURNS rt_base LANGUAGE internal AS $$int4in$$;
+FUNCTION rt_base_out(rt_base) RETURNS cstring LANGUAGE internal AS $$int4out$$;
+TYPE rt_base (INPUT = rt_base_in, OUTPUT = rt_base_out, INTERNALLENGTH = 4);`)
+}
+
 func TestRoundtripIndexVariants(t *testing.T) {
 	assertOpaqueRoundtrip(t, `TABLE t (a INTEGER, b INTEGER, c TEXT, e TEXT) {
     INDICES {
