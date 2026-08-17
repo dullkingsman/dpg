@@ -688,7 +688,7 @@ func (s *state) detectTypeKind(pos pipeline.SourcePos) (pipeline.ObjectKind, err
 var schemaAttrKeywords = func() map[string]bool {
 	words := []string{
 		"OWNER", "COMMENT", "RENAMED", "GRANTS", "GRANT",
-		"REVOCATIONS", "REVOCATION", "DEPRECATED", "PROTECTED",
+		"REVOCATIONS", "REVOCATION", "DEPRECATED", "PROTECTED", "SECURITY",
 	}
 	m := make(map[string]bool, len(words))
 	for _, w := range words {

@@ -538,6 +538,13 @@ func (b *blockParser) parseBlock(pos pipeline.SourcePos) (pipeline.BlockAST, err
 			var r pipeline.RevocationEntry
 			r, err = b.parseOneRevocation(dirPos)
 			ast.Revocations = append(ast.Revocations, r)
+		case "SECURITY":
+			// Repeatable, one per label provider (RFC §14.11) — unlike
+			// COMMENT, real PostgreSQL lets several independent providers
+			// label the same object simultaneously.
+			var sl pipeline.SecurityLabel
+			sl, err = b.parseSecurityLabel(dirPos)
+			ast.SecurityLabels = append(ast.SecurityLabels, sl)
 		case "PARTITIONS":
 			// PartitionDef wraps a list, so a PARTITIONS block must MERGE into
 			// any partitions a prior Mode-B PARTITION entry already added —
@@ -707,6 +714,46 @@ func (b *blockParser) parseIdentDirective(pos pipeline.SourcePos) (*pipeline.Ide
 		return nil, err
 	}
 	return &pipeline.Identifier{Name: name}, nil
+}
+
+// parseSecurityLabel reads: LABEL [FOR provider] 'label'; (the "SECURITY"
+// directive keyword itself is consumed by the caller's dispatch, mirroring
+// how "ROW LEVEL SECURITY" splits ROW/LEVEL/SECURITY across parseEnable/
+// parseForce and their own ENABLE/FORCE dispatch keyword).
+func (b *blockParser) parseSecurityLabel(pos pipeline.SourcePos) (pipeline.SecurityLabel, error) {
+	if err := b.expect("LABEL"); err != nil {
+		return pipeline.SecurityLabel{}, err
+	}
+	sl := pipeline.SecurityLabel{Pos: pos}
+	b.skipWS()
+	c := b.cur()
+	if strings.ToUpper(b.readWord()) == "FOR" {
+		b.skipWS()
+		var err error
+		if b.peek() == '"' {
+			sl.Provider, err = b.readQuotedString()
+		} else {
+			sl.Provider = b.readWord()
+			if sl.Provider == "" {
+				err = b.errorf("expected provider name after FOR")
+			}
+		}
+		if err != nil {
+			return pipeline.SecurityLabel{}, err
+		}
+	} else {
+		b.restore(c)
+	}
+	b.skipWS()
+	val, err := b.readSingleQuotedString()
+	if err != nil {
+		return pipeline.SecurityLabel{}, err
+	}
+	sl.Label = val
+	if err := b.expectSemi(); err != nil {
+		return pipeline.SecurityLabel{}, err
+	}
+	return sl, nil
 }
 
 // parseRenamedFrom reads: FROM old_name;
@@ -1164,6 +1211,13 @@ func (b *blockParser) fillColumnBlock(col *pipeline.ColumnBlock) error {
 				err = e2
 			} else {
 				col.Revocations = append(col.Revocations, r)
+			}
+		case "SECURITY":
+			sl, e2 := b.parseSecurityLabel(dirPos)
+			if e2 != nil {
+				err = e2
+			} else {
+				col.SecurityLabels = append(col.SecurityLabels, sl)
 			}
 		case "NAME":
 			b.skipWS()

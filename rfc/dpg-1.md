@@ -145,6 +145,7 @@ Copyright Notice
     14.8. Foreign Data Wrappers .................................... 70
     14.9. Foreign Servers .......................................... 71
     14.10.User Mappings ............................................ 71
+    14.11.Security Labels ........................................... 71
 15. Compilation Pipeline ........................................... 72
     15.1. Phases Overview .......................................... 72
     15.2. Phase 1 — File Discovery ................................. 73
@@ -3733,6 +3734,87 @@ USER MAPPING FOR app_service
 
 ---
 
+### 14.11. Security Labels
+
+   A security label attaches a provider-specific classification tag to
+   an object — meaningful only when a label provider is loaded on the
+   server (e.g. `sepgsql` for SELinux-integrated deployments; without
+   one, any `SECURITY LABEL` statement errors "no security label
+   providers have been loaded", confirmed live). DPG's directive
+   mirrors real PostgreSQL's own statement directly, unlike `COMMENT`
+   (a single nilable value): a block MAY declare several `SECURITY
+   LABEL` entries, one per provider, since PostgreSQL genuinely lets
+   multiple independent providers label the same object at once.
+
+   **PG equivalent:**
+   `SECURITY LABEL [FOR provider] ON object_type object_name IS { string | NULL }`
+
+```abnf
+security-label-decl =
+    "SECURITY" WSP "LABEL" [ WSP "FOR" WSP identifier ] WSP string-literal ";"
+```
+
+   The DPG form omits `ON object_type object_name` — implicit from the
+   enclosing declaration, the same convention `COMMENT`/`GRANTS`/
+   `REVOCATIONS` already use — and the provider identifier: omitted,
+   PostgreSQL resolves it to the sole loaded provider, erroring if zero
+   or more than one is loaded.
+
+```sql
+TABLE orders (
+    id BIGINT PRIMARY KEY
+) {
+    SECURITY LABEL FOR sepgsql 'system_u:object_r:sepgsql_table_t:s0';
+}
+
+COLUMN ssn {
+    SECURITY LABEL FOR sepgsql 'system_u:object_r:sepgsql_secret_table_t:s0';
+}
+```
+
+   **Supported object kinds:** every kind PostgreSQL's own `SECURITY
+   LABEL` grammar supports that DPG models at all — Tables (incl.
+   Foreign Tables), Columns, Views, Materialized Views, Functions,
+   Procedures, Aggregates (rendered as `ON FUNCTION`, matching real
+   PostgreSQL grammar — confirmed live, not `ON AGGREGATE`), Domains
+   (`ON DOMAIN`) and every other Type variant (`ON TYPE`), Schemas,
+   Sequences, Roles, Tablespaces, Publications, Subscriptions, and
+   Event Triggers. `DATABASE` and `LARGE OBJECT` are excluded — DPG
+   doesn't model either as an object kind at all (§23); `[PROCEDURAL]
+   LANGUAGE` is excluded because DPG doesn't support raw `CREATE
+   LANGUAGE` either (§23) — every real language install goes through
+   `CREATE EXTENSION`, which already has its own `COMMENT`/`SECURITY
+   LABEL` coverage as an ordinary opaque-tier kind.
+
+   **Storage note (introspection):** PostgreSQL splits `SECURITY
+   LABEL` storage across two system catalogs along the same
+   per-database/shared boundary `COMMENT`'s `obj_description`/
+   `shobj_description` split already follows — `pg_seclabel` for every
+   per-database kind above, `pg_shseclabel` for the three cluster-wide
+   kinds specifically (Role, Tablespace, Subscription — confirmed live
+   via `pg_class.relisshared`, not assumed from their per-database-
+   looking `CREATE` syntax). An implementation introspecting labels
+   must query the correct catalog per kind; this has no bearing on the
+   DPG source syntax or emitted DDL, which are identical either way.
+
+   **Diffing semantics:** keyed by provider, not by (privilege, role)
+   the way `GRANTS`/`REVOCATIONS` are — two entries for different
+   providers are independent catalog rows, never in conflict. Unlike
+   `GRANTS`' additive model, a removed entry emits an explicit `IS
+   NULL` (`SECURITY LABEL` has no separate revoke-shaped statement;
+   `NULL` is PostgreSQL's own documented way to clear a label). Every
+   emitted statement is `SAFE` — `SECURITY LABEL` never touches data,
+   only catalog metadata, the same classification `COMMENT ON` already
+   gets throughout this document.
+
+   | Change | DDL emitted | Safety |
+   |--------|-------------|--------|
+   | Label added (new provider) | `SECURITY LABEL [FOR provider] ON ... IS '...'` | `SAFE` |
+   | Label changed (same provider) | `SECURITY LABEL [FOR provider] ON ... IS '...'` (re-set) | `SAFE` |
+   | Label removed | `SECURITY LABEL [FOR provider] ON ... IS NULL` | `SAFE` |
+
+---
+
 ---
 
 ## 15. Compilation Pipeline
@@ -4957,6 +5039,26 @@ serial_sequence_declared      = "off"
    **Temporary tables:**
    Session-scoped; cannot be meaningfully managed by a schema tool.
 
+   **Database management (`CREATE DATABASE` / `ALTER DATABASE` /
+   `DROP DATABASE`):**
+   Permanently out of scope, not merely deferred. DPG's project model
+   treats a database directory (§3.4) as proof the database already
+   exists — the directory's presence is what makes a database
+   discoverable and in scope for diffing, not a declaration that DPG
+   should create it. Making DPG create-and-manage databases as objects
+   would require redefining what that directory means, or inventing a
+   second declaration surface alongside it; either way, database
+   creation/deletion is a cluster-provisioning operation, a tier below
+   the schema-management scope this specification defines, and is not
+   planned for any future version.
+
+   **`REASSIGN OWNED BY` / `DROP OWNED BY`:**
+   Out of scope. Both are one-shot cluster-maintenance commands, closer
+   in spirit to `VACUUM` than to a declared object — there is no
+   steady-state "desired" form of either to diff against, which is
+   exactly the same reason `ALTER` is structurally excluded from DPG's
+   no-verb object model (§4). Not planned for any future version.
+
 ---
 
 ## 24. Security Considerations
@@ -5120,6 +5222,7 @@ serial_sequence_declared      = "off"
    | Column-level grants | Declared, Diffed | Additive model |
    | Explicit revocations | Declared, Diffed | |
    | Default Privileges | Declared, Diffed | |
+   | Security Labels (§14.11) | Declared, Diffed | Keyed by provider; every kind PostgreSQL's own `SECURITY LABEL` grammar supports and DPG models |
    | Tablespaces | Declared, Passthrough | Cluster-level; reconstructed from catalog, hash-diffed |
    | Foreign Data Wrappers | Declared, Passthrough | Cluster-level; reconstructed from catalog, hash-diffed |
    | Foreign Servers | Declared, Passthrough | Reconstructed from catalog; hash-diffed |
@@ -5146,6 +5249,8 @@ serial_sequence_declared      = "off"
    | `REFRESH MATERIALIZED VIEW` | Out of scope | Runtime DML |
    | Temporary tables | Out of scope | Session-scoped |
    | Inline data seeding | Out of scope | DPG is a schema tool; data management is outside its scope |
+   | Database management (`CREATE`/`ALTER`/`DROP DATABASE`) | Out of scope | Cluster-provisioning, not schema management; see §23 — permanent, not deferred |
+   | `REASSIGN OWNED BY` / `DROP OWNED BY` | Out of scope | One-shot maintenance command, not a declarable object; see §23 |
    | Minimum PG version targeting | Deferred | See §23; planned v1.1 |
 
 ---

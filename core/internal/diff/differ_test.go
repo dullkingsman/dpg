@@ -11687,3 +11687,381 @@ func TestDiffColumnTypeNumericScaleShrinkStaysDestructive(t *testing.T) {
 		}
 	}
 }
+
+// ── SECURITY LABEL (RFC §14.11) ─────────────────────────────────────────────
+// Regression guard for the whole feature: no ir kind previously had a
+// SecurityLabels field at all, so a declared "SECURITY LABEL [FOR
+// provider] '...'" directive had nowhere to go at any layer. Covers the
+// generic diffSecurityLabelSet/createSecurityLabelOps helpers directly,
+// then a representative sample of the real per-kind wiring — especially
+// the keyword-selection cases that are easy to get backwards (TABLE vs
+// FOREIGN TABLE, VIEW vs MATERIALIZED VIEW, TYPE vs DOMAIN, and
+// PROCEDURE/AGGREGATE both using "FUNCTION" per real PostgreSQL grammar,
+// confirmed live) and the opaque-kind stale-snapshot self-heal path.
+
+func TestSecurityLabelSQL(t *testing.T) {
+	classified := "classified"
+	cases := []struct {
+		name     string
+		provider string
+		label    *string
+		want     string
+	}{
+		{"unqualified", "", &classified, "SECURITY LABEL ON TABLE \"t\" IS 'classified';"},
+		{"for provider", "dummy", &classified, "SECURITY LABEL FOR \"dummy\" ON TABLE \"t\" IS 'classified';"},
+		{"remove (IS NULL)", "dummy", nil, "SECURITY LABEL FOR \"dummy\" ON TABLE \"t\" IS NULL;"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := securityLabelSQL(tc.provider, `TABLE "t"`, tc.label)
+			if got != tc.want {
+				t.Errorf("got %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestDiffSecurityLabelSetGeneric(t *testing.T) {
+	pos := pipeline.SourcePos{}
+	snap := []snapshot.SnapSecurityLabel{
+		{Provider: "dummy", Label: "classified"},     // unchanged
+		{Provider: "selinux", Label: "unclassified"}, // removed
+	}
+	desired := []pipeline.SecurityLabel{
+		{Provider: "dummy", Label: "classified"}, // unchanged
+		{Provider: "other", Label: "secret"},     // added
+	}
+	ops := diffSecurityLabelSet(snap, desired, `TABLE "t"`, pos)
+
+	var added, removed, unchanged int
+	for _, op := range ops {
+		sql := op.SQL()
+		switch {
+		case strings.Contains(sql, `FOR "selinux"`) && strings.Contains(sql, "IS NULL"):
+			removed++
+		case strings.Contains(sql, `FOR "other"`) && strings.Contains(sql, "'secret'"):
+			added++
+		case strings.Contains(sql, `FOR "dummy"`):
+			unchanged++
+		}
+		if op.Safety() != pipeline.Safe {
+			t.Errorf("SECURITY LABEL op should be Safe, got %v: %s", op.Safety(), sql)
+		}
+	}
+	if added != 1 || removed != 1 {
+		t.Fatalf("want 1 added + 1 removed, got added=%d removed=%d, ops=%v", added, removed, sqlList(ops))
+	}
+	if unchanged != 0 {
+		t.Errorf("unchanged provider must not produce an op, got: %v", sqlList(ops))
+	}
+}
+
+func TestDiffSecurityLabelSetChangedLabelSameProvider(t *testing.T) {
+	pos := pipeline.SourcePos{}
+	snap := []snapshot.SnapSecurityLabel{{Provider: "dummy", Label: "unclassified"}}
+	desired := []pipeline.SecurityLabel{{Provider: "dummy", Label: "classified"}}
+	ops := diffSecurityLabelSet(snap, desired, `TABLE "t"`, pos)
+	if len(ops) != 1 {
+		t.Fatalf("want 1 op (re-set to new label), got %d: %v", len(ops), sqlList(ops))
+	}
+	if !strings.Contains(ops[0].SQL(), "'classified'") {
+		t.Errorf("expected the new label, got: %s", ops[0].SQL())
+	}
+}
+
+func TestCreateSecurityLabelOps(t *testing.T) {
+	pos := pipeline.SourcePos{}
+	labels := []pipeline.SecurityLabel{
+		{Provider: "dummy", Label: "classified"},
+		{Label: "unclassified"},
+	}
+	ops := createSecurityLabelOps(labels, `TABLE "t"`, pos)
+	if len(ops) != 2 {
+		t.Fatalf("want 2 ops, got %d", len(ops))
+	}
+	for _, op := range ops {
+		if op.Safety() != pipeline.Safe {
+			t.Errorf("expected Safe, got %v: %s", op.Safety(), op.SQL())
+		}
+	}
+	if !containsSQL(ops, `FOR "dummy"`) || !containsSQL(ops, "'classified'") {
+		t.Errorf("expected FOR-provider entry, got: %v", sqlList(ops))
+	}
+	if !containsSQL(ops, "'unclassified'") {
+		t.Errorf("expected unqualified entry, got: %v", sqlList(ops))
+	}
+}
+
+func TestDiffCreateTableEmitsSecurityLabels(t *testing.T) {
+	d := New()
+	desired := []pipeline.IRObject{
+		&ir.Table{Schema: "public", Name: "t",
+			Columns: []*ir.Column{{Name: "id", Type: ir.TypeRef{Name: "integer"},
+				SecurityLabels: []pipeline.SecurityLabel{{Provider: "dummy", Label: "secret"}}}},
+			SecurityLabels: []pipeline.SecurityLabel{{Provider: "dummy", Label: "classified"}},
+		},
+	}
+	ops, err := d.Diff(desired, &pipeline.Snapshot{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsSQL(ops, `SECURITY LABEL FOR "dummy" ON TABLE "public"."t" IS 'classified';`) {
+		t.Errorf("expected table-level SECURITY LABEL, got: %v", sqlList(ops))
+	}
+	if !containsSQL(ops, `SECURITY LABEL FOR "dummy" ON COLUMN "public"."t"."id" IS 'secret';`) {
+		t.Errorf("expected column-level SECURITY LABEL, got: %v", sqlList(ops))
+	}
+}
+
+func TestDiffForeignTableSecurityLabelUsesForeignTableKeyword(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.ft", &snapshot.SnapObject{
+		Kind: "table",
+		Table: &snapshot.SnapTable{
+			Schema: "public", Name: "ft", Foreign: true,
+			Columns: []snapshot.SnapColumn{{Name: "id", Type: "integer"}},
+		},
+	})
+	desired := []pipeline.IRObject{
+		&ir.Table{Schema: "public", Name: "ft", Foreign: true,
+			Columns:        []*ir.Column{{Name: "id", Type: ir.TypeRef{Name: "integer"}}},
+			SecurityLabels: []pipeline.SecurityLabel{{Provider: "dummy", Label: "classified"}},
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsSQL(ops, `ON FOREIGN TABLE "public"."ft"`) {
+		t.Errorf("expected ON FOREIGN TABLE, got: %v", sqlList(ops))
+	}
+}
+
+func TestDiffMaterializedViewSecurityLabelUsesMaterializedViewKeyword(t *testing.T) {
+	d := New()
+	desired := []pipeline.IRObject{
+		&ir.View{Schema: "public", Name: "mv", Materialized: true, Query: "SELECT 1",
+			SecurityLabels: []pipeline.SecurityLabel{{Provider: "dummy", Label: "classified"}}},
+	}
+	ops, err := d.Diff(desired, &pipeline.Snapshot{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsSQL(ops, `ON MATERIALIZED VIEW "public"."mv"`) {
+		t.Errorf("expected ON MATERIALIZED VIEW, got: %v", sqlList(ops))
+	}
+}
+
+func TestDiffPlainViewSecurityLabelUsesViewKeywordNotTable(t *testing.T) {
+	d := New()
+	desired := []pipeline.IRObject{
+		&ir.View{Schema: "public", Name: "v", Query: "SELECT 1",
+			SecurityLabels: []pipeline.SecurityLabel{{Provider: "dummy", Label: "classified"}}},
+	}
+	ops, err := d.Diff(desired, &pipeline.Snapshot{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsSQL(ops, `SECURITY LABEL FOR "dummy" ON VIEW "public"."v" IS 'classified';`) {
+		t.Errorf("expected ON VIEW (not ON TABLE — real PostgreSQL's SECURITY LABEL grammar has a distinct VIEW form), got: %v", sqlList(ops))
+	}
+}
+
+func TestDiffDomainSecurityLabelUsesDomainKeyword(t *testing.T) {
+	d := New()
+	desired := []pipeline.IRObject{
+		&ir.Type{Schema: "public", Name: "dom", Variant: "DOMAIN", DomainBaseType: ir.TypeRef{Name: "integer"},
+			SecurityLabels: []pipeline.SecurityLabel{{Provider: "dummy", Label: "classified"}}},
+	}
+	ops, err := d.Diff(desired, &pipeline.Snapshot{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsSQL(ops, `ON DOMAIN "public"."dom"`) {
+		t.Errorf("expected ON DOMAIN, got: %v", sqlList(ops))
+	}
+}
+
+func TestDiffEnumTypeSecurityLabelUsesTypeKeyword(t *testing.T) {
+	d := New()
+	desired := []pipeline.IRObject{
+		&ir.Type{Schema: "public", Name: "en", Variant: "ENUM", EnumValues: []string{"a", "b"},
+			SecurityLabels: []pipeline.SecurityLabel{{Provider: "dummy", Label: "classified"}}},
+	}
+	ops, err := d.Diff(desired, &pipeline.Snapshot{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsSQL(ops, `ON TYPE "public"."en"`) {
+		t.Errorf("expected ON TYPE (not ON DOMAIN), got: %v", sqlList(ops))
+	}
+}
+
+func TestDiffAggregateSecurityLabelUsesFunctionKeyword(t *testing.T) {
+	d := New()
+	desired := []pipeline.IRObject{
+		&ir.Aggregate{Schema: "public", Name: "agg", Args: []ir.FuncArg{{Type: ir.TypeRef{Name: "integer"}}},
+			Body:           "CREATE AGGREGATE public.agg(integer) (SFUNC = int4pl, STYPE = integer)",
+			SecurityLabels: []pipeline.SecurityLabel{{Provider: "dummy", Label: "classified"}}},
+	}
+	ops, err := d.Diff(desired, &pipeline.Snapshot{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsSQL(ops, `SECURITY LABEL FOR "dummy" ON FUNCTION "public"."agg"(integer) IS 'classified';`) {
+		t.Errorf("expected ON FUNCTION for an aggregate (real PostgreSQL grammar, not ON AGGREGATE), got: %v", sqlList(ops))
+	}
+}
+
+func TestDiffProcedureSecurityLabelAddedRemoved(t *testing.T) {
+	d := New()
+	body := "BEGIN NULL; END;"
+	hash := ir.HashBody(body)
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.p(integer)", &snapshot.SnapObject{
+		Kind: "procedure",
+		Opaque: &snapshot.SnapOpaque{
+			Kind: "procedure", Schema: "public", Name: "p", Args: "integer", BodyHash: hash,
+			SecurityLabels: []snapshot.SnapSecurityLabel{{Provider: "dummy", Label: "classified"}},
+		},
+	})
+	desired := []pipeline.IRObject{
+		&ir.Procedure{Schema: "public", Name: "p", Args: []ir.FuncArg{{Type: ir.TypeRef{Name: "integer"}}},
+			Attrs: ir.FuncAttrs{Language: "plpgsql", Body: body}, BodyHash: hash,
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsSQL(ops, `ON PROCEDURE "public"."p"(integer) IS NULL`) {
+		t.Errorf("expected the removed label to emit IS NULL, got: %v", sqlList(ops))
+	}
+}
+
+func TestDiffRoleSecurityLabel(t *testing.T) {
+	d := New()
+	desired := []pipeline.IRObject{
+		&ir.Role{Name: "myrole", SecurityLabels: []pipeline.SecurityLabel{{Provider: "dummy", Label: "classified"}}},
+	}
+	ops, err := d.Diff(desired, &pipeline.Snapshot{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsSQL(ops, `ON ROLE "myrole"`) {
+		t.Errorf("expected ON ROLE, got: %v", sqlList(ops))
+	}
+}
+
+func TestDiffSchemaSecurityLabel(t *testing.T) {
+	d := New()
+	desired := []pipeline.IRObject{
+		&ir.Schema{Name: "myschema", SecurityLabels: []pipeline.SecurityLabel{{Provider: "dummy", Label: "classified"}}},
+	}
+	ops, err := d.Diff(desired, &pipeline.Snapshot{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsSQL(ops, `ON SCHEMA "myschema"`) {
+		t.Errorf("expected ON SCHEMA, got: %v", sqlList(ops))
+	}
+}
+
+func TestDiffSequenceSecurityLabel(t *testing.T) {
+	d := New()
+	desired := []pipeline.IRObject{
+		&ir.Sequence{Schema: "public", Name: "seq", SecurityLabels: []pipeline.SecurityLabel{{Provider: "dummy", Label: "classified"}}},
+	}
+	ops, err := d.Diff(desired, &pipeline.Snapshot{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsSQL(ops, `ON SEQUENCE "public"."seq"`) {
+		t.Errorf("expected ON SEQUENCE, got: %v", sqlList(ops))
+	}
+}
+
+// TestDiffTablespaceSecurityLabelStaleSnapshotSelfHeals guards the opaque-
+// kind stale-snapshot self-heal branch specifically (TablespaceLocation ==
+// "" — a snapshot predating structured tracking): SecurityLabels must still
+// be diffed there rather than silently ignored until the next apply
+// populates the structural fields.
+func TestDiffTablespaceSecurityLabelStaleSnapshotSelfHeals(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("ts", &snapshot.SnapObject{
+		Kind:   "tablespace",
+		Opaque: &snapshot.SnapOpaque{Kind: "tablespace", Name: "ts"}, // TablespaceLocation == ""
+	})
+	desired := []pipeline.IRObject{
+		&ir.Tablespace{Name: "ts", Location: "/data/ts", Body: "CREATE TABLESPACE ts LOCATION '/data/ts'",
+			SecurityLabels: []pipeline.SecurityLabel{{Provider: "dummy", Label: "classified"}}},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsSQL(ops, `ON TABLESPACE "ts"`) || !containsSQL(ops, "'classified'") {
+		t.Errorf("expected SECURITY LABEL to still be diffed on the stale-snapshot self-heal path, got: %v", sqlList(ops))
+	}
+}
+
+func TestDiffPublicationSecurityLabel(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("pub", &snapshot.SnapObject{
+		Kind: "publication",
+		Opaque: &snapshot.SnapOpaque{
+			Kind: "publication", Name: "pub", PublicationStructured: true, PublicationAllTables: true,
+			PublicationInsert: true, PublicationUpdate: true, PublicationDelete: true, PublicationTruncate: true,
+		},
+	})
+	desired := []pipeline.IRObject{
+		&ir.Publication{Name: "pub", AllTables: true, Insert: true, Update: true, Delete: true, Truncate: true,
+			SecurityLabels: []pipeline.SecurityLabel{{Provider: "dummy", Label: "classified"}}},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsSQL(ops, `ON PUBLICATION "pub"`) {
+		t.Errorf("expected ON PUBLICATION, got: %v", sqlList(ops))
+	}
+}
+
+func TestDiffSubscriptionSecurityLabel(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("sub", &snapshot.SnapObject{
+		Kind:   "subscription",
+		Opaque: &snapshot.SnapOpaque{Kind: "subscription", Name: "sub", BodyHash: hashText("x")},
+	})
+	desired := []pipeline.IRObject{
+		&ir.Subscription{Name: "sub", Body: "x",
+			SecurityLabels: []pipeline.SecurityLabel{{Provider: "dummy", Label: "classified"}}},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsSQL(ops, `ON SUBSCRIPTION "sub"`) {
+		t.Errorf("expected ON SUBSCRIPTION, got: %v", sqlList(ops))
+	}
+}
+
+func TestDiffEventTriggerSecurityLabel(t *testing.T) {
+	d := New()
+	desired := []pipeline.IRObject{
+		&ir.EventTrigger{Name: "evt", Event: "ddl_command_start", Function: "public.f",
+			Body:           "CREATE EVENT TRIGGER evt ON ddl_command_start EXECUTE FUNCTION public.f()",
+			SecurityLabels: []pipeline.SecurityLabel{{Provider: "dummy", Label: "classified"}}},
+	}
+	ops, err := d.Diff(desired, &pipeline.Snapshot{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsSQL(ops, `ON EVENT TRIGGER "evt"`) {
+		t.Errorf("expected ON EVENT TRIGGER, got: %v", sqlList(ops))
+	}
+}

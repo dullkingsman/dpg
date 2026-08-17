@@ -593,6 +593,85 @@ func diffRevocationSet(
 	return ops
 }
 
+// securityLabelSQL renders a single "SECURITY LABEL [FOR provider] ON
+// <onClause> IS ..." statement (RFC §14.11). label == nil renders IS NULL
+// (removes the label for that provider); provider == "" omits the FOR
+// clause, letting PostgreSQL resolve it to the sole loaded provider.
+func securityLabelSQL(provider, onClause string, label *string) string {
+	var b strings.Builder
+	b.WriteString("SECURITY LABEL ")
+	if provider != "" {
+		b.WriteString("FOR ")
+		b.WriteString(quoteIdent(provider))
+		b.WriteString(" ")
+	}
+	b.WriteString("ON ")
+	b.WriteString(onClause)
+	b.WriteString(" IS ")
+	if label == nil {
+		b.WriteString("NULL")
+	} else {
+		b.WriteString(quoteLit(*label))
+	}
+	b.WriteString(";")
+	return b.String()
+}
+
+// diffSecurityLabelSet diffs a SECURITY LABEL list (RFC §14.11) against its
+// snapshot, keyed by provider — PostgreSQL lets several independent label
+// providers label the same object simultaneously, and each provider's own
+// label is an independent catalog row (pg_seclabel's primary key includes
+// provider), so two entries for different providers are never in conflict
+// the way two GRANT entries for the same (privilege, role) pair would be.
+// Unlike diffGrantSet's additive model, a removed provider entry emits an
+// explicit "IS NULL" (SECURITY LABEL has no separate REVOKE-shaped
+// statement — NULL is real PostgreSQL's own documented way to clear a
+// label). All ops are Safe: SECURITY LABEL never touches data, only catalog
+// metadata, same classification COMMENT ON already gets throughout this file.
+func diffSecurityLabelSet(
+	snapLabels []snapshot.SnapSecurityLabel,
+	desiredLabels []pipeline.SecurityLabel,
+	onClause string,
+	pos pipeline.SourcePos,
+) []pipeline.DiffOp {
+	var ops []pipeline.DiffOp
+
+	snapByKey := make(map[string]snapshot.SnapSecurityLabel, len(snapLabels))
+	for _, l := range snapLabels {
+		snapByKey[l.Provider] = l
+	}
+	desiredByKey := make(map[string]pipeline.SecurityLabel, len(desiredLabels))
+	for _, l := range desiredLabels {
+		desiredByKey[l.Provider] = l
+	}
+
+	for k, sl := range snapByKey {
+		if _, ok := desiredByKey[k]; !ok {
+			ops = append(ops, safeOp(securityLabelSQL(sl.Provider, onClause, nil), pos))
+		}
+	}
+	for k, dl := range desiredByKey {
+		if sl, ok := snapByKey[k]; !ok || sl.Label != dl.Label {
+			label := dl.Label
+			ops = append(ops, safeOp(securityLabelSQL(dl.Provider, onClause, &label), pos))
+		}
+	}
+	return ops
+}
+
+// createSecurityLabelOps renders one SAFE op per declared SecurityLabel
+// entry, for use at object-creation time (mirroring how createTable/
+// createView/etc. emit one op per Grant — see diffSecurityLabelSet's doc
+// comment for why this can never be a REVOKE-shaped removal at create time).
+func createSecurityLabelOps(labels []pipeline.SecurityLabel, onClause string, pos pipeline.SourcePos) []pipeline.DiffOp {
+	ops := make([]pipeline.DiffOp, len(labels))
+	for i, l := range labels {
+		label := l.Label
+		ops[i] = safeOp(securityLabelSQL(l.Provider, onClause, &label), pos)
+	}
+	return ops
+}
+
 // ── DROP operations ───────────────────────────────────────────────────────────
 
 func dropObject(so *snapshot.SnapObject) []pipeline.DiffOp {
@@ -808,7 +887,8 @@ func createObject(obj pipeline.IRObject, vtypes map[string]string) ([]pipeline.D
 		return createAggregate(o)
 	case *ir.Tablespace:
 		ops, err := createOpaque(o.Name, o.Body, "TABLESPACE", "", o.SrcPos)
-		return appendCommentOp(ops, err, "tablespace", "", o.Name, "", "", o.Comment, o.SrcPos)
+		ops, err = appendCommentOp(ops, err, "tablespace", "", o.Name, "", "", o.Comment, o.SrcPos)
+		return appendSecurityLabelOps(ops, err, "tablespace", "", o.Name, "", "", o.SecurityLabels, o.SrcPos)
 	case *ir.ForeignDataWrapper:
 		ops, err := createOpaque(o.Name, o.Body, "FOREIGN DATA WRAPPER", "", o.SrcPos)
 		return appendCommentOp(ops, err, "fdw", "", o.Name, "", "", o.Comment, o.SrcPos)
@@ -819,12 +899,14 @@ func createObject(obj pipeline.IRObject, vtypes map[string]string) ([]pipeline.D
 		return createUserMapping(o)
 	case *ir.Publication:
 		ops, err := createOpaque(o.Name, o.Body, "PUBLICATION", "", o.SrcPos)
-		return appendCommentOp(ops, err, "publication", "", o.Name, "", "", o.Comment, o.SrcPos)
+		ops, err = appendCommentOp(ops, err, "publication", "", o.Name, "", "", o.Comment, o.SrcPos)
+		return appendSecurityLabelOps(ops, err, "publication", "", o.Name, "", "", o.SecurityLabels, o.SrcPos)
 	case *ir.Subscription:
 		return createSubscription(o)
 	case *ir.EventTrigger:
 		ops, err := createOpaque(o.Name, o.Body, "EVENT TRIGGER", "", o.SrcPos)
-		return appendCommentOp(ops, err, "event_trigger", "", o.Name, "", "", o.Comment, o.SrcPos)
+		ops, err = appendCommentOp(ops, err, "event_trigger", "", o.Name, "", "", o.Comment, o.SrcPos)
+		return appendSecurityLabelOps(ops, err, "event_trigger", "", o.Name, "", "", o.SecurityLabels, o.SrcPos)
 	case *ir.Collation:
 		ops, err := createOpaque(o.QualifiedName(), o.Body, "COLLATION", o.Schema, o.SrcPos)
 		return appendCommentOp(ops, err, "collation", o.Schema, o.Name, "", "", o.Comment, o.SrcPos)
@@ -949,44 +1031,54 @@ func createOpaque(name, body, kind, schema string, pos pipeline.SourcePos) ([]pi
 // operator/operator class/operator family/cast all need their special
 // (non-plain-identifier) COMMENT ON syntax, confirmed against \h COMMENT.
 // Returns "" for an unrecognized kind.
-func commentOnOpaqueSQL(kind, schema, name, args, using string, comment *string) string {
-	var ident string
+// opaqueOnClause builds the "<OBJECT TYPE> <identity>" clause shared by
+// COMMENT ON and SECURITY LABEL ON for every opaque kind — both statements
+// target the exact same object identity, just with a different verb/value
+// tail. Returns "" for a kind neither statement supports.
+func opaqueOnClause(kind, schema, name, args, using string) string {
 	switch kind {
 	case "tablespace":
-		ident = "TABLESPACE " + quoteIdent(name)
+		return "TABLESPACE " + quoteIdent(name)
 	case "fdw":
-		ident = "FOREIGN DATA WRAPPER " + quoteIdent(name)
+		return "FOREIGN DATA WRAPPER " + quoteIdent(name)
 	case "server":
-		ident = "SERVER " + quoteIdent(name)
+		return "SERVER " + quoteIdent(name)
 	case "publication":
-		ident = "PUBLICATION " + quoteIdent(name)
+		return "PUBLICATION " + quoteIdent(name)
 	case "event_trigger":
-		ident = "EVENT TRIGGER " + quoteIdent(name)
+		return "EVENT TRIGGER " + quoteIdent(name)
 	case "collation":
-		ident = "COLLATION " + qualIdent(schema, name)
+		return "COLLATION " + qualIdent(schema, name)
 	case "operator":
-		ident = "OPERATOR " + qualOperatorIdent(schema, name) + "(" + args + ")"
+		return "OPERATOR " + qualOperatorIdent(schema, name) + "(" + args + ")"
 	case "operator_class":
-		ident = "OPERATOR CLASS " + qualIdent(schema, name) + " USING " + accessMethodOrDefault(using)
+		return "OPERATOR CLASS " + qualIdent(schema, name) + " USING " + accessMethodOrDefault(using)
 	case "operator_family":
-		ident = "OPERATOR FAMILY " + qualIdent(schema, name) + " USING " + accessMethodOrDefault(using)
+		return "OPERATOR FAMILY " + qualIdent(schema, name) + " USING " + accessMethodOrDefault(using)
 	case "cast":
 		parts := strings.SplitN(name, "->", 2)
 		if len(parts) != 2 {
 			return ""
 		}
-		ident = fmt.Sprintf("CAST (%s AS %s)", parts[0], parts[1])
+		return fmt.Sprintf("CAST (%s AS %s)", parts[0], parts[1])
 	case "statistics":
-		ident = "STATISTICS " + qualIdent(schema, name)
+		return "STATISTICS " + qualIdent(schema, name)
 	case "ts_config":
-		ident = "TEXT SEARCH CONFIGURATION " + qualIdent(schema, name)
+		return "TEXT SEARCH CONFIGURATION " + qualIdent(schema, name)
 	case "ts_dict":
-		ident = "TEXT SEARCH DICTIONARY " + qualIdent(schema, name)
+		return "TEXT SEARCH DICTIONARY " + qualIdent(schema, name)
 	case "ts_parser":
-		ident = "TEXT SEARCH PARSER " + qualIdent(schema, name)
+		return "TEXT SEARCH PARSER " + qualIdent(schema, name)
 	case "ts_template":
-		ident = "TEXT SEARCH TEMPLATE " + qualIdent(schema, name)
+		return "TEXT SEARCH TEMPLATE " + qualIdent(schema, name)
 	default:
+		return ""
+	}
+}
+
+func commentOnOpaqueSQL(kind, schema, name, args, using string, comment *string) string {
+	ident := opaqueOnClause(kind, schema, name, args, using)
+	if ident == "" {
 		return ""
 	}
 	val := "NULL"
@@ -1009,6 +1101,20 @@ func appendCommentOp(ops []pipeline.DiffOp, err error, kind, schema, name, args,
 	}
 	if sql := commentOnOpaqueSQL(kind, schema, name, args, using, comment); sql != "" {
 		ops = append(ops, safeOp(sql, pos))
+	}
+	return ops, nil
+}
+
+// appendSecurityLabelOps is appendCommentOp's SecurityLabels counterpart —
+// one createSecurityLabelOps op per declared provider, appended at
+// creation time (RFC §14.11). Skipped entirely for an opaque kind
+// opaqueOnClause doesn't recognize.
+func appendSecurityLabelOps(ops []pipeline.DiffOp, err error, kind, schema, name, args, using string, labels []pipeline.SecurityLabel, pos pipeline.SourcePos) ([]pipeline.DiffOp, error) {
+	if err != nil || len(labels) == 0 {
+		return ops, err
+	}
+	if ident := opaqueOnClause(kind, schema, name, args, using); ident != "" {
+		ops = append(ops, createSecurityLabelOps(labels, ident, pos)...)
 	}
 	return ops, nil
 }
@@ -1202,6 +1308,13 @@ func createSubscription(o *ir.Subscription) ([]pipeline.DiffOp, error) {
 			o.SrcPos,
 		))
 	}
+	// manualOp for the same ordering reason as COMMENT above: CREATE
+	// SUBSCRIPTION is itself non-transactional, so a transactional
+	// SECURITY LABEL here would run before it exists.
+	for _, l := range o.SecurityLabels {
+		label := l.Label
+		ops = append(ops, manualOp(securityLabelSQL(l.Provider, "SUBSCRIPTION "+quoteIdent(o.Name), &label), o.SrcPos))
+	}
 	return ops, nil
 }
 
@@ -1214,6 +1327,7 @@ func createSubscription(o *ir.Subscription) ([]pipeline.DiffOp, error) {
 // same as every other opaque-tier kind.
 func diffTablespace(o *ir.Tablespace, snap *snapshot.SnapOpaque) ([]pipeline.DiffOp, error) {
 	pos := o.SrcPos
+	onClause := "TABLESPACE " + quoteIdent(o.Name)
 	// Stale snapshot predating this structured field: Go's zero value ""
 	// for TablespaceLocation, even though a real tablespace always has a
 	// non-empty LOCATION (required by CREATE TABLESPACE's grammar) — same
@@ -1229,6 +1343,7 @@ func diffTablespace(o *ir.Tablespace, snap *snapshot.SnapOpaque) ([]pipeline.Dif
 				ops = append(ops, safeOp(sql, pos))
 			}
 		}
+		ops = append(ops, diffSecurityLabelSet(snap.SecurityLabels, o.SecurityLabels, onClause, pos)...)
 		if len(ops) == 0 {
 			ops = append(ops, safeOp(fmt.Sprintf("-- refresh snapshot metadata for tablespace %s", quoteIdent(o.Name)), pos))
 		}
@@ -1241,14 +1356,21 @@ func diffTablespace(o *ir.Tablespace, snap *snapshot.SnapOpaque) ([]pipeline.Dif
 			return nil, err
 		}
 		ops = append(ops, createOps...)
-		return appendCommentOp(ops, nil, "tablespace", "", o.Name, "", "", o.Comment, pos)
+		ops, err = appendCommentOp(ops, nil, "tablespace", "", o.Name, "", "", o.Comment, pos)
+		if err != nil {
+			return nil, err
+		}
+		ops = append(ops, createSecurityLabelOps(o.SecurityLabels, onClause, pos)...)
+		return ops, nil
 	}
+	var ops []pipeline.DiffOp
 	if !ptrEq(o.Comment, snap.Comment) {
 		if sql := commentOnOpaqueSQL("tablespace", "", o.Name, "", "", o.Comment); sql != "" {
-			return []pipeline.DiffOp{safeOp(sql, pos)}, nil
+			ops = append(ops, safeOp(sql, pos))
 		}
 	}
-	return nil, nil
+	ops = append(ops, diffSecurityLabelSet(snap.SecurityLabels, o.SecurityLabels, onClause, pos)...)
+	return ops, nil
 }
 
 // diffCast implements RFC §14.5's structured diffing: PostgreSQL provides no
@@ -1309,6 +1431,7 @@ func diffCast(o *ir.Cast, snap *snapshot.SnapOpaque) ([]pipeline.DiffOp, error) 
 // array, and WHEN TAG IN (...)'s list order carries no meaning.
 func diffEventTrigger(o *ir.EventTrigger, snap *snapshot.SnapOpaque) ([]pipeline.DiffOp, error) {
 	pos := o.SrcPos
+	onClause := "EVENT TRIGGER " + quoteIdent(o.Name)
 	// Stale snapshot predating these structured fields: EventTriggerEvent
 	// is always non-empty for a real event trigger (required by CREATE
 	// EVENT TRIGGER's grammar), never the Go zero value — same
@@ -1320,6 +1443,7 @@ func diffEventTrigger(o *ir.EventTrigger, snap *snapshot.SnapOpaque) ([]pipeline
 				ops = append(ops, safeOp(sql, pos))
 			}
 		}
+		ops = append(ops, diffSecurityLabelSet(snap.SecurityLabels, o.SecurityLabels, onClause, pos)...)
 		if len(ops) == 0 {
 			ops = append(ops, safeOp(fmt.Sprintf("-- refresh snapshot metadata for event trigger %s", quoteIdent(o.Name)), pos))
 		}
@@ -1334,14 +1458,21 @@ func diffEventTrigger(o *ir.EventTrigger, snap *snapshot.SnapOpaque) ([]pipeline
 			return nil, err
 		}
 		ops = append(ops, createOps...)
-		return appendCommentOp(ops, nil, "event_trigger", "", o.Name, "", "", o.Comment, pos)
+		ops, err = appendCommentOp(ops, nil, "event_trigger", "", o.Name, "", "", o.Comment, pos)
+		if err != nil {
+			return nil, err
+		}
+		ops = append(ops, createSecurityLabelOps(o.SecurityLabels, onClause, pos)...)
+		return ops, nil
 	}
+	var ops []pipeline.DiffOp
 	if !ptrEq(o.Comment, snap.Comment) {
 		if sql := commentOnOpaqueSQL("event_trigger", "", o.Name, "", "", o.Comment); sql != "" {
-			return []pipeline.DiffOp{safeOp(sql, pos)}, nil
+			ops = append(ops, safeOp(sql, pos))
 		}
 	}
-	return nil, nil
+	ops = append(ops, diffSecurityLabelSet(snap.SecurityLabels, o.SecurityLabels, onClause, pos)...)
+	return ops, nil
 }
 
 // userMappingPasswordKeys mirrors internal/introspect's and
@@ -1710,6 +1841,7 @@ func diffPublication(o *ir.Publication, snap *snapshot.SnapOpaque) ([]pipeline.D
 				ops = append(ops, safeOp(sql, pos))
 			}
 		}
+		ops = append(ops, diffSecurityLabelSet(snap.SecurityLabels, o.SecurityLabels, "PUBLICATION "+ident, pos)...)
 		if len(ops) == 0 {
 			ops = append(ops, safeOp(fmt.Sprintf("-- refresh snapshot metadata for publication %s", ident), pos))
 		}
@@ -1722,7 +1854,12 @@ func diffPublication(o *ir.Publication, snap *snapshot.SnapOpaque) ([]pipeline.D
 			return nil, err
 		}
 		ops = append(ops, createOps...)
-		return appendCommentOp(ops, nil, "publication", "", o.Name, "", "", o.Comment, pos)
+		ops, err = appendCommentOp(ops, nil, "publication", "", o.Name, "", "", o.Comment, pos)
+		if err != nil {
+			return nil, err
+		}
+		ops = append(ops, createSecurityLabelOps(o.SecurityLabels, "PUBLICATION "+ident, pos)...)
+		return ops, nil
 	}
 	var ops []pipeline.DiffOp
 	if !o.AllTables {
@@ -1750,7 +1887,12 @@ func diffPublication(o *ir.Publication, snap *snapshot.SnapOpaque) ([]pipeline.D
 					return nil, err
 				}
 				ops = append(ops, createOps...)
-				return appendCommentOp(ops, nil, "publication", "", o.Name, "", "", o.Comment, pos)
+				ops, err = appendCommentOp(ops, nil, "publication", "", o.Name, "", "", o.Comment, pos)
+				if err != nil {
+					return nil, err
+				}
+				ops = append(ops, createSecurityLabelOps(o.SecurityLabels, "PUBLICATION "+ident, pos)...)
+				return ops, nil
 			}
 			idents := make([]string, len(o.Tables))
 			for i, t := range o.Tables {
@@ -1768,6 +1910,7 @@ func diffPublication(o *ir.Publication, snap *snapshot.SnapOpaque) ([]pipeline.D
 			ops = append(ops, safeOp(sql, pos))
 		}
 	}
+	ops = append(ops, diffSecurityLabelSet(snap.SecurityLabels, o.SecurityLabels, "PUBLICATION "+ident, pos)...)
 	return ops, nil
 }
 
@@ -1797,6 +1940,7 @@ func diffSubscription(o *ir.Subscription, snap *snapshot.SnapOpaque) ([]pipeline
 			ops = append(ops, safeOp(fmt.Sprintf("COMMENT ON SUBSCRIPTION %s IS NULL;", quoteIdent(o.Name)), o.SrcPos))
 		}
 	}
+	ops = append(ops, diffSecurityLabelSet(snap.SecurityLabels, o.SecurityLabels, "SUBSCRIPTION "+quoteIdent(o.Name), o.SrcPos)...)
 	return ops, nil
 }
 
@@ -1820,6 +1964,7 @@ func createProcedure(o *ir.Procedure) []pipeline.DiffOp {
 	for _, r := range o.Revocations {
 		ops = append(ops, explicitRevokeOp(r, "PROCEDURE "+sig, o.SrcPos))
 	}
+	ops = append(ops, createSecurityLabelOps(o.SecurityLabels, "PROCEDURE "+sig, o.SrcPos)...)
 	return ops
 }
 
@@ -1849,6 +1994,7 @@ func createAggregate(o *ir.Aggregate) ([]pipeline.DiffOp, error) {
 	for _, r := range o.Revocations {
 		ops = append(ops, explicitRevokeOp(r, "FUNCTION "+sig, o.SrcPos))
 	}
+	ops = append(ops, createSecurityLabelOps(o.SecurityLabels, "FUNCTION "+sig, o.SrcPos)...)
 	return ops, nil
 }
 
@@ -1879,6 +2025,7 @@ func diffAggregate(o *ir.Aggregate, snap *snapshot.SnapOpaque) ([]pipeline.DiffO
 		}
 		ops = append(ops, diffGrantSet(nil, o.Grants, "FUNCTION "+sig, pos)...)
 		ops = append(ops, diffRevocationSet(nil, o.Revocations, "FUNCTION "+sig, pos)...)
+		ops = append(ops, createSecurityLabelOps(o.SecurityLabels, "FUNCTION "+sig, pos)...)
 		return ops, nil
 	}
 
@@ -1898,6 +2045,7 @@ func diffAggregate(o *ir.Aggregate, snap *snapshot.SnapOpaque) ([]pipeline.DiffO
 	}
 	ops = append(ops, diffGrantSet(snap.Grants, o.Grants, "FUNCTION "+sig, pos)...)
 	ops = append(ops, diffRevocationSet(snap.Revocations, o.Revocations, "FUNCTION "+sig, pos)...)
+	ops = append(ops, diffSecurityLabelSet(snap.SecurityLabels, o.SecurityLabels, "FUNCTION "+sig, pos)...)
 	return ops, nil
 }
 
@@ -2042,6 +2190,7 @@ func createSchema(o *ir.Schema) []pipeline.DiffOp {
 	for _, r := range o.Revocations {
 		ops = append(ops, explicitRevokeOp(r, "SCHEMA "+schemaIdent, o.SrcPos))
 	}
+	ops = append(ops, createSecurityLabelOps(o.SecurityLabels, "SCHEMA "+schemaIdent, o.SrcPos)...)
 	return ops
 }
 
@@ -2331,6 +2480,11 @@ func createTable(o *ir.Table, vtypes map[string]string) []pipeline.DiffOp {
 	for _, r := range o.Revocations {
 		ops = append(ops, explicitRevokeOp(r, "TABLE "+tblIdent, o.SrcPos))
 	}
+	tableObjType := "TABLE"
+	if o.Foreign {
+		tableObjType = "FOREIGN TABLE"
+	}
+	ops = append(ops, createSecurityLabelOps(o.SecurityLabels, tableObjType+" "+tblIdent, o.SrcPos)...)
 	for _, col := range o.Columns {
 		for _, g := range col.Grants {
 			ops = append(ops, colGrantOp(g, tblIdent, col.Name, col.SrcPos))
@@ -2338,6 +2492,7 @@ func createTable(o *ir.Table, vtypes map[string]string) []pipeline.DiffOp {
 		for _, r := range col.Revocations {
 			ops = append(ops, colExplicitRevokeOp(r, tblIdent, col.Name, col.SrcPos))
 		}
+		ops = append(ops, createSecurityLabelOps(col.SecurityLabels, "COLUMN "+tblIdent+"."+quoteIdent(col.Name), col.SrcPos)...)
 	}
 	return ops
 }
@@ -2696,6 +2851,7 @@ func createView(o *ir.View) []pipeline.DiffOp {
 	for _, r := range o.Revocations {
 		ops = append(ops, explicitRevokeOp(r, "TABLE "+viewIdent, o.SrcPos))
 	}
+	ops = append(ops, createSecurityLabelOps(o.SecurityLabels, viewKind+" "+viewIdent, o.SrcPos)...)
 	for _, idx := range o.Indexes {
 		// Always non-concurrent — this view doesn't exist yet, so its
 		// indexes are created in the same transactional migration as the
@@ -2725,6 +2881,7 @@ func createFunction(o *ir.Function) []pipeline.DiffOp {
 	for _, r := range o.Revocations {
 		ops = append(ops, explicitRevokeOp(r, "FUNCTION "+sig, o.SrcPos))
 	}
+	ops = append(ops, createSecurityLabelOps(o.SecurityLabels, "FUNCTION "+sig, o.SrcPos)...)
 	return ops
 }
 
@@ -2768,6 +2925,7 @@ func createType(o *ir.Type, vtypes map[string]string) []pipeline.DiffOp {
 				o.SrcPos,
 			))
 		}
+		ops = append(ops, createSecurityLabelOps(o.SecurityLabels, "DOMAIN "+qualIdent(o.Schema, o.Name), o.SrcPos)...)
 		return ops
 	default:
 		if o.Body != "" {
@@ -2786,6 +2944,7 @@ func createType(o *ir.Type, vtypes map[string]string) []pipeline.DiffOp {
 			o.SrcPos,
 		))
 	}
+	ops = append(ops, createSecurityLabelOps(o.SecurityLabels, "TYPE "+qualIdent(o.Schema, o.Name), o.SrcPos)...)
 	return ops
 }
 
@@ -2859,6 +3018,7 @@ func createSequence(o *ir.Sequence) []pipeline.DiffOp {
 			o.SrcPos,
 		))
 	}
+	ops = append(ops, createSecurityLabelOps(o.SecurityLabels, "SEQUENCE "+ident, o.SrcPos)...)
 	return ops
 }
 
@@ -2990,6 +3150,7 @@ func createRole(o *ir.Role) []pipeline.DiffOp {
 			o.SrcPos,
 		))
 	}
+	ops = append(ops, createSecurityLabelOps(o.SecurityLabels, "ROLE "+quoteIdent(o.Name), o.SrcPos)...)
 	return ops
 }
 
@@ -3524,6 +3685,7 @@ func diffProcedure(o *ir.Procedure, snap *snapshot.SnapOpaque) ([]pipeline.DiffO
 	}
 	ops = append(ops, diffGrantSet(snap.Grants, o.Grants, "PROCEDURE "+sig, pos)...)
 	ops = append(ops, diffRevocationSet(snap.Revocations, o.Revocations, "PROCEDURE "+sig, pos)...)
+	ops = append(ops, diffSecurityLabelSet(snap.SecurityLabels, o.SecurityLabels, "PROCEDURE "+sig, pos)...)
 	return ops, nil
 }
 
@@ -3585,6 +3747,7 @@ func diffSequence(o *ir.Sequence, snap *snapshot.SnapSequence) []pipeline.DiffOp
 			ops = append(ops, safeOp(fmt.Sprintf("COMMENT ON SEQUENCE %s IS NULL;", ident), pos))
 		}
 	}
+	ops = append(ops, diffSecurityLabelSet(snap.SecurityLabels, o.SecurityLabels, "SEQUENCE "+ident, pos)...)
 	return ops
 }
 
@@ -3772,6 +3935,7 @@ func diffRole(o *ir.Role, snap *snapshot.SnapRole) []pipeline.DiffOp {
 	}
 
 	ops = append(ops, diffRoleMembership(o, snap, pos)...)
+	ops = append(ops, diffSecurityLabelSet(snap.SecurityLabels, o.SecurityLabels, "ROLE "+ident, pos)...)
 	return ops
 }
 
@@ -3808,6 +3972,7 @@ func diffSchema(o *ir.Schema, snap *snapshot.SnapSchema) []pipeline.DiffOp {
 	schemaIdent := quoteIdent(o.Name)
 	ops = append(ops, diffGrantSet(snap.Grants, o.Grants, "SCHEMA "+schemaIdent, pos)...)
 	ops = append(ops, diffRevocationSet(snap.Revocations, o.Revocations, "SCHEMA "+schemaIdent, pos)...)
+	ops = append(ops, diffSecurityLabelSet(snap.SecurityLabels, o.SecurityLabels, "SCHEMA "+schemaIdent, pos)...)
 	return ops
 }
 
@@ -3863,6 +4028,7 @@ func diffView(o *ir.View, snap *snapshot.SnapView) []pipeline.DiffOp {
 
 	ops = append(ops, diffGrantSet(snap.Grants, o.Grants, "TABLE "+tbl, pos)...)
 	ops = append(ops, diffRevocationSet(snap.Revocations, o.Revocations, "TABLE "+tbl, pos)...)
+	ops = append(ops, diffSecurityLabelSet(snap.SecurityLabels, o.SecurityLabels, viewKind+" "+tbl, pos)...)
 	ops = append(ops, diffViewIndexes(o.Schema, o.Name, o.Indexes, snap.Indexes)...)
 	return ops
 }
@@ -3932,6 +4098,7 @@ func diffFunction(o *ir.Function, snap *snapshot.SnapFunction) []pipeline.DiffOp
 	}
 	ops = append(ops, diffGrantSet(snap.Grants, o.Grants, "FUNCTION "+sig, pos)...)
 	ops = append(ops, diffRevocationSet(snap.Revocations, o.Revocations, "FUNCTION "+sig, pos)...)
+	ops = append(ops, diffSecurityLabelSet(snap.SecurityLabels, o.SecurityLabels, "FUNCTION "+sig, pos)...)
 	return ops
 }
 
@@ -3968,6 +4135,7 @@ func diffType(o *ir.Type, snap *snapshot.SnapType, fullSnap *pipeline.Snapshot, 
 				ops = append(ops, safeOp(fmt.Sprintf("COMMENT ON TYPE %s IS NULL;", typeIdent), pos))
 			}
 		}
+		ops = append(ops, diffSecurityLabelSet(snap.SecurityLabels, o.SecurityLabels, "TYPE "+typeIdent, pos)...)
 		return ops, nil
 	}
 
@@ -4001,6 +4169,7 @@ func diffType(o *ir.Type, snap *snapshot.SnapType, fullSnap *pipeline.Snapshot, 
 					ops = append(ops, safeOp(fmt.Sprintf("COMMENT ON DOMAIN %s IS NULL;", typeIdent), pos))
 				}
 			}
+			ops = append(ops, diffSecurityLabelSet(snap.SecurityLabels, o.SecurityLabels, "DOMAIN "+typeIdent, pos)...)
 			// Same PROTECTED-field precedent as diffTable: if nothing else
 			// changed, ops would be empty and apply's len(ops)==0
 			// short-circuit skips Populate, so snap.DomainBaseType would
@@ -4075,6 +4244,7 @@ func diffType(o *ir.Type, snap *snapshot.SnapType, fullSnap *pipeline.Snapshot, 
 				ops = append(ops, safeOp(fmt.Sprintf("COMMENT ON DOMAIN %s IS NULL;", typeIdent), pos))
 			}
 		}
+		ops = append(ops, diffSecurityLabelSet(snap.SecurityLabels, o.SecurityLabels, "DOMAIN "+typeIdent, pos)...)
 		return ops, nil
 	}
 
@@ -4112,6 +4282,7 @@ func diffType(o *ir.Type, snap *snapshot.SnapType, fullSnap *pipeline.Snapshot, 
 				ops = append(ops, safeOp(fmt.Sprintf("COMMENT ON TYPE %s IS NULL;", typeIdent), pos))
 			}
 		}
+		ops = append(ops, diffSecurityLabelSet(snap.SecurityLabels, o.SecurityLabels, "TYPE "+typeIdent, pos)...)
 		return ops, nil
 	}
 
@@ -4153,6 +4324,7 @@ func diffType(o *ir.Type, snap *snapshot.SnapType, fullSnap *pipeline.Snapshot, 
 			ops = append(ops, safeOp(fmt.Sprintf("COMMENT ON TYPE %s IS NULL;", typeIdent), pos))
 		}
 	}
+	ops = append(ops, diffSecurityLabelSet(snap.SecurityLabels, o.SecurityLabels, "TYPE "+typeIdent, pos)...)
 	return ops, nil
 }
 
@@ -4340,6 +4512,11 @@ func diffTable(o *ir.Table, snap *snapshot.SnapTable, fullSnap *pipeline.Snapsho
 	ops = append(ops, diffTableInherits(tbl, o, snap, pos)...)
 	ops = append(ops, diffGrantSet(snap.Grants, o.Grants, "TABLE "+tbl, pos)...)
 	ops = append(ops, diffRevocationSet(snap.Revocations, o.Revocations, "TABLE "+tbl, pos)...)
+	tableObjType := "TABLE"
+	if o.Foreign {
+		tableObjType = "FOREIGN TABLE"
+	}
+	ops = append(ops, diffSecurityLabelSet(snap.SecurityLabels, o.SecurityLabels, tableObjType+" "+tbl, pos)...)
 	ops = append(ops, diffPartitions(tbl, o, snap, pos)...)
 	return ops, nil
 }
@@ -4812,6 +4989,7 @@ func diffColumns(tbl string, o *ir.Table, snap *snapshot.SnapTable, vtypes map[s
 		}
 		ops = append(ops, diffColGrantSet(tbl, col.Name, sc.Grants, col.Grants, col.SrcPos)...)
 		ops = append(ops, diffColRevocationSet(tbl, col.Name, sc.Revocations, col.Revocations, col.SrcPos)...)
+		ops = append(ops, diffSecurityLabelSet(sc.SecurityLabels, col.SecurityLabels, "COLUMN "+tbl+"."+quoteIdent(col.Name), col.SrcPos)...)
 	}
 
 	return ops, renamedFrom, droppedCols, nil

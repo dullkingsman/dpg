@@ -36,6 +36,9 @@ func (ci *CatalogIntrospector) Introspect(ctx context.Context, conn pipeline.Que
 	if err := introspectSchemaGrants(ctx, conn, schemas); err != nil {
 		return nil, err
 	}
+	if err := introspectSchemaSecurityLabels(ctx, conn, schemas); err != nil {
+		return nil, err
+	}
 	all = append(all, schemas...)
 
 	extensions, err := introspectExtensions(ctx, conn)
@@ -210,6 +213,9 @@ ORDER  BY n.nspname, p.proname, args`
 	rs.Close()
 
 	if err := introspectAggregateGrants(ctx, conn, aggIdx); err != nil {
+		return nil, err
+	}
+	if err := introspectAggregateSecurityLabels(ctx, conn, aggIdx); err != nil {
 		return nil, err
 	}
 	return out, nil
@@ -614,6 +620,12 @@ ORDER  BY n.nspname, c.relname`
 		return nil, err
 	}
 	if err := introspectTableInherits(ctx, conn, tableIdx); err != nil {
+		return nil, err
+	}
+	if err := introspectTableSecurityLabels(ctx, conn, tableIdx); err != nil {
+		return nil, err
+	}
+	if err := introspectColumnSecurityLabels(ctx, conn, tableIdx); err != nil {
 		return nil, err
 	}
 	if err := introspectTableGrants(ctx, conn, tableIdx); err != nil {
@@ -1296,6 +1308,9 @@ ORDER  BY n.nspname, c.relname`
 	}
 	rs.Close()
 
+	if err := introspectViewSecurityLabels(ctx, conn, viewIdx); err != nil {
+		return nil, err
+	}
 	if err := introspectViewGrants(ctx, conn, viewIdx); err != nil {
 		return nil, err
 	}
@@ -1463,6 +1478,12 @@ ORDER  BY n.nspname, p.proname, args`
 		proc.BodyHash = ir.HashFunctionBody(proc.Attrs.Language, proc.Attrs.Body, ir.RenderCreateProcedureSQL(proc))
 	}
 
+	if err := introspectFunctionSecurityLabels(ctx, conn, funcIdx); err != nil {
+		return nil, err
+	}
+	if err := introspectProcedureSecurityLabels(ctx, conn, procIdx); err != nil {
+		return nil, err
+	}
 	if err := introspectFunctionGrants(ctx, conn, funcIdx); err != nil {
 		return nil, err
 	}
@@ -1642,6 +1663,9 @@ ORDER  BY n.nspname, t.typname`
 		return nil, err
 	}
 	if err := introspectBaseBody(ctx, conn, out); err != nil {
+		return nil, err
+	}
+	if err := introspectTypeSecurityLabels(ctx, conn, out); err != nil {
 		return nil, err
 	}
 	return out, nil
@@ -2069,7 +2093,13 @@ ORDER  BY n.nspname, c.relname`
 		}
 		out = append(out, seq)
 	}
-	return out, rs.Err()
+	if err := rs.Err(); err != nil {
+		return nil, err
+	}
+	if err := introspectSequenceSecurityLabels(ctx, conn, out); err != nil {
+		return nil, err
+	}
+	return out, nil
 }
 
 // introspectRoles reads every Role attribute (RFC §11.1) except PASSWORD:
@@ -2132,7 +2162,13 @@ ORDER  BY r.rolname`
 		}
 		out = append(out, r)
 	}
-	return out, rs.Err()
+	if err := rs.Err(); err != nil {
+		return nil, err
+	}
+	if err := introspectRoleSecurityLabels(ctx, conn, out); err != nil {
+		return nil, err
+	}
+	return out, nil
 }
 
 var _ pipeline.Introspector = (*CatalogIntrospector)(nil)

@@ -904,6 +904,7 @@ func mergeTableBlock(tbl *Table, block pipeline.BlockAST) error {
 	for _, r := range block.Revocations {
 		tbl.Revocations = append(tbl.Revocations, blockRevocationToIR(r))
 	}
+	tbl.SecurityLabels = block.SecurityLabels
 
 	// Columns: per RFC §7.2, `COLUMN name { }` references an *existing* column
 	// in the DDL. A name that doesn't match is almost always a typo (e.g.
@@ -948,6 +949,7 @@ func mergeTableBlock(tbl *Table, block pipeline.BlockAST) error {
 		for _, rv := range cb.Revocations {
 			col.Revocations = append(col.Revocations, blockRevocationToIR(rv))
 		}
+		col.SecurityLabels = cb.SecurityLabels
 		col.NameMaps = append(col.NameMaps, cb.NameMaps...)
 	}
 
@@ -1111,6 +1113,7 @@ func (b *Builder) buildView(vs *pg_query.ViewStmt, block pipeline.BlockAST, pos 
 	for _, r := range block.Revocations {
 		v.Revocations = append(v.Revocations, blockRevocationToIR(r))
 	}
+	v.SecurityLabels = block.SecurityLabels
 	v.NameMaps = block.NameMaps
 	return v, nil
 }
@@ -1169,6 +1172,7 @@ func (b *Builder) buildMaterializedView(cta *pg_query.CreateTableAsStmt, block p
 	for _, idx := range block.Indices {
 		v.Indexes = append(v.Indexes, blockIndexToIR(idx))
 	}
+	v.SecurityLabels = block.SecurityLabels
 	v.NameMaps = block.NameMaps
 	return v, nil
 }
@@ -1213,6 +1217,7 @@ func (b *Builder) buildFunction(cfs *pg_query.CreateFunctionStmt, pg pipeline.PG
 	for _, r := range block.Revocations {
 		fn.Revocations = append(fn.Revocations, blockRevocationToIR(r))
 	}
+	fn.SecurityLabels = block.SecurityLabels
 	fn.NameMaps = block.NameMaps
 	return fn, nil
 }
@@ -1238,6 +1243,7 @@ func (b *Builder) buildProcedure(cfs *pg_query.CreateFunctionStmt, pg pipeline.P
 	for _, r := range block.Revocations {
 		proc.Revocations = append(proc.Revocations, blockRevocationToIR(r))
 	}
+	proc.SecurityLabels = block.SecurityLabels
 	proc.NameMaps = block.NameMaps
 	return proc, nil
 }
@@ -1401,6 +1407,7 @@ func (b *Builder) buildEnum(cs *pg_query.CreateEnumStmt, block pipeline.BlockAST
 	if block.MigrateRemove != nil {
 		t.MigrateRemove = block.MigrateRemove
 	}
+	t.SecurityLabels = block.SecurityLabels
 	t.NameMaps = block.NameMaps
 	return t, nil
 }
@@ -1452,6 +1459,7 @@ func (b *Builder) buildCompositeType(cs *pg_query.CompositeTypeStmt, block pipel
 	if block.Deprecated != nil {
 		t.Deprecated = &block.Deprecated.Value
 	}
+	t.SecurityLabels = block.SecurityLabels
 	t.NameMaps = block.NameMaps
 	return t, nil
 }
@@ -1524,6 +1532,7 @@ func (b *Builder) buildSchema(cs *pg_query.CreateSchemaStmt, block pipeline.Bloc
 	for _, r := range block.Revocations {
 		s.Revocations = append(s.Revocations, blockRevocationToIR(r))
 	}
+	s.SecurityLabels = block.SecurityLabels
 	s.NameMaps = block.NameMaps
 	return s, nil
 }
@@ -1573,6 +1582,7 @@ func (b *Builder) buildSequence(cs *pg_query.CreateSeqStmt, block pipeline.Block
 	for _, g := range block.Grants {
 		s.Grants = append(s.Grants, blockGrantToIR(g))
 	}
+	s.SecurityLabels = block.SecurityLabels
 	s.NameMaps = block.NameMaps
 	for _, opt := range cs.Options {
 		de := opt.GetDefElem()
@@ -1699,6 +1709,7 @@ func (b *Builder) buildRole(cs *pg_query.CreateRoleStmt, block pipeline.BlockAST
 	if block.Comment != nil {
 		r.Comment = &block.Comment.Value
 	}
+	r.SecurityLabels = block.SecurityLabels
 	r.NameMaps = block.NameMaps
 	return r, nil
 }
@@ -1710,6 +1721,7 @@ func (b *Builder) buildTablespace(cs *pg_query.CreateTableSpaceStmt, block pipel
 	if block.Comment != nil {
 		ts.Comment = &block.Comment.Value
 	}
+	ts.SecurityLabels = block.SecurityLabels
 	return ts, nil
 }
 
@@ -1875,6 +1887,7 @@ func (b *Builder) buildDomain(cs *pg_query.CreateDomainStmt, block pipeline.Bloc
 			Pos:  cst.Pos,
 		})
 	}
+	t.SecurityLabels = block.SecurityLabels
 	t.NameMaps = block.NameMaps
 	return t, nil
 }
@@ -1911,6 +1924,7 @@ func (b *Builder) buildRangeType(cs *pg_query.CreateRangeStmt, block pipeline.Bl
 	if block.Owner != nil {
 		t.Owner = &block.Owner.Name
 	}
+	t.SecurityLabels = block.SecurityLabels
 	t.NameMaps = block.NameMaps
 	return t, nil
 }
@@ -2021,6 +2035,7 @@ func (b *Builder) buildDefineStmt(ds *pg_query.DefineStmt, block pipeline.BlockA
 			t.Variant = "BASE"
 			t.Body = rawBody
 		}
+		t.SecurityLabels = block.SecurityLabels
 		t.NameMaps = block.NameMaps
 		return t, nil
 
@@ -2062,6 +2077,7 @@ func (b *Builder) buildDefineStmt(ds *pg_query.DefineStmt, block pipeline.BlockA
 		for _, r := range block.Revocations {
 			agg.Revocations = append(agg.Revocations, blockRevocationToIR(r))
 		}
+		agg.SecurityLabels = block.SecurityLabels
 		agg.NameMaps = block.NameMaps
 		return agg, nil
 
@@ -2348,6 +2364,7 @@ func (b *Builder) buildSubscription(stmt *pg_query.CreateSubscriptionStmt, block
 	if block.Comment != nil {
 		sub.Comment = &block.Comment.Value
 	}
+	sub.SecurityLabels = block.SecurityLabels
 	return sub, nil
 }
 
@@ -2410,6 +2427,7 @@ func (b *Builder) buildOpaque(node *pg_query.Node, block pipeline.BlockAST, pos 
 				}
 			}
 		}
+		pub.SecurityLabels = block.SecurityLabels
 		return pub, nil
 	case *pg_query.Node_CreateSubscriptionStmt:
 		return b.buildSubscription(n.CreateSubscriptionStmt, block, pos, sql)
@@ -2446,6 +2464,7 @@ func (b *Builder) buildOpaque(node *pg_query.Node, block pipeline.BlockAST, pos 
 		if block.Comment != nil {
 			evt.Comment = &block.Comment.Value
 		}
+		evt.SecurityLabels = block.SecurityLabels
 		return evt, nil
 	case *pg_query.Node_CreateOpClassStmt:
 		schema, name := extractTypeName(n.CreateOpClassStmt.Opclassname)

@@ -232,7 +232,13 @@ ORDER  BY spcname`
 		body := fmt.Sprintf("CREATE TABLESPACE %s LOCATION %s", quoteIdent(name), quoteLit(location))
 		out = append(out, &ir.Tablespace{Name: name, Location: location, Body: canonicalDDL(body), Comment: comment, Reconstructed: true})
 	}
-	return out, rs.Err()
+	if err := rs.Err(); err != nil {
+		return nil, err
+	}
+	if err := introspectTablespaceSecurityLabels(ctx, conn, out); err != nil {
+		return nil, err
+	}
+	return out, nil
 }
 
 // ── foreign data wrappers ─────────────────────────────────────────────────────
@@ -435,7 +441,13 @@ ORDER  BY e.evtname`
 			Reconstructed: true,
 		})
 	}
-	return out, rs.Err()
+	if err := rs.Err(); err != nil {
+		return nil, err
+	}
+	if err := introspectEventTriggerSecurityLabels(ctx, conn, out); err != nil {
+		return nil, err
+	}
+	return out, nil
 }
 
 // ── casts ─────────────────────────────────────────────────────────────────────
@@ -583,7 +595,13 @@ ORDER  BY p.pubname`
 		}
 		out = append(out, pub)
 	}
-	return out, rs.Err()
+	if err := rs.Err(); err != nil {
+		return nil, err
+	}
+	if err := introspectPublicationSecurityLabels(ctx, conn, out); err != nil {
+		return nil, err
+	}
+	return out, nil
 }
 
 // ── subscriptions ────────────────────────────────────────────────────────────
@@ -758,7 +776,13 @@ ORDER  BY s.subname`, twoPhaseCol, disableOnErrCol, pwReqCol, runAsOwnerCol, fai
 			Body: canonicalDDL(sb.String()), Comment: comment, Reconstructed: true,
 		})
 	}
-	return out, rs.Err()
+	if err := rs.Err(); err != nil {
+		return nil, err
+	}
+	if err := introspectSubscriptionSecurityLabels(ctx, conn, out); err != nil {
+		return nil, err
+	}
+	return out, nil
 }
 
 // publicationTableRefs is the structured counterpart to publicationTargets'

@@ -105,18 +105,33 @@ type TriggerDef struct {
 
 // ColumnBlock holds DPG-specific attributes for a single column.
 type ColumnBlock struct {
-	Name        Identifier
-	Comment     *StringLit
-	Statistics  *int
-	Compression *Identifier
-	Storage     *Identifier
-	Deprecated  *StringLit
-	RenamedFrom *Identifier
-	Using       *RawExpr
-	Grants      []GrantEntry
-	Revocations []RevocationEntry
-	NameMaps    []NameMapEntry
-	Pos         SourcePos
+	Name           Identifier
+	Comment        *StringLit
+	Statistics     *int
+	Compression    *Identifier
+	Storage        *Identifier
+	Deprecated     *StringLit
+	RenamedFrom    *Identifier
+	Using          *RawExpr
+	Grants         []GrantEntry
+	Revocations    []RevocationEntry
+	SecurityLabels []SecurityLabel
+	NameMaps       []NameMapEntry
+	Pos            SourcePos
+}
+
+// SecurityLabel is one "SECURITY LABEL [FOR provider] '...'" directive
+// inside a { } block, mirroring real PostgreSQL's SECURITY LABEL statement
+// (RFC §14.11 — only meaningful with a label provider installed, e.g.
+// sepgsql). Provider == "" is the unqualified form: PostgreSQL resolves it
+// to the sole loaded provider, and errors if zero or more than one is
+// loaded. Unlike Comment (a single nilable value), a block may declare
+// several SecurityLabel entries — one per provider — since real PostgreSQL
+// lets multiple independent label providers label the same object at once.
+type SecurityLabel struct {
+	Provider string
+	Label    string
+	Pos      SourcePos
 }
 
 // ConstraintDef is an additional constraint attached in the { } block.
@@ -309,6 +324,7 @@ type BlockAST struct {
 	Triggers            []TriggerDef
 	Grants              []GrantEntry
 	Revocations         []RevocationEntry
+	SecurityLabels      []SecurityLabel
 	Columns             []ColumnBlock
 	Constraints         []ConstraintDef
 	EnableRLS           bool

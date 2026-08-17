@@ -2566,3 +2566,155 @@ func TestConfirmOverwriteOnlyExistingPathsWarned(t *testing.T) {
 		t.Errorf("expected warning NOT to mention the non-existent file %s, got: %s", missing, out.String())
 	}
 }
+
+// TestRenderSecurityLabelsRoundtrip guards RFC §14.11 across every kind
+// PostgreSQL's real SECURITY LABEL statement supports: previously no IR
+// kind had a SecurityLabels field at all, so a declared SECURITY LABEL
+// directive had nowhere to go at any layer. One multi-provider entry per
+// kind (plus a second, unqualified-provider entry on Table) proves both the
+// FOR provider and bare forms render and recompile correctly.
+func TestRenderSecurityLabelsRoundtrip(t *testing.T) {
+	fmtOpts := format.Options{IndentSize: 4, KeywordCase: "upper"}
+	sl := func(provider, label string) []pipeline.SecurityLabel {
+		return []pipeline.SecurityLabel{{Provider: provider, Label: label}}
+	}
+	objs := []pipeline.IRObject{
+		&ir.Table{Schema: "public", Name: "t",
+			Columns:        []*ir.Column{{Name: "id", Type: ir.TypeRef{Name: "integer"}, SecurityLabels: sl("dummy", "secret")}},
+			SecurityLabels: []pipeline.SecurityLabel{{Provider: "dummy", Label: "classified"}, {Label: "unclassified"}},
+		},
+		&ir.View{Schema: "public", Name: "v", Query: "SELECT 1", SecurityLabels: sl("dummy", "classified")},
+		&ir.View{Schema: "public", Name: "mv", Materialized: true, Query: "SELECT 1", SecurityLabels: sl("dummy", "classified")},
+		&ir.Function{Schema: "public", Name: "f", ReturnType: ir.TypeRef{Name: "integer"},
+			Attrs: ir.FuncAttrs{Language: "sql", Body: "SELECT 1"}, SecurityLabels: sl("dummy", "classified")},
+		&ir.Procedure{Schema: "public", Name: "p",
+			Attrs: ir.FuncAttrs{Language: "sql", Body: "SELECT 1"}, SecurityLabels: sl("dummy", "classified")},
+		&ir.Aggregate{Schema: "public", Name: "agg", Args: []ir.FuncArg{{Type: ir.TypeRef{Name: "integer"}}},
+			Options:        []pipeline.StorageParam{{Key: "sfunc", Value: "int4pl"}, {Key: "stype", Value: "integer"}},
+			SecurityLabels: sl("dummy", "classified")},
+		&ir.Type{Schema: "public", Name: "dom", Variant: "DOMAIN", DomainBaseType: ir.TypeRef{Name: "integer"}, SecurityLabels: sl("dummy", "classified")},
+		&ir.Type{Schema: "public", Name: "en", Variant: "ENUM", EnumValues: []string{"a", "b"}, SecurityLabels: sl("dummy", "classified")},
+		&ir.Schema{Name: "myschema", SecurityLabels: sl("dummy", "classified")},
+		&ir.Sequence{Schema: "public", Name: "seq", SecurityLabels: sl("dummy", "classified")},
+		&ir.Role{Name: "myrole", SecurityLabels: sl("dummy", "classified")},
+		&ir.Tablespace{Name: "ts", Location: "/data/ts", Body: "CREATE TABLESPACE ts LOCATION '/data/ts'", SecurityLabels: sl("dummy", "classified")},
+		&ir.Publication{Name: "pub", Body: "CREATE PUBLICATION pub FOR ALL TABLES", AllTables: true, SecurityLabels: sl("dummy", "classified")},
+		&ir.Subscription{Name: "sub", Body: "CREATE SUBSCRIPTION sub CONNECTION 'x' PUBLICATION p", SecurityLabels: sl("dummy", "classified")},
+		&ir.EventTrigger{Name: "evt", Event: "ddl_command_start", Function: "public.f",
+			Body: "CREATE EVENT TRIGGER evt ON ddl_command_start EXECUTE FUNCTION public.f()", SecurityLabels: sl("dummy", "classified")},
+	}
+
+	var b strings.Builder
+	for _, o := range objs {
+		renderObjectDPG(&b, o, fmtOpts)
+	}
+	rendered := b.String()
+
+	if !strings.Contains(rendered, "SECURITY LABEL FOR dummy 'classified';") {
+		t.Fatalf("expected FOR-provider SECURITY LABEL directive, got:\n%s", rendered)
+	}
+	if !strings.Contains(rendered, "SECURITY LABEL 'unclassified';") {
+		t.Fatalf("expected unqualified SECURITY LABEL directive, got:\n%s", rendered)
+	}
+	if !strings.Contains(rendered, "SECURITY LABEL FOR dummy 'secret';") {
+		t.Fatalf("expected column-level SECURITY LABEL directive, got:\n%s", rendered)
+	}
+
+	dir := t.TempDir()
+	f := filepath.Join(dir, "objects.dpg")
+	if err := os.WriteFile(f, []byte(rendered), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	compiled, _, err := compiler.Compile([]string{f}, dir, pipeline.Default)
+	if err != nil {
+		t.Fatalf("dumped SecurityLabels failed to recompile: %v\n---\n%s", err, rendered)
+	}
+
+	wantOne := func(kind string, labels []pipeline.SecurityLabel) {
+		t.Helper()
+		if len(labels) != 1 || labels[0].Provider != "dummy" || labels[0].Label != "classified" {
+			t.Errorf("%s: SecurityLabels did not round-trip: %+v", kind, labels)
+		}
+	}
+
+	found := map[string]bool{}
+	for _, o := range compiled {
+		switch v := o.(type) {
+		case *ir.Table:
+			if v.Name == "t" {
+				found["table"] = true
+				if len(v.SecurityLabels) != 2 {
+					t.Errorf("table: SecurityLabels did not round-trip: %+v", v.SecurityLabels)
+				}
+				for _, c := range v.Columns {
+					if c.Name == "id" {
+						found["column"] = true
+						if len(c.SecurityLabels) != 1 || c.SecurityLabels[0].Provider != "dummy" || c.SecurityLabels[0].Label != "secret" {
+							t.Errorf("column: SecurityLabels did not round-trip: %+v", c.SecurityLabels)
+						}
+					}
+				}
+			}
+		case *ir.View:
+			if v.Name == "v" && !v.Materialized {
+				found["view"] = true
+				wantOne("view", v.SecurityLabels)
+			}
+			if v.Name == "mv" && v.Materialized {
+				found["matview"] = true
+				wantOne("matview", v.SecurityLabels)
+			}
+		case *ir.Function:
+			found["function"] = true
+			wantOne("function", v.SecurityLabels)
+		case *ir.Procedure:
+			found["procedure"] = true
+			wantOne("procedure", v.SecurityLabels)
+		case *ir.Aggregate:
+			found["aggregate"] = true
+			wantOne("aggregate", v.SecurityLabels)
+		case *ir.Type:
+			if v.Variant == "DOMAIN" {
+				found["domain"] = true
+				wantOne("domain", v.SecurityLabels)
+			}
+			if v.Variant == "ENUM" {
+				found["enum"] = true
+				wantOne("enum", v.SecurityLabels)
+			}
+		case *ir.Schema:
+			if v.Name == "myschema" {
+				found["schema"] = true
+				wantOne("schema", v.SecurityLabels)
+			}
+		case *ir.Sequence:
+			found["sequence"] = true
+			wantOne("sequence", v.SecurityLabels)
+		case *ir.Role:
+			if v.Name == "myrole" {
+				found["role"] = true
+				wantOne("role", v.SecurityLabels)
+			}
+		case *ir.Tablespace:
+			found["tablespace"] = true
+			wantOne("tablespace", v.SecurityLabels)
+		case *ir.Publication:
+			found["publication"] = true
+			wantOne("publication", v.SecurityLabels)
+		case *ir.Subscription:
+			found["subscription"] = true
+			wantOne("subscription", v.SecurityLabels)
+		case *ir.EventTrigger:
+			found["event_trigger"] = true
+			wantOne("event_trigger", v.SecurityLabels)
+		}
+	}
+
+	for _, kind := range []string{"table", "column", "view", "matview", "function", "procedure",
+		"aggregate", "domain", "enum", "schema", "sequence", "role", "tablespace",
+		"publication", "subscription", "event_trigger"} {
+		if !found[kind] {
+			t.Errorf("%s: object missing after recompile", kind)
+		}
+	}
+}

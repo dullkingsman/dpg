@@ -113,6 +113,7 @@ type Column struct {
 	Using                *string // USING expression for ALTER COLUMN TYPE
 	Grants               []Grant
 	Revocations          []Revocation
+	SecurityLabels       []pipeline.SecurityLabel
 	NameMaps             []pipeline.NameMapEntry
 	SrcPos               pipeline.SourcePos
 }
@@ -323,14 +324,15 @@ type Partition struct {
 
 // Schema is a CREATE SCHEMA declaration.
 type Schema struct {
-	Name        string
-	Owner       *string
-	Comment     *string
-	RenamedFrom *string
-	Grants      []Grant
-	Revocations []Revocation
-	NameMaps    []pipeline.NameMapEntry
-	SrcPos      pipeline.SourcePos
+	Name           string
+	Owner          *string
+	Comment        *string
+	RenamedFrom    *string
+	Grants         []Grant
+	Revocations    []Revocation
+	SecurityLabels []pipeline.SecurityLabel
+	NameMaps       []pipeline.NameMapEntry
+	SrcPos         pipeline.SourcePos
 }
 
 func (s *Schema) QualifiedName() string   { return s.Name }
@@ -375,6 +377,7 @@ type Table struct {
 	Triggers       []*Trigger
 	Grants         []Grant
 	Revocations    []Revocation
+	SecurityLabels []pipeline.SecurityLabel
 	RLSEnabled     bool
 	RLSForced      bool
 	Inherits       []string
@@ -408,9 +411,10 @@ type View struct {
 	// does not support indexes on a plain or recursive view, only on a
 	// materialized view (or a table). RFC §8.2's matview-block grammar is
 	// the only view-block variant that includes indices-block.
-	Indexes  []*Index
-	NameMaps []pipeline.NameMapEntry
-	SrcPos   pipeline.SourcePos
+	Indexes        []*Index
+	SecurityLabels []pipeline.SecurityLabel
+	NameMaps       []pipeline.NameMapEntry
+	SrcPos         pipeline.SourcePos
 }
 
 func (v *View) QualifiedName() string   { return qualName(v.Schema, v.Name) }
@@ -419,19 +423,20 @@ func (v *View) irObject()               {}
 
 // Function is a CREATE FUNCTION declaration.
 type Function struct {
-	Schema      string
-	Name        string
-	Args        []FuncArg
-	ReturnType  TypeRef
-	Attrs       FuncAttrs
-	BodyHash    string // SHA-256 of normalised body
-	Comment     *string
-	Deprecated  *string
-	RenamedFrom *string
-	Grants      []Grant
-	Revocations []Revocation
-	NameMaps    []pipeline.NameMapEntry
-	SrcPos      pipeline.SourcePos
+	Schema         string
+	Name           string
+	Args           []FuncArg
+	ReturnType     TypeRef
+	Attrs          FuncAttrs
+	BodyHash       string // SHA-256 of normalised body
+	Comment        *string
+	Deprecated     *string
+	RenamedFrom    *string
+	Grants         []Grant
+	Revocations    []Revocation
+	SecurityLabels []pipeline.SecurityLabel
+	NameMaps       []pipeline.NameMapEntry
+	SrcPos         pipeline.SourcePos
 }
 
 func (f *Function) QualifiedName() string {
@@ -442,16 +447,17 @@ func (f *Function) irObject()               {}
 
 // Procedure is a CREATE PROCEDURE declaration.
 type Procedure struct {
-	Schema      string
-	Name        string
-	Args        []FuncArg
-	Attrs       FuncAttrs
-	BodyHash    string // SHA-256 of normalised body
-	Comment     *string
-	Grants      []Grant
-	Revocations []Revocation
-	NameMaps    []pipeline.NameMapEntry
-	SrcPos      pipeline.SourcePos
+	Schema         string
+	Name           string
+	Args           []FuncArg
+	Attrs          FuncAttrs
+	BodyHash       string // SHA-256 of normalised body
+	Comment        *string
+	Grants         []Grant
+	Revocations    []Revocation
+	SecurityLabels []pipeline.SecurityLabel
+	NameMaps       []pipeline.NameMapEntry
+	SrcPos         pipeline.SourcePos
 }
 
 func (p *Procedure) QualifiedName() string {
@@ -469,12 +475,13 @@ type Aggregate struct {
 	// Options is the same SFUNC/STYPE/INITCOND/... key=value list as Body,
 	// kept structured (and in source order) so dump can reconstruct the DPG
 	// "AGGREGATE name (args) (options)" declaration without re-parsing Body.
-	Options     []pipeline.StorageParam
-	Comment     *string
-	Grants      []Grant
-	Revocations []Revocation
-	NameMaps    []pipeline.NameMapEntry
-	SrcPos      pipeline.SourcePos
+	Options        []pipeline.StorageParam
+	Comment        *string
+	Grants         []Grant
+	Revocations    []Revocation
+	SecurityLabels []pipeline.SecurityLabel
+	NameMaps       []pipeline.NameMapEntry
+	SrcPos         pipeline.SourcePos
 }
 
 func (a *Aggregate) QualifiedName() string {
@@ -511,6 +518,7 @@ type Type struct {
 	DomainDefault     *string
 	DomainNotNull     bool
 	DomainConstraints []*Constraint
+	SecurityLabels    []pipeline.SecurityLabel
 	SrcPos            pipeline.SourcePos
 }
 
@@ -520,12 +528,13 @@ func (t *Type) irObject()               {}
 
 // Sequence is a CREATE SEQUENCE declaration.
 type Sequence struct {
-	Schema   string
-	Name     string
-	Owner    *string
-	Comment  *string
-	Grants   []Grant
-	NameMaps []pipeline.NameMapEntry
+	Schema         string
+	Name           string
+	Owner          *string
+	Comment        *string
+	Grants         []Grant
+	SecurityLabels []pipeline.SecurityLabel
+	NameMaps       []pipeline.NameMapEntry
 	// Options (nil = use PostgreSQL default for that parameter)
 	IncrementBy *int64
 	MinValue    *int64
@@ -572,6 +581,7 @@ type Role struct {
 	RoleMembers     []string // ROLE role-list: these become members of this role
 	AdminRoles      []string // ADMIN role-list: these become members of this role, WITH ADMIN OPTION
 	Comment         *string
+	SecurityLabels  []pipeline.SecurityLabel
 	NameMaps        []pipeline.NameMapEntry
 	SrcPos          pipeline.SourcePos
 }
@@ -595,8 +605,9 @@ type Tablespace struct {
 	// introspector (as opposed to parsed from source). Reconstructed bodies are
 	// canonical but not byte-identical to hand-written source, so the snapshot
 	// omits their body hash to avoid spurious text-diff drift. See sourceBodyHash.
-	Reconstructed bool
-	SrcPos        pipeline.SourcePos
+	Reconstructed  bool
+	SecurityLabels []pipeline.SecurityLabel
+	SrcPos         pipeline.SourcePos
 }
 
 func (ts *Tablespace) QualifiedName() string   { return ts.Name }
@@ -746,6 +757,7 @@ type Publication struct {
 	// ALTER PUBLICATION ... SET TABLE this fix adds.
 	HasFilteredTables bool
 	Reconstructed     bool // Body rebuilt from the catalog; see Tablespace.Reconstructed
+	SecurityLabels    []pipeline.SecurityLabel
 	SrcPos            pipeline.SourcePos
 }
 
@@ -763,12 +775,13 @@ func (p *Publication) irObject()               {}
 // conninfo/DSN literal may itself contain a ':' (e.g. a postgresql:// URI),
 // so nothing else triggers resolution.
 type Subscription struct {
-	Name          string
-	ConnInfo      string
-	Body          string
-	Comment       *string
-	Reconstructed bool // Body rebuilt from the catalog; see Tablespace.Reconstructed
-	SrcPos        pipeline.SourcePos
+	Name           string
+	ConnInfo       string
+	Body           string
+	Comment        *string
+	Reconstructed  bool // Body rebuilt from the catalog; see Tablespace.Reconstructed
+	SecurityLabels []pipeline.SecurityLabel
+	SrcPos         pipeline.SourcePos
 }
 
 func (s *Subscription) QualifiedName() string   { return s.Name }
@@ -802,10 +815,11 @@ type EventTrigger struct {
 	// generic { COMMENT '...'; } was silently discarded for every one of
 	// them — no field existed to store it, so dpg plan reported
 	// "-- (no changes)" with no error and no effect.
-	Comment       *string
-	Body          string
-	Reconstructed bool // Body rebuilt from the catalog; see Tablespace.Reconstructed
-	SrcPos        pipeline.SourcePos
+	Comment        *string
+	Body           string
+	Reconstructed  bool // Body rebuilt from the catalog; see Tablespace.Reconstructed
+	SecurityLabels []pipeline.SecurityLabel
+	SrcPos         pipeline.SourcePos
 }
 
 func (e *EventTrigger) QualifiedName() string   { return e.Name }

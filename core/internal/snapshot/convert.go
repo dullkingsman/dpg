@@ -60,6 +60,21 @@ func toSnapOpFamilyMembers(members []pipeline.OpFamilyMember) []SnapOpFamilyMemb
 	return out
 }
 
+// toSnapSecurityLabels converts a declared/introspected SECURITY LABEL list
+// (RFC §14.11) to its snapshot form. Order-independent by nature (see
+// diffSecurityLabelSet in internal/diff), so unlike toSnapOpFamilyMembers no
+// ordering guarantee is implied here.
+func toSnapSecurityLabels(labels []pipeline.SecurityLabel) []SnapSecurityLabel {
+	if len(labels) == 0 {
+		return nil
+	}
+	out := make([]SnapSecurityLabel, len(labels))
+	for i, l := range labels {
+		out[i] = SnapSecurityLabel{Provider: l.Provider, Label: l.Label}
+	}
+	return out
+}
+
 // userMappingPasswordKeys mirrors internal/introspect's own copy of the same
 // list (which itself mirrors internal/linter's passwordColNames) — kept as
 // a local duplicate rather than a cross-package import, following this
@@ -162,6 +177,7 @@ func toSnapObject(obj pipeline.IRObject) *SnapObject {
 		for _, r := range o.Revocations {
 			so.Revocations = append(so.Revocations, toSnapRevocation(r))
 		}
+		so.SecurityLabels = toSnapSecurityLabels(o.SecurityLabels)
 		return &SnapObject{Kind: "procedure", Opaque: so}
 	case *ir.Aggregate:
 		so := &SnapOpaque{
@@ -175,6 +191,7 @@ func toSnapObject(obj pipeline.IRObject) *SnapObject {
 		for _, r := range o.Revocations {
 			so.Revocations = append(so.Revocations, toSnapRevocation(r))
 		}
+		so.SecurityLabels = toSnapSecurityLabels(o.SecurityLabels)
 		return &SnapObject{Kind: "aggregate", Opaque: so}
 	// The reliable-tier opaque types below can be introspected, in which case
 	// their Body is a catalog reconstruction (Reconstructed == true) whose text
@@ -185,6 +202,7 @@ func toSnapObject(obj pipeline.IRObject) *SnapObject {
 		return &SnapObject{Kind: "tablespace", Opaque: &SnapOpaque{
 			Kind: "tablespace", Name: o.Name, TablespaceLocation: o.Location,
 			BodyHash: sourceBodyHash(o.Body, o.Reconstructed), Comment: o.Comment,
+			SecurityLabels: toSnapSecurityLabels(o.SecurityLabels),
 		}}
 	case *ir.ForeignDataWrapper:
 		return &SnapObject{Kind: "fdw", Opaque: &SnapOpaque{
@@ -219,16 +237,19 @@ func toSnapObject(obj pipeline.IRObject) *SnapObject {
 			PublicationInsert: o.Insert, PublicationUpdate: o.Update, PublicationDelete: o.Delete, PublicationTruncate: o.Truncate,
 			PublicationHasFilteredTables: o.HasFilteredTables,
 			BodyHash:                     sourceBodyHash(o.Body, o.Reconstructed), Comment: o.Comment,
+			SecurityLabels: toSnapSecurityLabels(o.SecurityLabels),
 		}}
 	case *ir.Subscription:
 		return &SnapObject{Kind: "subscription", Opaque: &SnapOpaque{
 			Kind: "subscription", Name: o.Name, BodyHash: sourceBodyHash(o.Body, o.Reconstructed), Comment: o.Comment,
+			SecurityLabels: toSnapSecurityLabels(o.SecurityLabels),
 		}}
 	case *ir.EventTrigger:
 		return &SnapObject{Kind: "event_trigger", Opaque: &SnapOpaque{
 			Kind: "event_trigger", Name: o.Name,
 			EventTriggerEvent: o.Event, EventTriggerTags: o.Tags, EventTriggerFunction: o.Function,
 			BodyHash: sourceBodyHash(o.Body, o.Reconstructed), Comment: o.Comment,
+			SecurityLabels: toSnapSecurityLabels(o.SecurityLabels),
 		}}
 	case *ir.Collation:
 		return &SnapObject{Kind: "collation", Opaque: &SnapOpaque{
@@ -374,6 +395,7 @@ func toSnapSchema(o *ir.Schema) *SnapSchema {
 	for _, r := range o.Revocations {
 		ss.Revocations = append(ss.Revocations, toSnapRevocation(r))
 	}
+	ss.SecurityLabels = toSnapSecurityLabels(o.SecurityLabels)
 	return ss
 }
 
@@ -452,6 +474,7 @@ func toSnapTable(o *ir.Table) *SnapTable {
 	for _, r := range o.Revocations {
 		t.Revocations = append(t.Revocations, toSnapRevocation(r))
 	}
+	t.SecurityLabels = toSnapSecurityLabels(o.SecurityLabels)
 	t.NameMaps = toSnapNameMaps(o.NameMaps)
 	return t
 }
@@ -488,6 +511,7 @@ func toSnapColumn(col *ir.Column) SnapColumn {
 	for _, r := range col.Revocations {
 		sc.Revocations = append(sc.Revocations, toSnapRevocation(r))
 	}
+	sc.SecurityLabels = toSnapSecurityLabels(col.SecurityLabels)
 	sc.NameMaps = toSnapNameMaps(col.NameMaps)
 	return sc
 }
@@ -640,6 +664,7 @@ func toSnapView(o *ir.View) *SnapView {
 	for _, idx := range o.Indexes {
 		sv.Indexes = append(sv.Indexes, ToSnapIndex(idx))
 	}
+	sv.SecurityLabels = toSnapSecurityLabels(o.SecurityLabels)
 	sv.NameMaps = toSnapNameMaps(o.NameMaps)
 	return sv
 }
@@ -667,6 +692,7 @@ func toSnapFunction(o *ir.Function) *SnapFunction {
 	for _, r := range o.Revocations {
 		sf.Revocations = append(sf.Revocations, toSnapRevocation(r))
 	}
+	sf.SecurityLabels = toSnapSecurityLabels(o.SecurityLabels)
 	sf.NameMaps = toSnapNameMaps(o.NameMaps)
 	return sf
 }
@@ -694,23 +720,25 @@ func toSnapType(o *ir.Type) *SnapType {
 	for _, attr := range o.CompositeAttrs {
 		st.CompositeAttrs = append(st.CompositeAttrs, toSnapColumn(attr))
 	}
+	st.SecurityLabels = toSnapSecurityLabels(o.SecurityLabels)
 	st.NameMaps = toSnapNameMaps(o.NameMaps)
 	return st
 }
 
 func toSnapSequence(o *ir.Sequence) *SnapSequence {
 	return &SnapSequence{
-		Schema:      o.Schema,
-		Name:        o.Name,
-		Owner:       o.Owner,
-		Comment:     o.Comment,
-		IncrementBy: o.IncrementBy,
-		MinValue:    o.MinValue,
-		MaxValue:    o.MaxValue,
-		StartValue:  o.StartValue,
-		Cache:       o.Cache,
-		Cycle:       o.Cycle != nil && *o.Cycle,
-		NameMaps:    toSnapNameMaps(o.NameMaps),
+		Schema:         o.Schema,
+		Name:           o.Name,
+		Owner:          o.Owner,
+		Comment:        o.Comment,
+		IncrementBy:    o.IncrementBy,
+		MinValue:       o.MinValue,
+		MaxValue:       o.MaxValue,
+		StartValue:     o.StartValue,
+		Cache:          o.Cache,
+		Cycle:          o.Cycle != nil && *o.Cycle,
+		SecurityLabels: toSnapSecurityLabels(o.SecurityLabels),
+		NameMaps:       toSnapNameMaps(o.NameMaps),
 	}
 }
 
@@ -735,6 +763,7 @@ func toSnapRole(o *ir.Role) *SnapRole {
 		RoleMembers:     o.RoleMembers,
 		AdminRoles:      o.AdminRoles,
 		Comment:         o.Comment,
+		SecurityLabels:  toSnapSecurityLabels(o.SecurityLabels),
 		NameMaps:        toSnapNameMaps(o.NameMaps),
 	}
 }

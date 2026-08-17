@@ -619,13 +619,13 @@ func renderObjectDPG(b *strings.Builder, obj pipeline.IRObject, fmtOpts format.O
 		for _, col := range o.Columns {
 			hasStorage := col.Storage != nil && !col.StorageIsTypeDefault
 			if col.Comment != nil || hasStorage || col.Compression != nil || col.Statistics != nil ||
-				len(col.Grants) > 0 || len(col.Revocations) > 0 {
+				len(col.Grants) > 0 || len(col.Revocations) > 0 || len(col.SecurityLabels) > 0 {
 				colsWithAttrs = append(colsWithAttrs, col)
 			}
 		}
 		if o.Owner != nil || o.Comment != nil || o.RLSEnabled || len(o.Indexes) > 0 || len(colsWithAttrs) > 0 ||
 			len(o.Partitions) > 0 || len(o.Policies) > 0 || len(o.Triggers) > 0 || len(o.Grants) > 0 || len(o.Revocations) > 0 ||
-			len(blockCSTs) > 0 {
+			len(o.SecurityLabels) > 0 || len(blockCSTs) > 0 {
 			b.WriteString(" {\n")
 			blockHasContent := false
 			if o.Owner != nil {
@@ -693,6 +693,7 @@ func renderObjectDPG(b *strings.Builder, obj pipeline.IRObject, fmtOpts format.O
 						}
 						b.WriteString(";\n")
 					}
+					writeSecurityLabels(b, colInd, fmtOpts, col.SecurityLabels)
 					fmt.Fprintf(b, "%s}\n", ind)
 				}
 				fmt.Fprintf(b, "%s}\n", ind)
@@ -802,6 +803,12 @@ func renderObjectDPG(b *strings.Builder, obj pipeline.IRObject, fmtOpts format.O
 					b.WriteString(";\n")
 				}
 			}
+			if len(o.SecurityLabels) > 0 {
+				if blockHasContent {
+					b.WriteString("\n")
+				}
+				writeSecurityLabels(b, ind, fmtOpts, o.SecurityLabels)
+			}
 			b.WriteString("}")
 		}
 		b.WriteString(";\n")
@@ -876,7 +883,7 @@ func renderObjectDPG(b *strings.Builder, obj pipeline.IRObject, fmtOpts format.O
 			fmt.Fprintf(b, " %s %v", kw("ROWS"), *o.Attrs.Rows)
 		}
 		fmt.Fprintf(b, " %s $$%s$$", kw("AS"), o.Attrs.Body)
-		writeFuncBlock(b, ind, fmtOpts, o.Comment, o.Grants, o.Revocations)
+		writeFuncBlockWithLabels(b, ind, fmtOpts, o.Comment, o.Grants, o.Revocations, o.SecurityLabels)
 
 	case *ir.Aggregate:
 		// Previously had no case at all in this switch — an AGGREGATE
@@ -901,7 +908,7 @@ func renderObjectDPG(b *strings.Builder, obj pipeline.IRObject, fmtOpts format.O
 			fmt.Fprintf(b, "%s = %s", kw(strings.ToUpper(p.Key)), p.Value)
 		}
 		b.WriteString(")")
-		writeFuncBlock(b, ind, fmtOpts, o.Comment, o.Grants, o.Revocations)
+		writeFuncBlockWithLabels(b, ind, fmtOpts, o.Comment, o.Grants, o.Revocations, o.SecurityLabels)
 
 	case *ir.Procedure:
 		b.WriteString("\n")
@@ -915,7 +922,7 @@ func renderObjectDPG(b *strings.Builder, obj pipeline.IRObject, fmtOpts format.O
 		b.WriteString(" ")
 		b.WriteString(o.Attrs.Language)
 		fmt.Fprintf(b, " %s $$%s$$", kw("AS"), o.Attrs.Body)
-		writeFuncBlock(b, ind, fmtOpts, o.Comment, o.Grants, o.Revocations)
+		writeFuncBlockWithLabels(b, ind, fmtOpts, o.Comment, o.Grants, o.Revocations, o.SecurityLabels)
 
 	case *ir.Type:
 		switch o.Variant {
@@ -929,7 +936,7 @@ func renderObjectDPG(b *strings.Builder, obj pipeline.IRObject, fmtOpts format.O
 				b.WriteString(sqlStringLit(v))
 			}
 			b.WriteString(")")
-			writeTypeOwnerCommentBlock(b, ind, fmtOpts, o.Owner, o.Comment)
+			writeTypeOwnerCommentBlock(b, ind, fmtOpts, o.Owner, o.Comment, o.SecurityLabels)
 		case "DOMAIN":
 			// Renders via the structured Domain* fields (RFC §5.4's block
 			// syntax), not o.Body — previously the entire domain (base type,
@@ -940,7 +947,7 @@ func renderObjectDPG(b *strings.Builder, obj pipeline.IRObject, fmtOpts format.O
 			// diff property-by-property (an inline blob round-trips back
 			// into Body, not into DomainDefault/DomainConstraints/etc.).
 			fmt.Fprintf(b, "\n%s %s %s %s", kw("DOMAIN"), quoteIdentIfNeeded(o.Name), kw("AS"), o.DomainBaseType.String())
-			if o.DomainDefault != nil || o.DomainNotNull || len(o.DomainConstraints) > 0 || o.Comment != nil || o.Owner != nil {
+			if o.DomainDefault != nil || o.DomainNotNull || len(o.DomainConstraints) > 0 || o.Comment != nil || o.Owner != nil || len(o.SecurityLabels) > 0 {
 				b.WriteString(" {\n")
 				if o.Owner != nil {
 					fmt.Fprintf(b, "%s%s %s;\n", ind, kw("OWNER"), quoteIdentIfNeeded(*o.Owner))
@@ -957,6 +964,7 @@ func renderObjectDPG(b *strings.Builder, obj pipeline.IRObject, fmtOpts format.O
 				if o.Comment != nil {
 					fmt.Fprintf(b, "%s%s %s;\n", ind, kw("COMMENT"), sqlStringLit(*o.Comment))
 				}
+				writeSecurityLabels(b, ind, fmtOpts, o.SecurityLabels)
 				b.WriteString("}\n")
 			} else {
 				b.WriteString(";\n")
@@ -976,14 +984,14 @@ func renderObjectDPG(b *strings.Builder, obj pipeline.IRObject, fmtOpts format.O
 				fmt.Fprintf(b, "%s %s", quoteIdentIfNeeded(attr.Name), attr.Type.String())
 			}
 			b.WriteString(")")
-			writeTypeOwnerCommentBlock(b, ind, fmtOpts, o.Owner, o.Comment)
+			writeTypeOwnerCommentBlock(b, ind, fmtOpts, o.Owner, o.Comment, o.SecurityLabels)
 		case "RANGE":
 			// o.Body is introspectRangeBodies' reconstructed options text
 			// (e.g. "SUBTYPE = numeric") — same trailing-clause-only shape
 			// DOMAIN's Body already uses, no "CREATE TYPE ... AS RANGE"
 			// prefix baked in.
 			fmt.Fprintf(b, "\n%s %s %s %s (%s)", kw("TYPE"), quoteIdentIfNeeded(o.Name), kw("AS"), kw("RANGE"), o.Body)
-			writeTypeOwnerCommentBlock(b, ind, fmtOpts, o.Owner, o.Comment)
+			writeTypeOwnerCommentBlock(b, ind, fmtOpts, o.Owner, o.Comment, o.SecurityLabels)
 		case "BASE":
 			// No live introspection reconstructs a base type's body today
 			// (would need to recover the original CREATE TYPE(...) options
@@ -994,7 +1002,7 @@ func renderObjectDPG(b *strings.Builder, obj pipeline.IRObject, fmtOpts format.O
 			// options-only shape as RANGE, consistent with o.Body's doc
 			// comment ("raw Part1 for range/domain/base").
 			fmt.Fprintf(b, "\n%s %s (%s)", kw("TYPE"), quoteIdentIfNeeded(o.Name), o.Body)
-			writeTypeOwnerCommentBlock(b, ind, fmtOpts, o.Owner, o.Comment)
+			writeTypeOwnerCommentBlock(b, ind, fmtOpts, o.Owner, o.Comment, o.SecurityLabels)
 		default:
 			fmt.Fprintf(b, "\n-- type %s (%s) omitted\n", o.Name, o.Variant)
 		}
@@ -1048,7 +1056,7 @@ func renderObjectDPG(b *strings.Builder, obj pipeline.IRObject, fmtOpts format.O
 			b.WriteString(" ")
 			b.WriteString(kw("CYCLE"))
 		}
-		if o.Owner != nil || o.Comment != nil {
+		if o.Owner != nil || o.Comment != nil || len(o.SecurityLabels) > 0 {
 			b.WriteString(" {\n")
 			if o.Owner != nil {
 				fmt.Fprintf(b, "%s%s %s;\n", ind, kw("OWNER"), quoteIdentIfNeeded(*o.Owner))
@@ -1056,6 +1064,7 @@ func renderObjectDPG(b *strings.Builder, obj pipeline.IRObject, fmtOpts format.O
 			if o.Comment != nil {
 				fmt.Fprintf(b, "%s%s %s;\n", ind, kw("COMMENT"), sqlStringLit(*o.Comment))
 			}
+			writeSecurityLabels(b, ind, fmtOpts, o.SecurityLabels)
 			b.WriteString("}\n")
 		} else {
 			b.WriteString(";\n")
@@ -1106,8 +1115,13 @@ func renderObjectDPG(b *strings.Builder, obj pipeline.IRObject, fmtOpts format.O
 		if len(o.AdminRoles) > 0 {
 			fmt.Fprintf(&opts, " %s %s", kw("ADMIN"), joinIdentsIfNeeded(o.AdminRoles))
 		}
-		if o.Comment != nil {
-			fmt.Fprintf(b, "\n%s %s%s\n{\n%s%s %s;\n}\n", kw("ROLE"), name, opts.String(), ind, kw("COMMENT"), sqlStringLit(*o.Comment))
+		if o.Comment != nil || len(o.SecurityLabels) > 0 {
+			fmt.Fprintf(b, "\n%s %s%s\n{\n", kw("ROLE"), name, opts.String())
+			if o.Comment != nil {
+				fmt.Fprintf(b, "%s%s %s;\n", ind, kw("COMMENT"), sqlStringLit(*o.Comment))
+			}
+			writeSecurityLabels(b, ind, fmtOpts, o.SecurityLabels)
+			b.WriteString("}\n")
 		} else {
 			fmt.Fprintf(b, "\n%s %s%s;\n", kw("ROLE"), name, opts.String())
 		}
@@ -1145,6 +1159,7 @@ func renderObjectDPG(b *strings.Builder, obj pipeline.IRObject, fmtOpts format.O
 			}
 			b.WriteString(";\n")
 		}
+		writeSecurityLabels(b, ind, fmtOpts, o.SecurityLabels)
 		b.WriteString("}\n")
 
 	case *ir.Extension:
@@ -1168,7 +1183,7 @@ func renderObjectDPG(b *strings.Builder, obj pipeline.IRObject, fmtOpts format.O
 	case *ir.Cast:
 		renderOpaqueBody(b, ind, fmtOpts, o.Body, o.Comment)
 	case *ir.EventTrigger:
-		renderOpaqueBody(b, ind, fmtOpts, o.Body, o.Comment)
+		renderOpaqueBodyWithLabels(b, ind, fmtOpts, o.Body, o.Comment, o.SecurityLabels)
 	case *ir.ForeignDataWrapper:
 		renderOpaqueBody(b, ind, fmtOpts, o.Body, o.Comment)
 	case *ir.ForeignServer:
@@ -1176,11 +1191,11 @@ func renderObjectDPG(b *strings.Builder, obj pipeline.IRObject, fmtOpts format.O
 	case *ir.UserMapping:
 		renderOpaqueBody(b, ind, fmtOpts, o.Body, nil)
 	case *ir.Publication:
-		renderOpaqueBody(b, ind, fmtOpts, o.Body, o.Comment)
+		renderOpaqueBodyWithLabels(b, ind, fmtOpts, o.Body, o.Comment, o.SecurityLabels)
 	case *ir.Subscription:
-		renderOpaqueBody(b, ind, fmtOpts, o.Body, o.Comment)
+		renderOpaqueBodyWithLabels(b, ind, fmtOpts, o.Body, o.Comment, o.SecurityLabels)
 	case *ir.Tablespace:
-		renderOpaqueBody(b, ind, fmtOpts, o.Body, o.Comment)
+		renderOpaqueBodyWithLabels(b, ind, fmtOpts, o.Body, o.Comment, o.SecurityLabels)
 	case *ir.Operator:
 		renderOpaqueBody(b, ind, fmtOpts, o.Body, o.Comment)
 	case *ir.OperatorClass:
@@ -1236,7 +1251,8 @@ func writeFuncArgs(b *strings.Builder, args []ir.FuncArg) {
 // ir.View.Indexes).
 func writeViewBlock(b *strings.Builder, ind string, fmtOpts format.Options, o *ir.View) {
 	kw := fmtOpts.Keyword
-	if o.Owner == nil && o.Comment == nil && len(o.Grants) == 0 && len(o.Revocations) == 0 && len(o.Indexes) == 0 {
+	if o.Owner == nil && o.Comment == nil && len(o.Grants) == 0 && len(o.Revocations) == 0 &&
+		len(o.Indexes) == 0 && len(o.SecurityLabels) == 0 {
 		b.WriteString(";\n")
 		return
 	}
@@ -1276,6 +1292,7 @@ func writeViewBlock(b *strings.Builder, ind string, fmtOpts format.Options, o *i
 		}
 		fmt.Fprintf(b, "%s}\n", ind)
 	}
+	writeSecurityLabels(b, ind, fmtOpts, o.SecurityLabels)
 	b.WriteString("}\n")
 }
 
@@ -1283,9 +1300,9 @@ func writeViewBlock(b *strings.Builder, ind string, fmtOpts format.Options, o *i
 // declaration: a bare ";" when there's no OWNER/COMMENT to declare, or a
 // "{ }" block carrying them when there is. DOMAIN has its own richer block
 // (DEFAULT/NOT NULL/CONSTRAINT alongside OWNER/COMMENT) and doesn't use this.
-func writeTypeOwnerCommentBlock(b *strings.Builder, ind string, fmtOpts format.Options, owner, comment *string) {
+func writeTypeOwnerCommentBlock(b *strings.Builder, ind string, fmtOpts format.Options, owner, comment *string, securityLabels []pipeline.SecurityLabel) {
 	kw := fmtOpts.Keyword
-	if owner == nil && comment == nil {
+	if owner == nil && comment == nil && len(securityLabels) == 0 {
 		b.WriteString(";\n")
 		return
 	}
@@ -1296,6 +1313,7 @@ func writeTypeOwnerCommentBlock(b *strings.Builder, ind string, fmtOpts format.O
 	if comment != nil {
 		fmt.Fprintf(b, "%s%s %s;\n", ind, kw("COMMENT"), sqlStringLit(*comment))
 	}
+	writeSecurityLabels(b, ind, fmtOpts, securityLabels)
 	b.WriteString("}\n")
 }
 
@@ -1308,8 +1326,17 @@ func writeTypeOwnerCommentBlock(b *strings.Builder, ind string, fmtOpts format.O
 // never detect drift on either, or even reconstruct a function's/procedure's
 // body to begin with.
 func writeFuncBlock(b *strings.Builder, ind string, fmtOpts format.Options, comment *string, grants []ir.Grant, revocations []ir.Revocation) {
+	writeFuncBlockWithLabels(b, ind, fmtOpts, comment, grants, revocations, nil)
+}
+
+// writeFuncBlockWithLabels is writeFuncBlock plus SecurityLabels (RFC
+// §14.11) — kept as a separate entry point rather than adding a parameter
+// to writeFuncBlock itself so every existing zero-SecurityLabels call site
+// (Extension, and any future FUNCTION-shaped kind that never gets one)
+// doesn't need a trailing nil.
+func writeFuncBlockWithLabels(b *strings.Builder, ind string, fmtOpts format.Options, comment *string, grants []ir.Grant, revocations []ir.Revocation, securityLabels []pipeline.SecurityLabel) {
 	kw := fmtOpts.Keyword
-	if comment == nil && len(grants) == 0 && len(revocations) == 0 {
+	if comment == nil && len(grants) == 0 && len(revocations) == 0 && len(securityLabels) == 0 {
 		b.WriteString(";\n")
 		return
 	}
@@ -1339,7 +1366,24 @@ func writeFuncBlock(b *strings.Builder, ind string, fmtOpts format.Options, comm
 		}
 		b.WriteString(";\n")
 	}
+	writeSecurityLabels(b, ind, fmtOpts, securityLabels)
 	b.WriteString("}\n")
+}
+
+// writeSecurityLabels renders each declared SECURITY LABEL entry (RFC
+// §14.11) as its own "SECURITY LABEL [FOR provider] '...';" directive line
+// — the same DPG block syntax the block parser accepts (see
+// blockParser.parseSecurityLabel), reused by every kind's block-rendering
+// code below, not just writeFuncBlockWithLabels' FUNCTION-shaped callers.
+func writeSecurityLabels(b *strings.Builder, ind string, fmtOpts format.Options, labels []pipeline.SecurityLabel) {
+	kw := fmtOpts.Keyword
+	for _, l := range labels {
+		fmt.Fprintf(b, "%s%s %s", ind, kw("SECURITY"), kw("LABEL"))
+		if l.Provider != "" {
+			fmt.Fprintf(b, " %s %s", kw("FOR"), quoteIdentIfNeeded(l.Provider))
+		}
+		fmt.Fprintf(b, " %s;\n", sqlStringLit(l.Label))
+	}
 }
 
 // renderOpaqueBody writes a reconstructed CREATE statement (already
@@ -1418,6 +1462,27 @@ func renderOpaqueBody(b *strings.Builder, ind string, fmtOpts format.Options, bo
 	}
 	fmt.Fprintf(b, "\n%s", body)
 	writeFuncBlock(b, ind, fmtOpts, comment, nil, nil)
+}
+
+// renderOpaqueBodyWithLabels is renderOpaqueBody plus SecurityLabels (RFC
+// §14.11) — a separate entry point (not a renderOpaqueBody parameter)
+// because most of renderOpaqueBody's callers (Collation, Cast, FDW,
+// ForeignServer, UserMapping, Operator, OperatorClass/Family, Statistics,
+// TSParser/Template/Dict) are kinds real PostgreSQL's SECURITY LABEL simply
+// doesn't support at all — their ir types have no SecurityLabels field to
+// pass. Only the 4 opaque kinds that do (Tablespace, Publication,
+// Subscription, EventTrigger) call this instead.
+func renderOpaqueBodyWithLabels(b *strings.Builder, ind string, fmtOpts format.Options, body string, comment *string, securityLabels []pipeline.SecurityLabel) {
+	body = strings.TrimSpace(body)
+	const createPrefix = "CREATE "
+	if len(body) >= len(createPrefix) && strings.EqualFold(body[:len(createPrefix)], createPrefix) {
+		body = strings.TrimSpace(body[len(createPrefix):])
+	}
+	if body == "" {
+		return
+	}
+	fmt.Fprintf(b, "\n%s", body)
+	writeFuncBlockWithLabels(b, ind, fmtOpts, comment, nil, nil, securityLabels)
 }
 
 // renderTSConfigBody is renderOpaqueBody's TSConfig-specific variant: a text
