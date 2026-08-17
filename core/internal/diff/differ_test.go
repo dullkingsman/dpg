@@ -6443,6 +6443,97 @@ func TestDiffAggregateUnchangedIsNoop(t *testing.T) {
 	}
 }
 
+// ── AGGREGATE structural Options comparison (C.3 fix) ──────────────────────
+// Regression guard for the audit's live-reproduced bug: `diffAggregate`
+// compared raw BodyHash even when the snap side came from introspection's
+// catalog reconstruction, so a cosmetically-different but catalog-identical
+// Body (e.g. lowercase "sfunc = ..." vs. hand-written "SFUNC = ...") always
+// registered as bodyChanged, producing a spurious DESTRUCTIVE DROP+CREATE
+// on every single `plan --live`/`apply`, even with zero real changes.
+
+func TestDiffAggregateStructuredOptionsCosmeticBodyDriftIsNoop(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	// Snap's Body/BodyHash simulate an introspected reconstruction: same
+	// options, different casing/spacing from hand-written source.
+	liveBody := "CREATE AGGREGATE public.my_agg (numeric) (sfunc = numeric_add, stype = numeric, initcond = '0')"
+	liveHash := fmt.Sprintf("%x", sha256Sum(liveBody))
+	_ = snap.SetObject(`public.my_agg(numeric)`, &snapshot.SnapObject{
+		Kind: "aggregate",
+		Opaque: &snapshot.SnapOpaque{
+			Kind: "aggregate", Schema: "public", Name: "my_agg", Args: "numeric",
+			BodyHash:                   liveHash,
+			AggregateOptionsStructured: true,
+			AggregateOptions: []snapshot.SnapOptionKV{
+				{Key: "sfunc", Value: "numeric_add"},
+				{Key: "stype", Value: "numeric"},
+				{Key: "initcond", Value: "'0'"},
+			},
+		},
+	})
+	desired := []pipeline.IRObject{
+		&ir.Aggregate{
+			Schema: "public",
+			Name:   "my_agg",
+			Args:   []ir.FuncArg{{Type: ir.TypeRef{Name: "numeric"}}},
+			Body:   "CREATE AGGREGATE audit_sum (numeric) (SFUNC = numeric_add, STYPE = numeric, INITCOND = '0')",
+			Options: []pipeline.StorageParam{
+				{Key: "sfunc", Value: "numeric_add"},
+				{Key: "stype", Value: "numeric"},
+				{Key: "initcond", Value: "'0'"},
+			},
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ops) != 0 {
+		t.Errorf("expected no ops for a cosmetically-different but structurally identical aggregate, got: %v", sqlList(ops))
+	}
+}
+
+func TestDiffAggregateStructuredOptionsGenuineChangeStillDrops(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	liveBody := "CREATE AGGREGATE public.my_agg (numeric) (sfunc = numeric_add, stype = numeric)"
+	liveHash := fmt.Sprintf("%x", sha256Sum(liveBody))
+	_ = snap.SetObject(`public.my_agg(numeric)`, &snapshot.SnapObject{
+		Kind: "aggregate",
+		Opaque: &snapshot.SnapOpaque{
+			Kind: "aggregate", Schema: "public", Name: "my_agg", Args: "numeric",
+			BodyHash:                   liveHash,
+			AggregateOptionsStructured: true,
+			AggregateOptions: []snapshot.SnapOptionKV{
+				{Key: "sfunc", Value: "numeric_add"},
+				{Key: "stype", Value: "numeric"},
+			},
+		},
+	})
+	desired := []pipeline.IRObject{
+		&ir.Aggregate{
+			Schema: "public",
+			Name:   "my_agg",
+			Args:   []ir.FuncArg{{Type: ir.TypeRef{Name: "numeric"}}},
+			Body:   "CREATE AGGREGATE public.my_agg (numeric) (SFUNC = float8_accum, STYPE = float8)",
+			Options: []pipeline.StorageParam{
+				{Key: "sfunc", Value: "float8_accum"},
+				{Key: "stype", Value: "float8"},
+			},
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsSQL(ops, "DROP AGGREGATE IF EXISTS") {
+		t.Errorf("expected DROP AGGREGATE IF EXISTS for a genuine option change, got: %v", sqlList(ops))
+	}
+	if !containsSQL(ops, "CREATE AGGREGATE") {
+		t.Errorf("expected CREATE AGGREGATE for a genuine option change, got: %v", sqlList(ops))
+	}
+}
+
 func TestDiffMaterViewCommentUsesCorrectKind(t *testing.T) {
 	d := New()
 	comment := "a summary view"

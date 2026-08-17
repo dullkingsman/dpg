@@ -184,6 +184,11 @@ func toSnapObject(obj pipeline.IRObject) *SnapObject {
 			Kind: "aggregate", Schema: o.Schema, Name: o.Name,
 			Args: ir.ArgsKey(o.Args), BodyHash: hashBodyStr(o.Body), Comment: o.Comment,
 			NameMaps: toSnapNameMaps(o.NameMaps),
+			// Populated unconditionally (both source-parsed and introspected
+			// Aggregates carry a structured Options list) — see
+			// SnapOpaque.AggregateOptionsStructured's doc comment.
+			AggregateOptionsStructured: true,
+			AggregateOptions:           toSnapOptions(o.Options),
 		}
 		for _, g := range o.Grants {
 			so.Grants = append(so.Grants, toSnapGrant(g))

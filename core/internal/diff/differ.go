@@ -1998,19 +1998,35 @@ func createAggregate(o *ir.Aggregate) ([]pipeline.DiffOp, error) {
 	return ops, nil
 }
 
+// diffAggregate diffs a CREATE AGGREGATE declaration against its snapshot.
+// PostgreSQL has no incremental ALTER AGGREGATE, so any genuine change to
+// SFUNC/STYPE/INITCOND/... still must resolve to DROP+CREATE — but whether
+// that DROP+CREATE is warranted is decided by comparing the already-
+// structured Options list (see SnapOpaque.AggregateOptionsStructured's doc
+// comment), not by hashing the raw Body text. Raw-hash comparison false-
+// positives on cosmetic differences (keyword case, option order) between
+// hand-written source and an introspected reconstruction — the same class
+// of bug already fixed for OperatorClass (see diffOperatorClass). A stale
+// pre-feature snapshot (AggregateOptionsStructured false) falls back to the
+// old raw-BodyHash path.
 func diffAggregate(o *ir.Aggregate, snap *snapshot.SnapOpaque) ([]pipeline.DiffOp, error) {
 	sig := buildAggregateSignature(o)
 	pos := o.SrcPos
 
-	var newHash string
-	if o.Body != "" {
-		sum := sha256.Sum256([]byte(strings.TrimSpace(o.Body)))
-		newHash = fmt.Sprintf("%x", sum)
+	var bodyChanged bool
+	if snap.AggregateOptionsStructured {
+		bodyChanged = !optionsEqual(toComparableOptions(o.Options, false), snap.AggregateOptions)
+	} else {
+		var newHash string
+		if o.Body != "" {
+			sum := sha256.Sum256([]byte(strings.TrimSpace(o.Body)))
+			newHash = fmt.Sprintf("%x", sum)
+		}
+		// Skip body comparison when either side has no hash: the live snapshot
+		// (introspected) cannot reconstruct the aggregate body, so we only diff
+		// body when both sides have a hash (offline plan against committed snapshot).
+		bodyChanged = newHash != "" && snap.BodyHash != "" && newHash != snap.BodyHash
 	}
-	// Skip body comparison when either side has no hash: the live snapshot
-	// (introspected) cannot reconstruct the aggregate body, so we only diff
-	// body when both sides have a hash (offline plan against committed snapshot).
-	bodyChanged := newHash != "" && snap.BodyHash != "" && newHash != snap.BodyHash
 
 	if bodyChanged {
 		ops := []pipeline.DiffOp{

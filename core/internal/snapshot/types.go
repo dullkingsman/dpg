@@ -161,6 +161,20 @@ type SnapOpaque struct {
 	// it wouldn't otherwise show up in Members/StorageType.
 	OperatorClassFamilySchema string `json:"operator_class_family_schema,omitempty"`
 	OperatorClassFamilyName   string `json:"operator_class_family_name,omitempty"`
+	// AggregateOptionsStructured/AggregateOptions mirror
+	// OperatorClassMembersStructured/OperatorClassMembers above, for a CREATE
+	// AGGREGATE's SFUNC/STYPE/INITCOND/... option list (see
+	// ir.Aggregate.Options's doc comment). Used only for a structural
+	// equality check in the differ — PostgreSQL has no incremental ALTER
+	// AGGREGATE, so any genuine option change still resolves to DROP+CREATE;
+	// this exists solely to avoid a false DESTRUCTIVE diff when BodyHash
+	// differs for purely cosmetic reasons (keyword case, option order)
+	// between hand-written source and an introspected reconstruction. The
+	// sentinel distinguishes "snapshot predates this feature" (no structured
+	// comparison possible, fall back to raw BodyHash) from an aggregate that
+	// genuinely has this data captured.
+	AggregateOptionsStructured bool           `json:"aggregate_options_structured,omitempty"`
+	AggregateOptions           []SnapOptionKV `json:"aggregate_options,omitempty"`
 }
 
 // SnapOpFamilyMember is one "loose" OPERATOR FAMILY member (RFC §14.4) —
