@@ -85,10 +85,7 @@ silently clobbered.`,
 				clusterOut, dumpStore := dumpClusterTargets(cl, store, outputDir)
 
 				for _, db := range databases {
-					out := outputDir
-					if out == "" {
-						out = filepath.Join(proj.RootDir, cl.Name(), db.Name())
-					}
+					out := dumpDatabaseOutputDir(outputDir, db)
 					if err := runDump(cl, db, out, clusterOut, introspector, dumpStore, secretResolver, fmtOpts, yes); err != nil {
 						return fmt.Errorf("%s/%s: %w", cl.Name(), db.Name(), err)
 					}
@@ -123,6 +120,24 @@ func dumpClusterTargets(cl *project.Cluster, store pipeline.SnapshotStore, outpu
 	}
 	return filepath.Join(outputDir, cl.Name(), "cluster"),
 		&snapshot.FileStore{Dir: filepath.Join(outputDir, ".dpg", "snapshots")}
+}
+
+// dumpDatabaseOutputDir decides where a database's per-database dump output
+// (schema files, objects.dpg) should land this invocation. Without -o
+// (outputDir == ""), it must be db.Dir — the database's own already-resolved
+// real directory — not a path reconstructed from declared names
+// (cl.Name()/db.Name()). db is only ever reachable here via project
+// discovery, which requires its dpg.toml to already exist on disk, so
+// db.Dir is always a real, correct answer; reconstructing a name-derived
+// path instead silently creates a disconnected sibling directory whenever a
+// project's directory name and declared `name =` field diverge (a rename, a
+// copy-pasted template, or a typo — nothing prevents this). With -o set,
+// behavior is unchanged: outputDir is used verbatim, exactly as before.
+func dumpDatabaseOutputDir(outputDir string, db *project.Database) string {
+	if outputDir == "" {
+		return db.Dir
+	}
+	return outputDir
 }
 
 // confirmOverwrite checks paths for any that already exist on disk and, if

@@ -2418,6 +2418,48 @@ func TestDumpClusterTargetsMultipleClustersNamespaced(t *testing.T) {
 	}
 }
 
+// ── dumpDatabaseOutputDir (dpg dump default output path) ────────────────────
+
+// TestDumpDatabaseOutputDirNoOutputDirUsesRealDatabaseDirectory proves the
+// fix: without -o, the default output path must be db.Dir — the database's
+// own already-resolved real directory — not a path reconstructed from
+// declared names. Before this fix, a database whose directory name diverged
+// from its declared [database] name (a rename, a copy-pasted template, or a
+// typo) would silently get dumped into a brand-new, disconnected sibling
+// directory instead of its real one.
+func TestDumpDatabaseOutputDirNoOutputDirUsesRealDatabaseDirectory(t *testing.T) {
+	db := &project.Database{
+		Dir:    "/real/project/cluster1/mydb_v2",
+		Config: config.DatabaseConfig{Database: config.DatabaseDef{Name: "dupdb1"}},
+	}
+
+	out := dumpDatabaseOutputDir("", db)
+
+	if out != db.Dir {
+		t.Errorf("dumpDatabaseOutputDir(\"\", db): got %q, want db.Dir %q", out, db.Dir)
+	}
+	nameDerivedPath := filepath.Join("cluster1", "dupdb1")
+	if out == nameDerivedPath {
+		t.Errorf("dumpDatabaseOutputDir must not reconstruct a name-derived path, got %q", out)
+	}
+}
+
+// TestDumpDatabaseOutputDirWithOutputDirUsesOutputDirUnchanged proves -o's
+// existing behavior is untouched by this fix: with -o set, the caller's
+// value is used verbatim, regardless of db.Dir.
+func TestDumpDatabaseOutputDirWithOutputDirUsesOutputDirUnchanged(t *testing.T) {
+	db := &project.Database{
+		Dir:    "/real/project/cluster1/mydb_v2",
+		Config: config.DatabaseConfig{Database: config.DatabaseDef{Name: "dupdb1"}},
+	}
+
+	out := dumpDatabaseOutputDir("/scratch/out", db)
+
+	if out != "/scratch/out" {
+		t.Errorf("dumpDatabaseOutputDir(\"/scratch/out\", db): got %q, want %q", out, "/scratch/out")
+	}
+}
+
 // ── confirmOverwrite (dpg dump overwrite-protection) ────────────────────────
 
 // TestConfirmOverwriteNoExistingFilesNoPrompt proves the common, safe case

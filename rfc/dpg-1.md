@@ -559,7 +559,11 @@ snapshot_on_apply = true
    are present the compiler MUST abort with error DPG-E002 (ambiguous
    connection).  If neither is present, commands that require a live
    database connection (`dpg apply`, `dpg verify`, `dpg dump`) MUST
-   fail with error DPG-E003 (no connection configured).
+   fail with error DPG-E003 (no connection configured).  If `name` is
+   omitted or empty the compiler MUST abort with error DPG-E032
+   (cluster name required).  `name` MUST also be unique across every
+   cluster directory in the project; a repeated `name` MUST abort with
+   error DPG-E034 (duplicate cluster name) — see §3.6.
 
 ### 3.4. Database dpg.toml
 
@@ -575,6 +579,14 @@ name = "myapp"
 # qualifier. REQUIRED.
 default_schema = "public"
 ```
+
+   **Constraint:** if `name` is omitted or empty the compiler MUST
+   abort with error DPG-E033 (database name required).  `name` MUST
+   also be unique among every database directory within the same
+   cluster (uniqueness is per-cluster, not project-wide — the same
+   database name MAY recur under a different cluster); a repeated
+   `name` within one cluster MUST abort with error DPG-E035
+   (duplicate database name) — see §3.6.
 
 ### 3.5. Cluster-Level Objects Directory
 
@@ -617,6 +629,22 @@ default_schema = "public"
 
    3.  Pass the collected file sets to the macro preprocessor (Phase 2,
        Section 15.3).
+
+   **Name validation.** Step 2.a MUST validate that the cluster's
+   declared `name` (§3.3) is non-empty (error DPG-E032 if not) and
+   unique across every cluster directory discovered under the project
+   root (error DPG-E034 if not, naming both directories).  Step 2.b.i
+   MUST validate that the database's declared `name` (§3.4) is
+   non-empty (error DPG-E033 if not) and unique among every database
+   directory within that same cluster (error DPG-E035 if not, naming
+   both directories) — database name uniqueness is scoped per-cluster
+   only, not project-wide.  These checks exist because `--cluster`/
+   `--database` selection (§D.2.4), the snapshot store, the migrations
+   archive, and `dpg dump`'s default output path all key off the
+   declared `name`, not the directory: an unvalidated empty or
+   duplicate name causes silent misbehavior — an unreachable second
+   cluster/database, or two unrelated clusters/databases sharing the
+   same persisted snapshot on disk — rather than a clear error.
 
 ### 3.7. Block Merge Conflict Resolution
 
@@ -6445,6 +6473,10 @@ type SecretResolver interface {
    | DPG-E027 | `cluster_not_found` | `--cluster` value does not match any cluster. |
    | DPG-E028 | `multiple_databases_no_flag` | Multiple databases found; `--database` required. |
    | DPG-E029 | `database_not_found` | `--database` value does not match any database. |
+   | DPG-E032 | `cluster_name_required` | Cluster `dpg.toml` is missing a `[cluster] name` (§3.3). |
+   | DPG-E033 | `database_name_required` | Database `dpg.toml` is missing a `[database] name` (§3.4). |
+   | DPG-E034 | `duplicate_cluster_name` | Two cluster directories declare the same `name` (§3.6). |
+   | DPG-E035 | `duplicate_database_name` | Two database directories within the same cluster declare the same `name` (§3.6). |
 
 ---
 
@@ -6935,6 +6967,7 @@ ENUM user_status ('active', 'inactive', 'banned') {
    | E.4 | 2026-05-17 | §D.10 added. Name Maps feature specified: ten rule keywords, `[namemaps]` TOML config at all three levels (global + per-object-type rules), inline `NAME MAP` and `NAME MAPS` block directives, literal target name support via double-quoted identifiers, resolution order (block > database > cluster > root), snapshot `name_maps` array field on all object types, error codes DPG-E030 and DPG-E031. |
    | E.5 | 2026-08-16 | §D.11 added. `SERIAL`/`BIGSERIAL`/`SMALLSERIAL` column sugar specified as a first-class IR concept (`Column.Serial`, sibling marker to `Column.Type`): normalization table, `SERIAL`-implies-`NOT NULL` rule, literal-keyword emission with suppressed `NOT NULL`/`DEFAULT`, `pg_depend`-based introspection detection mirroring identity columns, non-reapplicable dump output fixed, `SnapColumn.serial` field, and a legacy-snapshot self-healing comparison for pre-existing snapshots that stored the literal `"serial"` type name. §D.3's `serial-sequence-declared` entry updated: now also triggers on `Column.Serial`, not `Column.Identity` only. |
    | E.6 | 2026-08-17 | §23 and §25 updated with four scope decisions that had previously been made and recorded only in project working notes, not in this document: `CREATE ACCESS METHOD`, `CREATE CONVERSION`, `CREATE [PROCEDURAL] LANGUAGE`, and `CREATE TRANSFORM` are all formally out of scope (covered either by the extension-install path DPG already manages, or by having no realistic hand-declared use case). Brings this document in line with the two sibling decisions (`CREATE DATABASE`, `REASSIGN OWNED BY`/`DROP OWNED BY`) it already documented. |
+   | E.7 | 2026-08-17 | §3.3, §3.4, and §3.6 updated: cluster and database `name` were already documented as REQUIRED but the reference implementation never enforced it. §3.6's Discovery Algorithm now normatively requires validating that both names are non-empty and, per §3.3/§3.4's new constraint clauses, unique — cluster names project-wide, database names per-cluster only (the same database name legitimately recurring under a different cluster remains valid). Four new error codes added to §D.7: DPG-E032/E033 (empty name), DPG-E034/E035 (duplicate name). Also fixed a related implementation bug found alongside this: `dpg dump`'s default (no `-o`) output path was reconstructed from declared names rather than the already-resolved real directory, silently writing into a disconnected sibling directory whenever a project's directory name and declared name diverged — no RFC section previously specified this path should prefer the resolved directory, so no corresponding text amendment was needed beyond the behavior fix itself. |
 
 ---
 

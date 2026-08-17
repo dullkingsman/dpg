@@ -145,6 +145,18 @@ link = "env:PROD_URL"
 	}
 }
 
+func TestLoadCluster_EmptyNameErrors(t *testing.T) {
+	dir := t.TempDir()
+	path := writeFile(t, dir, "dpg.toml", `
+[cluster]
+url = "postgres://localhost/prod"
+`)
+	_, err := config.LoadCluster(path)
+	if err == nil {
+		t.Fatal("expected error: cluster name is required")
+	}
+}
+
 func TestLoadCluster_ConnectionURL_PrefersURL(t *testing.T) {
 	dir := t.TempDir()
 	path := writeFile(t, dir, "dpg.toml", `
@@ -189,6 +201,18 @@ default_schema = "app"
 	}
 	if cfg.Database.DefaultSchema != "app" {
 		t.Errorf("DefaultSchema: got %q", cfg.Database.DefaultSchema)
+	}
+}
+
+func TestLoadDatabase_EmptyNameErrors(t *testing.T) {
+	dir := t.TempDir()
+	path := writeFile(t, dir, "dpg.toml", `
+[database]
+default_schema = "app"
+`)
+	_, err := config.LoadDatabase(path)
+	if err == nil {
+		t.Fatal("expected error: database name is required")
 	}
 }
 

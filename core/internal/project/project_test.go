@@ -3,6 +3,7 @@ package project_test
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/dullkingsman/dpg/internal/project"
@@ -152,6 +153,86 @@ func TestDiscover_MultipleClustersDatabases(t *testing.T) {
 	}
 	if totalDBs != 3 {
 		t.Errorf("total databases: expected 3, got %d", totalDBs)
+	}
+}
+
+func TestDiscover_DuplicateClusterNameErrors(t *testing.T) {
+	root := t.TempDir()
+
+	writeF := func(rel, content string) {
+		path := filepath.Join(root, rel)
+		_ = os.MkdirAll(filepath.Dir(path), 0o755)
+		_ = os.WriteFile(path, []byte(content), 0o644)
+	}
+
+	writeF("dpg.toml", "[compiler]\ndefault_drop_behavior = \"restrict\"\n")
+	writeF("cluster-a/dpg.toml", "[cluster]\nname = \"shared\"\nurl = \"postgres://a\"\n")
+	writeF("cluster-b/dpg.toml", "[cluster]\nname = \"shared\"\nurl = \"postgres://b\"\n")
+
+	_, err := project.Discover(root)
+	if err == nil {
+		t.Fatal("expected an error for two cluster directories declaring the same name")
+	}
+	if !strings.Contains(err.Error(), "shared") {
+		t.Errorf("expected error to mention the shared name %q, got: %v", "shared", err)
+	}
+	if !strings.Contains(err.Error(), "cluster-a") || !strings.Contains(err.Error(), "cluster-b") {
+		t.Errorf("expected error to name both directories, got: %v", err)
+	}
+}
+
+func TestDiscover_DuplicateDatabaseNameErrors(t *testing.T) {
+	root := t.TempDir()
+
+	writeF := func(rel, content string) {
+		path := filepath.Join(root, rel)
+		_ = os.MkdirAll(filepath.Dir(path), 0o755)
+		_ = os.WriteFile(path, []byte(content), 0o644)
+	}
+
+	writeF("dpg.toml", "[compiler]\ndefault_drop_behavior = \"restrict\"\n")
+	writeF("cluster-a/dpg.toml", "[cluster]\nname = \"a\"\nurl = \"postgres://a\"\n")
+	writeF("cluster-a/db-x/dpg.toml", "[database]\nname = \"shared\"\n")
+	writeF("cluster-a/db-y/dpg.toml", "[database]\nname = \"shared\"\n")
+
+	_, err := project.Discover(root)
+	if err == nil {
+		t.Fatal("expected an error for two database directories in one cluster declaring the same name")
+	}
+	if !strings.Contains(err.Error(), "shared") {
+		t.Errorf("expected error to mention the shared name %q, got: %v", "shared", err)
+	}
+	if !strings.Contains(err.Error(), "db-x") || !strings.Contains(err.Error(), "db-y") {
+		t.Errorf("expected error to name both directories, got: %v", err)
+	}
+}
+
+// TestDiscover_SameDatabaseNameAcrossDifferentClustersIsAllowed proves the
+// duplicate-database-name check is scoped to within a single cluster only —
+// the same database name recurring under a different cluster (e.g. a
+// "staging" database that exists in both a local and a remote cluster) is
+// normal and must not be flagged.
+func TestDiscover_SameDatabaseNameAcrossDifferentClustersIsAllowed(t *testing.T) {
+	root := t.TempDir()
+
+	writeF := func(rel, content string) {
+		path := filepath.Join(root, rel)
+		_ = os.MkdirAll(filepath.Dir(path), 0o755)
+		_ = os.WriteFile(path, []byte(content), 0o644)
+	}
+
+	writeF("dpg.toml", "[compiler]\ndefault_drop_behavior = \"restrict\"\n")
+	writeF("cluster-a/dpg.toml", "[cluster]\nname = \"a\"\nurl = \"postgres://a\"\n")
+	writeF("cluster-a/staging/dpg.toml", "[database]\nname = \"staging\"\n")
+	writeF("cluster-b/dpg.toml", "[cluster]\nname = \"b\"\nurl = \"postgres://b\"\n")
+	writeF("cluster-b/staging/dpg.toml", "[database]\nname = \"staging\"\n")
+
+	proj, err := project.Discover(root)
+	if err != nil {
+		t.Fatalf("Discover: expected no error, got: %v", err)
+	}
+	if len(proj.Clusters) != 2 {
+		t.Fatalf("Clusters: expected 2, got %d", len(proj.Clusters))
 	}
 }
 

@@ -167,7 +167,30 @@ func discoverClusters(rootDir string) ([]*Cluster, error) {
 		}
 		clusters = append(clusters, cluster)
 	}
+	if err := checkDuplicateClusterNames(clusters); err != nil {
+		return nil, err
+	}
 	return clusters, nil
+}
+
+// checkDuplicateClusterNames returns an error naming both directories when
+// two or more discovered clusters declare the same [cluster] name. Cluster
+// selection (resolveClusters, cmd/dpg/targets.go) matches purely by this
+// declared name, not by directory — an undetected duplicate silently makes
+// the second cluster permanently unreachable via --cluster, and since
+// snapshot storage, the migrations archive, and dpg dump's default output
+// path are all keyed by this same name, it also makes two unrelated
+// (possibly differently-hosted) clusters silently share those files on disk.
+func checkDuplicateClusterNames(clusters []*Cluster) error {
+	seen := make(map[string]*Cluster, len(clusters))
+	for _, cl := range clusters {
+		name := cl.Name()
+		if existing, ok := seen[name]; ok {
+			return fmt.Errorf("duplicate cluster name %q declared in both %s and %s", name, existing.Dir, cl.Dir)
+		}
+		seen[name] = cl
+	}
+	return nil
 }
 
 // loadCluster loads a single cluster from its dpg.toml inside clusterDir.
@@ -225,7 +248,30 @@ func discoverDatabases(clusterDir, reservedDir string) ([]*Database, error) {
 		}
 		databases = append(databases, db)
 	}
+	if err := checkDuplicateDatabaseNames(clusterDir, databases); err != nil {
+		return nil, err
+	}
 	return databases, nil
+}
+
+// checkDuplicateDatabaseNames returns an error naming both directories when
+// two or more database directories within the same cluster declare the same
+// [database] name — the same failure mode as checkDuplicateClusterNames, one
+// level down. Database name uniqueness is scoped to a single cluster only
+// (resolveDatabases, cmd/dpg/targets.go, only ever compares within one
+// cluster's own Databases; snapshot/migration paths nest cluster-then-
+// database), so the same database name recurring under a *different*
+// cluster is legitimate and must not be flagged here.
+func checkDuplicateDatabaseNames(clusterDir string, databases []*Database) error {
+	seen := make(map[string]*Database, len(databases))
+	for _, db := range databases {
+		name := db.Name()
+		if existing, ok := seen[name]; ok {
+			return fmt.Errorf("cluster %s: duplicate database name %q declared in both %s and %s", clusterDir, name, existing.Dir, db.Dir)
+		}
+		seen[name] = db
+	}
+	return nil
 }
 
 // loadDatabase loads a single database from its dpg.toml inside dbDir.
