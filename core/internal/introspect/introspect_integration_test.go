@@ -5,6 +5,7 @@ package introspect_test
 import (
 	"context"
 	"fmt"
+	"slices"
 	"strings"
 	"testing"
 
@@ -76,6 +77,221 @@ func TestIntrospectAggregate(t *testing.T) {
 	}
 	if !strings.Contains(found.Body, "CREATE AGGREGATE") || !strings.Contains(found.Body, "numeric_mul") {
 		t.Errorf("Body should reconstruct a usable CREATE AGGREGATE statement, got %q", found.Body)
+	}
+}
+
+// ── PUBLIC EXECUTE revocation synthesis (RFC audit item C.4) ───────────────
+// Regression guard for the live-reproduced bug: introspection only ever read
+// aclexplode(proacl)'s existing rows, so a function-like object whose PUBLIC
+// EXECUTE default was explicitly revoked (a common security practice) looked
+// identical to one that was never touched at all — dump→reapply silently
+// restored PUBLIC's implicit default, undoing the revocation. Fixed by
+// synthesizing a Revocation whenever proacl is materialized (NOT NULL) but
+// carries no PUBLIC row.
+
+func TestIntrospectAggregateSynthesizesPublicRevocationWhenExplicitlyRevoked(t *testing.T) {
+	connStr := testpg.Start(t)
+	ctx := context.Background()
+
+	conn, err := executor.Connect(ctx, connStr)
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	defer conn.Close(ctx)
+
+	stmts := []string{
+		`CREATE AGGREGATE public.locked_sum (numeric) (SFUNC = numeric_add, STYPE = numeric)`,
+		`REVOKE EXECUTE ON FUNCTION public.locked_sum(numeric) FROM PUBLIC`,
+	}
+	for _, stmt := range stmts {
+		if _, err := conn.Exec(ctx, stmt); err != nil {
+			t.Fatalf("exec %q: %v", stmt, err)
+		}
+	}
+
+	ci := introspect.New()
+	objects, err := ci.Introspect(ctx, conn)
+	if err != nil {
+		t.Fatalf("introspect: %v", err)
+	}
+
+	var found *ir.Aggregate
+	for _, obj := range objects {
+		if a, ok := obj.(*ir.Aggregate); ok && a.Name == "locked_sum" && a.Schema == "public" {
+			found = a
+			break
+		}
+	}
+	if found == nil {
+		t.Fatal("introspect: aggregate public.locked_sum not found in results")
+	}
+	if len(found.Revocations) != 1 || len(found.Revocations[0].Roles) != 1 || found.Revocations[0].Roles[0] != "PUBLIC" {
+		t.Fatalf("Revocations: got %+v, want one EXECUTE-FROM-PUBLIC revocation", found.Revocations)
+	}
+	if !slices.Contains(found.Revocations[0].Privileges, "EXECUTE") {
+		t.Errorf("Revocations[0].Privileges: got %v, want EXECUTE", found.Revocations[0].Privileges)
+	}
+}
+
+func TestIntrospectAggregateUntouchedACLHasNoSyntheticRevocation(t *testing.T) {
+	connStr := testpg.Start(t)
+	ctx := context.Background()
+
+	conn, err := executor.Connect(ctx, connStr)
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	defer conn.Close(ctx)
+
+	if _, err := conn.Exec(ctx, `CREATE AGGREGATE public.default_sum (numeric) (SFUNC = numeric_add, STYPE = numeric)`); err != nil {
+		t.Fatalf("exec: %v", err)
+	}
+
+	ci := introspect.New()
+	objects, err := ci.Introspect(ctx, conn)
+	if err != nil {
+		t.Fatalf("introspect: %v", err)
+	}
+
+	var found *ir.Aggregate
+	for _, obj := range objects {
+		if a, ok := obj.(*ir.Aggregate); ok && a.Name == "default_sum" && a.Schema == "public" {
+			found = a
+			break
+		}
+	}
+	if found == nil {
+		t.Fatal("introspect: aggregate public.default_sum not found in results")
+	}
+	if len(found.Revocations) != 0 {
+		t.Errorf("Revocations: got %+v, want none — PUBLIC EXECUTE was never touched (proacl IS NULL)", found.Revocations)
+	}
+}
+
+func TestIntrospectAggregateExplicitGrantToOtherRoleKeepsPublicDefault(t *testing.T) {
+	connStr := testpg.Start(t)
+	ctx := context.Background()
+
+	conn, err := executor.Connect(ctx, connStr)
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	defer conn.Close(ctx)
+
+	stmts := []string{
+		`CREATE ROLE it_analyst`,
+		`CREATE AGGREGATE public.shared_sum (numeric) (SFUNC = numeric_add, STYPE = numeric)`,
+		`GRANT EXECUTE ON FUNCTION public.shared_sum(numeric) TO it_analyst`,
+	}
+	for _, stmt := range stmts {
+		if _, err := conn.Exec(ctx, stmt); err != nil {
+			t.Fatalf("exec %q: %v", stmt, err)
+		}
+	}
+
+	ci := introspect.New()
+	objects, err := ci.Introspect(ctx, conn)
+	if err != nil {
+		t.Fatalf("introspect: %v", err)
+	}
+
+	var found *ir.Aggregate
+	for _, obj := range objects {
+		if a, ok := obj.(*ir.Aggregate); ok && a.Name == "shared_sum" && a.Schema == "public" {
+			found = a
+			break
+		}
+	}
+	if found == nil {
+		t.Fatal("introspect: aggregate public.shared_sum not found in results")
+	}
+	// proacl is materialized (the GRANT to it_analyst forced that), but
+	// PUBLIC's default EXECUTE was never revoked, so aclexplode still
+	// carries a PUBLIC row and no synthetic revocation should be added.
+	if len(found.Revocations) != 0 {
+		t.Errorf("Revocations: got %+v, want none — PUBLIC's default was never revoked", found.Revocations)
+	}
+}
+
+func TestIntrospectFunctionSynthesizesPublicRevocationWhenExplicitlyRevoked(t *testing.T) {
+	connStr := testpg.Start(t)
+	ctx := context.Background()
+
+	conn, err := executor.Connect(ctx, connStr)
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	defer conn.Close(ctx)
+
+	stmts := []string{
+		`CREATE FUNCTION public.locked_fn() RETURNS int LANGUAGE sql AS 'SELECT 1'`,
+		`REVOKE EXECUTE ON FUNCTION public.locked_fn() FROM PUBLIC`,
+	}
+	for _, stmt := range stmts {
+		if _, err := conn.Exec(ctx, stmt); err != nil {
+			t.Fatalf("exec %q: %v", stmt, err)
+		}
+	}
+
+	ci := introspect.New()
+	objects, err := ci.Introspect(ctx, conn)
+	if err != nil {
+		t.Fatalf("introspect: %v", err)
+	}
+
+	var found *ir.Function
+	for _, obj := range objects {
+		if f, ok := obj.(*ir.Function); ok && f.Name == "locked_fn" && f.Schema == "public" {
+			found = f
+			break
+		}
+	}
+	if found == nil {
+		t.Fatal("introspect: function public.locked_fn not found in results")
+	}
+	if len(found.Revocations) != 1 || len(found.Revocations[0].Roles) != 1 || found.Revocations[0].Roles[0] != "PUBLIC" {
+		t.Fatalf("Revocations: got %+v, want one EXECUTE-FROM-PUBLIC revocation", found.Revocations)
+	}
+}
+
+func TestIntrospectProcedureSynthesizesPublicRevocationWhenExplicitlyRevoked(t *testing.T) {
+	connStr := testpg.Start(t)
+	ctx := context.Background()
+
+	conn, err := executor.Connect(ctx, connStr)
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	defer conn.Close(ctx)
+
+	stmts := []string{
+		`CREATE PROCEDURE public.locked_proc() LANGUAGE sql AS 'SELECT 1'`,
+		`REVOKE EXECUTE ON PROCEDURE public.locked_proc() FROM PUBLIC`,
+	}
+	for _, stmt := range stmts {
+		if _, err := conn.Exec(ctx, stmt); err != nil {
+			t.Fatalf("exec %q: %v", stmt, err)
+		}
+	}
+
+	ci := introspect.New()
+	objects, err := ci.Introspect(ctx, conn)
+	if err != nil {
+		t.Fatalf("introspect: %v", err)
+	}
+
+	var found *ir.Procedure
+	for _, obj := range objects {
+		if p, ok := obj.(*ir.Procedure); ok && p.Name == "locked_proc" && p.Schema == "public" {
+			found = p
+			break
+		}
+	}
+	if found == nil {
+		t.Fatal("introspect: procedure public.locked_proc not found in results")
+	}
+	if len(found.Revocations) != 1 || len(found.Revocations[0].Roles) != 1 || found.Revocations[0].Roles[0] != "PUBLIC" {
+		t.Fatalf("Revocations: got %+v, want one EXECUTE-FROM-PUBLIC revocation", found.Revocations)
 	}
 }
 

@@ -7,6 +7,7 @@ import (
 	"context"
 	"fmt"
 	"regexp"
+	"slices"
 	"strings"
 
 	pg_query "github.com/pganalyze/pg_query_go/v6"
@@ -221,6 +222,49 @@ ORDER  BY n.nspname, p.proname, args`
 	return out, nil
 }
 
+// functionLikeACLMaterializedKeys returns the set of "schema.name(args)" keys
+// (args = pg_get_function_identity_arguments, matching every prokind-scoped
+// grants query's own idx key format) for functions/procedures/aggregates
+// (selected by prokind: 'f'/'p'/'a') whose pg_proc.proacl has been
+// materialized (is NOT NULL) — i.e. at least one explicit GRANT/REVOKE has
+// ever touched the object, as opposed to one still carrying Postgres's pure
+// implicit-default ACL (proacl IS NULL, PUBLIC's default EXECUTE applies,
+// nothing to declare).
+//
+// This distinction is invisible to aclexplode(proacl) alone: an object whose
+// PUBLIC EXECUTE was never granted (proacl IS NULL) and one whose PUBLIC
+// EXECUTE was explicitly revoked (proacl IS NOT NULL, no PUBLIC row) both
+// produce zero PUBLIC rows from aclexplode. Each *Grants function below uses
+// this to synthesize an explicit "REVOKE EXECUTE FROM PUBLIC" Revocation for
+// the latter case only — without it, dump→reapply silently restores PUBLIC's
+// implicit default on every explicitly-locked-down function-like object,
+// undoing a real security decision (see RFC audit item C.4).
+func functionLikeACLMaterializedKeys(ctx context.Context, conn pipeline.Querier, prokind string) (map[string]bool, error) {
+	const q = `
+SELECT n.nspname, p.proname, pg_get_function_identity_arguments(p.oid) AS args
+FROM   pg_proc p
+JOIN   pg_namespace n ON n.oid = p.pronamespace
+WHERE  p.prokind = $1
+AND    n.nspname NOT IN ('pg_catalog','information_schema','pg_toast')
+AND    p.proacl IS NOT NULL`
+
+	rs, err := conn.QueryRows(ctx, q, prokind)
+	if err != nil {
+		return nil, fmt.Errorf("introspect function-like ACL materialization: %w", err)
+	}
+	defer rs.Close()
+
+	out := make(map[string]bool)
+	for rs.Next() {
+		var schema, name, args string
+		if err := rs.Scan(&schema, &name, &args); err != nil {
+			return nil, err
+		}
+		out[schema+"."+name+"("+args+")"] = true
+	}
+	return out, rs.Err()
+}
+
 func introspectAggregateGrants(ctx context.Context, conn pipeline.Querier, idx map[string]*ir.Aggregate) error {
 	const q = `
 SELECT n.nspname, p.proname,
@@ -282,7 +326,33 @@ ORDER  BY n.nspname, p.proname, args, grantee, a.privilege_type`
 			WithGrant:  e.grantable,
 		})
 	}
+
+	materialized, err := functionLikeACLMaterializedKeys(ctx, conn, "a")
+	if err != nil {
+		return err
+	}
+	for key, agg := range idx {
+		if !materialized[key] || hasPublicGrant(agg.Grants) {
+			continue
+		}
+		agg.Revocations = append(agg.Revocations, ir.Revocation{
+			Privileges: []string{"EXECUTE"}, Roles: []string{"PUBLIC"},
+		})
+	}
 	return nil
+}
+
+// hasPublicGrant reports whether any grant in grants names the PUBLIC
+// pseudo-role — used by *Grants functions to decide whether a materialized
+// ACL's missing PUBLIC row means "explicitly revoked" (see
+// functionLikeACLMaterializedKeys's doc comment).
+func hasPublicGrant(grants []ir.Grant) bool {
+	for _, g := range grants {
+		if slices.Contains(g.Roles, "PUBLIC") {
+			return true
+		}
+	}
+	return false
 }
 
 // ── default privileges ──────────────────────────────────────────────────────
@@ -2474,6 +2544,19 @@ ORDER  BY n.nspname, p.proname, args, grantee, a.privilege_type`
 			WithGrant:  e.grantable,
 		})
 	}
+
+	materialized, err := functionLikeACLMaterializedKeys(ctx, conn, "f")
+	if err != nil {
+		return err
+	}
+	for key, fn := range idx {
+		if !materialized[key] || hasPublicGrant(fn.Grants) {
+			continue
+		}
+		fn.Revocations = append(fn.Revocations, ir.Revocation{
+			Privileges: []string{"EXECUTE"}, Roles: []string{"PUBLIC"},
+		})
+	}
 	return nil
 }
 
@@ -2536,6 +2619,19 @@ ORDER  BY n.nspname, p.proname, args, grantee, a.privilege_type`
 			Privileges: e.privs,
 			Roles:      []string{k.grantee},
 			WithGrant:  e.grantable,
+		})
+	}
+
+	materialized, err := functionLikeACLMaterializedKeys(ctx, conn, "p")
+	if err != nil {
+		return err
+	}
+	for key, proc := range idx {
+		if !materialized[key] || hasPublicGrant(proc.Grants) {
+			continue
+		}
+		proc.Revocations = append(proc.Revocations, ir.Revocation{
+			Privileges: []string{"EXECUTE"}, Roles: []string{"PUBLIC"},
 		})
 	}
 	return nil
