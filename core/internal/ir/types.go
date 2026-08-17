@@ -342,6 +342,7 @@ type Extension struct {
 	Name     string
 	Schema   *string
 	Version  *string
+	Comment  *string
 	NameMaps []pipeline.NameMapEntry
 	SrcPos   pipeline.SourcePos
 }
@@ -468,11 +469,12 @@ type Aggregate struct {
 	// Options is the same SFUNC/STYPE/INITCOND/... key=value list as Body,
 	// kept structured (and in source order) so dump can reconstruct the DPG
 	// "AGGREGATE name (args) (options)" declaration without re-parsing Body.
-	Options  []pipeline.StorageParam
-	Comment  *string
-	Grants   []Grant
-	NameMaps []pipeline.NameMapEntry
-	SrcPos   pipeline.SourcePos
+	Options     []pipeline.StorageParam
+	Comment     *string
+	Grants      []Grant
+	Revocations []Revocation
+	NameMaps    []pipeline.NameMapEntry
+	SrcPos      pipeline.SourcePos
 }
 
 func (a *Aggregate) QualifiedName() string {

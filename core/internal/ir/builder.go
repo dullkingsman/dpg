@@ -1549,6 +1549,9 @@ func (b *Builder) buildExtension(cs *pg_query.CreateExtensionStmt, block pipelin
 			}
 		}
 	}
+	if block.Comment != nil {
+		e.Comment = &block.Comment.Value
+	}
 	e.NameMaps = block.NameMaps
 	return e, nil
 }
@@ -2055,6 +2058,9 @@ func (b *Builder) buildDefineStmt(ds *pg_query.DefineStmt, block pipeline.BlockA
 		}
 		for _, g := range block.Grants {
 			agg.Grants = append(agg.Grants, blockGrantToIR(g))
+		}
+		for _, r := range block.Revocations {
+			agg.Revocations = append(agg.Revocations, blockRevocationToIR(r))
 		}
 		agg.NameMaps = block.NameMaps
 		return agg, nil

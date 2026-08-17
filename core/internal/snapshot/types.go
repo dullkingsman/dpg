@@ -46,7 +46,7 @@ type SnapOpaque struct {
 	BodyHash    string             `json:"body_hash,omitempty"`
 	Comment     *string            `json:"comment,omitempty"`
 	Grants      []SnapGrant        `json:"grants,omitempty"`      // aggregate and procedure
-	Revocations []SnapGrant        `json:"revocations,omitempty"` // procedure only
+	Revocations []SnapGrant        `json:"revocations,omitempty"` // procedure and aggregate
 	Mappings    []SnapTSMapping    `json:"mappings,omitempty"`    // ts_config only (RFC §12.1 MAPPING FOR)
 	NameMaps    []SnapNameMapEntry `json:"name_maps,omitempty"`
 	// TablespaceLocation (RFC §14.7), CastMethod/CastContext/CastFunction
@@ -181,6 +181,7 @@ type SnapExtension struct {
 	Name     string             `json:"name"`
 	Schema   *string            `json:"schema,omitempty"`
 	Version  *string            `json:"version,omitempty"`
+	Comment  *string            `json:"comment,omitempty"`
 	NameMaps []SnapNameMapEntry `json:"name_maps,omitempty"`
 }
 

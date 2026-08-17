@@ -1808,6 +1808,49 @@ func TestRenderDefaultPrivilegesCompiles(t *testing.T) {
 	}
 }
 
+// TestRenderExtensionCommentRoundtrip guards a real gap: ir.Extension had no
+// Comment field at all, so a declared COMMENT was silently dropped by dump
+// (and by build/snapshot/diff before this fix) even though COMMENT ON
+// EXTENSION is valid PostgreSQL syntax.
+func TestRenderExtensionCommentRoundtrip(t *testing.T) {
+	fmtOpts := format.Options{IndentSize: 4, KeywordCase: "upper"}
+	comment := "crypto functions"
+	ext := &ir.Extension{Name: "pgcrypto", Comment: &comment}
+
+	var b strings.Builder
+	renderObjectDPG(&b, ext, fmtOpts)
+	rendered := b.String()
+
+	if !strings.Contains(rendered, `EXTENSION pgcrypto {`) {
+		t.Errorf("expected EXTENSION pgcrypto block, got:\n%s", rendered)
+	}
+	if !strings.Contains(rendered, "COMMENT 'crypto functions';") {
+		t.Errorf("expected COMMENT directive, got:\n%s", rendered)
+	}
+
+	dir := t.TempDir()
+	f := filepath.Join(dir, "schema.dpg")
+	if err := os.WriteFile(f, []byte(rendered), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	compiled, _, err := compiler.Compile([]string{f}, dir, pipeline.Default)
+	if err != nil {
+		t.Fatalf("dumped extension failed to recompile: %v\n---\n%s", err, rendered)
+	}
+	var found *ir.Extension
+	for _, o := range compiled {
+		if e, ok := o.(*ir.Extension); ok && e.Name == "pgcrypto" {
+			found = e
+		}
+	}
+	if found == nil {
+		t.Fatalf("extension pgcrypto missing after recompile\n---\n%s", rendered)
+	}
+	if found.Comment == nil || *found.Comment != comment {
+		t.Errorf("Comment did not round-trip: %v", found.Comment)
+	}
+}
+
 func TestRenderAggregateCompiles(t *testing.T) {
 	fmtOpts := format.Options{IndentSize: 4, KeywordCase: "upper"}
 	comment := "multiplicative aggregate"
@@ -1819,8 +1862,9 @@ func TestRenderAggregateCompiles(t *testing.T) {
 			{Key: "stype", Value: "numeric"},
 			{Key: "initcond", Value: "'1'"},
 		},
-		Comment: &comment,
-		Grants:  []ir.Grant{{Privileges: []string{"EXECUTE"}, Roles: []string{"app_service"}}},
+		Comment:     &comment,
+		Grants:      []ir.Grant{{Privileges: []string{"EXECUTE"}, Roles: []string{"app_service"}}},
+		Revocations: []ir.Revocation{{Privileges: []string{"EXECUTE"}, Roles: []string{"PUBLIC"}}},
 	}
 
 	var b strings.Builder
@@ -1860,6 +1904,9 @@ func TestRenderAggregateCompiles(t *testing.T) {
 	}
 	if len(found.Grants) != 1 {
 		t.Errorf("Grants did not round-trip: %v", found.Grants)
+	}
+	if len(found.Revocations) != 1 || found.Revocations[0].Roles[0] != "PUBLIC" {
+		t.Errorf("Revocations did not round-trip: %v", found.Revocations)
 	}
 	if !strings.Contains(found.Body, "sfunc = numeric_mul") || !strings.Contains(found.Body, "stype = numeric") {
 		t.Errorf("Body should carry the recompiled options, got %q", found.Body)

@@ -1846,6 +1846,9 @@ func createAggregate(o *ir.Aggregate) ([]pipeline.DiffOp, error) {
 		}
 		ops = append(ops, safeOp(sql+";", o.SrcPos))
 	}
+	for _, r := range o.Revocations {
+		ops = append(ops, explicitRevokeOp(r, "FUNCTION "+sig, o.SrcPos))
+	}
 	return ops, nil
 }
 
@@ -1875,6 +1878,7 @@ func diffAggregate(o *ir.Aggregate, snap *snapshot.SnapOpaque) ([]pipeline.DiffO
 			))
 		}
 		ops = append(ops, diffGrantSet(nil, o.Grants, "FUNCTION "+sig, pos)...)
+		ops = append(ops, diffRevocationSet(nil, o.Revocations, "FUNCTION "+sig, pos)...)
 		return ops, nil
 	}
 
@@ -1893,6 +1897,7 @@ func diffAggregate(o *ir.Aggregate, snap *snapshot.SnapOpaque) ([]pipeline.DiffO
 		}
 	}
 	ops = append(ops, diffGrantSet(snap.Grants, o.Grants, "FUNCTION "+sig, pos)...)
+	ops = append(ops, diffRevocationSet(snap.Revocations, o.Revocations, "FUNCTION "+sig, pos)...)
 	return ops, nil
 }
 
@@ -2054,7 +2059,14 @@ func createExtension(o *ir.Extension) []pipeline.DiffOp {
 		b.WriteString("'")
 	}
 	b.WriteString(";")
-	return []pipeline.DiffOp{safeOp(b.String(), o.SrcPos)}
+	ops := []pipeline.DiffOp{safeOp(b.String(), o.SrcPos)}
+	if o.Comment != nil {
+		ops = append(ops, safeOp(
+			fmt.Sprintf("COMMENT ON EXTENSION %s IS %s;", quoteIdent(o.Name), quoteLit(*o.Comment)),
+			o.SrcPos,
+		))
+	}
+	return ops
 }
 
 func createTable(o *ir.Table, vtypes map[string]string) []pipeline.DiffOp {
@@ -3463,13 +3475,27 @@ func diffProcedure(o *ir.Procedure, snap *snapshot.SnapOpaque) ([]pipeline.DiffO
 
 func diffExtension(o *ir.Extension, snap *snapshot.SnapExtension) []pipeline.DiffOp {
 	pos := o.SrcPos
+	var ops []pipeline.DiffOp
 	if !ptrEq(o.Version, snap.Version) && o.Version != nil {
-		return []pipeline.DiffOp{safeOp(
+		ops = append(ops, safeOp(
 			fmt.Sprintf("ALTER EXTENSION %s UPDATE TO %s;", quoteIdent(o.Name), quoteLit(*o.Version)),
 			pos,
-		)}
+		))
 	}
-	return nil
+	if !ptrEq(o.Comment, snap.Comment) {
+		if o.Comment != nil {
+			ops = append(ops, safeOp(
+				fmt.Sprintf("COMMENT ON EXTENSION %s IS %s;", quoteIdent(o.Name), quoteLit(*o.Comment)),
+				pos,
+			))
+		} else {
+			ops = append(ops, safeOp(
+				fmt.Sprintf("COMMENT ON EXTENSION %s IS NULL;", quoteIdent(o.Name)),
+				pos,
+			))
+		}
+	}
+	return ops
 }
 
 func diffSequence(o *ir.Sequence, snap *snapshot.SnapSequence) []pipeline.DiffOp {

@@ -6153,6 +6153,136 @@ func TestDiffAggregateGrantAdded(t *testing.T) {
 	}
 }
 
+// ── AGGREGATE Revocations ──────────────────────────────────────────────────
+// Regression guard mirroring TestDiffCreateProcedureEmitsRevocation and
+// friends: ir.Aggregate had no Revocations field at all, so a declared
+// REVOCATIONS block was parsed but silently dropped everywhere downstream
+// (build, snapshot, diff, dump) — only the GRANT half ever took effect.
+
+func TestDiffCreateAggregateEmitsRevocation(t *testing.T) {
+	d := New()
+	body := "CREATE AGGREGATE public.my_agg(numeric) (SFUNC = numeric_add, STYPE = numeric)"
+	desired := []pipeline.IRObject{
+		&ir.Aggregate{
+			Schema:      "public",
+			Name:        "my_agg",
+			Args:        []ir.FuncArg{{Type: ir.TypeRef{Name: "numeric"}}},
+			Body:        body,
+			Revocations: []ir.Revocation{{Privileges: []string{"EXECUTE"}, Roles: []string{"PUBLIC"}}},
+		},
+	}
+	ops, err := d.Diff(desired, &pipeline.Snapshot{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsSQL(ops, "REVOKE EXECUTE ON FUNCTION") {
+		t.Errorf("expected REVOKE EXECUTE ON FUNCTION at create time, got: %v", sqlList(ops))
+	}
+	if containsSQL(ops, `"PUBLIC"`) {
+		t.Errorf("PUBLIC must not be quoted, got: %v", sqlList(ops))
+	}
+}
+
+func TestDiffAggregateRevocationAdded(t *testing.T) {
+	d := New()
+	body := "CREATE AGGREGATE public.my_agg(numeric) (SFUNC = numeric_add, STYPE = numeric)"
+	bodyHash := fmt.Sprintf("%x", sha256Sum(body))
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject(`public.my_agg(numeric)`, &snapshot.SnapObject{
+		Kind: "aggregate",
+		Opaque: &snapshot.SnapOpaque{
+			Kind: "aggregate", Schema: "public", Name: "my_agg", Args: "numeric", BodyHash: bodyHash,
+		},
+	})
+	desired := []pipeline.IRObject{
+		&ir.Aggregate{
+			Schema:      "public",
+			Name:        "my_agg",
+			Args:        []ir.FuncArg{{Type: ir.TypeRef{Name: "numeric"}}},
+			Body:        body,
+			Revocations: []ir.Revocation{{Privileges: []string{"EXECUTE"}, Roles: []string{"PUBLIC"}}},
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var found bool
+	for _, o := range ops {
+		if strings.Contains(o.SQL(), "REVOKE EXECUTE ON FUNCTION") {
+			found = true
+			if o.Safety() != pipeline.Caution {
+				t.Errorf("explicit revocation safety = %v, want Caution: %s", o.Safety(), o.SQL())
+			}
+		}
+	}
+	if !found {
+		t.Errorf("expected REVOKE EXECUTE ON FUNCTION, got: %v", sqlList(ops))
+	}
+}
+
+func TestDiffAggregateRevocationRemoved(t *testing.T) {
+	d := New()
+	body := "CREATE AGGREGATE public.my_agg(numeric) (SFUNC = numeric_add, STYPE = numeric)"
+	bodyHash := fmt.Sprintf("%x", sha256Sum(body))
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject(`public.my_agg(numeric)`, &snapshot.SnapObject{
+		Kind: "aggregate",
+		Opaque: &snapshot.SnapOpaque{
+			Kind: "aggregate", Schema: "public", Name: "my_agg", Args: "numeric", BodyHash: bodyHash,
+			Revocations: []snapshot.SnapGrant{{Privileges: []string{"EXECUTE"}, Roles: []string{"PUBLIC"}}},
+		},
+	})
+	desired := []pipeline.IRObject{
+		&ir.Aggregate{
+			Schema: "public",
+			Name:   "my_agg",
+			Args:   []ir.FuncArg{{Type: ir.TypeRef{Name: "numeric"}}},
+			Body:   body,
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsSQL(ops, "GRANT EXECUTE ON FUNCTION") {
+		t.Errorf("expected GRANT EXECUTE ON FUNCTION to restore the revoked privilege, got: %v", sqlList(ops))
+	}
+	if containsSQL(ops, "REVOKE") {
+		t.Errorf("must not also emit REVOKE when the revocation itself was removed: %v", sqlList(ops))
+	}
+}
+
+func TestDiffAggregateRevocationUnchangedIsNoop(t *testing.T) {
+	d := New()
+	body := "CREATE AGGREGATE public.my_agg(numeric) (SFUNC = numeric_add, STYPE = numeric)"
+	bodyHash := fmt.Sprintf("%x", sha256Sum(body))
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject(`public.my_agg(numeric)`, &snapshot.SnapObject{
+		Kind: "aggregate",
+		Opaque: &snapshot.SnapOpaque{
+			Kind: "aggregate", Schema: "public", Name: "my_agg", Args: "numeric", BodyHash: bodyHash,
+			Revocations: []snapshot.SnapGrant{{Privileges: []string{"EXECUTE"}, Roles: []string{"PUBLIC"}}},
+		},
+	})
+	desired := []pipeline.IRObject{
+		&ir.Aggregate{
+			Schema:      "public",
+			Name:        "my_agg",
+			Args:        []ir.FuncArg{{Type: ir.TypeRef{Name: "numeric"}}},
+			Body:        body,
+			Revocations: []ir.Revocation{{Privileges: []string{"EXECUTE"}, Roles: []string{"PUBLIC"}}},
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if containsSQL(ops, "GRANT") || containsSQL(ops, "REVOKE") {
+		t.Errorf("expected no GRANT/REVOKE for unchanged revocation, got: %v", sqlList(ops))
+	}
+}
+
 func TestDiffAggregateUnchangedIsNoop(t *testing.T) {
 	d := New()
 	snap := &pipeline.Snapshot{}
@@ -6267,6 +6397,67 @@ func TestDiffExtensionVersionUpdated(t *testing.T) {
 	}
 	if ops[0].Safety() != pipeline.Safe {
 		t.Errorf("expected Safe, got %s", ops[0].Safety())
+	}
+}
+
+// ── Extension Comment (ir.Extension previously had no Comment field at all;
+// COMMENT ON EXTENSION is valid, real PostgreSQL syntax but was silently
+// dropped by build/snapshot/diff/dump) ─────────────────────────────────────
+
+func TestDiffCreateExtensionEmitsComment(t *testing.T) {
+	d := New()
+	comment := "crypto functions"
+	desired := []pipeline.IRObject{
+		&ir.Extension{Name: "pgcrypto", Comment: &comment},
+	}
+	ops, err := d.Diff(desired, &pipeline.Snapshot{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsSQL(ops, "COMMENT ON EXTENSION") || !containsSQL(ops, "'crypto functions'") {
+		t.Errorf("expected COMMENT ON EXTENSION at create time, got: %v", sqlList(ops))
+	}
+}
+
+func TestDiffExtensionCommentAdded(t *testing.T) {
+	d := New()
+	ver := "1.0"
+	comment := "crypto functions"
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("pgcrypto", &snapshot.SnapObject{
+		Kind:      "extension",
+		Extension: &snapshot.SnapExtension{Name: "pgcrypto", Version: &ver},
+	})
+	desired := []pipeline.IRObject{
+		&ir.Extension{Name: "pgcrypto", Version: &ver, Comment: &comment},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsSQL(ops, "COMMENT ON EXTENSION") || !containsSQL(ops, "'crypto functions'") {
+		t.Errorf("expected COMMENT ON EXTENSION, got: %v", sqlList(ops))
+	}
+}
+
+func TestDiffExtensionCommentRemoved(t *testing.T) {
+	d := New()
+	ver := "1.0"
+	comment := "crypto functions"
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("pgcrypto", &snapshot.SnapObject{
+		Kind:      "extension",
+		Extension: &snapshot.SnapExtension{Name: "pgcrypto", Version: &ver, Comment: &comment},
+	})
+	desired := []pipeline.IRObject{
+		&ir.Extension{Name: "pgcrypto", Version: &ver},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsSQL(ops, "COMMENT ON EXTENSION") || !containsSQL(ops, "IS NULL") {
+		t.Errorf("expected COMMENT ON EXTENSION ... IS NULL, got: %v", sqlList(ops))
 	}
 }
 

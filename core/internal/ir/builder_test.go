@@ -724,6 +724,30 @@ func TestBuildProcedureGrantsAndRevocations(t *testing.T) {
 	}
 }
 
+// TestBuildAggregateGrantsAndRevocations is TestBuildFunctionGrantsAndRevocations's
+// AGGREGATE counterpart — ir.Aggregate had the identical missing-field bug
+// (REVOCATIONS parsed generically by the blockparser but silently dropped by
+// the AGGREGATE case in buildObject).
+func TestBuildAggregateGrantsAndRevocations(t *testing.T) {
+	obj := buildObject(t, pipeline.KindAggregate,
+		`amount_product (numeric) (SFUNC = numeric_mul, STYPE = numeric, INITCOND = '1')`,
+		`GRANTS { EXECUTE TO app_service; } REVOCATIONS { EXECUTE FROM PUBLIC; }`,
+	)
+	agg, ok := obj.(*ir.Aggregate)
+	if !ok {
+		t.Fatalf("expected *ir.Aggregate, got %T", obj)
+	}
+	if len(agg.Grants) != 1 {
+		t.Fatalf("Grants: got %d", len(agg.Grants))
+	}
+	if len(agg.Revocations) != 1 {
+		t.Fatalf("Revocations: got %d", len(agg.Revocations))
+	}
+	if len(agg.Revocations[0].Roles) != 1 || agg.Revocations[0].Roles[0] != "PUBLIC" {
+		t.Errorf("Revocations[0].Roles: got %v", agg.Revocations[0].Roles)
+	}
+}
+
 // TestBuildFunctionParallelCostRows proves PARALLEL/COST/ROWS all parse
 // correctly. COST/ROWS use pg_query's NumericOnly grammar production
 // (Integer or Float node, never String — confirmed via a live probe before

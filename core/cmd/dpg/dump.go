@@ -901,7 +901,7 @@ func renderObjectDPG(b *strings.Builder, obj pipeline.IRObject, fmtOpts format.O
 			fmt.Fprintf(b, "%s = %s", kw(strings.ToUpper(p.Key)), p.Value)
 		}
 		b.WriteString(")")
-		writeFuncBlock(b, ind, fmtOpts, o.Comment, o.Grants, nil)
+		writeFuncBlock(b, ind, fmtOpts, o.Comment, o.Grants, o.Revocations)
 
 	case *ir.Procedure:
 		b.WriteString("\n")
@@ -1150,7 +1150,8 @@ func renderObjectDPG(b *strings.Builder, obj pipeline.IRObject, fmtOpts format.O
 	case *ir.Extension:
 		// Bare form (no VERSION) so plan --live never pins/updates a version:
 		// diffExtension only acts when the desired side declares a version.
-		fmt.Fprintf(b, "\n%s %s;\n", kw("EXTENSION"), quoteIdentIfNeeded(o.Name))
+		fmt.Fprintf(b, "\n%s %s", kw("EXTENSION"), quoteIdentIfNeeded(o.Name))
+		writeFuncBlock(b, ind, fmtOpts, o.Comment, nil, nil)
 
 	// Reliable-tier opaque objects carry a canonicalised CREATE statement in
 	// Body; renderOpaqueBody strips the CREATE verb to satisfy the no-verb

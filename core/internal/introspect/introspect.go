@@ -504,7 +504,8 @@ func introspectExtensions(ctx context.Context, conn pipeline.Querier) ([]pipelin
 	const q = `
 SELECT e.extname,
        n.nspname AS schema,
-       e.extversion
+       e.extversion,
+       obj_description(e.oid, 'pg_extension') AS comment
 FROM   pg_extension e
 JOIN   pg_namespace n ON n.oid = e.extnamespace
 WHERE  n.nspname NOT IN ('pg_catalog', 'information_schema')
@@ -519,10 +520,11 @@ ORDER  BY e.extname`
 	var out []pipeline.IRObject
 	for rs.Next() {
 		var name, schema, version string
-		if err := rs.Scan(&name, &schema, &version); err != nil {
+		var comment *string
+		if err := rs.Scan(&name, &schema, &version, &comment); err != nil {
 			return nil, err
 		}
-		out = append(out, &ir.Extension{Name: name, Schema: &schema, Version: &version})
+		out = append(out, &ir.Extension{Name: name, Schema: &schema, Version: &version, Comment: comment})
 	}
 	return out, rs.Err()
 }

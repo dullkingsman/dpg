@@ -172,6 +172,9 @@ func toSnapObject(obj pipeline.IRObject) *SnapObject {
 		for _, g := range o.Grants {
 			so.Grants = append(so.Grants, toSnapGrant(g))
 		}
+		for _, r := range o.Revocations {
+			so.Revocations = append(so.Revocations, toSnapRevocation(r))
+		}
 		return &SnapObject{Kind: "aggregate", Opaque: so}
 	// The reliable-tier opaque types below can be introspected, in which case
 	// their Body is a catalog reconstruction (Reconstructed == true) whose text
@@ -373,6 +376,7 @@ func toSnapExtension(o *ir.Extension) *SnapExtension {
 		Name:     o.Name,
 		Schema:   o.Schema,
 		Version:  o.Version,
+		Comment:  o.Comment,
 		NameMaps: toSnapNameMaps(o.NameMaps),
 	}
 }
