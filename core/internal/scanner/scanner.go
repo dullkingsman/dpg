@@ -646,11 +646,21 @@ func (s *state) detectTypeKind(pos pipeline.SourcePos) (pipeline.ObjectKind, err
 	s.skipWS()
 	s.readWord() // name
 	s.skipWS()
+	// peekWord() only captures word characters — it silently returns "" when
+	// the next token is "(" (BASE type's own form, RFC §5.5's "TYPE name
+	// (INPUT = ..., ...)"), so that case must be checked directly against the
+	// next byte, not against peekWord()'s result. This previously meant a
+	// BASE type could never be recognised at all — detectTypeKind always
+	// fell through to the "expected AS or (" error for the exact syntax that
+	// error message claims to accept, whether hand-written or dumped.
+	nextIsParen := s.peek() == '('
 	peeked := strings.ToUpper(s.peekWord())
 	s.restore(c) // restore so Part1 includes the name
 
-	switch peeked {
-	case "AS":
+	switch {
+	case nextIsParen:
+		return pipeline.KindBaseType, nil
+	case peeked == "AS":
 		// Could be composite (AS (...)) or range (AS RANGE (...)).
 		// Save and peek two words ahead.
 		c2 := s.cur()
@@ -665,8 +675,6 @@ func (s *state) detectTypeKind(pos pipeline.SourcePos) (pipeline.ObjectKind, err
 			return pipeline.KindRangeType, nil
 		}
 		return pipeline.KindCompositeType, nil
-	case "(":
-		return pipeline.KindBaseType, nil
 	default:
 		return pipeline.KindUnknown, pipeline.Errorf(pos, "cannot determine TYPE variant; expected AS or (, got %q", peeked)
 	}

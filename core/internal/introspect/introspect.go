@@ -1572,11 +1572,16 @@ SELECT n.nspname, t.typname,
        pg_get_userbyid(t.typowner) AS owner
 FROM   pg_type t
 JOIN   pg_namespace n ON n.oid = t.typnamespace
-WHERE  t.typtype IN ('e','c','r','d')
+WHERE  t.typtype IN ('e','c','r','d','b')
 AND    n.nspname NOT IN ('pg_catalog','information_schema','pg_toast')
 AND    (t.typtype != 'c' OR NOT EXISTS (
     SELECT 1 FROM pg_class c WHERE c.oid = t.typrelid AND c.relkind != 'c'
 ))
+-- PostgreSQL auto-creates an array shadow type (typcategory 'A', e.g.
+-- "_mytype") for every base type — pg_type.typarray on the ELEMENT type
+-- points forward to it, the same canonical test psql/format_type use, so
+-- exclude any type that's the target of some other type's typarray.
+AND    NOT EXISTS (SELECT 1 FROM pg_type base WHERE base.typarray = t.oid)
 AND    NOT EXISTS (SELECT 1 FROM pg_depend d WHERE d.classid = 'pg_type'::regclass AND d.objid = t.oid AND d.deptype = 'e')
 ORDER  BY n.nspname, t.typname`
 
@@ -1610,6 +1615,9 @@ ORDER  BY n.nspname, t.typname`
 		return nil, err
 	}
 	if err := introspectRangeBodies(ctx, conn, out); err != nil {
+		return nil, err
+	}
+	if err := introspectBaseBody(ctx, conn, out); err != nil {
 		return nil, err
 	}
 	return out, nil
@@ -1832,6 +1840,121 @@ ORDER  BY n.nspname, t.typname`
 		}
 		if subtypeDiff != nil {
 			parts = append(parts, "SUBTYPE_DIFF = "+*subtypeDiff)
+		}
+		t.Body = strings.Join(parts, ", ")
+		t.Reconstructed = true
+	}
+	return rs.Err()
+}
+
+// introspectBaseBody reconstructs a BASE type's CREATE TYPE options list
+// (RFC §5.5: "INPUT = func, OUTPUT = func, ...") from pg_type — the same
+// "reconstruct from catalog" pattern as introspectRangeBodies above. Diffing
+// stays hash-only (RFC §5.5: any change is DESTRUCTIVE), so completeness
+// here only affects how faithfully a dumped base type round-trips, not
+// diffing behavior.
+func introspectBaseBody(ctx context.Context, conn pipeline.Querier, types []pipeline.IRObject) error {
+	const q = `
+SELECT n.nspname, t.typname,
+       infn.proname, outfn.proname,
+       recvfn.proname, sendfn.proname,
+       modinfn.proname, modoutfn.proname,
+       anlfn.proname, subfn.proname,
+       t.typlen, t.typbyval, t.typalign::text, t.typstorage::text,
+       t.typcategory::text, t.typispreferred, t.typdelim::text,
+       elem.typname AS element, t.typcollation <> 0 AS collatable
+FROM   pg_type t
+JOIN   pg_namespace n ON n.oid = t.typnamespace
+JOIN   pg_proc infn   ON infn.oid = t.typinput
+JOIN   pg_proc outfn  ON outfn.oid = t.typoutput
+LEFT   JOIN pg_proc recvfn   ON recvfn.oid = t.typreceive
+LEFT   JOIN pg_proc sendfn   ON sendfn.oid = t.typsend
+LEFT   JOIN pg_proc modinfn  ON modinfn.oid = t.typmodin
+LEFT   JOIN pg_proc modoutfn ON modoutfn.oid = t.typmodout
+LEFT   JOIN pg_proc anlfn    ON anlfn.oid = t.typanalyze
+LEFT   JOIN pg_proc subfn    ON subfn.oid = t.typsubscript
+LEFT   JOIN pg_type elem     ON elem.oid = NULLIF(t.typelem, 0)
+WHERE  t.typtype = 'b'
+AND    n.nspname NOT IN ('pg_catalog','information_schema','pg_toast')
+ORDER  BY n.nspname, t.typname`
+
+	rs, err := conn.QueryRows(ctx, q)
+	if err != nil {
+		return fmt.Errorf("introspect base type bodies: %w", err)
+	}
+	defer rs.Close()
+
+	baseIdx := map[string]*ir.Type{}
+	for _, obj := range types {
+		if t, ok := obj.(*ir.Type); ok && t.Variant == "BASE" {
+			baseIdx[t.Schema+"."+t.Name] = t
+		}
+	}
+
+	alignName := map[string]string{"c": "char", "s": "int2", "i": "int4", "d": "double"}
+	storageName := map[string]string{"p": "plain", "e": "external", "m": "main", "x": "extended"}
+
+	for rs.Next() {
+		var schema, name, inputFn, outputFn, align, storage, category, delim string
+		var recvFn, sendFn, modinFn, modoutFn, anlFn, subFn, element *string
+		var typLen int32
+		var byVal, preferred, collatable bool
+		if err := rs.Scan(&schema, &name, &inputFn, &outputFn,
+			&recvFn, &sendFn, &modinFn, &modoutFn, &anlFn, &subFn,
+			&typLen, &byVal, &align, &storage,
+			&category, &preferred, &delim, &element, &collatable); err != nil {
+			return err
+		}
+		t, ok := baseIdx[schema+"."+name]
+		if !ok {
+			continue
+		}
+		parts := []string{
+			"INPUT = " + quoteIdent(inputFn),
+			"OUTPUT = " + quoteIdent(outputFn),
+		}
+		if recvFn != nil {
+			parts = append(parts, "RECEIVE = "+quoteIdent(*recvFn))
+		}
+		if sendFn != nil {
+			parts = append(parts, "SEND = "+quoteIdent(*sendFn))
+		}
+		if modinFn != nil {
+			parts = append(parts, "TYPMOD_IN = "+quoteIdent(*modinFn))
+		}
+		if modoutFn != nil {
+			parts = append(parts, "TYPMOD_OUT = "+quoteIdent(*modoutFn))
+		}
+		if anlFn != nil {
+			parts = append(parts, "ANALYZE = "+quoteIdent(*anlFn))
+		}
+		if subFn != nil {
+			parts = append(parts, "SUBSCRIPT = "+quoteIdent(*subFn))
+		}
+		if typLen == -1 {
+			parts = append(parts, "INTERNALLENGTH = VARIABLE")
+		} else if typLen > 0 {
+			parts = append(parts, fmt.Sprintf("INTERNALLENGTH = %d", typLen))
+		}
+		if byVal {
+			parts = append(parts, "PASSEDBYVALUE")
+		}
+		if a, ok := alignName[align]; ok {
+			parts = append(parts, "ALIGNMENT = "+a)
+		}
+		if s, ok := storageName[storage]; ok {
+			parts = append(parts, "STORAGE = "+s)
+		}
+		if element != nil {
+			parts = append(parts, "ELEMENT = "+*element)
+		}
+		parts = append(parts, "DELIMITER = "+quoteLit(delim))
+		parts = append(parts, "CATEGORY = "+quoteLit(category))
+		if preferred {
+			parts = append(parts, "PREFERRED = true")
+		}
+		if collatable {
+			parts = append(parts, "COLLATABLE = true")
 		}
 		t.Body = strings.Join(parts, ", ")
 		t.Reconstructed = true

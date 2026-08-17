@@ -172,6 +172,35 @@ func (r *Resolver) Sort(objects []pipeline.IRObject) ([]pipeline.IRObject, error
 		refEdge(objIdx, schema+"."+t.Name)
 	}
 
+	// isBaseTypeTarget reports whether t resolves to a BASE-variant Type in
+	// the object set — used to skip the usual Function/Procedure→Type
+	// ordering edge for a LANGUAGE internal/c function specifically.
+	// Confirmed live: CREATE FUNCTION ... RETURNS/  (arg) not_yet_existing_type
+	// AS '...' LANGUAGE internal auto-creates a shell type ("type ... is not
+	// yet defined / Creating a shell type definition") — PostgreSQL's own
+	// documented bootstrapping trick for a base type's I/O functions, which
+	// legitimately forward-reference the type before it exists. The usual
+	// "function depends on its param/return type" edge would be exactly
+	// backwards here, and combined with the Type→Function edge added below
+	// (the type's full definition needs those functions first) would form an
+	// unresolvable cycle with no DEFERRABLE escape hatch.
+	isBaseTypeTarget := func(t ir.TypeRef, fallbackSchema string) bool {
+		if t.Schema == "pg_catalog" || t.Name == "" {
+			return false
+		}
+		schema := defaultSchema(t.Schema, fallbackSchema)
+		key := t.Name
+		if schema != "" {
+			key = schema + "." + t.Name
+		}
+		j, ok := idx[key]
+		if !ok {
+			return false
+		}
+		ty, ok := objects[j].(*ir.Type)
+		return ok && ty.Variant == "BASE"
+	}
+
 	// sqlBodyCallsIdent matches whether name appears as a whole-word
 	// identifier (case-insensitive, PostgreSQL identifiers being
 	// case-insensitive unless quoted) inside body. Not a real SQL parse —
@@ -385,15 +414,36 @@ func (r *Resolver) Sort(objects []pipeline.IRObject) ([]pipeline.IRObject, error
 			// Type/domain/enum depends on its schema.
 			schemaEdge(i, o.Schema)
 
+			// A BASE type's INPUT/OUTPUT/RECEIVE/SEND/... functions (and a
+			// RANGE type's CANONICAL/SUBTYPE_DIFF) must already exist before
+			// CREATE TYPE runs — confirmed live: "type ... does not exist"
+			// when the type is created first. Body is opaque free text (RFC
+			// §5.3/§5.5), so this reuses bodyCallsFuncEdge's whole-word scan
+			// rather than parsing it — same ordering hazard, found the same
+			// way, as a LANGUAGE sql body's function calls.
+			if o.Variant == "BASE" || o.Variant == "RANGE" {
+				bodyCallsFuncEdge(i, o.Body)
+			}
+
 		case *ir.Function:
 			schemaEdge(i, o.Schema)
 			// Depends on any custom TYPE used in its parameters or return
 			// type, and (for a LANGUAGE sql body) any function/procedure it
-			// calls — see typeRefEdge/bodyCallsFuncEdge above.
+			// calls — see typeRefEdge/bodyCallsFuncEdge above. Skipped for a
+			// LANGUAGE internal/c function's reference to a BASE type — see
+			// isBaseTypeTarget's doc comment; that specific combination is a
+			// forward reference PostgreSQL itself resolves via shell-type
+			// auto-creation, not a real ordering requirement.
+			isCLike := strings.EqualFold(o.Attrs.Language, "internal") || strings.EqualFold(o.Attrs.Language, "c")
 			for _, arg := range o.Args {
+				if isCLike && isBaseTypeTarget(arg.Type, o.Schema) {
+					continue
+				}
 				typeRefEdge(i, arg.Type, o.Schema)
 			}
-			typeRefEdge(i, o.ReturnType, o.Schema)
+			if !(isCLike && isBaseTypeTarget(o.ReturnType, o.Schema)) {
+				typeRefEdge(i, o.ReturnType, o.Schema)
+			}
 			if strings.EqualFold(o.Attrs.Language, "sql") {
 				bodyCallsFuncEdge(i, o.Attrs.Body)
 			}
@@ -401,8 +451,13 @@ func (r *Resolver) Sort(objects []pipeline.IRObject) ([]pipeline.IRObject, error
 		case *ir.Procedure:
 			schemaEdge(i, o.Schema)
 			// Same reasoning as *ir.Function above (a procedure has no
-			// return type).
+			// return type), including the LANGUAGE internal/c BASE-type
+			// forward-reference exemption.
+			isCLike := strings.EqualFold(o.Attrs.Language, "internal") || strings.EqualFold(o.Attrs.Language, "c")
 			for _, arg := range o.Args {
+				if isCLike && isBaseTypeTarget(arg.Type, o.Schema) {
+					continue
+				}
 				typeRefEdge(i, arg.Type, o.Schema)
 			}
 			if strings.EqualFold(o.Attrs.Language, "sql") {
