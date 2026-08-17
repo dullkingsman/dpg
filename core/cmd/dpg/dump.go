@@ -539,10 +539,17 @@ func renderObjectDPG(b *strings.Builder, obj pipeline.IRObject, fmtOpts format.O
 			items = append(items, tableItem{section: classifyColumn(col), text: renderColText(col)})
 		}
 		renderCSTText := func(cst *ir.Constraint) string {
-			if cst.Name != "" {
-				return fmt.Sprintf("%s%s %s %s", ind, kw("CONSTRAINT"), quoteIdentIfNeeded(cst.Name), cst.Expr)
+			// NOT VALID is real PostgreSQL's own CREATE TABLE constraint-attribute
+			// grammar (unlike COMMENT, which has no inline slot at all — see
+			// blockCSTs above), so it renders safely as a trailing suffix here.
+			notValid := ""
+			if cst.NotValid {
+				notValid = fmt.Sprintf(" %s %s", kw("NOT"), kw("VALID"))
 			}
-			return ind + cst.Expr
+			if cst.Name != "" {
+				return fmt.Sprintf("%s%s %s %s%s", ind, kw("CONSTRAINT"), quoteIdentIfNeeded(cst.Name), cst.Expr, notValid)
+			}
+			return ind + cst.Expr + notValid
 		}
 		for _, cst := range refCSTs {
 			items = append(items, tableItem{section: "references", text: renderCSTText(cst)})

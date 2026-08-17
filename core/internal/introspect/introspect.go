@@ -810,6 +810,17 @@ ORDER  BY n.nspname, c.relname, con.conname`
 		if !ok {
 			continue
 		}
+		// pg_get_constraintdef bakes a trailing "NOT VALID" into def itself
+		// for an unvalidated constraint — strip it so Expr always represents
+		// the bare definition regardless of source, matching parseConstraint
+		// (blockparser), which already strips the same suffix from
+		// hand-written source into this same NotValid field. Without this,
+		// a comment-bearing NOT VALID constraint sourced from live
+		// introspection rendered "NOT VALID NOT VALID" wherever a caller
+		// (e.g. dump) appends NOT VALID itself based on NotValid.
+		if notValid {
+			expr = strings.TrimSpace(strings.TrimSuffix(strings.TrimSpace(expr), "NOT VALID"))
+		}
 		cst := &ir.Constraint{
 			Name:       name,
 			Type:       typ,
