@@ -11280,6 +11280,71 @@ func TestDiffUnprotectedTableDropSucceeds(t *testing.T) {
 	}
 }
 
+// ── "public" schema lifecycle guard (RFC audit item C.2) ───────────────────
+// Regression guard: once introspectSchemas stopped hard-excluding "public"
+// (so its live Owner/Comment/Grants become visible to plan --live/verify),
+// a project with a schemas/public/ directory but no explicit `SCHEMA
+// public { }` declaration would otherwise get a spurious DESTRUCTIVE
+// DROP SCHEMA IF EXISTS "public" on every plan --live, since desired never
+// carries an object for it but the live snapshot now does. "public" always
+// exists in PostgreSQL and must never be proposed for DROP regardless of
+// whether desired declares it.
+
+func TestDiffNeverDropsPublicSchemaEvenWhenAbsentFromDesired(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	owner := "dpg"
+	_ = snap.SetObject("public", &snapshot.SnapObject{
+		Kind:   "schema",
+		Schema: &snapshot.SnapSchema{Name: "public", Owner: &owner},
+	})
+	ops, err := d.Diff(nil, snap)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if containsSQL(ops, "DROP SCHEMA") {
+		t.Errorf("must never propose DROP SCHEMA for public, got: %v", sqlList(ops))
+	}
+}
+
+func TestDiffOtherSchemaStillDroppedWhenAbsentFromDesired(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("staging", &snapshot.SnapObject{
+		Kind:   "schema",
+		Schema: &snapshot.SnapSchema{Name: "staging"},
+	})
+	ops, err := d.Diff(nil, snap)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !containsSQL(ops, `DROP SCHEMA IF EXISTS "staging";`) {
+		t.Errorf("expected normal DROP SCHEMA for a non-public schema absent from desired, got: %v", sqlList(ops))
+	}
+}
+
+func TestDiffPublicSchemaGrantChangeStillDetectedWhenDeclared(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public", &snapshot.SnapObject{
+		Kind:   "schema",
+		Schema: &snapshot.SnapSchema{Name: "public"},
+	})
+	desired := []pipeline.IRObject{
+		&ir.Schema{
+			Name:   "public",
+			Grants: []ir.Grant{{Privileges: []string{"USAGE"}, Roles: []string{"audit_role"}}},
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !containsSQL(ops, `GRANT USAGE ON SCHEMA "public" TO "audit_role"`) {
+		t.Errorf("expected GRANT USAGE ON SCHEMA public when explicitly declared, got: %v", sqlList(ops))
+	}
+}
+
 func TestDiffTableDropCascadeEmitsCascade(t *testing.T) {
 	d := New()
 	snap := &pipeline.Snapshot{}

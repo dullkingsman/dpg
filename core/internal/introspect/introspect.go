@@ -470,6 +470,20 @@ ORDER  BY r.rolname, n.nspname, d.defaclobjtype, grantee, a.privilege_type`
 
 // ── schemas ───────────────────────────────────────────────────────────────────
 
+// introspectSchemas reads every managed schema, including "public". Unlike
+// "information_schema"/"pg_%" (genuinely PostgreSQL-internal, never user-
+// managed), "public" is a real, commonly-granted-on schema that used to be
+// hard-excluded here — making its actual Owner/Comment/Grants state
+// completely invisible to `dpg dump` and `plan --live`/`verify` drift
+// detection (confirmed live: a `GRANT USAGE ON SCHEMA public` was silently
+// dropped by dump and never flagged as drift — RFC audit item C.2). The
+// differ's own diffing/dump-render logic for ir.Schema was already correct
+// once given a snapshot to compare against; only introspection's read side
+// was excluding it. The corresponding "never propose DROP SCHEMA public"
+// lifecycle guard lives in differ.go's Pass 2 (schemas/tables/etc. absent
+// from desired but present in snap) — "public" always exists in PostgreSQL
+// and is never dropped, the same reasoning compiler.go already documents
+// for why it's skipped from directory-based synthetic schema declarations.
 func introspectSchemas(ctx context.Context, conn pipeline.Querier) ([]pipeline.IRObject, error) {
 	const q = `
 SELECT n.nspname,
@@ -478,7 +492,7 @@ SELECT n.nspname,
 FROM   pg_namespace n
 JOIN   pg_roles r ON r.oid = n.nspowner
 WHERE  n.nspname NOT LIKE 'pg_%'
-AND    n.nspname NOT IN ('information_schema', 'public')
+AND    n.nspname != 'information_schema'
 ORDER  BY n.nspname`
 
 	rs, err := conn.QueryRows(ctx, q)
@@ -501,6 +515,9 @@ ORDER  BY n.nspname`
 
 // introspectSchemaGrants populates Schema.Grants for every schema in objs
 // using aclexplode on pg_namespace.nspacl, mirroring introspectTableGrants.
+// Includes "public" — see introspectSchemas' doc comment (RFC audit item
+// C.2); the grantee CASE's 'PUBLIC' pseudo-role string is unrelated to and
+// not to be confused with the schema literally named "public".
 func introspectSchemaGrants(ctx context.Context, conn pipeline.Querier, objs []pipeline.IRObject) error {
 	idx := make(map[string]*ir.Schema, len(objs))
 	for _, o := range objs {
@@ -520,7 +537,7 @@ SELECT n.nspname,
 FROM   pg_namespace n,
        LATERAL aclexplode(n.nspacl) a
 WHERE  n.nspname NOT LIKE 'pg_%'
-AND    n.nspname NOT IN ('information_schema', 'public')
+AND    n.nspname != 'information_schema'
 ORDER  BY n.nspname, grantee, a.privilege_type`
 
 	rs, err := conn.QueryRows(ctx, q)

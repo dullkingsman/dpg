@@ -159,6 +159,17 @@ func (d *Differ) Diff(desired []pipeline.IRObject, snap *pipeline.Snapshot) ([]p
 				key,
 			)
 		}
+		// "public" always exists in PostgreSQL and is never dropped — the
+		// same reasoning compiler.go documents for skipping it from
+		// directory-based synthetic schema declarations. Needed now that
+		// introspectSchemas includes "public" (RFC audit item C.2): without
+		// this guard, any project with a schemas/public/ directory but no
+		// explicit `SCHEMA public { }` declaration would get a spurious
+		// DESTRUCTIVE DROP SCHEMA IF EXISTS "public" on every plan --live,
+		// since desired never carries an object for it but snap now does.
+		if so.Kind == "schema" && so.Schema != nil && so.Schema.Name == "public" {
+			continue
+		}
 		ops = append(ops, dropObject(&so)...)
 	}
 

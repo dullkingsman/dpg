@@ -1122,3 +1122,59 @@ func TestIntrospectSubPartitionedTable(t *testing.T) {
 		t.Errorf("expected metrics_2026_web and metrics_2026_other, got %v", names)
 	}
 }
+
+// TestIntrospectPublicSchemaGrantsVisible is the live-catalog guard for RFC
+// audit item C.2: introspectSchemas/introspectSchemaGrants used to hard-
+// exclude "public", so a real GRANT on it was completely invisible to
+// dpg dump and plan --live/verify drift detection. Reproduces the audit's
+// exact scenario: GRANT USAGE ON SCHEMA public TO a role, then confirm
+// introspection now actually captures it.
+func TestIntrospectPublicSchemaGrantsVisible(t *testing.T) {
+	connStr := testpg.Start(t)
+	ctx := context.Background()
+
+	conn, err := executor.Connect(ctx, connStr)
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	defer conn.Close(ctx)
+
+	stmts := []string{
+		`CREATE ROLE audit_role`,
+		`GRANT USAGE ON SCHEMA public TO audit_role`,
+	}
+	for _, stmt := range stmts {
+		if _, err := conn.Exec(ctx, stmt); err != nil {
+			t.Fatalf("exec %q: %v", stmt, err)
+		}
+	}
+
+	ci := introspect.New()
+	objects, err := ci.Introspect(ctx, conn)
+	if err != nil {
+		t.Fatalf("introspect: %v", err)
+	}
+
+	var found *ir.Schema
+	for _, obj := range objects {
+		if s, ok := obj.(*ir.Schema); ok && s.Name == "public" {
+			found = s
+			break
+		}
+	}
+	if found == nil {
+		t.Fatal("introspect: schema public not found in results — C.2 regression")
+	}
+	if found.Owner == nil {
+		t.Error("Owner: got nil, want the public schema's real owner")
+	}
+	var grantedToAuditRole bool
+	for _, g := range found.Grants {
+		if slices.Contains(g.Roles, "audit_role") && slices.Contains(g.Privileges, "USAGE") {
+			grantedToAuditRole = true
+		}
+	}
+	if !grantedToAuditRole {
+		t.Errorf("Grants: got %+v, want a USAGE grant to audit_role", found.Grants)
+	}
+}
