@@ -2117,7 +2117,10 @@ func createTable(o *ir.Table, vtypes map[string]string) []pipeline.DiffOp {
 		case "FOREIGN KEY":
 			// Single-column FK: strip "FOREIGN KEY ("col") " prefix, keep "REFERENCES ...".
 			// The REFERENCES suffix includes ON DELETE/UPDATE actions and DEFERRABLE.
-			if len(cols) == 1 {
+			// NotValid constraints are never inlined (see the CHECK case's identical
+			// guard below for why) — they always stay in the table-level loop, the
+			// only place NOT VALID is actually appended.
+			if len(cols) == 1 && !cst.NotValid {
 				upper := strings.ToUpper(cst.Expr)
 				if refIdx := strings.Index(upper, "REFERENCES"); refIdx > 0 {
 					inlineFor[cols[0]] = append(inlineFor[cols[0]], inlineKW{name: cst.Name, keyword: cst.Expr[refIdx:]})
@@ -2129,7 +2132,13 @@ func createTable(o *ir.Table, vtypes map[string]string) []pipeline.DiffOp {
 			// promoted from a column definition (buildColumn sets Columns=[colname]).
 			// Table-level CHECK constraints (Columns empty) stay table-level because
 			// we cannot safely infer which column they belong to from the expression.
-			if len(cst.Columns) == 1 {
+			// NotValid constraints are excluded from inlining regardless of column
+			// count: whether PostgreSQL's inline column_constraint grammar even
+			// accepts a trailing NOT VALID isn't verified here, so routing them to
+			// the table-level loop (which does append it, confirmed live) avoids
+			// silently dropping NOT VALID again the way the un-guarded version of
+			// this loop did before this fix.
+			if len(cst.Columns) == 1 && !cst.NotValid {
 				inlineFor[cst.Columns[0]] = append(inlineFor[cst.Columns[0]], inlineKW{name: cst.Name, keyword: cst.Expr})
 				skipIdx[i] = true
 			}
@@ -2193,6 +2202,9 @@ func createTable(o *ir.Table, vtypes map[string]string) []pipeline.DiffOp {
 			b.WriteString(" ")
 		}
 		b.WriteString(cst.Expr)
+		if cst.NotValid {
+			b.WriteString(" NOT VALID")
+		}
 	}
 	b.WriteString("\n)")
 	if len(o.Inherits) > 0 && !o.Foreign {
@@ -5246,10 +5258,16 @@ func diffViewIndexes(schema, view string, desired []*ir.Index, snapIdx []snapsho
 			continue
 		}
 		// Comment is excluded from the recreate-triggering comparison, same
-		// reasoning as diffIndexes below.
+		// reasoning as diffIndexes below. Where is normalized (not excluded)
+		// the same way — see stripOuterParens' doc comment — since pg_get_expr
+		// always wraps a WHERE predicate in one extra pair of parens on
+		// reconstruction, which would otherwise compare unequal against an
+		// unchanged, hand-written predicate that never had them.
 		desiredSnap := snapshot.ToSnapIndex(idx)
 		definitionDesired, definitionSnap := desiredSnap, *si
 		definitionDesired.Comment, definitionSnap.Comment = "", ""
+		definitionDesired.Where = stripOuterParens(definitionDesired.Where)
+		definitionSnap.Where = stripOuterParens(definitionSnap.Where)
 		if definitionDesired != definitionSnap {
 			ops = append(ops, cautionOp(
 				fmt.Sprintf("DROP INDEX IF EXISTS %s;", quoteIdent(idx.Name)),
@@ -5343,6 +5361,14 @@ func diffIndexes(schema, table string, o *ir.Table, snap *snapshot.SnapTable, re
 		// must not trigger a destructive rebuild.
 		definitionDesired, definitionSnap := desiredSnap, translatedSnap
 		definitionDesired.Comment, definitionSnap.Comment = "", ""
+		// Where is normalized (not excluded) the same way Comment is
+		// excluded above — see stripOuterParens' doc comment — since
+		// pg_get_indexdef always wraps a WHERE predicate in one extra pair
+		// of parens on reconstruction, which would otherwise compare
+		// unequal against an unchanged, hand-written predicate that never
+		// had them.
+		definitionDesired.Where = stripOuterParens(definitionDesired.Where)
+		definitionSnap.Where = stripOuterParens(definitionSnap.Where)
 		if definitionDesired != definitionSnap {
 			ops = append(ops, cautionOp(
 				fmt.Sprintf("DROP INDEX IF EXISTS %s;", quoteIdent(idx.Name)),
@@ -5510,6 +5536,41 @@ func firstParenGroup(s string) (int, int) {
 	return -1, -1
 }
 
+// stripOuterParens removes one layer of genuinely-wrapping outer parens from
+// s, e.g. "(a OR b)" -> "a OR b", but leaves "(a) OR (b)" untouched (the
+// leading "(" there closes long before the string ends, so it isn't a
+// wrapping pair at all) — reuses firstParenGroup's balanced-depth matching
+// rather than a naive "starts with ( and ends with )" check, which would
+// mishandle exactly that case.
+//
+// Exists because PostgreSQL's own expression deparser (pg_get_expr)
+// unconditionally wraps a policy's USING/WITH CHECK qual and an index's
+// WHERE predicate in one such pair when reconstructing it from the catalog
+// (confirmed live: "(owner_id = 1)", "(status = 'active'::text)"),
+// regardless of how the expression was originally written — while DPG's own
+// parser either never captures those parens at all (USING/WITH CHECK, whose
+// "(" ")" the parser consumes as its own delimiters) or preserves the
+// expression exactly as written, parens or not (index WHERE, where they're
+// grammatically optional). Either way, the desired and introspected sides of
+// an unchanged expression can end up differing only by this one wrapping
+// pair, comparing unequal and triggering a destructive drop+recreate for no
+// real change. This is comparison-only normalization, the same "never
+// change what's stored or emitted, only what's used to decide drift"
+// precedent stripStringLiteralCasts/translateConstraintExpr already use —
+// callers apply it to freshly-built comparison copies, never to the stored
+// field itself.
+func stripOuterParens(s string) string {
+	s = strings.TrimSpace(s)
+	if len(s) < 2 || s[0] != '(' || s[len(s)-1] != ')' {
+		return s
+	}
+	open, close := firstParenGroup(s)
+	if open != 0 || close != len(s)-1 {
+		return s
+	}
+	return strings.TrimSpace(s[1 : len(s)-1])
+}
+
 // replaceQuotedIdents substitutes a renamed column's references in s, both
 // quoted ("old" → "new") and bare (old → new, at a word boundary — no
 // partial-identifier match, so renaming "a" never touches "cat"). The bare
@@ -5652,8 +5713,8 @@ func diffPolicies(schema, table string, o *ir.Table, snap *snapshot.SnapTable) [
 			ops = append(ops, createPolicy(schema, table, pol)...)
 		} else if pol.Command != existing.Command ||
 			pol.Permissive != existing.Permissive ||
-			ptrStr(pol.Using) != existing.Using ||
-			ptrStr(pol.WithCheck) != existing.WithCheck {
+			stripOuterParens(ptrStr(pol.Using)) != stripOuterParens(existing.Using) ||
+			stripOuterParens(ptrStr(pol.WithCheck)) != stripOuterParens(existing.WithCheck) {
 			ops = append(ops, safeOp(
 				fmt.Sprintf("DROP POLICY IF EXISTS %s ON %s;", quoteIdent(pol.Name), tblIdent),
 				pol.Pos,
