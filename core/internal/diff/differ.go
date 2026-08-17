@@ -3421,13 +3421,42 @@ func qualifyOpFamilyOperandForCompare(isOperator bool, famSchema, schema, name s
 	return famSchema + "." + name
 }
 
+// opMemberNameMatches compares an operator/function member's identity,
+// tolerating an unqualified FUNCTION reference that resolves to either the
+// family's own schema (qualifyOpFamilyOperandForCompare's existing default
+// for a genuinely custom support function) or pg_catalog (a built-in reused
+// unqualified — routine for standard access-method support functions like
+// btint4cmp, which PostgreSQL's own documentation examples write exactly
+// this way). Both are legitimate resolutions for the identical unqualified
+// text without a live catalog to disambiguate, so treating only one as a
+// match produces a false structural mismatch — confirmed live: RFC audit
+// item C.5's fix started trusting this comparison's "false" result to drive
+// DROP+CREATE directly (previously masked by diffOperatorClass falling
+// through to diffOpaqueIR's live-BodyHash blind spot regardless), which
+// surfaced this as a real live-drift false positive on an entirely
+// unmodified operator class using an unqualified builtin FUNCTION item. An
+// unqualified OPERATOR reference keeps its existing pg_catalog-only
+// default: unlike a function, a genuinely custom operator symbol left
+// unqualified in source is rare enough, and ambiguous enough at apply time
+// too, not to warrant the same widening.
+func opMemberNameMatches(isFunction bool, famSchema, dSchema, dName, sSchema, sName string) bool {
+	if dName != sName {
+		return false
+	}
+	if dSchema != "" {
+		return dSchema == sSchema
+	}
+	if isFunction {
+		return sSchema == famSchema || sSchema == "pg_catalog"
+	}
+	return sSchema == "pg_catalog"
+}
+
 // opFamilyMemberEqual compares the "payload" of a same-slot member pair —
 // the parts Key() deliberately excludes (see its doc comment): operator/
 // function identity, FOR ORDER BY, and (for FUNCTION) the argument list.
 func opFamilyMemberEqual(famSchema string, d pipeline.OpFamilyMember, s snapshot.SnapOpFamilyMember) bool {
-	dName := qualifyOpFamilyOperandForCompare(!d.IsFunction, famSchema, d.Name.Schema, d.Name.Name)
-	sName := qualifyOpFamilyOperandForCompare(!s.IsFunction, famSchema, s.NameSchema, s.Name)
-	if dName != sName {
+	if !opMemberNameMatches(d.IsFunction, famSchema, d.Name.Schema, d.Name.Name, s.NameSchema, s.Name) {
 		return false
 	}
 	if d.OrderBy != s.OrderBy {
@@ -3471,28 +3500,60 @@ func opClassMembersEqual(famSchema string, desired []pipeline.OpFamilyMember, sn
 // diffOperatorClass is diffOpaqueIR's OperatorClass-specific wrapper. Unlike
 // diffOperatorFamily/diffTSConfig, it never adds incremental ops of its own —
 // PostgreSQL's AS-list has no incremental ALTER OPERATOR CLASS, so any real
-// member-list change still must resolve to diffOpaqueIR's ordinary
-// DROP+CREATE. Its only job is deciding *whether* that DROP+CREATE is
-// warranted: diffOpaqueIR triggers purely on raw BodyHash, which false-
-// positives on a hand-written AS-list that's structurally identical to the
-// snapshot's but spelled differently (whitespace, operator/type
-// qualification, item order). When Members/StorageType/FAMILY all compare
-// structurally equal, body is passed through as "" so diffOpaqueIR's hash
-// branch is skipped entirely and only Comment gets diffed — exactly as if
-// nothing about the AS-list had changed, because nothing catalog-relevant
-// has. A stale pre-feature snapshot (OperatorClassMembersStructured false)
-// or any genuine mismatch falls through to today's unmodified BodyHash path.
+// member-list change still must resolve to a DROP+CREATE. Its job is
+// deciding *whether* that DROP+CREATE is warranted, using the structural
+// Members/StorageType/FAMILY comparison instead of diffOpaqueIR's raw
+// BodyHash — which false-positives on a hand-written AS-list that's
+// structurally identical to the snapshot's but spelled differently
+// (whitespace, operator/type qualification, item order), and, more
+// severely, silently under-reports for the live-comparison case: a live-
+// introspected snap always has Reconstructed == true (see
+// introspectOperatorClasses), which makes its BodyHash permanently "" (see
+// sourceBodyHash's doc comment) — so diffOpaqueIR's `snap.BodyHash != ""`
+// guard would skip the comparison entirely no matter how real the change
+// is. Confirmed live: a genuine AS-list edit was correctly detected by
+// offline `plan` (source vs. committed snapshot, real BodyHash on both
+// sides) but produced zero ops from `plan --live` (RFC audit item C.5).
+//
+// So both directions of this structural comparison drive the decision
+// directly, without ever falling through to diffOpaqueIR's hash check for a
+// members-changed case:
+//   - equal → body passed through as "" to diffOpaqueIR, so its hash branch
+//     is skipped and only Comment gets diffed — exactly as if nothing about
+//     the AS-list had changed, because nothing catalog-relevant has;
+//   - unequal → DROP+CREATE emitted directly via dropCreateOpaque, since the
+//     structural comparison alone already proves a real difference exists,
+//     independent of whether either side's BodyHash happens to be usable.
+//
+// A stale pre-feature snapshot (OperatorClassMembersStructured false) falls
+// back to today's unstructured BodyHash path, same as before this fix.
 func diffOperatorClass(o *ir.OperatorClass, snap *snapshot.SnapOpaque) ([]pipeline.DiffOp, error) {
 	famSchema := o.FamilySchema
 	if famSchema == "" {
 		famSchema = o.Schema
 	}
-	if snap.OperatorClassMembersStructured &&
-		o.StorageType == snap.OperatorClassStorageType &&
-		o.FamilySchema == snap.OperatorClassFamilySchema &&
-		o.FamilyName == snap.OperatorClassFamilyName &&
-		opClassMembersEqual(famSchema, o.Members, snap.OperatorClassMembers) {
-		return diffOpaqueIR(o.QualifiedName(), "", o.Reconstructed, o.Comment, snap, o.SrcPos)
+	// famName mirrors famSchema's fallback: ir.OperatorClass.FamilyName's own
+	// doc comment documents empty FamilyName as meaning "hand-written source
+	// omitted FAMILY, relying on PostgreSQL's own same-name auto-creation" —
+	// i.e. it resolves to the class's own Name. Introspection, by contrast,
+	// always names the family explicitly (see introspectOperatorClasses),
+	// so comparing o.FamilyName/o.FamilySchema against snap's without this
+	// same resolution made every unqualified-or-omitted FAMILY declaration
+	// misdiff as "changed" the moment a real snap value was available to
+	// compare against — live-reproduced as a false-positive DROP+CREATE on
+	// an entirely unmodified operator class (RFC audit item C.5).
+	famName := o.FamilyName
+	if famName == "" {
+		famName = o.Name
+	}
+	if snap.OperatorClassMembersStructured {
+		if o.StorageType == snap.OperatorClassStorageType &&
+			famSchema == snap.OperatorClassFamilySchema &&
+			famName == snap.OperatorClassFamilyName &&
+			opClassMembersEqual(famSchema, o.Members, snap.OperatorClassMembers) {
+			return diffOpaqueIR(o.QualifiedName(), "", o.Reconstructed, o.Comment, snap, o.SrcPos)
+		}
+		return dropCreateOpaque(o.QualifiedName(), o.Body, o.Comment, snap, o.SrcPos)
 	}
 	return diffOpaqueIR(o.QualifiedName(), o.Body, o.Reconstructed, o.Comment, snap, o.SrcPos)
 }
@@ -3617,13 +3678,7 @@ func diffOpaqueIR(name, body string, reconstructed bool, comment *string, snap *
 		sum := sha256.Sum256([]byte(strings.TrimSpace(body)))
 		newHash := fmt.Sprintf("%x", sum)
 		if snap.BodyHash != "" && newHash != snap.BodyHash {
-			ops := dropObject(&snapshot.SnapObject{Kind: snap.Kind, Opaque: snap})
-			createOps, err := createOpaque(name, body, snap.Kind, snap.Schema, pos)
-			if err != nil {
-				return nil, err
-			}
-			ops = append(ops, createOps...)
-			return appendCommentOp(ops, nil, snap.Kind, snap.Schema, snap.Name, snap.Args, snap.Using, comment, pos)
+			return dropCreateOpaque(name, body, comment, snap, pos)
 		}
 	}
 	if !ptrEq(comment, snap.Comment) {
@@ -3632,6 +3687,22 @@ func diffOpaqueIR(name, body string, reconstructed bool, comment *string, snap *
 		}
 	}
 	return nil, nil
+}
+
+// dropCreateOpaque emits the standard DROP+CREATE(+COMMENT) sequence for an
+// opaque object whose body has genuinely changed — shared by diffOpaqueIR's
+// raw-BodyHash decision and diffOperatorClass's structural one (see
+// diffOperatorClass's doc comment for why OperatorClass can't rely on
+// diffOpaqueIR's BodyHash check for the live-comparison case, RFC audit item
+// C.5).
+func dropCreateOpaque(name, body string, comment *string, snap *snapshot.SnapOpaque, pos pipeline.SourcePos) ([]pipeline.DiffOp, error) {
+	ops := dropObject(&snapshot.SnapObject{Kind: snap.Kind, Opaque: snap})
+	createOps, err := createOpaque(name, body, snap.Kind, snap.Schema, pos)
+	if err != nil {
+		return nil, err
+	}
+	ops = append(ops, createOps...)
+	return appendCommentOp(ops, nil, snap.Kind, snap.Schema, snap.Name, snap.Args, snap.Using, comment, pos)
 }
 
 // diffTSConfig is diffOpaqueIR's TSConfig-specific wrapper: MAPPING FOR

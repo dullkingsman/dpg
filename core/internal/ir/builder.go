@@ -2597,11 +2597,26 @@ func normalizeOpFamilyMembers(raw []pipeline.OpFamilyMember) ([]pipeline.OpFamil
 // Datatype — the behavior documented for CREATE OPERATOR CLASS's OPERATOR and
 // FUNCTION items (unlike ALTER OPERATOR FAMILY ADD, which has no enclosing
 // class datatype to fall back to, see normalizeOpFamilyMembers).
+//
+// Run through ParseTypeText, same as normalizeOpFamilyMembers's own
+// LeftType/RightType canonicalization — required by OpFamilyMember.Key's own
+// doc comment ("a same-type member written as int4 on one side and integer
+// on the other will misdiff"). Missing here meant a class's own AS-list
+// members (unlike a standalone OPERATOR FAMILY block's, which does go
+// through normalizeOpFamilyMembers) never matched introspection's always-
+// canonical `::regtype::text` output, so opClassMembersEqual always found
+// them "different" — silently masked pre-C.5-fix because diffOperatorClass
+// used to fall through to diffOpaqueIR's live-BodyHash blind spot regardless
+// (RFC audit item C.5's fix uncovered this as a real, separate live-drift
+// false positive: `plan --live` on an untouched operator class proposed a
+// spurious DROP+CREATE using "int4" vs the class's declared "int4" only
+// because the roundtrip through the catalog normalizes it to "integer").
 func opClassOperandType(explicit []*pg_query.Node, datatype *pg_query.TypeName) (left, right string) {
 	if len(explicit) == 2 {
-		return typeNameToRef(explicit[0].GetTypeName()).String(), typeNameToRef(explicit[1].GetTypeName()).String()
+		return ParseTypeText(typeNameToRef(explicit[0].GetTypeName()).String()).String(),
+			ParseTypeText(typeNameToRef(explicit[1].GetTypeName()).String()).String()
 	}
-	d := typeNameToRef(datatype).String()
+	d := ParseTypeText(typeNameToRef(datatype).String()).String()
 	return d, d
 }
 
@@ -2634,7 +2649,11 @@ func opClassFunctionMember(it *pg_query.CreateOpClassItem, datatype *pg_query.Ty
 	left, right := opClassOperandType(it.ClassArgs, datatype)
 	funcArgs := make([]string, len(it.Name.Objargs))
 	for i, a := range it.Name.Objargs {
-		funcArgs[i] = typeNameToRef(a.GetTypeName()).String()
+		// Canonicalized for the same reason opClassOperandType's LeftType/
+		// RightType are — introspection's fn_args always comes out of
+		// format_type(), so an uncanonicalized "int4" here would never
+		// match its "integer".
+		funcArgs[i] = ParseTypeText(typeNameToRef(a.GetTypeName()).String()).String()
 	}
 	return pipeline.OpFamilyMember{
 		IsFunction: true, Number: int(it.Number), Name: pipeline.Identifier{Schema: schema, Name: name},
