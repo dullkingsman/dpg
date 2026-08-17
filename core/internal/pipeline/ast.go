@@ -58,6 +58,7 @@ type IndexDef struct {
 	With             []StorageParam
 	Tablespace       *Identifier
 	Concurrently     bool
+	Comment          *StringLit
 	Pos              SourcePos
 }
 
@@ -85,6 +86,7 @@ type PolicyDef struct {
 	Using      *RawExpr
 	WithCheck  *RawExpr
 	Roles      []Identifier
+	Comment    *StringLit
 	Pos        SourcePos
 }
 
@@ -97,6 +99,7 @@ type TriggerDef struct {
 	Condition *RawExpr
 	Function  Identifier
 	Args      []string
+	Comment   *StringLit
 	Pos       SourcePos
 }
 
@@ -122,6 +125,7 @@ type ConstraintDef struct {
 	Name     Identifier
 	Expr     RawExpr
 	NotValid bool
+	Comment  *StringLit
 	Pos      SourcePos
 }
 

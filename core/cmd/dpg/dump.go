@@ -474,8 +474,19 @@ func renderObjectDPG(b *strings.Builder, obj pipeline.IRObject, fmtOpts format.O
 		inlinedByCol := map[string][]string{}
 		var refCSTs []*ir.Constraint
 		var otherCSTs []*ir.Constraint
+		// blockCSTs holds constraints carrying a Comment: real PostgreSQL's
+		// native CREATE TABLE column/constraint-list grammar (what every
+		// other bucket below renders into) has no way to attach a comment to
+		// a constraint inline, so these render instead as CONSTRAINTS { }
+		// block entries (see writeEntryCommentBlock) — the DPG-block-level
+		// declaration path, parsed by the blockparser rather than pg_query,
+		// which is the only place this session's new "{ COMMENT '...'; }"
+		// grammar is actually valid syntax.
+		var blockCSTs []*ir.Constraint
 		for _, cst := range o.Constraints {
-			if len(cst.Columns) == 1 && isInlineable(cst.Type) {
+			if cst.Comment != nil {
+				blockCSTs = append(blockCSTs, cst)
+			} else if len(cst.Columns) == 1 && isInlineable(cst.Type) {
 				inlinedByCol[cst.Columns[0]] = append(inlinedByCol[cst.Columns[0]], inlineConstraintClause(cst))
 			} else if cst.Type == "FOREIGN KEY" {
 				refCSTs = append(refCSTs, cst)
@@ -606,7 +617,8 @@ func renderObjectDPG(b *strings.Builder, obj pipeline.IRObject, fmtOpts format.O
 			}
 		}
 		if o.Owner != nil || o.Comment != nil || o.RLSEnabled || len(o.Indexes) > 0 || len(colsWithAttrs) > 0 ||
-			len(o.Partitions) > 0 || len(o.Policies) > 0 || len(o.Triggers) > 0 || len(o.Grants) > 0 || len(o.Revocations) > 0 {
+			len(o.Partitions) > 0 || len(o.Policies) > 0 || len(o.Triggers) > 0 || len(o.Grants) > 0 || len(o.Revocations) > 0 ||
+			len(blockCSTs) > 0 {
 			b.WriteString(" {\n")
 			blockHasContent := false
 			if o.Owner != nil {
@@ -688,6 +700,25 @@ func renderObjectDPG(b *strings.Builder, obj pipeline.IRObject, fmtOpts format.O
 				fmt.Fprintf(b, "%s%s {\n", ind, kw("INDICES"))
 				for _, idx := range o.Indexes {
 					renderIndex(b, idx, fmtOpts)
+				}
+				fmt.Fprintf(b, "%s}\n", ind)
+				blockHasContent = true
+			}
+			if len(blockCSTs) > 0 {
+				if blockHasContent {
+					b.WriteString("\n")
+				}
+				// Mode A (CONSTRAINTS { … }) — the form the scanner accepts.
+				// Only constraints carrying a Comment land here; every other
+				// constraint still renders inline in the column/constraint
+				// list above (see blockCSTs' doc comment).
+				fmt.Fprintf(b, "%s%s {\n", ind, kw("CONSTRAINTS"))
+				for _, cst := range blockCSTs {
+					fmt.Fprintf(b, "%s%s %s", ind+ind, quoteIdentIfNeeded(cst.Name), cst.Expr)
+					if cst.NotValid {
+						fmt.Fprintf(b, " %s %s", kw("NOT"), kw("VALID"))
+					}
+					writeEntryCommentBlock(b, ind, fmtOpts, cst.Comment)
 				}
 				fmt.Fprintf(b, "%s}\n", ind)
 				blockHasContent = true
@@ -1647,6 +1678,21 @@ func renderPartitionEntry(b *strings.Builder, p *ir.Partition, ind string, fmtOp
 // own CREATE POLICY: [AS PERMISSIVE|RESTRICTIVE] FOR command [TO roles]
 // [USING (...)] [WITH CHECK (...)] — not the RFC's ABNF listing (FOR before
 // AS), which contradicts its own worked example and real PG's grammar.
+// writeEntryCommentBlock terminates one INDICES/POLICIES/TRIGGERS/
+// CONSTRAINTS entry, written at ind+ind (nested one level inside the
+// owning table's { } block already): a bare ";" when there's no comment,
+// or a "{ COMMENT '...'; }" block when there is — mirrors
+// parseTrailingCommentBlock's grammar exactly (see blockparser).
+func writeEntryCommentBlock(b *strings.Builder, ind string, fmtOpts format.Options, comment *string) {
+	kw := fmtOpts.Keyword
+	if comment == nil {
+		b.WriteString(";\n")
+		return
+	}
+	fmt.Fprintf(b, " {\n%s%s%s %s;\n%s%s}\n",
+		ind, ind, ind, kw("COMMENT")+" "+sqlStringLit(*comment), ind, ind)
+}
+
 func renderPolicy(b *strings.Builder, pol *ir.Policy, fmtOpts format.Options) {
 	ind := fmtOpts.Indent()
 	kw := fmtOpts.Keyword
@@ -1665,7 +1711,7 @@ func renderPolicy(b *strings.Builder, pol *ir.Policy, fmtOpts format.Options) {
 	if pol.WithCheck != nil {
 		fmt.Fprintf(b, " %s %s (%s)", kw("WITH"), kw("CHECK"), *pol.WithCheck)
 	}
-	b.WriteString(";\n")
+	writeEntryCommentBlock(b, ind, fmtOpts, pol.Comment)
 }
 
 // renderTrigger writes one Mode A TRIGGERS { } entry — previously not
@@ -1690,7 +1736,8 @@ func renderTrigger(b *strings.Builder, trg *ir.Trigger, fmtOpts format.Options) 
 	if trg.Condition != nil {
 		fmt.Fprintf(b, " %s (%s)", kw("WHEN"), *trg.Condition)
 	}
-	fmt.Fprintf(b, " %s %s %s(%s);\n", kw("EXECUTE"), kw("FUNCTION"), trg.Function, strings.Join(trg.Args, ", "))
+	fmt.Fprintf(b, " %s %s %s(%s)", kw("EXECUTE"), kw("FUNCTION"), trg.Function, strings.Join(trg.Args, ", "))
+	writeEntryCommentBlock(b, ind, fmtOpts, trg.Comment)
 }
 
 func renderIndex(b *strings.Builder, idx *ir.Index, fmtOpts format.Options) {
@@ -1749,5 +1796,5 @@ func renderIndex(b *strings.Builder, idx *ir.Index, fmtOpts format.Options) {
 	if idx.Tablespace != nil {
 		fmt.Fprintf(b, " %s %s", kw("TABLESPACE"), quoteIdentIfNeeded(*idx.Tablespace))
 	}
-	b.WriteString(";\n")
+	writeEntryCommentBlock(b, ind, fmtOpts, idx.Comment)
 }

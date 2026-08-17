@@ -483,13 +483,17 @@ func toSnapColumn(col *ir.Column) SnapColumn {
 }
 
 func toSnapConstraint(cst *ir.Constraint) SnapConstraint {
-	return SnapConstraint{
+	sc := SnapConstraint{
 		Name:       cst.Name,
 		Type:       cst.Type,
 		Expr:       cst.Expr,
 		NotValid:   cst.NotValid,
 		Deferrable: cst.Deferrable,
 	}
+	if cst.Comment != nil {
+		sc.Comment = *cst.Comment
+	}
+	return sc
 }
 
 // ToSnapIndex converts an ir.Index into its flat, fully comparable snapshot
@@ -548,6 +552,9 @@ func ToSnapIndex(idx *ir.Index) SnapIndex {
 	if idx.Tablespace != nil {
 		si.Tablespace = *idx.Tablespace
 	}
+	if idx.Comment != nil {
+		si.Comment = *idx.Comment
+	}
 	return si
 }
 
@@ -563,17 +570,24 @@ func toSnapPolicy(pol *ir.Policy) SnapPolicy {
 	if pol.WithCheck != nil {
 		sp.WithCheck = *pol.WithCheck
 	}
+	if pol.Comment != nil {
+		sp.Comment = *pol.Comment
+	}
 	return sp
 }
 
 func toSnapTrigger(trg *ir.Trigger) SnapTrigger {
-	return SnapTrigger{
+	st := SnapTrigger{
 		Name:     trg.Name,
 		When:     trg.When,
 		Events:   strings.Join(trg.Events, ", "),
 		ForEach:  trg.ForEach,
 		Function: trg.Function,
 	}
+	if trg.Comment != nil {
+		st.Comment = *trg.Comment
+	}
+	return st
 }
 
 func toSnapGrant(g ir.Grant) SnapGrant {

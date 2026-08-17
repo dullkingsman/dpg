@@ -777,7 +777,8 @@ SELECT n.nspname, c.relname,
             THEN (SELECT a.attname FROM pg_attribute a
                   WHERE  a.attrelid = con.conrelid AND a.attnum = con.conkey[1])
             ELSE NULL
-       END AS single_col
+       END AS single_col,
+       obj_description(con.oid, 'pg_constraint') AS comment
 FROM   pg_constraint con
 JOIN   pg_class c     ON c.oid = con.conrelid
 JOIN   pg_namespace n ON n.oid = c.relnamespace
@@ -801,8 +802,8 @@ ORDER  BY n.nspname, c.relname, con.conname`
 	for rs.Next() {
 		var schema, table, name, typ, expr string
 		var notValid, deferrable bool
-		var singleCol *string
-		if err := rs.Scan(&schema, &table, &name, &typ, &expr, &notValid, &deferrable, &singleCol); err != nil {
+		var singleCol, comment *string
+		if err := rs.Scan(&schema, &table, &name, &typ, &expr, &notValid, &deferrable, &singleCol, &comment); err != nil {
 			return err
 		}
 		t, ok := idx[schema+"."+table]
@@ -815,6 +816,7 @@ ORDER  BY n.nspname, c.relname, con.conname`
 			Expr:       expr,
 			NotValid:   notValid,
 			Deferrable: deferrable,
+			Comment:    comment,
 		}
 		if singleCol != nil {
 			cst.Columns = []string{*singleCol}
@@ -835,7 +837,8 @@ SELECT n.nspname, c.relname,
        ix.indisunique,
        am.amname AS method,
        pg_get_indexdef(ix.indexrelid) AS idx_def,
-       its.spcname AS tablespace
+       its.spcname AS tablespace,
+       obj_description(i.oid, 'pg_class') AS comment
 FROM   pg_index ix
 JOIN   pg_class c  ON c.oid = ix.indrelid
 JOIN   pg_class i  ON i.oid = ix.indexrelid
@@ -859,8 +862,8 @@ ORDER  BY n.nspname, c.relname, i.relname`
 	for rs.Next() {
 		var schema, table, name, method, def string
 		var unique bool
-		var tablespace *string
-		if err := rs.Scan(&schema, &table, &name, &unique, &method, &def, &tablespace); err != nil {
+		var tablespace, comment *string
+		if err := rs.Scan(&schema, &table, &name, &unique, &method, &def, &tablespace, &comment); err != nil {
 			return err
 		}
 		t, ok := idx[schema+"."+table]
@@ -886,6 +889,7 @@ ORDER  BY n.nspname, c.relname, i.relname`
 			With:             parseIndexWith(def),
 			Where:            where,
 			Tablespace:       tablespace,
+			Comment:          comment,
 		})
 	}
 	return rs.Err()
@@ -912,7 +916,8 @@ SELECT n.nspname, c.relname,
        ix.indisunique,
        am.amname AS method,
        pg_get_indexdef(ix.indexrelid) AS idx_def,
-       its.spcname AS tablespace
+       its.spcname AS tablespace,
+       obj_description(i.oid, 'pg_class') AS comment
 FROM   pg_index ix
 JOIN   pg_class c  ON c.oid = ix.indrelid
 JOIN   pg_class i  ON i.oid = ix.indexrelid
@@ -932,8 +937,8 @@ ORDER  BY n.nspname, c.relname, i.relname`
 	for rs.Next() {
 		var schema, view, name, method, def string
 		var unique bool
-		var tablespace *string
-		if err := rs.Scan(&schema, &view, &name, &unique, &method, &def, &tablespace); err != nil {
+		var tablespace, comment *string
+		if err := rs.Scan(&schema, &view, &name, &unique, &method, &def, &tablespace, &comment); err != nil {
 			return err
 		}
 		v, ok := idx[schema+"."+view]
@@ -955,6 +960,7 @@ ORDER  BY n.nspname, c.relname, i.relname`
 			With:             parseIndexWith(def),
 			Where:            where,
 			Tablespace:       tablespace,
+			Comment:          comment,
 		})
 	}
 	return rs.Err()
@@ -1119,7 +1125,8 @@ SELECT n.nspname, c.relname,
                      ELSE 'ALL' END AS cmd,
        p.polpermissive,
        pg_get_expr(p.polqual, p.polrelid) AS using_expr,
-       pg_get_expr(p.polwithcheck, p.polrelid) AS check_expr
+       pg_get_expr(p.polwithcheck, p.polrelid) AS check_expr,
+       obj_description(p.oid, 'pg_policy') AS comment
 FROM   pg_policy p
 JOIN   pg_class c     ON c.oid = p.polrelid
 JOIN   pg_namespace n ON n.oid = c.relnamespace
@@ -1135,8 +1142,8 @@ ORDER  BY n.nspname, c.relname, p.polname`
 	for rs.Next() {
 		var schema, table, name, cmd string
 		var permissive bool
-		var using, check *string
-		if err := rs.Scan(&schema, &table, &name, &cmd, &permissive, &using, &check); err != nil {
+		var using, check, comment *string
+		if err := rs.Scan(&schema, &table, &name, &cmd, &permissive, &using, &check, &comment); err != nil {
 			return err
 		}
 		t, ok := idx[schema+"."+table]
@@ -1149,6 +1156,7 @@ ORDER  BY n.nspname, c.relname, p.polname`
 			Permissive: permissive,
 			Using:      using,
 			WithCheck:  check,
+			Comment:    comment,
 		})
 	}
 	return rs.Err()
@@ -1174,7 +1182,8 @@ SELECT n.nspname, c.relname,
            CASE WHEN (t.tgtype & 32) != 0 THEN 'TRUNCATE' END
        ], ' OR ') AS events,
        p.proname AS func_name,
-       pn.nspname AS func_schema
+       pn.nspname AS func_schema,
+       obj_description(t.oid, 'pg_trigger') AS comment
 FROM   pg_trigger t
 JOIN   pg_class c     ON c.oid = t.tgrelid
 JOIN   pg_namespace n ON n.oid = c.relnamespace
@@ -1192,7 +1201,8 @@ ORDER  BY n.nspname, c.relname, t.tgname`
 
 	for rs.Next() {
 		var schema, table, name, when, forEach, events, funcName, funcSchema string
-		if err := rs.Scan(&schema, &table, &name, &when, &forEach, &events, &funcName, &funcSchema); err != nil {
+		var comment *string
+		if err := rs.Scan(&schema, &table, &name, &when, &forEach, &events, &funcName, &funcSchema, &comment); err != nil {
 			return err
 		}
 		t, ok := idx[schema+"."+table]
@@ -1215,6 +1225,7 @@ ORDER  BY n.nspname, c.relname, t.tgname`
 			Events:   cleanEvents,
 			ForEach:  forEach,
 			Function: fn,
+			Comment:  comment,
 		})
 	}
 	return rs.Err()

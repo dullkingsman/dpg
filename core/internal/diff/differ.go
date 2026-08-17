@@ -2268,6 +2268,15 @@ func createTable(o *ir.Table, vtypes map[string]string) []pipeline.DiffOp {
 			))
 		}
 	}
+	for _, cst := range o.Constraints {
+		if cst.Comment != nil && cst.Name != "" {
+			ops = append(ops, safeOp(
+				fmt.Sprintf("COMMENT ON CONSTRAINT %s ON %s IS %s;",
+					quoteIdent(cst.Name), qualIdent(o.Schema, o.Name), quoteLit(*cst.Comment)),
+				cst.Pos,
+			))
+		}
+	}
 	if o.RLSEnabled {
 		ops = append(ops, safeOp(fmt.Sprintf("ALTER TABLE %s ENABLE ROW LEVEL SECURITY;", qualIdent(o.Schema, o.Name)), o.SrcPos))
 	}
@@ -2394,10 +2403,19 @@ func createIndex(schema, table string, idx *ir.Index, concurrent bool) []pipelin
 	}
 	b.WriteString(";")
 
+	var ops []pipeline.DiffOp
 	if concurrent {
-		return []pipeline.DiffOp{manualOp(b.String(), idx.Pos)}
+		ops = append(ops, manualOp(b.String(), idx.Pos))
+	} else {
+		ops = append(ops, cautionOp(b.String(), idx.Pos))
 	}
-	return []pipeline.DiffOp{cautionOp(b.String(), idx.Pos)}
+	if idx.Comment != nil {
+		ops = append(ops, safeOp(
+			fmt.Sprintf("COMMENT ON INDEX %s IS %s;", qualIdent(schema, idx.Name), quoteLit(*idx.Comment)),
+			idx.Pos,
+		))
+	}
+	return ops
 }
 
 func createPolicy(schema, table string, pol *ir.Policy) []pipeline.DiffOp {
@@ -2429,7 +2447,14 @@ func createPolicy(schema, table string, pol *ir.Policy) []pipeline.DiffOp {
 		b.WriteString(")")
 	}
 	b.WriteString(";")
-	return []pipeline.DiffOp{safeOp(b.String(), pol.Pos)}
+	ops := []pipeline.DiffOp{safeOp(b.String(), pol.Pos)}
+	if pol.Comment != nil {
+		ops = append(ops, safeOp(
+			fmt.Sprintf("COMMENT ON POLICY %s ON %s IS %s;", quoteIdent(pol.Name), tbl, quoteLit(*pol.Comment)),
+			pol.Pos,
+		))
+	}
+	return ops
 }
 
 func createTrigger(schema, table string, trg *ir.Trigger) []pipeline.DiffOp {
@@ -2454,7 +2479,14 @@ func createTrigger(schema, table string, trg *ir.Trigger) []pipeline.DiffOp {
 	b.WriteString("(")
 	b.WriteString(strings.Join(trg.Args, ", "))
 	b.WriteString(");")
-	return []pipeline.DiffOp{safeOp(b.String(), trg.Pos)}
+	ops := []pipeline.DiffOp{safeOp(b.String(), trg.Pos)}
+	if trg.Comment != nil {
+		ops = append(ops, safeOp(
+			fmt.Sprintf("COMMENT ON TRIGGER %s ON %s IS %s;", quoteIdent(trg.Name), qualIdent(schema, table), quoteLit(*trg.Comment)),
+			trg.Pos,
+		))
+	}
+	return ops
 }
 
 func tableGrantOp(g ir.Grant, tblIdent string, pos pipeline.SourcePos) *op {
@@ -4884,9 +4916,31 @@ func diffConstraints(tbl string, o *ir.Table, snap *snapshot.SnapTable, fullSnap
 			pos,
 		))
 	}
+	// commentOp emits (or clears) a COMMENT ON CONSTRAINT for an
+	// already-existing constraint — unnamed constraints can't be targeted
+	// (same limitation already documented above for DROP CONSTRAINT), so sc
+	// carries the real catalog name the way validateConstraintOp's own
+	// sc.Name argument does.
+	commentOp := func(sc *snapshot.SnapConstraint, c *ir.Constraint) []pipeline.DiffOp {
+		if sc.Name == "" || ptrStr(c.Comment) == sc.Comment {
+			return nil
+		}
+		if c.Comment != nil {
+			return []pipeline.DiffOp{safeOp(
+				fmt.Sprintf("COMMENT ON CONSTRAINT %s ON %s IS %s;", quoteIdent(sc.Name), tbl, quoteLit(*c.Comment)),
+				c.Pos,
+			)}
+		}
+		return []pipeline.DiffOp{safeOp(
+			fmt.Sprintf("COMMENT ON CONSTRAINT %s ON %s IS NULL;", quoteIdent(sc.Name), tbl),
+			c.Pos,
+		)}
+	}
+
 	for _, c := range o.Constraints {
 		if sc, exists := snapByKey[key(c.Name, c.Type, c.Expr)]; exists {
 			ops = append(ops, validateConstraintOp(tbl, sc, c)...)
+			ops = append(ops, commentOp(sc, c)...)
 			continue
 		}
 		if c.Name == "" {
@@ -4894,6 +4948,7 @@ func diffConstraints(tbl string, o *ir.Table, snap *snapshot.SnapTable, fullSnap
 				if predicted, predOK := predictName(c, label); predOK {
 					if sc, exists := snapByKey["n:"+predicted]; exists {
 						ops = append(ops, validateConstraintOp(tbl, sc, c)...)
+						ops = append(ops, commentOp(sc, c)...)
 						continue
 					}
 				}
@@ -4911,6 +4966,12 @@ func diffConstraints(tbl string, o *ir.Table, snap *snapshot.SnapTable, fullSnap
 			sql = fmt.Sprintf("ALTER TABLE %s ADD %s%s;", tbl, c.Expr, notValid)
 		}
 		ops = append(ops, cautionOp(sql, c.Pos))
+		if c.Comment != nil && c.Name != "" {
+			ops = append(ops, safeOp(
+				fmt.Sprintf("COMMENT ON CONSTRAINT %s ON %s IS %s;", quoteIdent(c.Name), tbl, quoteLit(*c.Comment)),
+				c.Pos,
+			))
+		}
 	}
 	return ops
 }
@@ -5184,12 +5245,29 @@ func diffViewIndexes(schema, view string, desired []*ir.Index, snapIdx []snapsho
 			ops = append(ops, createIndex(schema, view, idx, idx.Concurrently)...)
 			continue
 		}
-		if snapshot.ToSnapIndex(idx) != *si {
+		// Comment is excluded from the recreate-triggering comparison, same
+		// reasoning as diffIndexes below.
+		desiredSnap := snapshot.ToSnapIndex(idx)
+		definitionDesired, definitionSnap := desiredSnap, *si
+		definitionDesired.Comment, definitionSnap.Comment = "", ""
+		if definitionDesired != definitionSnap {
 			ops = append(ops, cautionOp(
 				fmt.Sprintf("DROP INDEX IF EXISTS %s;", quoteIdent(idx.Name)),
 				idx.Pos,
 			))
 			ops = append(ops, createIndex(schema, view, idx, idx.Concurrently)...)
+		} else if desiredSnap.Comment != si.Comment {
+			if idx.Comment != nil {
+				ops = append(ops, safeOp(
+					fmt.Sprintf("COMMENT ON INDEX %s IS %s;", quoteIdent(idx.Name), quoteLit(*idx.Comment)),
+					idx.Pos,
+				))
+			} else {
+				ops = append(ops, safeOp(
+					fmt.Sprintf("COMMENT ON INDEX %s IS NULL;", quoteIdent(idx.Name)),
+					idx.Pos,
+				))
+			}
 		}
 	}
 	return ops
@@ -5256,12 +5334,33 @@ func diffIndexes(schema, table string, o *ir.Table, snap *snapshot.SnapTable, re
 		translatedSnap.Columns = translateIndexColumnList(si.Columns, renamedCols)
 		translatedSnap.Include = translateIndexColumnList(si.Include, renamedCols)
 		translatedSnap.Where = replaceQuotedIdents(si.Where, renamedCols)
-		if snapshot.ToSnapIndex(idx) != translatedSnap {
+		desiredSnap := snapshot.ToSnapIndex(idx)
+		// Comment is excluded from the recreate-triggering comparison below
+		// (createIndex already emits it on any DROP+CREATE, so it's still
+		// applied when a real definition change happens alongside it) — an
+		// index has no in-place ALTER for its structural definition, but it
+		// does for its comment (COMMENT ON INDEX), so a comment-only edit
+		// must not trigger a destructive rebuild.
+		definitionDesired, definitionSnap := desiredSnap, translatedSnap
+		definitionDesired.Comment, definitionSnap.Comment = "", ""
+		if definitionDesired != definitionSnap {
 			ops = append(ops, cautionOp(
 				fmt.Sprintf("DROP INDEX IF EXISTS %s;", quoteIdent(idx.Name)),
 				idx.Pos,
 			))
 			ops = append(ops, createIndex(schema, table, idx, concurrent)...)
+		} else if desiredSnap.Comment != translatedSnap.Comment {
+			if idx.Comment != nil {
+				ops = append(ops, safeOp(
+					fmt.Sprintf("COMMENT ON INDEX %s IS %s;", quoteIdent(idx.Name), quoteLit(*idx.Comment)),
+					idx.Pos,
+				))
+			} else {
+				ops = append(ops, safeOp(
+					fmt.Sprintf("COMMENT ON INDEX %s IS NULL;", quoteIdent(idx.Name)),
+					idx.Pos,
+				))
+			}
 		}
 	}
 	return ops
@@ -5560,6 +5659,18 @@ func diffPolicies(schema, table string, o *ir.Table, snap *snapshot.SnapTable) [
 				pol.Pos,
 			))
 			ops = append(ops, createPolicy(schema, table, pol)...)
+		} else if ptrStr(pol.Comment) != existing.Comment {
+			if pol.Comment != nil {
+				ops = append(ops, safeOp(
+					fmt.Sprintf("COMMENT ON POLICY %s ON %s IS %s;", quoteIdent(pol.Name), tblIdent, quoteLit(*pol.Comment)),
+					pol.Pos,
+				))
+			} else {
+				ops = append(ops, safeOp(
+					fmt.Sprintf("COMMENT ON POLICY %s ON %s IS NULL;", quoteIdent(pol.Name), tblIdent),
+					pol.Pos,
+				))
+			}
 		}
 	}
 	return ops
@@ -5599,6 +5710,18 @@ func diffTriggers(schema, table string, o *ir.Table, snap *snapshot.SnapTable) [
 				trg.Pos,
 			))
 			ops = append(ops, createTrigger(schema, table, trg)...)
+		} else if ptrStr(trg.Comment) != existing.Comment {
+			if trg.Comment != nil {
+				ops = append(ops, safeOp(
+					fmt.Sprintf("COMMENT ON TRIGGER %s ON %s IS %s;", quoteIdent(trg.Name), tblIdent, quoteLit(*trg.Comment)),
+					trg.Pos,
+				))
+			} else {
+				ops = append(ops, safeOp(
+					fmt.Sprintf("COMMENT ON TRIGGER %s ON %s IS NULL;", quoteIdent(trg.Name), tblIdent),
+					trg.Pos,
+				))
+			}
 		}
 	}
 	return ops

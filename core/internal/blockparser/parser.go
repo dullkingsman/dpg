@@ -226,6 +226,40 @@ func (b *blockParser) expectSemi() error {
 	return nil
 }
 
+// parseTrailingCommentBlock parses an INDICES/POLICIES/TRIGGERS/CONSTRAINTS
+// entry's terminator: a bare ";" (no comment), or a "{ COMMENT '...'; }"
+// block — the same "bare ; vs { } block" convention every other
+// comment-bearing kind already uses (mirrors dump's writeViewBlock/
+// writeFuncBlock rendering), rather than a bespoke trailing clause. None of
+// these four sub-kinds support any block-level directive today, so this is
+// the minimal shared addition rather than one bespoke parser per kind.
+func (b *blockParser) parseTrailingCommentBlock() (*pipeline.StringLit, error) {
+	b.skipWS()
+	if b.peek() == '{' {
+		b.advance() // consume {
+		b.skipWS()
+		dirPos := b.srcPos()
+		word := strings.ToUpper(b.readWord())
+		if word != "COMMENT" {
+			return nil, b.errorf("expected COMMENT inside block, got %q", word)
+		}
+		comment, err := b.parseStringDirective(dirPos)
+		if err != nil {
+			return nil, err
+		}
+		b.skipWS()
+		if b.peek() != '}' {
+			return nil, b.errorf("expected '}' to close block, got %q", b.peek())
+		}
+		b.advance()
+		return comment, nil
+	}
+	if b.peek() == ';' {
+		b.advance()
+	}
+	return nil, nil
+}
+
 // readIdentifier reads a (possibly schema-qualified) identifier.
 func (b *blockParser) readIdentifier() (pipeline.Identifier, error) {
 	b.skipWS()
@@ -920,10 +954,11 @@ func (b *blockParser) parseOneIndex(presetUnique bool) (pipeline.IndexDef, error
 	}
 doneIndexClauses:
 
-	b.skipWS()
-	if b.peek() == ';' {
-		b.advance()
+	comment, err := b.parseTrailingCommentBlock()
+	if err != nil {
+		return idx, err
 	}
+	idx.Comment = comment
 	return idx, nil
 }
 
@@ -1190,8 +1225,10 @@ func (b *blockParser) parseConstraint(pos pipeline.SourcePos) (pipeline.Constrai
 	}
 	cst := pipeline.ConstraintDef{Name: name, Pos: pos}
 
-	// Read everything up to ';' or "NOT VALID;"
-	raw, err := b.readRawUntil(";")
+	// Read everything up to ';', "NOT VALID;", or a trailing "{ COMMENT
+	// '...'; }" block — the brace is a real terminator here, not part of the
+	// expression, so it must stop readRawUntil the same way ';' does.
+	raw, err := b.readRawUntil(";{")
 	if err != nil {
 		return cst, err
 	}
@@ -1203,7 +1240,11 @@ func (b *blockParser) parseConstraint(pos pipeline.SourcePos) (pipeline.Constrai
 		raw = strings.TrimSpace(raw[:len(raw)-len("NOT VALID")])
 	}
 	cst.Expr = pipeline.RawExpr{Text: raw, Pos: pos}
-	b.advance() // consume ;
+	comment, err := b.parseTrailingCommentBlock()
+	if err != nil {
+		return cst, err
+	}
+	cst.Comment = comment
 	return cst, nil
 }
 
@@ -1335,10 +1376,11 @@ func (b *blockParser) parseOnePolicy() (pipeline.PolicyDef, error) {
 		}
 	}
 donePolicy:
-	b.skipWS()
-	if b.peek() == ';' {
-		b.advance()
+	comment, err := b.parseTrailingCommentBlock()
+	if err != nil {
+		return pol, err
 	}
+	pol.Comment = comment
 	return pol, nil
 }
 
@@ -1500,10 +1542,11 @@ func (b *blockParser) parseOneTrigger() (pipeline.TriggerDef, error) {
 		}
 	}
 
-	b.skipWS()
-	if b.peek() == ';' {
-		b.advance()
+	comment, err := b.parseTrailingCommentBlock()
+	if err != nil {
+		return trig, err
 	}
+	trig.Comment = comment
 	return trig, nil
 }
 

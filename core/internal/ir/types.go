@@ -140,6 +140,7 @@ type Index struct {
 	With             []pipeline.StorageParam
 	Tablespace       *string
 	Concurrently     bool
+	Comment          *string
 	Pos              pipeline.SourcePos
 }
 
@@ -188,6 +189,7 @@ type Constraint struct {
 	NotValid          bool
 	Deferrable        bool
 	InitiallyDeferred bool
+	Comment           *string
 	Pos               pipeline.SourcePos
 }
 
@@ -246,6 +248,7 @@ type Policy struct {
 	Using      *string
 	WithCheck  *string
 	Roles      []string
+	Comment    *string
 	Pos        pipeline.SourcePos
 }
 
@@ -258,6 +261,7 @@ type Trigger struct {
 	Condition *string
 	Function  string // qualified function name
 	Args      []string
+	Comment   *string
 	Pos       pipeline.SourcePos
 }
 

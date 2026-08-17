@@ -953,12 +953,16 @@ func mergeTableBlock(tbl *Table, block pipeline.BlockAST) error {
 
 	// Additional constraints from block.
 	for _, cst := range block.Constraints {
-		tbl.Constraints = append(tbl.Constraints, &Constraint{
+		newCst := &Constraint{
 			Name:     cst.Name.Name,
 			Expr:     cst.Expr.Text,
 			NotValid: cst.NotValid,
 			Pos:      cst.Pos,
-		})
+		}
+		if cst.Comment != nil {
+			newCst.Comment = &cst.Comment.Value
+		}
+		tbl.Constraints = append(tbl.Constraints, newCst)
 	}
 
 	// Partitions
@@ -2714,6 +2718,9 @@ func blockIndexToIR(idx pipeline.IndexDef) *Index {
 	if idx.Tablespace != nil {
 		ir.Tablespace = &idx.Tablespace.Name
 	}
+	if idx.Comment != nil {
+		ir.Comment = &idx.Comment.Value
+	}
 	return ir
 }
 
@@ -2733,6 +2740,9 @@ func blockPolicyToIR(pol pipeline.PolicyDef) *Policy {
 	for _, r := range pol.Roles {
 		p.Roles = append(p.Roles, r.String())
 	}
+	if pol.Comment != nil {
+		p.Comment = &pol.Comment.Value
+	}
 	return p
 }
 
@@ -2748,6 +2758,9 @@ func blockTriggerToIR(tr pipeline.TriggerDef) *Trigger {
 	t.Function = tr.Function.String()
 	if tr.Condition != nil {
 		t.Condition = &tr.Condition.Text
+	}
+	if tr.Comment != nil {
+		t.Comment = &tr.Comment.Value
 	}
 	return t
 }

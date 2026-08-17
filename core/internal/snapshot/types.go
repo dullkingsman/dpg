@@ -250,6 +250,7 @@ type SnapConstraint struct {
 	Expr       string `json:"expr,omitempty"`
 	NotValid   bool   `json:"not_valid,omitempty"`
 	Deferrable bool   `json:"deferrable,omitempty"`
+	Comment    string `json:"comment,omitempty"`
 }
 
 // SnapIndex is a flat, fully comparable (string/bool fields only) snapshot of
@@ -266,6 +267,7 @@ type SnapIndex struct {
 	NullsNotDistinct bool   `json:"nulls_not_distinct,omitempty"`
 	With             string `json:"with,omitempty"` // comma-separated key=value storage params
 	Tablespace       string `json:"tablespace,omitempty"`
+	Comment          string `json:"comment,omitempty"`
 }
 
 type SnapPolicy struct {
@@ -274,6 +276,7 @@ type SnapPolicy struct {
 	Permissive bool   `json:"permissive"`
 	Using      string `json:"using,omitempty"`
 	WithCheck  string `json:"with_check,omitempty"`
+	Comment    string `json:"comment,omitempty"`
 }
 
 type SnapTrigger struct {
@@ -282,6 +285,7 @@ type SnapTrigger struct {
 	Events   string `json:"events"` // comma-separated
 	ForEach  string `json:"for_each"`
 	Function string `json:"function"`
+	Comment  string `json:"comment,omitempty"`
 }
 
 type SnapGrant struct {
