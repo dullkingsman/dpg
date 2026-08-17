@@ -276,6 +276,47 @@ func TestSort_CircularNonDeferrableFKErrors(t *testing.T) {
 	}
 }
 
+// TestSort_RangeTypeAutoConstructorNoCycle is the regression guard for RFC
+// audit item C.1: dumping a real RANGE type crashed dpg dump/plan/apply with
+// a goroutine stack overflow. PostgreSQL auto-generates an eponymous
+// constructor function for a RANGE type (LANGUAGE internal, e.g.
+// `range_constructor2`, ReturnType == the range type itself), which
+// introspection captures as an ordinary managed ir.Function. Before this fix,
+// that function got a Function→Type edge (only BASE types were exempted from
+// the usual "function depends on its return type" edge) while the range
+// type's own Body text — which necessarily contains the type's own name —
+// matched bodyCallsFuncEdge's whole-word scan and added a Type→Function edge
+// back, a genuine 2-node cycle with zero Tables in it. canDefer used to
+// default to true for a cycle with no FK-bearing Table at all, so Sort's
+// constraint-stripping recovery removed nothing and recursed on an unchanged
+// object set forever. This reproduces that exact shape end-to-end through
+// the real Sort path (not a canDefer unit test) — before the fix this
+// crashed the process; it must now return without error.
+func TestSort_RangeTypeAutoConstructorNoCycle(t *testing.T) {
+	rangeType := &ir.Type{
+		Schema: "app", Name: "price_range", Variant: "RANGE",
+		Body:   "CREATE TYPE app.price_range AS RANGE (SUBTYPE = numeric)",
+		SrcPos: pos,
+	}
+	ctor := &ir.Function{
+		Schema: "app", Name: "price_range",
+		Args:       []ir.FuncArg{{Type: ir.TypeRef{Name: "numeric"}}, {Type: ir.TypeRef{Name: "numeric"}}},
+		ReturnType: ir.TypeRef{Schema: "app", Name: "price_range"},
+		Attrs:      ir.FuncAttrs{Language: "internal"},
+		SrcPos:     pos,
+	}
+	objects := []pipeline.IRObject{schema("app"), rangeType, ctor}
+
+	r := graph.New()
+	sorted, err := r.Sort(objects)
+	if err != nil {
+		t.Fatalf("Sort returned error for RANGE type + auto-generated constructor: %v", err)
+	}
+	if len(sorted) != 3 {
+		t.Errorf("expected 3 objects, got %d", len(sorted))
+	}
+}
+
 // ── Unknown FK / type targets in managed schemas ───────────────────────────────
 
 func TestSort_UnresolvedFKInManagedSchemaErrors(t *testing.T) {

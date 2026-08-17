@@ -172,8 +172,8 @@ func (r *Resolver) Sort(objects []pipeline.IRObject) ([]pipeline.IRObject, error
 		refEdge(objIdx, schema+"."+t.Name)
 	}
 
-	// isBaseTypeTarget reports whether t resolves to a BASE-variant Type in
-	// the object set — used to skip the usual Function/Procedure→Type
+	// isBaseTypeTarget reports whether t resolves to a BASE- or RANGE-variant
+	// Type in the object set — used to skip the usual Function/Procedure→Type
 	// ordering edge for a LANGUAGE internal/c function specifically.
 	// Confirmed live: CREATE FUNCTION ... RETURNS/  (arg) not_yet_existing_type
 	// AS '...' LANGUAGE internal auto-creates a shell type ("type ... is not
@@ -184,6 +184,19 @@ func (r *Resolver) Sort(objects []pipeline.IRObject) ([]pipeline.IRObject, error
 	// backwards here, and combined with the Type→Function edge added below
 	// (the type's full definition needs those functions first) would form an
 	// unresolvable cycle with no DEFERRABLE escape hatch.
+	//
+	// RANGE needs the identical exemption for a different but analogous
+	// reason: CREATE TYPE ... AS RANGE auto-generates its own eponymous
+	// constructor function(s) (LANGUAGE internal, e.g. `range_constructor2`),
+	// introspected as an ordinary managed ir.Function whose ReturnType is the
+	// range type itself. Without this exemption that function gets a
+	// Function→Type edge, and the range type's own Body text (which contains
+	// the type's — and thus the constructor's — own name) matches
+	// bodyCallsFuncEdge's whole-word scan, adding a Type→Function edge back:
+	// a genuine 2-node cycle with zero Tables in it, which canDefer used to
+	// mishandle (see canDefer's doc comment) — confirmed live, reproduced by
+	// dumping a real RANGE type and hitting a stack-overflowing infinite
+	// Sort recursion (RFC audit item C.1).
 	isBaseTypeTarget := func(t ir.TypeRef, fallbackSchema string) bool {
 		if t.Schema == "pg_catalog" || t.Name == "" {
 			return false
@@ -198,7 +211,7 @@ func (r *Resolver) Sort(objects []pipeline.IRObject) ([]pipeline.IRObject, error
 			return false
 		}
 		ty, ok := objects[j].(*ir.Type)
-		return ok && ty.Variant == "BASE"
+		return ok && (ty.Variant == "BASE" || ty.Variant == "RANGE")
 	}
 
 	// sqlBodyCallsIdent matches whether name appears as a whole-word
@@ -430,10 +443,11 @@ func (r *Resolver) Sort(objects []pipeline.IRObject) ([]pipeline.IRObject, error
 			// Depends on any custom TYPE used in its parameters or return
 			// type, and (for a LANGUAGE sql body) any function/procedure it
 			// calls — see typeRefEdge/bodyCallsFuncEdge above. Skipped for a
-			// LANGUAGE internal/c function's reference to a BASE type — see
-			// isBaseTypeTarget's doc comment; that specific combination is a
-			// forward reference PostgreSQL itself resolves via shell-type
-			// auto-creation, not a real ordering requirement.
+			// LANGUAGE internal/c function's reference to a BASE or RANGE
+			// type — see isBaseTypeTarget's doc comment; that specific
+			// combination is a forward reference PostgreSQL itself resolves
+			// via shell-type auto-creation (BASE) or its own auto-generated
+			// constructor function (RANGE), not a real ordering requirement.
 			isCLike := strings.EqualFold(o.Attrs.Language, "internal") || strings.EqualFold(o.Attrs.Language, "c")
 			for _, arg := range o.Args {
 				if isCLike && isBaseTypeTarget(arg.Type, o.Schema) {
@@ -451,7 +465,7 @@ func (r *Resolver) Sort(objects []pipeline.IRObject) ([]pipeline.IRObject, error
 		case *ir.Procedure:
 			schemaEdge(i, o.Schema)
 			// Same reasoning as *ir.Function above (a procedure has no
-			// return type), including the LANGUAGE internal/c BASE-type
+			// return type), including the LANGUAGE internal/c BASE/RANGE-type
 			// forward-reference exemption.
 			isCLike := strings.EqualFold(o.Attrs.Language, "internal") || strings.EqualFold(o.Attrs.Language, "c")
 			for _, arg := range o.Args {
@@ -625,7 +639,7 @@ func (r *Resolver) Sort(objects []pipeline.IRObject) ([]pipeline.IRObject, error
 	if len(sorted) != n {
 		// There is a cycle. Detect DEFERRABLE FKs that could break the cycle.
 		cycle := findCycle(edges, n)
-		if canDefer(objects, cycle) {
+		if canDefer(objects, cycle, idx) {
 			cycleSet := make(map[int]bool, len(cycle))
 			for _, i := range cycle {
 				cycleSet[i] = true
@@ -635,6 +649,7 @@ func (r *Resolver) Sort(objects []pipeline.IRObject) ([]pipeline.IRObject, error
 			modified := make([]pipeline.IRObject, len(objects))
 			copy(modified, objects)
 
+			removedAny := false
 			for i, obj := range modified {
 				if !cycleSet[i] {
 					continue
@@ -650,6 +665,7 @@ func (r *Resolver) Sort(objects []pipeline.IRObject) ([]pipeline.IRObject, error
 						if ref != "" {
 							if j, ok := idx[ref]; ok && cycleSet[j] {
 								deferred = append(deferred, deferredFK{table: tbl, fk: cst})
+								removedAny = true
 								continue
 							}
 						}
@@ -659,6 +675,21 @@ func (r *Resolver) Sort(objects []pipeline.IRObject) ([]pipeline.IRObject, error
 				tblCopy := *tbl
 				tblCopy.Constraints = keepConstraints
 				modified[i] = &tblCopy
+			}
+
+			// Defense in depth, independent of canDefer's own guarantee: if
+			// nothing was actually removed, recursing would hit this exact
+			// cycle again and recurse forever (see canDefer's doc comment,
+			// RFC audit item C.1's infinite-recursion crash). Fall through to
+			// the ordinary "no DEFERRABLE FK" error instead of retrying an
+			// unmodified object set.
+			if !removedAny {
+				members := make([]string, 0, len(cycle))
+				for _, i := range cycle {
+					members = append(members, objects[i].QualifiedName())
+				}
+				return nil, pipeline.Errorf(pipeline.SourcePos{}, "circular dependency cycle with no DEFERRABLE FK: %s",
+					strings.Join(members, " → "))
 			}
 
 			reResolved, err := (&Resolver{}).Sort(modified)
@@ -791,23 +822,57 @@ func findCycle(edges []map[int]bool, n int) []int {
 	return nil
 }
 
-// canDefer returns true if all FK constraints among cycle members are DEFERRABLE.
-func canDefer(objects []pipeline.IRObject, cycle []int) bool {
+// canDefer returns true only when the cycle is actually closed by at least
+// one DEFERRABLE FOREIGN KEY constraint — i.e. a constraint on a Table
+// member of the cycle whose REFERENCES target (via extractFKRef/idx) is
+// itself another member of the cycle — and every such cycle-closing FK is
+// DEFERRABLE. Mirrors Sort's own constraint-stripping loop's target check so
+// the two stay in agreement about which constraints actually break the
+// cycle.
+//
+// Previously this returned true whenever it found no *non-deferrable* FK
+// among cycle members, which silently defaulted to true for a cycle with no
+// FK-bearing Tables in it at all (e.g. one closed purely by Function/Type
+// ordering edges — see isBaseTypeTarget's RANGE-type doc comment, RFC audit
+// item C.1). Sort's stripping loop then found nothing to remove, recursed
+// with an unchanged object set, hit the identical cycle again, and repeated
+// until the goroutine stack overflowed. Requiring at least one genuine
+// deferrable cycle-closing FK closes that hole; the no-progress guard in
+// Sort's caller is a second, independent line of defense against the same
+// failure mode for any future cause.
+func canDefer(objects []pipeline.IRObject, cycle []int, idx map[string]int) bool {
 	if len(cycle) == 0 {
 		return false
 	}
+	cycleSet := make(map[int]bool, len(cycle))
+	for _, i := range cycle {
+		cycleSet[i] = true
+	}
+	foundDeferrableFK := false
 	for _, i := range cycle {
 		tbl, ok := objects[i].(*ir.Table)
 		if !ok {
 			continue
 		}
 		for _, cst := range tbl.Constraints {
-			if cst.Type == "FOREIGN KEY" && !cst.Deferrable {
+			if cst.Type != "FOREIGN KEY" {
+				continue
+			}
+			ref := extractFKRef(cst.Expr)
+			if ref == "" {
+				continue
+			}
+			j, ok := idx[ref]
+			if !ok || !cycleSet[j] {
+				continue
+			}
+			if !cst.Deferrable {
 				return false
 			}
+			foundDeferrableFK = true
 		}
 	}
-	return true
+	return foundDeferrableFK
 }
 
 // Ensure Resolver implements pipeline.DependencyResolver.
