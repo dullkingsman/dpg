@@ -291,3 +291,33 @@ func TestCluster_ClusterObjectsDirExcludedFromDatabases(t *testing.T) {
 		t.Errorf("Database name: got %q", cl.Databases[0].Name())
 	}
 }
+
+// TestDiscover_DatabaseNamedLikeClusterObjectsDirErrors proves DPG-E004
+// (reserved_name_conflict, documented in the RFC §3.5 but never enforced by
+// the reference implementation): a directory that shares the cluster's
+// reserved objects-dir name but actually declares a [database] section must
+// be rejected with a clear error, not silently discarded as if it were the
+// (empty/nonexistent) objects directory — the same "invisible ghost
+// directory" failure mode as a duplicate database name, just triggered by a
+// name collision with a reserved name instead of another database.
+func TestDiscover_DatabaseNamedLikeClusterObjectsDirErrors(t *testing.T) {
+	root := t.TempDir()
+	writeF := func(rel, content string) {
+		p := filepath.Join(root, rel)
+		_ = os.MkdirAll(filepath.Dir(p), 0o755)
+		_ = os.WriteFile(p, []byte(content), 0o644)
+	}
+	writeF("dpg.toml", "[compiler]\ndefault_drop_behavior = \"restrict\"\n")
+	writeF("c/dpg.toml", "[cluster]\nname = \"c\"\nurl = \"postgres://x\"\n")
+	// "cluster" is the default ClusterObjectsDir, but this one has a real
+	// [database] dpg.toml inside it — a genuine naming conflict.
+	writeF("c/cluster/dpg.toml", "[database]\nname = \"oops\"\n")
+
+	_, err := project.Discover(root)
+	if err == nil {
+		t.Fatal("expected an error for a database directory sharing the cluster objects directory's name")
+	}
+	if !strings.Contains(err.Error(), "cluster") {
+		t.Errorf("expected error to mention the conflicting directory name, got: %v", err)
+	}
+}

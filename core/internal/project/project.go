@@ -235,7 +235,19 @@ func discoverDatabases(clusterDir, reservedDir string) ([]*Database, error) {
 			continue
 		}
 		if entry.Name() == reservedDir {
-			continue // cluster-level objects directory — not a database
+			// Normally this is just the (possibly not-yet-created) cluster
+			// objects directory itself — not a database, silently skip. But
+			// if it actually holds a [database]-declaring dpg.toml, that's a
+			// real naming conflict (RFC §3.5, DPG-E004): the user tried to
+			// declare a database here, and without this check it would be
+			// silently discarded with no error at all, identical in shape to
+			// the duplicate-name bugs fixed alongside this.
+			cfgPath := filepath.Join(clusterDir, entry.Name(), "dpg.toml")
+			if hasDatabaseSection(cfgPath) {
+				return nil, fmt.Errorf("%s: database directory name %q conflicts with the cluster's reserved objects directory name (cluster_objects_dir) — rename one of them",
+					filepath.Join(clusterDir, entry.Name()), entry.Name())
+			}
+			continue
 		}
 		dbDir := filepath.Join(clusterDir, entry.Name())
 		cfgPath := filepath.Join(dbDir, "dpg.toml")
@@ -248,10 +260,30 @@ func discoverDatabases(clusterDir, reservedDir string) ([]*Database, error) {
 		}
 		databases = append(databases, db)
 	}
-	if err := checkDuplicateDatabaseNames(clusterDir, databases); err != nil {
+	if err := checkDuplicateDatabaseNames(databases); err != nil {
 		return nil, err
 	}
 	return databases, nil
+}
+
+// hasDatabaseSection reports whether the dpg.toml at path declares a
+// [database] section — mirroring isRootConfig's line-scan technique above.
+// Used to distinguish a genuine database directory that happens to share
+// the cluster's reserved objects-dir name (a real conflict, DPG-E004) from
+// the ordinary case of that name simply not existing yet or holding
+// non-database content (no dpg.toml at all, matching how a cluster objects
+// directory is actually used per RFC §3.5).
+func hasDatabaseSection(path string) bool {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return false
+	}
+	for line := range strings.SplitSeq(string(data), "\n") {
+		if strings.TrimSpace(line) == "[database]" {
+			return true
+		}
+	}
+	return false
 }
 
 // checkDuplicateDatabaseNames returns an error naming both directories when
@@ -261,13 +293,16 @@ func discoverDatabases(clusterDir, reservedDir string) ([]*Database, error) {
 // (resolveDatabases, cmd/dpg/targets.go, only ever compares within one
 // cluster's own Databases; snapshot/migration paths nest cluster-then-
 // database), so the same database name recurring under a *different*
-// cluster is legitimate and must not be flagged here.
-func checkDuplicateDatabaseNames(clusterDir string, databases []*Database) error {
+// cluster is legitimate and must not be flagged here. No cluster-identifying
+// prefix here: discoverDatabases's only caller, loadCluster, already wraps
+// every error it returns with "cluster %q: %w", so adding one here would
+// just double it up.
+func checkDuplicateDatabaseNames(databases []*Database) error {
 	seen := make(map[string]*Database, len(databases))
 	for _, db := range databases {
 		name := db.Name()
 		if existing, ok := seen[name]; ok {
-			return fmt.Errorf("cluster %s: duplicate database name %q declared in both %s and %s", clusterDir, name, existing.Dir, db.Dir)
+			return fmt.Errorf("duplicate database name %q declared in both %s and %s", name, existing.Dir, db.Dir)
 		}
 		seen[name] = db
 	}
