@@ -5416,6 +5416,106 @@ func TestDiffTriggerAdded(t *testing.T) {
 	}
 }
 
+// TestDiffCreateTriggerEmitsUpdateOfColumns guards RFC audit item #1: the
+// UPDATE OF column list was tokenized and explicitly discarded — a trigger
+// declared to fire only on specific columns actually fired on every column
+// update instead.
+func TestDiffCreateTriggerEmitsUpdateOfColumns(t *testing.T) {
+	d := New()
+	desired := []pipeline.IRObject{
+		&ir.Table{
+			Schema:  "public",
+			Name:    "t",
+			Columns: []*ir.Column{{Name: "id", Type: ir.TypeRef{Name: "bigint"}}},
+			Triggers: []*ir.Trigger{
+				{Name: "trg_a", When: "AFTER", Events: []string{"UPDATE"}, ForEach: "ROW", UpdateOfColumns: []string{"email", "status"}, Function: "trg_touch"},
+			},
+		},
+	}
+	ops, err := d.Diff(desired, &pipeline.Snapshot{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsSQL(ops, `UPDATE OF "email", "status"`) {
+		t.Errorf("expected UPDATE OF \"email\", \"status\" in CREATE TRIGGER, got: %v", sqlList(ops))
+	}
+}
+
+// TestDiffTriggerUpdateOfColumnsChangedDropsAndRecreates guards a changed
+// UPDATE OF column list being detected as a real change (RFC audit item
+// #1) — previously invisible to diffing since the field didn't exist at
+// all.
+func TestDiffTriggerUpdateOfColumnsChangedDropsAndRecreates(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.t", &snapshot.SnapObject{
+		Kind: "table",
+		Table: &snapshot.SnapTable{
+			Schema:  "public",
+			Name:    "t",
+			Columns: []snapshot.SnapColumn{{Name: "id", Type: "bigint"}},
+			Triggers: []snapshot.SnapTrigger{
+				{Name: "trg_a", When: "AFTER", Events: "UPDATE", ForEach: "ROW", UpdateOfColumns: "email", Function: "public.trg_touch"},
+			},
+		},
+	})
+	desired := []pipeline.IRObject{
+		&ir.Table{
+			Schema:  "public",
+			Name:    "t",
+			Columns: []*ir.Column{{Name: "id", Type: ir.TypeRef{Name: "bigint"}}},
+			Triggers: []*ir.Trigger{
+				{Name: "trg_a", When: "AFTER", Events: []string{"UPDATE"}, ForEach: "ROW", UpdateOfColumns: []string{"email", "status"}, Function: "trg_touch"},
+			},
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsSQL(ops, `DROP TRIGGER IF EXISTS "trg_a"`) {
+		t.Errorf("expected DROP TRIGGER for a changed UPDATE OF list, got: %v", sqlList(ops))
+	}
+	if !containsSQL(ops, `UPDATE OF "email", "status"`) {
+		t.Errorf("expected re-CREATE TRIGGER with the new UPDATE OF list, got: %v", sqlList(ops))
+	}
+}
+
+// TestDiffTriggerUpdateOfColumnsUnchangedIsNoop proves an identical
+// UPDATE OF column list doesn't trigger a spurious drop+recreate.
+func TestDiffTriggerUpdateOfColumnsUnchangedIsNoop(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.t", &snapshot.SnapObject{
+		Kind: "table",
+		Table: &snapshot.SnapTable{
+			Schema:  "public",
+			Name:    "t",
+			Columns: []snapshot.SnapColumn{{Name: "id", Type: "bigint"}},
+			Triggers: []snapshot.SnapTrigger{
+				{Name: "trg_a", When: "AFTER", Events: "UPDATE", ForEach: "ROW", UpdateOfColumns: "email, status", Function: "public.trg_touch"},
+			},
+		},
+	})
+	desired := []pipeline.IRObject{
+		&ir.Table{
+			Schema:  "public",
+			Name:    "t",
+			Columns: []*ir.Column{{Name: "id", Type: ir.TypeRef{Name: "bigint"}}},
+			Triggers: []*ir.Trigger{
+				{Name: "trg_a", When: "AFTER", Events: []string{"UPDATE"}, ForEach: "ROW", UpdateOfColumns: []string{"email", "status"}, Function: "trg_touch"},
+			},
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ops) != 0 {
+		t.Errorf("expected no ops for an unchanged UPDATE OF list, got: %v", sqlList(ops))
+	}
+}
+
 func TestDiffTriggerRemoved(t *testing.T) {
 	d := New()
 	snap := &pipeline.Snapshot{}
@@ -6875,6 +6975,76 @@ func TestDiffCreateExtension(t *testing.T) {
 	}
 }
 
+// TestDiffCreateExtensionCascade guards RFC audit item #15: a declared
+// CASCADE must appear in the emitted CREATE EXTENSION statement.
+func TestDiffCreateExtensionCascade(t *testing.T) {
+	d := New()
+	desired := []pipeline.IRObject{
+		&ir.Extension{Name: "pg_trgm", Cascade: true},
+	}
+	ops, err := d.Diff(desired, &pipeline.Snapshot{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsSQL(ops, "CASCADE") {
+		t.Errorf("expected CASCADE in CREATE EXTENSION, got: %v", sqlList(ops))
+	}
+}
+
+// TestDiffExtensionSchemaChangeDropsAndRecreates guards RFC audit item #16:
+// SnapExtension.Schema existed but diffExtension never compared it — a
+// spurious no-op on a genuine SCHEMA change, which the RFC's own diffing
+// table (line 1539) requires to be a DESTRUCTIVE drop + recreate.
+func TestDiffExtensionSchemaChangeDropsAndRecreates(t *testing.T) {
+	d := New()
+	oldSchema, newSchema := "public", "extensions"
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("postgis", &snapshot.SnapObject{
+		Kind:      "extension",
+		Extension: &snapshot.SnapExtension{Name: "postgis", Schema: &oldSchema},
+	})
+	desired := []pipeline.IRObject{
+		&ir.Extension{Name: "postgis", Schema: &newSchema},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsSQL(ops, "DROP EXTENSION IF EXISTS") {
+		t.Errorf("expected DROP EXTENSION for a schema change, got: %v", sqlList(ops))
+	}
+	if !containsSQL(ops, `SCHEMA "extensions"`) {
+		t.Errorf("expected re-CREATE EXTENSION with the new schema, got: %v", sqlList(ops))
+	}
+	dropOp := ops[0]
+	if dropOp.Safety() != pipeline.Destructive {
+		t.Errorf("expected DROP EXTENSION to be Destructive, got %s", dropOp.Safety())
+	}
+}
+
+// TestDiffExtensionSchemaUnspecifiedIsNoop proves the nil-means-unspecified
+// convention: a source that never mentions SCHEMA must not touch an
+// existing extension's schema.
+func TestDiffExtensionSchemaUnspecifiedIsNoop(t *testing.T) {
+	d := New()
+	oldSchema := "public"
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("pgcrypto", &snapshot.SnapObject{
+		Kind:      "extension",
+		Extension: &snapshot.SnapExtension{Name: "pgcrypto", Schema: &oldSchema},
+	})
+	desired := []pipeline.IRObject{
+		&ir.Extension{Name: "pgcrypto"},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ops) != 0 {
+		t.Errorf("expected no ops when SCHEMA unspecified in source, got: %v", sqlList(ops))
+	}
+}
+
 func TestDiffExtensionUnchangedIsNoop(t *testing.T) {
 	d := New()
 	ver := "1.0"
@@ -6995,6 +7165,136 @@ func TestDiffCreateSequence(t *testing.T) {
 	if !containsSQL(ops, "CREATE SEQUENCE IF NOT EXISTS") || !containsSQL(ops, "INCREMENT BY 2") ||
 		!containsSQL(ops, "START WITH 100") || !containsSQL(ops, "CACHE 10") || !containsSQL(ops, "CYCLE") {
 		t.Errorf("expected CREATE SEQUENCE with all params + CYCLE, got: %v", sqlList(ops))
+	}
+}
+
+// TestDiffCreateSequenceAsTypeAndOwnedBy guards RFC audit item #14: AS type
+// and OWNED BY were completely unimplemented — breaking the RFC's own
+// canonical example verbatim.
+func TestDiffCreateSequenceAsTypeAndOwnedBy(t *testing.T) {
+	d := New()
+	owned := "orders.order_number"
+	desired := []pipeline.IRObject{
+		&ir.Sequence{Schema: "public", Name: "order_number_seq", AsType: &ir.TypeRef{Name: "bigint"}, OwnedBy: &owned},
+	}
+	ops, err := d.Diff(desired, &pipeline.Snapshot{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsSQL(ops, "CREATE SEQUENCE IF NOT EXISTS") || !containsSQL(ops, " AS bigint") {
+		t.Errorf("expected CREATE SEQUENCE ... AS bigint, got: %v", sqlList(ops))
+	}
+	if !containsSQL(ops, `OWNED BY "orders"."order_number"`) {
+		t.Errorf("expected OWNED BY orders.order_number, got: %v", sqlList(ops))
+	}
+}
+
+// TestDiffSequenceAsTypeChangedDropsAndRecreates guards the AS-type half of
+// RFC audit item #14: per the RFC's own diffing table, an AS type change is
+// DROP + CREATE, DESTRUCTIVE (not an in-place ALTER, even though real
+// PostgreSQL supports one).
+func TestDiffSequenceAsTypeChangedDropsAndRecreates(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.seq_id", &snapshot.SnapObject{
+		Kind:     "sequence",
+		Sequence: &snapshot.SnapSequence{Schema: "public", Name: "seq_id", AsType: "integer"},
+	})
+	desired := []pipeline.IRObject{
+		&ir.Sequence{Schema: "public", Name: "seq_id", AsType: &ir.TypeRef{Name: "bigint"}},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsSQL(ops, "DROP SEQUENCE IF EXISTS") {
+		t.Errorf("expected DROP SEQUENCE for an AS type change, got: %v", sqlList(ops))
+	}
+	if !containsSQL(ops, " AS bigint") {
+		t.Errorf("expected re-CREATE SEQUENCE with the new AS type, got: %v", sqlList(ops))
+	}
+	dropOp := ops[0]
+	if dropOp.Safety() != pipeline.Destructive {
+		t.Errorf("expected DROP SEQUENCE to be Destructive, got %s", dropOp.Safety())
+	}
+}
+
+// TestDiffSequenceOwnedByChangedIsSafeAlter guards the OWNED BY half of RFC
+// audit item #14: per the RFC's own diffing table, an OWNED BY change is a
+// SAFE ALTER SEQUENCE (not DROP+CREATE — a genuinely separate diff branch
+// from AS type, despite both being new fields on the same object).
+func TestDiffSequenceOwnedByChangedIsSafeAlter(t *testing.T) {
+	d := New()
+	oldOwned := "orders.legacy_number"
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.seq_id", &snapshot.SnapObject{
+		Kind:     "sequence",
+		Sequence: &snapshot.SnapSequence{Schema: "public", Name: "seq_id", OwnedBy: &oldOwned},
+	})
+	newOwned := "orders.order_number"
+	desired := []pipeline.IRObject{
+		&ir.Sequence{Schema: "public", Name: "seq_id", OwnedBy: &newOwned},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if containsSQL(ops, "DROP SEQUENCE") {
+		t.Errorf("OWNED BY change should not DROP+CREATE, got: %v", sqlList(ops))
+	}
+	op := findOpSQL(ops, `OWNED BY "orders"."order_number"`)
+	if op == nil {
+		t.Fatalf("expected ALTER SEQUENCE ... OWNED BY, got: %v", sqlList(ops))
+	}
+	if op.Safety() != pipeline.Safe {
+		t.Errorf("expected OWNED BY change to be Safe, got %s", op.Safety())
+	}
+}
+
+// TestDiffSequenceOwnedByNoneChangedIsSafeAlter proves the explicit "OWNED
+// BY NONE" sentinel round-trips through diffing distinctly from nil
+// (unspecified).
+func TestDiffSequenceOwnedByNoneChangedIsSafeAlter(t *testing.T) {
+	d := New()
+	oldOwned := "orders.order_number"
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.seq_id", &snapshot.SnapObject{
+		Kind:     "sequence",
+		Sequence: &snapshot.SnapSequence{Schema: "public", Name: "seq_id", OwnedBy: &oldOwned},
+	})
+	none := "NONE"
+	desired := []pipeline.IRObject{
+		&ir.Sequence{Schema: "public", Name: "seq_id", OwnedBy: &none},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsSQL(ops, "OWNED BY NONE") {
+		t.Errorf("expected ALTER SEQUENCE ... OWNED BY NONE, got: %v", sqlList(ops))
+	}
+}
+
+// TestDiffSequenceAsTypeOwnedByUnspecifiedIsNoop proves the nil-means-
+// unspecified convention: a source that never mentions AS/OWNED BY must not
+// touch an existing sequence's type or ownership either way.
+func TestDiffSequenceAsTypeOwnedByUnspecifiedIsNoop(t *testing.T) {
+	d := New()
+	owned := "orders.order_number"
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.seq_id", &snapshot.SnapObject{
+		Kind:     "sequence",
+		Sequence: &snapshot.SnapSequence{Schema: "public", Name: "seq_id", AsType: "bigint", OwnedBy: &owned},
+	})
+	desired := []pipeline.IRObject{
+		&ir.Sequence{Schema: "public", Name: "seq_id"},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ops) != 0 {
+		t.Errorf("expected no ops when AS/OWNED BY unspecified in source, got: %v", sqlList(ops))
 	}
 }
 

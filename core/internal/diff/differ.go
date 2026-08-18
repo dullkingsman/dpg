@@ -2390,6 +2390,9 @@ func createExtension(o *ir.Extension) []pipeline.DiffOp {
 		b.WriteString(*o.Version)
 		b.WriteString("'")
 	}
+	if o.Cascade {
+		b.WriteString(" CASCADE")
+	}
 	b.WriteString(";")
 	ops := []pipeline.DiffOp{safeOp(b.String(), o.SrcPos)}
 	if o.Comment != nil {
@@ -2826,7 +2829,7 @@ func createTrigger(schema, table string, trg *ir.Trigger) []pipeline.DiffOp {
 	b.WriteString(" ")
 	b.WriteString(trg.When)
 	b.WriteString(" ")
-	b.WriteString(strings.Join(trg.Events, " OR "))
+	b.WriteString(strings.Join(triggerEventClauses(trg), " OR "))
 	b.WriteString(" ON ")
 	b.WriteString(qualIdent(schema, table))
 	b.WriteString(" FOR EACH ")
@@ -2849,6 +2852,28 @@ func createTrigger(schema, table string, trg *ir.Trigger) []pipeline.DiffOp {
 		))
 	}
 	return ops
+}
+
+// triggerEventClauses renders each of a trigger's events, attaching
+// "OF col1, col2" to the UPDATE event when UpdateOfColumns is set (RFC
+// audit item #1) — real PostgreSQL attaches the OF clause to the UPDATE
+// keyword specifically, even within a combined "INSERT OR UPDATE OF col"
+// event list, not to the trigger as a whole.
+func triggerEventClauses(trg *ir.Trigger) []string {
+	events := make([]string, len(trg.Events))
+	copy(events, trg.Events)
+	if len(trg.UpdateOfColumns) > 0 {
+		cols := make([]string, len(trg.UpdateOfColumns))
+		for i, c := range trg.UpdateOfColumns {
+			cols[i] = quoteIdent(c)
+		}
+		for i, e := range events {
+			if e == "UPDATE" {
+				events[i] = "UPDATE OF " + strings.Join(cols, ", ")
+			}
+		}
+	}
+	return events
 }
 
 func tableGrantOp(g ir.Grant, tblIdent string, pos pipeline.SourcePos) *op {
@@ -3263,6 +3288,14 @@ func createSequence(o *ir.Sequence) []pipeline.DiffOp {
 	var b strings.Builder
 	b.WriteString("CREATE SEQUENCE IF NOT EXISTS ")
 	b.WriteString(ident)
+	if o.AsType != nil {
+		// AS type must come first, right after the sequence name, per real
+		// PostgreSQL's CREATE SEQUENCE grammar — kept out of writeSeqParams
+		// (shared with ALTER SEQUENCE) since a changed AS type is never
+		// altered in place (RFC audit item #14: DROP + CREATE, DESTRUCTIVE),
+		// only ever emitted here at creation time.
+		fmt.Fprintf(&b, " AS %s", o.AsType.String())
+	}
 	writeSeqParams(&b, o)
 	b.WriteString(";")
 	ops := []pipeline.DiffOp{safeOp(b.String(), o.SrcPos)}
@@ -3329,6 +3362,30 @@ func writeSeqParams(b *strings.Builder, o *ir.Sequence) {
 			b.WriteString(" NO CYCLE")
 		}
 	}
+	if o.OwnedBy != nil {
+		// RFC audit item #14: OWNED BY, SAFE per the RFC's diffing table —
+		// unlike AS type, this is a normal ALTER SEQUENCE clause, valid in
+		// both CREATE and ALTER SEQUENCE grammar, so it belongs in the
+		// shared param writer.
+		if *o.OwnedBy == "NONE" {
+			b.WriteString(" OWNED BY NONE")
+		} else {
+			fmt.Fprintf(b, " OWNED BY %s", quoteQualifiedIdent(*o.OwnedBy))
+		}
+	}
+}
+
+// quoteQualifiedIdent quotes each dot-separated part of a qualified
+// identifier independently (e.g. "orders.order_number" ->
+// "\"orders\".\"order_number\"") — used for Sequence.OwnedBy's table.column
+// reference (RFC audit item #14), which the builder stores as plain,
+// unquoted dotted text.
+func quoteQualifiedIdent(s string) string {
+	parts := strings.Split(s, ".")
+	for i, p := range parts {
+		parts[i] = quoteIdent(p)
+	}
+	return strings.Join(parts, ".")
 }
 
 // writeRoleBoolOpt writes " ON" or " OFF" (PostgreSQL's toggle-pair keywords)
@@ -4057,6 +4114,16 @@ func diffProcedure(o *ir.Procedure, snap *snapshot.SnapOpaque) ([]pipeline.DiffO
 
 func diffExtension(o *ir.Extension, snap *snapshot.SnapExtension) []pipeline.DiffOp {
 	pos := o.SrcPos
+	// SCHEMA change (RFC audit item #16): PostgreSQL has no
+	// ALTER EXTENSION ... SET SCHEMA that also moves every object the
+	// extension owns consistently for every extension (some don't support
+	// it at all), so the RFC's own diffing table requires drop + recreate,
+	// DESTRUCTIVE — previously SnapExtension.Schema existed but was never
+	// compared at all, a spurious no-op on a real change.
+	if !ptrEq(o.Schema, snap.Schema) && o.Schema != nil {
+		ops := []pipeline.DiffOp{destructiveOp(fmt.Sprintf("DROP EXTENSION IF EXISTS %s;", quoteIdent(o.Name)), pos)}
+		return append(ops, createExtension(o)...)
+	}
 	var ops []pipeline.DiffOp
 	if !ptrEq(o.Version, snap.Version) && o.Version != nil {
 		ops = append(ops, safeOp(
@@ -4081,18 +4148,32 @@ func diffExtension(o *ir.Extension, snap *snapshot.SnapExtension) []pipeline.Dif
 }
 
 func diffSequence(o *ir.Sequence, snap *snapshot.SnapSequence) []pipeline.DiffOp {
-	var ops []pipeline.DiffOp
 	pos := o.SrcPos
 	ident := qualIdent(o.Schema, o.Name)
 
+	// AS type change (RFC audit item #14): per the RFC's own diffing
+	// table, this is DROP + CREATE, DESTRUCTIVE — PostgreSQL has no
+	// in-place ALTER SEQUENCE ... AS that DPG chose to expose (unlike
+	// OWNED BY below, which real PostgreSQL does support altering in
+	// place). Checked before paramsChanged since it takes over the whole
+	// diff, same shape as diffType's DOMAIN base-type-change branch.
+	if o.AsType != nil && o.AsType.String() != snap.AsType {
+		ops := []pipeline.DiffOp{destructiveOp(fmt.Sprintf("DROP SEQUENCE IF EXISTS %s;", ident), pos)}
+		return append(ops, createSequence(o)...)
+	}
+
+	var ops []pipeline.DiffOp
+
 	// Check if any explicitly-specified sequence params differ from the snapshot.
 	// Only compare params that the user set (non-nil in desired IR).
+	ownedByChanged := o.OwnedBy != nil && !ptrEq(o.OwnedBy, snap.OwnedBy)
 	paramsChanged := (o.IncrementBy != nil && !int64PtrEq(o.IncrementBy, snap.IncrementBy)) ||
 		seqBoundChanged(o.MinValue, o.NoMinValue, snap.MinValue, snap.NoMinValue) ||
 		seqBoundChanged(o.MaxValue, o.NoMaxValue, snap.MaxValue, snap.NoMaxValue) ||
 		(o.StartValue != nil && !int64PtrEq(o.StartValue, snap.StartValue)) ||
 		(o.Cache != nil && !int64PtrEq(o.Cache, snap.Cache)) ||
-		(o.Cycle != nil && *o.Cycle != snap.Cycle)
+		(o.Cycle != nil && *o.Cycle != snap.Cycle) ||
+		ownedByChanged
 	if paramsChanged {
 		var b strings.Builder
 		b.WriteString("ALTER SEQUENCE ")
@@ -6694,6 +6775,7 @@ func diffTriggers(schema, table string, o *ir.Table, snap *snapshot.SnapTable) [
 		} else if trg.When != existing.When ||
 			strings.Join(trg.Events, ", ") != existing.Events ||
 			trg.ForEach != existing.ForEach ||
+			strings.Join(trg.UpdateOfColumns, ", ") != existing.UpdateOfColumns ||
 			qualifyFuncForCompare(trg.Function) != qualifyFuncForCompare(existing.Function) ||
 			foldTriggerPseudoRelNames(normalizeExprForCompare(ptrStr(trg.Condition))) != foldTriggerPseudoRelNames(normalizeExprForCompare(existing.Condition)) {
 			ops = append(ops, cautionOp(

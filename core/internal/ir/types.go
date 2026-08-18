@@ -255,15 +255,23 @@ type Policy struct {
 
 // Trigger is a trigger definition.
 type Trigger struct {
-	Name      string
-	When      string   // "BEFORE", "AFTER", "INSTEAD OF"
-	Events    []string // "INSERT", "UPDATE", "DELETE", "TRUNCATE"
-	ForEach   string   // "ROW", "STATEMENT"
-	Condition *string
-	Function  string // qualified function name
-	Args      []string
-	Comment   *string
-	Pos       pipeline.SourcePos
+	Name    string
+	When    string   // "BEFORE", "AFTER", "INSTEAD OF"
+	Events  []string // "INSERT", "UPDATE", "DELETE", "TRUNCATE"
+	ForEach string   // "ROW", "STATEMENT"
+	// UpdateOfColumns is RFC audit item #1's "UPDATE OF col1, col2, ..."
+	// column list — nil when the UPDATE event has no OF clause (fires on
+	// any column update, PostgreSQL's own default). A trigger scoped to
+	// specific columns is semantically different from an unscoped one:
+	// previously tokenized and explicitly discarded by the blockparser, so
+	// a column-scoped trigger silently fired on every column update
+	// instead of just the declared ones.
+	UpdateOfColumns []string
+	Condition       *string
+	Function        string // qualified function name
+	Args            []string
+	Comment         *string
+	Pos             pipeline.SourcePos
 }
 
 // Grant is a single GRANT directive.
@@ -341,9 +349,15 @@ func (s *Schema) irObject()               {}
 
 // Extension is a CREATE EXTENSION declaration.
 type Extension struct {
-	Name     string
-	Schema   *string
-	Version  *string
+	Name    string
+	Schema  *string
+	Version *string
+	// Cascade is RFC audit item #15's create-time CASCADE flag
+	// (CREATE EXTENSION ... CASCADE, real PostgreSQL grammar) — auto-
+	// installs any extensions this one depends on that aren't already
+	// present. Create-time only; PostgreSQL has no ALTER EXTENSION ...
+	// CASCADE, so it never participates in diffing, only createExtension.
+	Cascade  bool
 	Comment  *string
 	NameMaps []pipeline.NameMapEntry
 	SrcPos   pipeline.SourcePos
@@ -583,7 +597,23 @@ type Sequence struct {
 	// here means "source didn't explicitly write NO MINVALUE/NO MAXVALUE",
 	// not "the sequence has no minimum/maximum".
 	NoMinValue, NoMaxValue bool
-	SrcPos                 pipeline.SourcePos
+	// AsType is RFC audit item #14's "AS type" data-type clause (nil = not
+	// declared, PostgreSQL's own default is bigint) — completely
+	// unimplemented before this: no IR field, no builder handling, silently
+	// discarded on every create/diff. Per the RFC's own diffing table, an
+	// AS type change is DESTRUCTIVE (DROP + CREATE; PostgreSQL has no
+	// ALTER SEQUENCE ... AS that resizes cleanly in place per the RFC's
+	// chosen semantics).
+	AsType *TypeRef
+	// OwnedBy is RFC audit item #14's "OWNED BY table.col" clause — nil
+	// means unspecified (not managed by DPG, matching every other optional
+	// sequence field's convention). The literal string "NONE" represents
+	// an explicit "OWNED BY NONE" declaration (PostgreSQL's own keyword);
+	// any other value holds the qualified "table.column" (or
+	// "schema.table.column") text as written. Per the RFC's diffing table,
+	// an OWNED BY change is SAFE (ALTER SEQUENCE ... OWNED BY ...).
+	OwnedBy *string
+	SrcPos  pipeline.SourcePos
 }
 
 func (s *Sequence) QualifiedName() string   { return qualName(s.Schema, s.Name) }

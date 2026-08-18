@@ -1075,6 +1075,9 @@ func renderObjectDPG(b *strings.Builder, obj pipeline.IRObject, fmtOpts format.O
 		b.WriteString(kw("SEQUENCE"))
 		b.WriteString(" ")
 		b.WriteString(quoteIdentIfNeeded(o.Name))
+		if o.AsType != nil {
+			fmt.Fprintf(b, " %s %s", kw("AS"), o.AsType.String())
+		}
 		if o.IncrementBy != nil {
 			fmt.Fprintf(b, " %s %d", kw("INCREMENT BY"), *o.IncrementBy)
 		}
@@ -1093,6 +1096,13 @@ func renderObjectDPG(b *strings.Builder, obj pipeline.IRObject, fmtOpts format.O
 		if o.Cycle != nil && *o.Cycle {
 			b.WriteString(" ")
 			b.WriteString(kw("CYCLE"))
+		}
+		if o.OwnedBy != nil {
+			if *o.OwnedBy == "NONE" {
+				fmt.Fprintf(b, " %s %s", kw("OWNED BY"), kw("NONE"))
+			} else {
+				fmt.Fprintf(b, " %s %s", kw("OWNED BY"), quoteDottedIdentIfNeeded(*o.OwnedBy))
+			}
 		}
 		if o.Owner != nil || o.Comment != nil || len(o.Grants) > 0 || len(o.Revocations) > 0 || len(o.SecurityLabels) > 0 {
 			b.WriteString(" {\n")
@@ -1752,6 +1762,17 @@ func quoteQualIdentIfNeeded(s string) string {
 	return quoteIdentIfNeeded(schema) + "." + quoteIdentIfNeeded(name)
 }
 
+// quoteDottedIdentIfNeeded is quoteQualIdentIfNeeded generalized to any
+// number of dot-separated parts — used for Sequence.OwnedBy (RFC audit item
+// #14), which can be "table.column" or "schema.table.column".
+func quoteDottedIdentIfNeeded(s string) string {
+	parts := strings.Split(s, ".")
+	for i, p := range parts {
+		parts[i] = quoteIdentIfNeeded(p)
+	}
+	return strings.Join(parts, ".")
+}
+
 // joinIdentsIfNeeded quotes-if-needed and comma-joins a list of identifiers
 // (e.g. a Role's IN ROLE/ROLE/ADMIN membership lists).
 func joinIdentsIfNeeded(names []string) string {
@@ -1950,6 +1971,17 @@ func renderTrigger(b *strings.Builder, trg *ir.Trigger, fmtOpts format.Options) 
 	events := make([]string, len(trg.Events))
 	for i, e := range trg.Events {
 		events[i] = kw(e)
+		// RFC audit item #1: attach "OF col1, col2" to the UPDATE event
+		// specifically, matching real PostgreSQL's own CREATE TRIGGER
+		// clause placement (see triggerEventClauses' identical reasoning
+		// in internal/diff).
+		if e == "UPDATE" && len(trg.UpdateOfColumns) > 0 {
+			cols := make([]string, len(trg.UpdateOfColumns))
+			for j, c := range trg.UpdateOfColumns {
+				cols[j] = quoteIdentIfNeeded(c)
+			}
+			events[i] = kw(e) + " " + kw("OF") + " " + strings.Join(cols, ", ")
+		}
 	}
 	fmt.Fprintf(b, " %s", strings.Join(events, " "+kw("OR")+" "))
 	fmt.Fprintf(b, " %s %s %s", kw("FOR"), kw("EACH"), kw(trg.ForEach))

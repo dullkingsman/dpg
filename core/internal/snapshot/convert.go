@@ -640,11 +640,12 @@ func toSnapPolicy(pol *ir.Policy) SnapPolicy {
 
 func toSnapTrigger(trg *ir.Trigger) SnapTrigger {
 	st := SnapTrigger{
-		Name:     trg.Name,
-		When:     trg.When,
-		Events:   strings.Join(trg.Events, ", "),
-		ForEach:  trg.ForEach,
-		Function: trg.Function,
+		Name:            trg.Name,
+		When:            trg.When,
+		Events:          strings.Join(trg.Events, ", "),
+		ForEach:         trg.ForEach,
+		UpdateOfColumns: strings.Join(trg.UpdateOfColumns, ", "),
+		Function:        trg.Function,
 	}
 	if trg.Condition != nil {
 		st.Condition = *trg.Condition
@@ -776,8 +777,12 @@ func toSnapSequence(o *ir.Sequence) *SnapSequence {
 		StartValue:     o.StartValue,
 		Cache:          o.Cache,
 		Cycle:          o.Cycle != nil && *o.Cycle,
+		OwnedBy:        o.OwnedBy,
 		SecurityLabels: toSnapSecurityLabels(o.SecurityLabels),
 		NameMaps:       toSnapNameMaps(o.NameMaps),
+	}
+	if o.AsType != nil {
+		ss.AsType = o.AsType.String()
 	}
 	for _, g := range o.Grants {
 		ss.Grants = append(ss.Grants, toSnapGrant(g))

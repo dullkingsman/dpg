@@ -1358,6 +1358,31 @@ func TestBuildExtension(t *testing.T) {
 	}
 }
 
+// TestBuildExtensionCascade guards RFC audit item #15: buildExtension never
+// read pg_query's "cascade" DefElem, so a declared CASCADE was silently
+// discarded — breaking the RFC's own canonical example
+// ("EXTENSION pg_trgm CASCADE;") verbatim.
+func TestBuildExtensionCascade(t *testing.T) {
+	obj := buildObject(t, pipeline.KindExtension, `pg_trgm CASCADE`, ``)
+	e, ok := obj.(*ir.Extension)
+	if !ok {
+		t.Fatalf("expected *ir.Extension, got %T", obj)
+	}
+	if !e.Cascade {
+		t.Error("Cascade: got false, want true")
+	}
+}
+
+// TestBuildExtensionCascadeUnspecified proves Cascade stays false when the
+// source doesn't mention CASCADE at all.
+func TestBuildExtensionCascadeUnspecified(t *testing.T) {
+	obj := buildObject(t, pipeline.KindExtension, `pg_trgm`, ``)
+	e := obj.(*ir.Extension)
+	if e.Cascade {
+		t.Error("Cascade: got true, want false")
+	}
+}
+
 // ── Sequence ──────────────────────────────────────────────────────────────────
 
 // TestBuildSequenceCycle is the regression guard for a bug found during a
@@ -1461,6 +1486,46 @@ func TestBuildSequenceAllOptions(t *testing.T) {
 	}
 	if s.Cycle == nil || !*s.Cycle {
 		t.Errorf("Cycle: got %v, want true", s.Cycle)
+	}
+}
+
+// TestBuildSequenceAsTypeAndOwnedBy guards RFC audit item #14: sequence
+// "AS type" and "OWNED BY" were completely unimplemented (no IR field, no
+// builder handling) — breaking the RFC's own canonical example
+// ("SEQUENCE ... AS BIGINT ... OWNED BY orders.order_number;") verbatim.
+func TestBuildSequenceAsTypeAndOwnedBy(t *testing.T) {
+	obj := buildObject(t, pipeline.KindSequence,
+		`order_number_seq AS BIGINT OWNED BY orders.order_number`, ``)
+	s := obj.(*ir.Sequence)
+	if s.AsType == nil || s.AsType.Name != "bigint" {
+		t.Errorf("AsType: got %v, want bigint", s.AsType)
+	}
+	if s.OwnedBy == nil || *s.OwnedBy != "orders.order_number" {
+		t.Errorf("OwnedBy: got %v, want orders.order_number", s.OwnedBy)
+	}
+}
+
+// TestBuildSequenceOwnedByNone proves the explicit "OWNED BY NONE" form
+// parses to the "NONE" sentinel, distinct from OwnedBy being nil
+// (unspecified).
+func TestBuildSequenceOwnedByNone(t *testing.T) {
+	obj := buildObject(t, pipeline.KindSequence, `seq_id OWNED BY NONE`, ``)
+	s := obj.(*ir.Sequence)
+	if s.OwnedBy == nil || *s.OwnedBy != "NONE" {
+		t.Errorf("OwnedBy: got %v, want NONE", s.OwnedBy)
+	}
+}
+
+// TestBuildSequenceAsTypeOwnedByUnspecified proves both fields stay nil
+// when the source doesn't mention AS/OWNED BY at all.
+func TestBuildSequenceAsTypeOwnedByUnspecified(t *testing.T) {
+	obj := buildObject(t, pipeline.KindSequence, `seq_id INCREMENT BY 1`, ``)
+	s := obj.(*ir.Sequence)
+	if s.AsType != nil {
+		t.Errorf("AsType: got %v, want nil", s.AsType)
+	}
+	if s.OwnedBy != nil {
+		t.Errorf("OwnedBy: got %v, want nil", s.OwnedBy)
 	}
 }
 

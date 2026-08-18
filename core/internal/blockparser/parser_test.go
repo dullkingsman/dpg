@@ -1,6 +1,7 @@
 package blockparser_test
 
 import (
+	"slices"
 	"testing"
 
 	"github.com/dullkingsman/dpg/internal/blockparser"
@@ -665,6 +666,68 @@ func TestSimpleTrigger(t *testing.T) {
 	}
 	if tr.Function.Name != "on_insert" {
 		t.Errorf("trigger function: got %q", tr.Function.Name)
+	}
+}
+
+// TestTriggerUpdateOfColumns guards RFC audit item #1: the "UPDATE OF
+// col1, col2, ..." column list was tokenized and explicitly discarded — a
+// trigger declared to fire only on specific columns actually fired on
+// every column update instead, a real semantics divergence.
+func TestTriggerUpdateOfColumns(t *testing.T) {
+	src := `TRIGGERS {
+		after_email_change AFTER UPDATE OF email, status
+			FOR EACH ROW
+			EXECUTE FUNCTION notify_email_change();
+	}`
+	ast := parse(t, src)
+	if len(ast.Triggers) != 1 {
+		t.Fatalf("expected 1 trigger, got %d", len(ast.Triggers))
+	}
+	tr := ast.Triggers[0]
+	if len(tr.Events) != 1 || tr.Events[0] != "UPDATE" {
+		t.Errorf("trigger events: got %v", tr.Events)
+	}
+	if want := []string{"email", "status"}; !slices.Equal(tr.UpdateOfColumns, want) {
+		t.Errorf("UpdateOfColumns: got %v, want %v", tr.UpdateOfColumns, want)
+	}
+}
+
+// TestTriggerUpdateOfColumnsWithOrEvent proves the OF column list doesn't
+// swallow a following "OR <event>" clause.
+func TestTriggerUpdateOfColumnsWithOrEvent(t *testing.T) {
+	src := `TRIGGERS {
+		trg AFTER INSERT OR UPDATE OF email
+			FOR EACH ROW
+			EXECUTE FUNCTION f();
+	}`
+	ast := parse(t, src)
+	if len(ast.Triggers) != 1 {
+		t.Fatalf("expected 1 trigger, got %d", len(ast.Triggers))
+	}
+	tr := ast.Triggers[0]
+	if want := []string{"INSERT", "UPDATE"}; !slices.Equal(tr.Events, want) {
+		t.Errorf("Events: got %v, want %v", tr.Events, want)
+	}
+	if want := []string{"email"}; !slices.Equal(tr.UpdateOfColumns, want) {
+		t.Errorf("UpdateOfColumns: got %v, want %v", tr.UpdateOfColumns, want)
+	}
+}
+
+// TestTriggerUpdateWithoutOfColumns proves UpdateOfColumns stays nil when
+// the source doesn't write an OF clause at all — fires on every column
+// update, PostgreSQL's own default.
+func TestTriggerUpdateWithoutOfColumns(t *testing.T) {
+	src := `TRIGGERS {
+		trg AFTER UPDATE
+			FOR EACH ROW
+			EXECUTE FUNCTION f();
+	}`
+	ast := parse(t, src)
+	if len(ast.Triggers) != 1 {
+		t.Fatalf("expected 1 trigger, got %d", len(ast.Triggers))
+	}
+	if ast.Triggers[0].UpdateOfColumns != nil {
+		t.Errorf("UpdateOfColumns: got %v, want nil", ast.Triggers[0].UpdateOfColumns)
 	}
 }
 

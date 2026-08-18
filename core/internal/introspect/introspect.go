@@ -1301,7 +1301,15 @@ SELECT n.nspname, c.relname,
        p.proname AS func_name,
        pn.nspname AS func_schema,
        pg_get_triggerdef(t.oid, true) AS triggerdef,
-       obj_description(t.oid, 'pg_trigger') AS comment
+       obj_description(t.oid, 'pg_trigger') AS comment,
+       -- RFC audit item #1: pg_trigger.tgattr is the "UPDATE OF col, ..."
+       -- column list as an int2vector of attnums (empty when the trigger
+       -- has no OF clause at all) — unnest WITH ORDINALITY preserves the
+       -- declared column order.
+       (SELECT array_agg(a.attname ORDER BY u.ord)
+          FROM unnest(t.tgattr) WITH ORDINALITY AS u(attnum, ord)
+          JOIN pg_attribute a ON a.attrelid = t.tgrelid AND a.attnum = u.attnum
+       ) AS update_of_columns
 FROM   pg_trigger t
 JOIN   pg_class c     ON c.oid = t.tgrelid
 JOIN   pg_namespace n ON n.oid = c.relnamespace
@@ -1320,7 +1328,8 @@ ORDER  BY n.nspname, c.relname, t.tgname`
 	for rs.Next() {
 		var schema, table, name, when, forEach, events, funcName, funcSchema, triggerDef string
 		var comment *string
-		if err := rs.Scan(&schema, &table, &name, &when, &forEach, &events, &funcName, &funcSchema, &triggerDef, &comment); err != nil {
+		var updateOfColumns []string
+		if err := rs.Scan(&schema, &table, &name, &when, &forEach, &events, &funcName, &funcSchema, &triggerDef, &comment, &updateOfColumns); err != nil {
 			return err
 		}
 		condition := extractTriggerWhenCondition(triggerDef)
@@ -1339,13 +1348,14 @@ ORDER  BY n.nspname, c.relname, t.tgname`
 			}
 		}
 		t.Triggers = append(t.Triggers, &ir.Trigger{
-			Name:      name,
-			When:      when,
-			Events:    cleanEvents,
-			ForEach:   forEach,
-			Function:  fn,
-			Condition: condition,
-			Comment:   comment,
+			Name:            name,
+			When:            when,
+			Events:          cleanEvents,
+			ForEach:         forEach,
+			UpdateOfColumns: updateOfColumns,
+			Function:        fn,
+			Condition:       condition,
+			Comment:         comment,
 		})
 	}
 	return rs.Err()
@@ -2255,7 +2265,8 @@ func introspectSequences(ctx context.Context, conn pipeline.Querier) ([]pipeline
 SELECT n.nspname, c.relname,
        r.rolname AS owner,
        obj_description(c.oid, 'pg_class') AS comment,
-       s.seqincrement, s.seqmin, s.seqmax, s.seqstart, s.seqcache, s.seqcycle
+       s.seqincrement, s.seqmin, s.seqmax, s.seqstart, s.seqcache, s.seqcycle,
+       format_type(s.seqtypid, NULL) AS as_type
 FROM   pg_class c
 JOIN   pg_namespace n  ON n.oid = c.relnamespace
 JOIN   pg_roles r      ON r.oid = c.relowner
@@ -2266,7 +2277,25 @@ AND    NOT EXISTS (
            SELECT 1 FROM pg_depend d
            WHERE  d.classid = 'pg_class'::regclass
            AND    d.objid = c.oid
-           AND    d.deptype IN ('a', 'i', 'e')
+           AND    d.deptype IN ('i', 'e')
+       )
+-- A hand-declared "OWNED BY" sequence (RFC audit item #14) produces the
+-- identical pg_depend deptype='a' row a SERIAL/bigserial column's
+-- auto-generated sequence does — confirmed live, PostgreSQL's catalog
+-- cannot tell the two apart by dependency shape alone. The prior blanket
+-- "any deptype='a' dependency means SERIAL sugar, exclude it" filter
+-- therefore also made every hand-declared OWNED BY sequence invisible to
+-- introspection entirely. introspectColumns' own SERIAL detection already
+-- requires the owning column to ALSO carry a nextval() default
+-- (serialOwned && def != nil) — mirrored here: only exclude when the
+-- owning column has a default at all, the same distinguishing signal.
+AND    NOT EXISTS (
+           SELECT 1 FROM pg_depend d
+           JOIN   pg_attrdef ad ON ad.adrelid = d.refobjid AND ad.adnum = d.refobjsubid
+           WHERE  d.classid = 'pg_class'::regclass
+           AND    d.objid = c.oid
+           AND    d.deptype = 'a'
+           AND    d.refclassid = 'pg_class'::regclass
        )
 ORDER  BY n.nspname, c.relname`
 
@@ -2282,7 +2311,8 @@ ORDER  BY n.nspname, c.relname`
 		var comment *string
 		var increment, min, max, start, cache int64
 		var cycle bool
-		if err := rs.Scan(&schema, &name, &owner, &comment, &increment, &min, &max, &start, &cache, &cycle); err != nil {
+		var asType string
+		if err := rs.Scan(&schema, &name, &owner, &comment, &increment, &min, &max, &start, &cache, &cycle, &asType); err != nil {
 			return nil, err
 		}
 		seq := &ir.Sequence{
@@ -2296,6 +2326,9 @@ ORDER  BY n.nspname, c.relname`
 			StartValue:  &start,
 			Cache:       &cache,
 			Cycle:       &cycle,
+		}
+		if asType != "" {
+			seq.AsType = &ir.TypeRef{Name: asType}
 		}
 		out = append(out, seq)
 	}
@@ -2313,7 +2346,52 @@ ORDER  BY n.nspname, c.relname`
 	if err := introspectSequenceGrants(ctx, conn, seqIdx); err != nil {
 		return nil, err
 	}
+	if err := introspectSequenceOwnedBy(ctx, conn, seqIdx); err != nil {
+		return nil, err
+	}
 	return out, nil
+}
+
+// introspectSequenceOwnedBy populates Sequence.OwnedBy for every sequence in
+// idx by reading the auto-dependency (pg_depend deptype 'a') PostgreSQL
+// itself records for a real OWNED BY relationship (RFC audit item #14) — a
+// sequence with no such dependency has no owner ("NONE"'s live-catalog
+// equivalent; left nil here, matching the general nil-means-unspecified
+// convention, since a bare sequence and one explicitly declared
+// "OWNED BY NONE" are catalog-indistinguishable).
+func introspectSequenceOwnedBy(ctx context.Context, conn pipeline.Querier, idx map[string]*ir.Sequence) error {
+	const q = `
+SELECT sn.nspname, s.relname, tn.nspname, t.relname, a.attname
+FROM   pg_depend d
+JOIN   pg_class s      ON s.oid = d.objid AND s.relkind = 'S'
+JOIN   pg_namespace sn ON sn.oid = s.relnamespace
+JOIN   pg_class t      ON t.oid = d.refobjid
+JOIN   pg_namespace tn ON tn.oid = t.relnamespace
+JOIN   pg_attribute a  ON a.attrelid = t.oid AND a.attnum = d.refobjsubid
+WHERE  d.classid = 'pg_class'::regclass
+AND    d.refclassid = 'pg_class'::regclass
+AND    d.deptype = 'a'
+AND    d.refobjsubid > 0`
+
+	rs, err := conn.QueryRows(ctx, q)
+	if err != nil {
+		return fmt.Errorf("introspect sequence owned-by: %w", err)
+	}
+	defer rs.Close()
+
+	for rs.Next() {
+		var seqSchema, seqName, tblSchema, tblName, colName string
+		if err := rs.Scan(&seqSchema, &seqName, &tblSchema, &tblName, &colName); err != nil {
+			return err
+		}
+		seq, ok := idx[seqSchema+"."+seqName]
+		if !ok {
+			continue
+		}
+		owned := fmt.Sprintf("%s.%s.%s", tblSchema, tblName, colName)
+		seq.OwnedBy = &owned
+	}
+	return rs.Err()
 }
 
 // introspectSequenceGrants populates Sequence.Grants for every sequence in

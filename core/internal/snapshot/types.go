@@ -336,13 +336,17 @@ type SnapPolicy struct {
 }
 
 type SnapTrigger struct {
-	Name      string `json:"name"`
-	When      string `json:"when"`
-	Events    string `json:"events"` // comma-separated
-	ForEach   string `json:"for_each"`
-	Function  string `json:"function"`
-	Condition string `json:"condition,omitempty"`
-	Comment   string `json:"comment,omitempty"`
+	Name    string `json:"name"`
+	When    string `json:"when"`
+	Events  string `json:"events"` // comma-separated
+	ForEach string `json:"for_each"`
+	// UpdateOfColumns is RFC audit item #1's "UPDATE OF col1, col2, ..."
+	// column list, comma-separated — see ir.Trigger.UpdateOfColumns' doc
+	// comment.
+	UpdateOfColumns string `json:"update_of_columns,omitempty"`
+	Function        string `json:"function"`
+	Condition       string `json:"condition,omitempty"`
+	Comment         string `json:"comment,omitempty"`
 }
 
 type SnapGrant struct {
@@ -439,6 +443,13 @@ type SnapSequence struct {
 	StartValue     *int64              `json:"start_value,omitempty"`
 	Cache          *int64              `json:"cache,omitempty"`
 	Cycle          bool                `json:"cycle,omitempty"`
+	// AsType/OwnedBy are RFC audit item #14's structured diffing inputs —
+	// see ir.Sequence.AsType/OwnedBy's doc comments. AsType is "" when
+	// never declared (a real sequence's resolved type is never empty, so
+	// this doubles as the same self-healing "stale snapshot" signal
+	// already used elsewhere, e.g. diffType's DOMAIN branch).
+	AsType         string              `json:"as_type,omitempty"`
+	OwnedBy        *string             `json:"owned_by,omitempty"`
 	SecurityLabels []SnapSecurityLabel `json:"security_labels,omitempty"`
 	NameMaps       []SnapNameMapEntry  `json:"name_maps,omitempty"`
 }

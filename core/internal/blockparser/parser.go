@@ -1508,7 +1508,15 @@ func (b *blockParser) parseOneTrigger() (pipeline.TriggerDef, error) {
 				b.readWord()
 				for {
 					b.skipWS()
-					b.readWord() // column name (discard; stored in Part1 trigger def if needed)
+					// RFC audit item #1: the column list was tokenized and
+					// explicitly discarded here — a trigger declared to
+					// fire only on specific columns actually fired on
+					// every column update instead, a real semantics
+					// divergence, not cosmetic.
+					col := b.readWord()
+					if col != "" {
+						trig.UpdateOfColumns = append(trig.UpdateOfColumns, col)
+					}
 					b.skipWS()
 					if b.peek() != ',' {
 						break

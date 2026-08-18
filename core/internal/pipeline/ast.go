@@ -92,15 +92,20 @@ type PolicyDef struct {
 
 // TriggerDef is a single trigger definition inside a { } block.
 type TriggerDef struct {
-	Name      Identifier
-	When      string   // "BEFORE", "AFTER", "INSTEAD OF"
-	Events    []string // "INSERT", "UPDATE", "DELETE", "TRUNCATE"
-	ForEach   string   // "ROW", "STATEMENT"
-	Condition *RawExpr
-	Function  Identifier
-	Args      []string
-	Comment   *StringLit
-	Pos       SourcePos
+	Name    Identifier
+	When    string   // "BEFORE", "AFTER", "INSTEAD OF"
+	Events  []string // "INSERT", "UPDATE", "DELETE", "TRUNCATE"
+	ForEach string   // "ROW", "STATEMENT"
+	// UpdateOfColumns is the column list from "UPDATE OF col1, col2, ..."
+	// (RFC audit item #1) — nil when the UPDATE event has no OF clause at
+	// all (fires on any column update, PostgreSQL's own default). Only
+	// ever set when Events contains "UPDATE".
+	UpdateOfColumns []string
+	Condition       *RawExpr
+	Function        Identifier
+	Args            []string
+	Comment         *StringLit
+	Pos             SourcePos
 }
 
 // ColumnBlock holds DPG-specific attributes for a single column.

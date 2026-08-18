@@ -1597,6 +1597,10 @@ func (b *Builder) buildExtension(cs *pg_query.CreateExtensionStmt, block pipelin
 					v := sv.Sval
 					e.Version = &v
 				}
+			case "cascade":
+				if b := de.Arg.GetBoolean(); b != nil {
+					e.Cascade = b.GetBoolval()
+				}
 			}
 		}
 	}
@@ -1667,6 +1671,34 @@ func (b *Builder) buildSequence(cs *pg_query.CreateSeqStmt, block pipeline.Block
 				if b := de.Arg.GetBoolean(); b != nil {
 					cyc := b.GetBoolval()
 					s.Cycle = &cyc
+				}
+			}
+		case "as":
+			// RFC audit item #14: AS type, a TypeName arg (not
+			// Integer/A_Const/Boolean like every option above), so
+			// seqOptionInt never handled it either.
+			if tn := de.Arg.GetTypeName(); tn != nil {
+				ref := typeNameToRef(tn)
+				s.AsType = &ref
+			}
+		case "owned_by":
+			// RFC audit item #14: OWNED BY table.col, a List of String
+			// name-part nodes — "none" (lowercase, single item) for the
+			// explicit "OWNED BY NONE" form, otherwise the column's
+			// qualified name parts (table.col, or schema.table.col).
+			if lst := de.Arg.GetList(); lst != nil {
+				parts := make([]string, 0, len(lst.Items))
+				for _, item := range lst.Items {
+					if sv := item.GetString_(); sv != nil {
+						parts = append(parts, sv.Sval)
+					}
+				}
+				if len(parts) == 1 && strings.EqualFold(parts[0], "none") {
+					none := "NONE"
+					s.OwnedBy = &none
+				} else if len(parts) > 0 {
+					owned := strings.Join(parts, ".")
+					s.OwnedBy = &owned
 				}
 			}
 		}
@@ -2968,12 +3000,13 @@ func blockPolicyToIR(pol pipeline.PolicyDef) *Policy {
 
 func blockTriggerToIR(tr pipeline.TriggerDef) *Trigger {
 	t := &Trigger{
-		Name:    tr.Name.Name,
-		When:    tr.When,
-		Events:  tr.Events,
-		ForEach: tr.ForEach,
-		Args:    tr.Args,
-		Pos:     tr.Pos,
+		Name:            tr.Name.Name,
+		When:            tr.When,
+		Events:          tr.Events,
+		ForEach:         tr.ForEach,
+		UpdateOfColumns: tr.UpdateOfColumns,
+		Args:            tr.Args,
+		Pos:             tr.Pos,
 	}
 	t.Function = tr.Function.String()
 	if tr.Condition != nil {
