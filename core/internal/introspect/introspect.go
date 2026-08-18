@@ -1798,7 +1798,83 @@ ORDER  BY n.nspname, t.typname`
 	if err := introspectTypeSecurityLabels(ctx, conn, out); err != nil {
 		return nil, err
 	}
+	if err := introspectTypeGrants(ctx, conn, out); err != nil {
+		return nil, err
+	}
 	return out, nil
+}
+
+// introspectTypeGrants populates Type.Grants for every type in types using
+// aclexplode on pg_type.typacl (RFC audit item #3 — uniform across all 5
+// variants, including DOMAIN: real PostgreSQL grants a domain exactly like
+// any other type, via pg_type.typacl, confirmed live).
+func introspectTypeGrants(ctx context.Context, conn pipeline.Querier, types []pipeline.IRObject) error {
+	idx := make(map[string]*ir.Type, len(types))
+	for _, obj := range types {
+		t := obj.(*ir.Type)
+		idx[t.Schema+"."+t.Name] = t
+	}
+
+	const q = `
+SELECT n.nspname, t.typname,
+       CASE WHEN a.grantee = 0 THEN 'PUBLIC' ELSE pg_get_userbyid(a.grantee) END AS grantee,
+       a.privilege_type, a.is_grantable
+FROM   pg_type t
+JOIN   pg_namespace n ON n.oid = t.typnamespace,
+       LATERAL aclexplode(t.typacl) a
+WHERE  t.typtype IN ('e','c','r','d','b')
+AND    n.nspname NOT IN ('pg_catalog','information_schema','pg_toast')
+ORDER  BY n.nspname, t.typname, grantee, a.privilege_type`
+
+	rs, err := conn.QueryRows(ctx, q)
+	if err != nil {
+		return fmt.Errorf("introspect type grants: %w", err)
+	}
+	defer rs.Close()
+
+	type grantKey struct{ schema, name, grantee string }
+	type grantEntry struct {
+		privs     []string
+		grantable bool
+	}
+	grants := make(map[grantKey]*grantEntry)
+	var order []grantKey
+
+	for rs.Next() {
+		var schema, name, grantee, priv string
+		var grantable bool
+		if err := rs.Scan(&schema, &name, &grantee, &priv, &grantable); err != nil {
+			return err
+		}
+		k := grantKey{schema, name, grantee}
+		e, ok := grants[k]
+		if !ok {
+			e = &grantEntry{}
+			grants[k] = e
+			order = append(order, k)
+		}
+		e.privs = append(e.privs, priv)
+		if grantable {
+			e.grantable = true
+		}
+	}
+	if err := rs.Err(); err != nil {
+		return err
+	}
+
+	for _, k := range order {
+		t, ok := idx[k.schema+"."+k.name]
+		if !ok {
+			continue
+		}
+		e := grants[k]
+		t.Grants = append(t.Grants, ir.Grant{
+			Privileges: e.privs,
+			Roles:      []string{k.grantee},
+			WithGrant:  e.grantable,
+		})
+	}
+	return nil
 }
 
 func introspectCompositeAttrs(ctx context.Context, conn pipeline.Querier, types []pipeline.IRObject) error {
@@ -2229,7 +2305,83 @@ ORDER  BY n.nspname, c.relname`
 	if err := introspectSequenceSecurityLabels(ctx, conn, out); err != nil {
 		return nil, err
 	}
+	seqIdx := make(map[string]*ir.Sequence, len(out))
+	for _, o := range out {
+		seq := o.(*ir.Sequence)
+		seqIdx[seq.Schema+"."+seq.Name] = seq
+	}
+	if err := introspectSequenceGrants(ctx, conn, seqIdx); err != nil {
+		return nil, err
+	}
 	return out, nil
+}
+
+// introspectSequenceGrants populates Sequence.Grants for every sequence in
+// idx using aclexplode on pg_class.relacl, mirroring introspectTableGrants
+// (RFC audit item #24: Sequence.Grants was correctly populated by the
+// builder but never referenced by createSequence/diffSequence, and there was
+// no introspection path for it at all).
+func introspectSequenceGrants(ctx context.Context, conn pipeline.Querier, idx map[string]*ir.Sequence) error {
+	const q = `
+SELECT n.nspname, c.relname,
+       CASE WHEN a.grantee = 0 THEN 'PUBLIC' ELSE pg_get_userbyid(a.grantee) END AS grantee,
+       a.privilege_type, a.is_grantable
+FROM   pg_class c
+JOIN   pg_namespace n ON n.oid = c.relnamespace,
+       LATERAL aclexplode(c.relacl) a
+WHERE  c.relkind = 'S'
+AND    n.nspname NOT IN ('pg_catalog','information_schema','pg_toast')
+ORDER  BY n.nspname, c.relname, grantee, a.privilege_type`
+
+	rs, err := conn.QueryRows(ctx, q)
+	if err != nil {
+		return fmt.Errorf("introspect sequence grants: %w", err)
+	}
+	defer rs.Close()
+
+	type grantKey struct{ schema, name, grantee string }
+	type grantEntry struct {
+		privs     []string
+		grantable bool
+	}
+	grants := make(map[grantKey]*grantEntry)
+	var order []grantKey
+
+	for rs.Next() {
+		var schema, name, grantee, priv string
+		var grantable bool
+		if err := rs.Scan(&schema, &name, &grantee, &priv, &grantable); err != nil {
+			return err
+		}
+		k := grantKey{schema, name, grantee}
+		e, ok := grants[k]
+		if !ok {
+			e = &grantEntry{}
+			grants[k] = e
+			order = append(order, k)
+		}
+		e.privs = append(e.privs, priv)
+		if grantable {
+			e.grantable = true
+		}
+	}
+	if err := rs.Err(); err != nil {
+		return err
+	}
+
+	for _, k := range order {
+		s, ok := idx[k.schema+"."+k.name]
+		if !ok {
+			continue
+		}
+		e := grants[k]
+		s.Grants = append(s.Grants, ir.Grant{
+			Privileges: e.privs,
+			Roles:      []string{k.grantee},
+			WithGrant:  e.grantable,
+		})
+	}
+	return nil
 }
 
 // introspectRoles reads every Role attribute (RFC §11.1) except PASSWORD:

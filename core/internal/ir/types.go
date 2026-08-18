@@ -447,12 +447,20 @@ func (f *Function) irObject()               {}
 
 // Procedure is a CREATE PROCEDURE declaration.
 type Procedure struct {
-	Schema         string
-	Name           string
-	Args           []FuncArg
-	Attrs          FuncAttrs
-	BodyHash       string // SHA-256 of normalised body
-	Comment        *string
+	Schema   string
+	Name     string
+	Args     []FuncArg
+	Attrs    FuncAttrs
+	BodyHash string // SHA-256 of normalised body
+	Comment  *string
+	// Deprecated/RenamedFrom mirror ir.Function's identical func-block
+	// directives (RFC §9.3/9.4 point Function/Procedure/Aggregate at the
+	// same grammar) — RFC audit items #8/#10: Procedure never got them
+	// despite sharing the grammar, so DEPRECATED was silently discarded and
+	// a rename was treated as an unrelated DROP+CREATE instead of
+	// ALTER PROCEDURE ... RENAME TO.
+	Deprecated     *string
+	RenamedFrom    *string
 	Grants         []Grant
 	Revocations    []Revocation
 	SecurityLabels []pipeline.SecurityLabel
@@ -475,8 +483,12 @@ type Aggregate struct {
 	// Options is the same SFUNC/STYPE/INITCOND/... key=value list as Body,
 	// kept structured (and in source order) so dump can reconstruct the DPG
 	// "AGGREGATE name (args) (options)" declaration without re-parsing Body.
-	Options        []pipeline.StorageParam
-	Comment        *string
+	Options []pipeline.StorageParam
+	Comment *string
+	// Deprecated/RenamedFrom — see Procedure's identical fields' doc
+	// comment (RFC audit items #9/#11).
+	Deprecated     *string
+	RenamedFrom    *string
 	Grants         []Grant
 	Revocations    []Revocation
 	SecurityLabels []pipeline.SecurityLabel
@@ -503,7 +515,20 @@ type Type struct {
 	Owner          *string
 	Deprecated     *string
 	MigrateRemove  *pipeline.MigrateRemoveBlock // ENUM only: MIGRATE REMOVE { } block
-	NameMaps       []pipeline.NameMapEntry
+	// Grants/Revocations (RFC audit item #3) apply uniformly across all 5
+	// variants — real PostgreSQL's GRANT/REVOKE has no separate "ON DOMAIN"
+	// target; a domain is granted exactly like any other type, via
+	// "... ON TYPE domain_name ..." (confirmed live). Live-verification
+	// during the audit found ENUM's has_type_privilege() returning true
+	// after a live apply and initially treated that as ENUM-specific
+	// evidence the bug didn't reproduce there — re-traced live: that's
+	// PostgreSQL's own default USAGE-to-PUBLIC grant every type variant
+	// gets on creation (confirmed identically true for ENUM/COMPOSITE/
+	// RANGE/DOMAIN with no DPG involvement at all), not a real difference.
+	// The bug is uniform across all 5 variants.
+	Grants      []Grant
+	Revocations []Revocation
+	NameMaps    []pipeline.NameMapEntry
 	// DomainBaseType/DomainDefault/DomainNotNull/DomainConstraints (DOMAIN
 	// only) are RFC §5.4's structured domain diffing inputs — a domain is
 	// NOT purely opaque like RANGE/BASE despite sharing the Body field, so
@@ -528,11 +553,16 @@ func (t *Type) irObject()               {}
 
 // Sequence is a CREATE SEQUENCE declaration.
 type Sequence struct {
-	Schema         string
-	Name           string
-	Owner          *string
-	Comment        *string
-	Grants         []Grant
+	Schema  string
+	Name    string
+	Owner   *string
+	Comment *string
+	Grants  []Grant
+	// Revocations is RFC §11.3's explicit REVOCATION block support (RFC
+	// audit item #24) — Grants was already populated by the builder, but
+	// neither createSequence/diffSequence ever referenced Grants (a total
+	// silent-discard) and there was no Revocations slot at all.
+	Revocations    []Revocation
 	SecurityLabels []pipeline.SecurityLabel
 	NameMaps       []pipeline.NameMapEntry
 	// Options (nil = use PostgreSQL default for that parameter)
@@ -544,8 +574,16 @@ type Sequence struct {
 	// Cycle is nil when the source didn't write CYCLE or NO CYCLE at all
 	// (unlike the other options above, false is a real, explicit value:
 	// NO CYCLE), so it needs the same nil-means-unspecified treatment.
-	Cycle  *bool
-	SrcPos pipeline.SourcePos
+	Cycle *bool
+	// NoMinValue/NoMaxValue distinguish an explicit "NO MINVALUE"/
+	// "NO MAXVALUE" declaration from "not mentioned at all" (RFC audit item
+	// #20) — pg_query represents both as the identical nil-Arg DefElem
+	// shape, so MinValue/MaxValue alone (nil either way) can't tell them
+	// apart. Same nil-means-unspecified convention as Cycle above: false
+	// here means "source didn't explicitly write NO MINVALUE/NO MAXVALUE",
+	// not "the sequence has no minimum/maximum".
+	NoMinValue, NoMaxValue bool
+	SrcPos                 pipeline.SourcePos
 }
 
 func (s *Sequence) QualifiedName() string   { return qualName(s.Schema, s.Name) }
@@ -605,7 +643,12 @@ type Tablespace struct {
 	// introspector (as opposed to parsed from source). Reconstructed bodies are
 	// canonical but not byte-identical to hand-written source, so the snapshot
 	// omits their body hash to avoid spurious text-diff drift. See sourceBodyHash.
-	Reconstructed  bool
+	Reconstructed bool
+	// Grants/Revocations (RFC audit item #4) — same missing-field shape as
+	// the already-fixed Schema-grants pattern, never generalized to
+	// Tablespace.
+	Grants         []Grant
+	Revocations    []Revocation
 	SecurityLabels []pipeline.SecurityLabel
 	SrcPos         pipeline.SourcePos
 }
@@ -633,7 +676,11 @@ type ForeignDataWrapper struct {
 	Body          string
 	Comment       *string
 	Reconstructed bool // Body rebuilt from the catalog; see Tablespace.Reconstructed
-	SrcPos        pipeline.SourcePos
+	// Grants/Revocations (RFC audit item #5) — see Tablespace.Grants' doc
+	// comment.
+	Grants      []Grant
+	Revocations []Revocation
+	SrcPos      pipeline.SourcePos
 }
 
 func (f *ForeignDataWrapper) QualifiedName() string   { return f.Name }
@@ -658,7 +705,11 @@ type ForeignServer struct {
 	Body          string
 	Comment       *string
 	Reconstructed bool // Body rebuilt from the catalog; see Tablespace.Reconstructed
-	SrcPos        pipeline.SourcePos
+	// Grants/Revocations (RFC audit item #6) — see Tablespace.Grants' doc
+	// comment.
+	Grants      []Grant
+	Revocations []Revocation
+	SrcPos      pipeline.SourcePos
 }
 
 func (f *ForeignServer) QualifiedName() string   { return f.Name }
@@ -706,6 +757,12 @@ type PublicationTableRef struct {
 type Publication struct {
 	Name string
 	Body string
+	// Owner is diffed/emitted independently of Body (ALTER PUBLICATION ...
+	// OWNER TO), same reasoning as Comment below (RFC audit item #7:
+	// Publication had no Owner field at all — real PostgreSQL supports
+	// ALTER PUBLICATION ... OWNER TO, but the RFC's Publication model never
+	// added a corresponding no-syntax-slot).
+	Owner *string
 	// Comment is diffed/emitted independently of Body (COMMENT ON
 	// PUBLICATION), same as every other Comment-bearing opaque kind —
 	// confirmed live via \h COMMENT that real PostgreSQL genuinely supports

@@ -168,7 +168,7 @@ func toSnapObject(obj pipeline.IRObject) *SnapObject {
 	case *ir.Procedure:
 		so := &SnapOpaque{
 			Kind: "procedure", Schema: o.Schema, Name: o.Name,
-			Args: ir.ArgsKey(o.Args), BodyHash: o.BodyHash, Comment: o.Comment,
+			Args: ir.ArgsKey(o.Args), BodyHash: o.BodyHash, Comment: o.Comment, Deprecated: o.Deprecated,
 			NameMaps: toSnapNameMaps(o.NameMaps),
 		}
 		for _, g := range o.Grants {
@@ -182,7 +182,7 @@ func toSnapObject(obj pipeline.IRObject) *SnapObject {
 	case *ir.Aggregate:
 		so := &SnapOpaque{
 			Kind: "aggregate", Schema: o.Schema, Name: o.Name,
-			Args: ir.ArgsKey(o.Args), BodyHash: hashBodyStr(o.Body), Comment: o.Comment,
+			Args: ir.ArgsKey(o.Args), BodyHash: hashBodyStr(o.Body), Comment: o.Comment, Deprecated: o.Deprecated,
 			NameMaps: toSnapNameMaps(o.NameMaps),
 			// Populated unconditionally (both source-parsed and introspected
 			// Aggregates carry a structured Options list) — see
@@ -204,23 +204,44 @@ func toSnapObject(obj pipeline.IRObject) *SnapObject {
 	// source-derived bodies, so offline plan/apply still detect edits while
 	// verify/plan --live (which involve a reconstruction) skip the comparison.
 	case *ir.Tablespace:
-		return &SnapObject{Kind: "tablespace", Opaque: &SnapOpaque{
+		so := &SnapOpaque{
 			Kind: "tablespace", Name: o.Name, TablespaceLocation: o.Location,
 			BodyHash: sourceBodyHash(o.Body, o.Reconstructed), Comment: o.Comment,
 			SecurityLabels: toSnapSecurityLabels(o.SecurityLabels),
-		}}
+		}
+		for _, g := range o.Grants {
+			so.Grants = append(so.Grants, toSnapGrant(g))
+		}
+		for _, r := range o.Revocations {
+			so.Revocations = append(so.Revocations, toSnapRevocation(r))
+		}
+		return &SnapObject{Kind: "tablespace", Opaque: so}
 	case *ir.ForeignDataWrapper:
-		return &SnapObject{Kind: "fdw", Opaque: &SnapOpaque{
+		so := &SnapOpaque{
 			Kind: "fdw", Name: o.Name,
 			OptionsStructured: true, FDWHandler: o.Handler, FDWValidator: o.Validator, FDWOptions: toSnapOptions(o.Options),
 			BodyHash: sourceBodyHash(o.Body, o.Reconstructed), Comment: o.Comment,
-		}}
+		}
+		for _, g := range o.Grants {
+			so.Grants = append(so.Grants, toSnapGrant(g))
+		}
+		for _, r := range o.Revocations {
+			so.Revocations = append(so.Revocations, toSnapRevocation(r))
+		}
+		return &SnapObject{Kind: "fdw", Opaque: so}
 	case *ir.ForeignServer:
-		return &SnapObject{Kind: "server", Opaque: &SnapOpaque{
+		so := &SnapOpaque{
 			Kind: "server", Name: o.Name,
 			OptionsStructured: true, ServerFDWName: o.FDWName, ServerType: o.Type, ServerVersion: o.Version, ServerOptions: toSnapOptions(o.Options),
 			BodyHash: sourceBodyHash(o.Body, o.Reconstructed), Comment: o.Comment,
-		}}
+		}
+		for _, g := range o.Grants {
+			so.Grants = append(so.Grants, toSnapGrant(g))
+		}
+		for _, r := range o.Revocations {
+			so.Revocations = append(so.Revocations, toSnapRevocation(r))
+		}
+		return &SnapObject{Kind: "server", Opaque: so}
 	case *ir.UserMapping:
 		return &SnapObject{Kind: "user_mapping", Opaque: &SnapOpaque{
 			Kind: "user_mapping", Name: o.User + "@" + o.Server,
@@ -238,6 +259,7 @@ func toSnapObject(obj pipeline.IRObject) *SnapObject {
 		}
 		return &SnapObject{Kind: "publication", Opaque: &SnapOpaque{
 			Kind: "publication", Name: o.Name,
+			PublicationOwner:      o.Owner,
 			PublicationStructured: true, PublicationAllTables: o.AllTables, PublicationTables: tables,
 			PublicationInsert: o.Insert, PublicationUpdate: o.Update, PublicationDelete: o.Delete, PublicationTruncate: o.Truncate,
 			PublicationHasFilteredTables: o.HasFilteredTables,
@@ -729,13 +751,19 @@ func toSnapType(o *ir.Type) *SnapType {
 	for _, attr := range o.CompositeAttrs {
 		st.CompositeAttrs = append(st.CompositeAttrs, toSnapColumn(attr))
 	}
+	for _, g := range o.Grants {
+		st.Grants = append(st.Grants, toSnapGrant(g))
+	}
+	for _, r := range o.Revocations {
+		st.Revocations = append(st.Revocations, toSnapRevocation(r))
+	}
 	st.SecurityLabels = toSnapSecurityLabels(o.SecurityLabels)
 	st.NameMaps = toSnapNameMaps(o.NameMaps)
 	return st
 }
 
 func toSnapSequence(o *ir.Sequence) *SnapSequence {
-	return &SnapSequence{
+	ss := &SnapSequence{
 		Schema:         o.Schema,
 		Name:           o.Name,
 		Owner:          o.Owner,
@@ -743,12 +771,21 @@ func toSnapSequence(o *ir.Sequence) *SnapSequence {
 		IncrementBy:    o.IncrementBy,
 		MinValue:       o.MinValue,
 		MaxValue:       o.MaxValue,
+		NoMinValue:     o.NoMinValue,
+		NoMaxValue:     o.NoMaxValue,
 		StartValue:     o.StartValue,
 		Cache:          o.Cache,
 		Cycle:          o.Cycle != nil && *o.Cycle,
 		SecurityLabels: toSnapSecurityLabels(o.SecurityLabels),
 		NameMaps:       toSnapNameMaps(o.NameMaps),
 	}
+	for _, g := range o.Grants {
+		ss.Grants = append(ss.Grants, toSnapGrant(g))
+	}
+	for _, r := range o.Revocations {
+		ss.Revocations = append(ss.Revocations, toSnapRevocation(r))
+	}
+	return ss
 }
 
 func toSnapRole(o *ir.Role) *SnapRole {

@@ -4011,7 +4011,166 @@ func containsSQL(ops []pipeline.DiffOp, substr string) bool {
 	return false
 }
 
-// ── Grant diffing ─────────────────────────────────────────────────────────────
+// findOpSQL returns the DiffOp whose SQL contains substr, or nil.
+func findOpSQL(ops []pipeline.DiffOp, substr string) pipeline.DiffOp {
+	for _, o := range ops {
+		if strings.Contains(o.SQL(), substr) {
+			return o
+		}
+	}
+	return nil
+}
+
+// TestDiffTableGrantRemovedIsCaution guards RFC audit item #25: an implicit
+// revoke (a GRANT simply removed from source) can break another role's
+// dependent access exactly like an explicit REVOCATION does, so it must be
+// classified cautionOp — matching DEFAULT PRIVILEGES's already-correct
+// handling of the identical real-world event, not safeOp like it was before
+// this fix.
+func TestDiffTableGrantRemovedIsCaution(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.orders", &snapshot.SnapObject{
+		Kind: "table",
+		Table: &snapshot.SnapTable{
+			Schema:  "public",
+			Name:    "orders",
+			Columns: []snapshot.SnapColumn{{Name: "id", Type: "bigint"}},
+			Grants:  []snapshot.SnapGrant{{Privileges: []string{"SELECT"}, Roles: []string{"readonly"}}},
+		},
+	})
+	desired := []pipeline.IRObject{
+		&ir.Table{
+			Schema:  "public",
+			Name:    "orders",
+			Columns: []*ir.Column{{Name: "id", Type: ir.TypeRef{Name: "bigint"}}},
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	op := findOpSQL(ops, "REVOKE SELECT ON TABLE")
+	if op == nil {
+		t.Fatalf("expected REVOKE SELECT ON TABLE, got: %v", sqlList(ops))
+	}
+	if op.Safety() != pipeline.Caution {
+		t.Errorf("expected implicit revoke to be Caution, got %s", op.Safety())
+	}
+}
+
+// TestDiffColumnGrantRemovedIsCaution is the column-level counterpart of
+// TestDiffTableGrantRemovedIsCaution (RFC audit item #25).
+func TestDiffColumnGrantRemovedIsCaution(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.orders", &snapshot.SnapObject{
+		Kind: "table",
+		Table: &snapshot.SnapTable{
+			Schema: "public",
+			Name:   "orders",
+			Columns: []snapshot.SnapColumn{
+				{Name: "id", Type: "bigint"},
+				{Name: "email", Type: "text", Grants: []snapshot.SnapGrant{{Privileges: []string{"SELECT"}, Roles: []string{"readonly"}}}},
+			},
+		},
+	})
+	desired := []pipeline.IRObject{
+		&ir.Table{
+			Schema: "public",
+			Name:   "orders",
+			Columns: []*ir.Column{
+				{Name: "id", Type: ir.TypeRef{Name: "bigint"}},
+				{Name: "email", Type: ir.TypeRef{Name: "text"}},
+			},
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	op := findOpSQL(ops, `REVOKE SELECT ("email")`)
+	if op == nil {
+		t.Fatalf("expected column-level REVOKE SELECT, got: %v", sqlList(ops))
+	}
+	if op.Safety() != pipeline.Caution {
+		t.Errorf("expected implicit column-level revoke to be Caution, got %s", op.Safety())
+	}
+}
+
+// TestDiffPolicyRemovedIsCaution guards RFC audit item #26: a dropped RLS
+// policy silently widens row visibility — behavior-changing even though no
+// data is lost — so DROP POLICY must be cautionOp, not safeOp.
+func TestDiffPolicyRemovedIsCaution(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.t", &snapshot.SnapObject{
+		Kind: "table",
+		Table: &snapshot.SnapTable{
+			Schema:  "public",
+			Name:    "t",
+			Columns: []snapshot.SnapColumn{{Name: "id", Type: "bigint"}},
+			Policies: []snapshot.SnapPolicy{
+				{Name: "owner_only", Command: "ALL"},
+			},
+		},
+	})
+	desired := []pipeline.IRObject{
+		&ir.Table{
+			Schema:  "public",
+			Name:    "t",
+			Columns: []*ir.Column{{Name: "id", Type: ir.TypeRef{Name: "bigint"}}},
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	op := findOpSQL(ops, `DROP POLICY IF EXISTS "owner_only"`)
+	if op == nil {
+		t.Fatalf("expected DROP POLICY for removed policy, got: %v", sqlList(ops))
+	}
+	if op.Safety() != pipeline.Caution {
+		t.Errorf("expected DROP POLICY to be Caution, got %s", op.Safety())
+	}
+}
+
+// TestDiffTriggerRemovedIsCaution guards RFC audit item #26: a dropped
+// trigger silently stops enforcing whatever business logic it implemented —
+// so DROP TRIGGER must be cautionOp, not safeOp.
+func TestDiffTriggerRemovedIsCaution(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.t", &snapshot.SnapObject{
+		Kind: "table",
+		Table: &snapshot.SnapTable{
+			Schema:  "public",
+			Name:    "t",
+			Columns: []snapshot.SnapColumn{{Name: "id", Type: "bigint"}},
+			Triggers: []snapshot.SnapTrigger{
+				{Name: "trg_a", When: "AFTER", Events: "INSERT", ForEach: "ROW", Function: "public.trg_touch"},
+			},
+		},
+	})
+	desired := []pipeline.IRObject{
+		&ir.Table{
+			Schema:  "public",
+			Name:    "t",
+			Columns: []*ir.Column{{Name: "id", Type: ir.TypeRef{Name: "bigint"}}},
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	op := findOpSQL(ops, `DROP TRIGGER IF EXISTS "trg_a"`)
+	if op == nil {
+		t.Fatalf("expected DROP TRIGGER for removed trigger, got: %v", sqlList(ops))
+	}
+	if op.Safety() != pipeline.Caution {
+		t.Errorf("expected DROP TRIGGER to be Caution, got %s", op.Safety())
+	}
+}
 
 func TestDiffTableGrantAdded(t *testing.T) {
 	d := New()
@@ -4909,6 +5068,18 @@ func TestDiffColumnStatisticsReset(t *testing.T) {
 
 // ── View structural changes ───────────────────────────────────────────────────
 
+// TestDiffViewRecursiveChangedDropsAndRecretes previously asserted the
+// re-created view's CREATE statement carried a literal "RECURSIVE" keyword
+// — that was the pre-#27-fix behavior, and turned out to be wrong once
+// RFC audit item #27 wired Recursive through for real: pg_query's deparse
+// of an actual RECURSIVE VIEW's query already returns a self-contained
+// "WITH RECURSIVE ..." CTE (confirmed live against postgres:17), so
+// "CREATE RECURSIVE VIEW ... AS WITH RECURSIVE ..." is a genuine PostgreSQL
+// syntax error (SQLSTATE 42601) — this test's hand-built Query
+// ("SELECT id FROM nodes") never had that shape, masking the bug. createView
+// now deliberately omits the RECURSIVE keyword (same reasoning dump's View
+// case already used), relying on Query alone — this test now asserts that
+// corrected contract instead.
 func TestDiffViewRecursiveChangedDropsAndRecretes(t *testing.T) {
 	d := New()
 	snap := &pipeline.Snapshot{}
@@ -4936,8 +5107,11 @@ func TestDiffViewRecursiveChangedDropsAndRecretes(t *testing.T) {
 	if !containsSQL(ops, "DROP VIEW IF EXISTS") {
 		t.Errorf("expected DROP VIEW IF EXISTS, got: %v", sqlList(ops))
 	}
-	if !containsSQL(ops, "RECURSIVE") {
-		t.Errorf("expected RECURSIVE in CREATE VIEW, got: %v", sqlList(ops))
+	if containsSQL(ops, "CREATE RECURSIVE VIEW") {
+		t.Errorf("CREATE RECURSIVE VIEW is a real PostgreSQL syntax error against a self-contained WITH RECURSIVE query text, got: %v", sqlList(ops))
+	}
+	if !containsSQL(ops, "CREATE VIEW") {
+		t.Errorf("expected a plain CREATE VIEW (Query text alone is self-sufficient), got: %v", sqlList(ops))
 	}
 	for _, o := range ops {
 		if o.Safety() == pipeline.Safe && strings.Contains(o.SQL(), "DROP") {
@@ -6903,6 +7077,138 @@ func TestDiffSequenceCycleUnspecifiedIsNoop(t *testing.T) {
 	}
 }
 
+// TestDiffSequenceNoMinValueToggledOnIsDetected is the regression guard for
+// RFC audit item #20: switching an existing bounded sequence to explicit
+// "NO MINVALUE" produced the same nil MinValue as "not mentioned at all",
+// so diffSequence's paramsChanged (gated on o.MinValue != nil) silently
+// ignored the change entirely.
+func TestDiffSequenceNoMinValueToggledOnIsDetected(t *testing.T) {
+	d := New()
+	min := int64(5)
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.seq_id", &snapshot.SnapObject{
+		Kind:     "sequence",
+		Sequence: &snapshot.SnapSequence{Schema: "public", Name: "seq_id", MinValue: &min},
+	})
+	desired := []pipeline.IRObject{
+		&ir.Sequence{Schema: "public", Name: "seq_id", NoMinValue: true},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsSQL(ops, "ALTER SEQUENCE") || !containsSQL(ops, "NO MINVALUE") {
+		t.Errorf("expected ALTER SEQUENCE ... NO MINVALUE, got: %v", sqlList(ops))
+	}
+}
+
+// TestDiffSequenceNoMaxValueToggledOnIsDetected is NoMinValue's MAXVALUE
+// counterpart (RFC audit item #20).
+func TestDiffSequenceNoMaxValueToggledOnIsDetected(t *testing.T) {
+	d := New()
+	max := int64(1000)
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.seq_id", &snapshot.SnapObject{
+		Kind:     "sequence",
+		Sequence: &snapshot.SnapSequence{Schema: "public", Name: "seq_id", MaxValue: &max},
+	})
+	desired := []pipeline.IRObject{
+		&ir.Sequence{Schema: "public", Name: "seq_id", NoMaxValue: true},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsSQL(ops, "ALTER SEQUENCE") || !containsSQL(ops, "NO MAXVALUE") {
+		t.Errorf("expected ALTER SEQUENCE ... NO MAXVALUE, got: %v", sqlList(ops))
+	}
+}
+
+// TestDiffSequenceMinValueUnspecifiedIsNoop proves the nil-means-unspecified
+// semantics extend to NoMinValue/NoMaxValue: a sequence source that never
+// mentions MINVALUE/MAXVALUE/NO MINVALUE/NO MAXVALUE must not touch an
+// existing sequence's bounds either way.
+func TestDiffSequenceMinValueUnspecifiedIsNoop(t *testing.T) {
+	d := New()
+	min := int64(5)
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.seq_id", &snapshot.SnapObject{
+		Kind:     "sequence",
+		Sequence: &snapshot.SnapSequence{Schema: "public", Name: "seq_id", MinValue: &min},
+	})
+	desired := []pipeline.IRObject{
+		&ir.Sequence{Schema: "public", Name: "seq_id"},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ops) != 0 {
+		t.Errorf("expected no ops when MINVALUE unspecified in source, got: %v", sqlList(ops))
+	}
+}
+
+// TestDiffCreateSequenceEmitsGrant and TestDiffSequenceGrantAdded/Removed are
+// the regression guard for RFC audit item #24: ir.Sequence.Grants was
+// correctly populated by the builder, but neither createSequence nor
+// diffSequence ever referenced it — no GRANT SQL on create, no diff/ALTER on
+// update — and SnapSequence had no Grants field at all, so it couldn't even
+// round-trip through the snapshot.
+func TestDiffCreateSequenceEmitsGrant(t *testing.T) {
+	d := New()
+	desired := []pipeline.IRObject{
+		&ir.Sequence{Schema: "public", Name: "seq_id", Grants: []ir.Grant{{Privileges: []string{"USAGE"}, Roles: []string{"app_readonly"}}}},
+	}
+	ops, err := d.Diff(desired, &pipeline.Snapshot{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsSQL(ops, `GRANT USAGE ON SEQUENCE "public"."seq_id" TO "app_readonly"`) {
+		t.Errorf("expected GRANT USAGE ON SEQUENCE, got: %v", sqlList(ops))
+	}
+}
+
+func TestDiffSequenceGrantAdded(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.seq_id", &snapshot.SnapObject{
+		Kind:     "sequence",
+		Sequence: &snapshot.SnapSequence{Schema: "public", Name: "seq_id"},
+	})
+	desired := []pipeline.IRObject{
+		&ir.Sequence{Schema: "public", Name: "seq_id", Grants: []ir.Grant{{Privileges: []string{"USAGE"}, Roles: []string{"app_readonly"}}}},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsSQL(ops, `GRANT USAGE ON SEQUENCE "public"."seq_id" TO "app_readonly"`) {
+		t.Errorf("expected GRANT USAGE ON SEQUENCE, got: %v", sqlList(ops))
+	}
+}
+
+func TestDiffSequenceGrantRemoved(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.seq_id", &snapshot.SnapObject{
+		Kind: "sequence",
+		Sequence: &snapshot.SnapSequence{
+			Schema: "public", Name: "seq_id",
+			Grants: []snapshot.SnapGrant{{Privileges: []string{"USAGE"}, Roles: []string{"app_readonly"}}},
+		},
+	})
+	desired := []pipeline.IRObject{
+		&ir.Sequence{Schema: "public", Name: "seq_id"},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsSQL(ops, `REVOKE USAGE ON SEQUENCE "public"."seq_id" FROM "app_readonly"`) {
+		t.Errorf("expected REVOKE USAGE ON SEQUENCE, got: %v", sqlList(ops))
+	}
+}
+
 func TestDiffSequenceUnchangedIsNoop(t *testing.T) {
 	d := New()
 	snap := &pipeline.Snapshot{}
@@ -7880,6 +8186,52 @@ func TestCreatePublicationEmitsCommentAfterCreate(t *testing.T) {
 	want := `COMMENT ON PUBLICATION "order_changes" IS 'large order inserts';`
 	if ops[1].SQL() != want {
 		t.Errorf("got %q, want %q", ops[1].SQL(), want)
+	}
+}
+
+// TestCreatePublicationEmitsOwner and TestDiffPublicationOwnerChanged guard
+// RFC audit item #7: Publication had no Owner field at all.
+func TestCreatePublicationEmitsOwner(t *testing.T) {
+	d := New()
+	owner := "app_admin"
+	desired := []pipeline.IRObject{
+		&ir.Publication{
+			Name:  "order_changes",
+			Body:  "CREATE PUBLICATION order_changes FOR ALL TABLES",
+			Owner: &owner,
+		},
+	}
+	ops, err := d.Diff(desired, &pipeline.Snapshot{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsSQL(ops, `ALTER PUBLICATION "order_changes" OWNER TO "app_admin";`) {
+		t.Errorf("expected ALTER PUBLICATION ... OWNER TO, got: %v", sqlList(ops))
+	}
+}
+
+func TestDiffPublicationOwnerChanged(t *testing.T) {
+	d := New()
+	oldOwner := "app_admin"
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("p", &snapshot.SnapObject{
+		Kind: "publication",
+		Opaque: &snapshot.SnapOpaque{
+			Kind: "publication", Name: "p", PublicationStructured: true, PublicationAllTables: true,
+			PublicationInsert: true, PublicationUpdate: true, PublicationDelete: true, PublicationTruncate: true,
+			PublicationOwner: &oldOwner,
+		},
+	})
+	newOwner := "app_readonly"
+	desired := []pipeline.IRObject{
+		&ir.Publication{Name: "p", AllTables: true, Insert: true, Update: true, Delete: true, Truncate: true, Body: "CREATE PUBLICATION p FOR ALL TABLES", Owner: &newOwner},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsSQL(ops, `ALTER PUBLICATION "p" OWNER TO "app_readonly";`) {
+		t.Errorf("expected ALTER PUBLICATION ... OWNER TO, got: %v", sqlList(ops))
 	}
 }
 
@@ -9484,6 +9836,122 @@ func TestDiffProcedureUnchangedIsNoop(t *testing.T) {
 	}
 }
 
+// TestDiffCreateProcedureEmitsDeprecatedComment guards RFC audit item #8:
+// PROCEDURE { DEPRECATED '...'; } was silently discarded (no field at all)
+// — mirrors Function's existing effectiveComment merge into COMMENT ON.
+func TestDiffCreateProcedureEmitsDeprecatedComment(t *testing.T) {
+	d := New()
+	dep := "use recalc_totals_v2 instead"
+	desired := []pipeline.IRObject{
+		&ir.Procedure{
+			Schema: "public", Name: "recalc_totals",
+			Args:       []ir.FuncArg{{Type: ir.TypeRef{Name: "integer"}}},
+			Attrs:      ir.FuncAttrs{Language: "plpgsql", Body: "BEGIN NULL; END;"},
+			Deprecated: &dep,
+		},
+	}
+	ops, err := d.Diff(desired, &pipeline.Snapshot{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsSQL(ops, "[DEPRECATED] use recalc_totals_v2 instead") {
+		t.Errorf("expected COMMENT with [DEPRECATED] marker, got: %v", sqlList(ops))
+	}
+}
+
+// TestDiffProcedureRenamedFromEmitsAlterRename guards RFC audit item #10: a
+// procedure rename was treated as an unrelated DROP+CREATE instead of
+// ALTER PROCEDURE ... RENAME TO.
+func TestDiffProcedureRenamedFromEmitsAlterRename(t *testing.T) {
+	d := New()
+	body := "BEGIN NULL; END;"
+	hash := ir.HashBody(body)
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.recalc_totals_old(integer)", &snapshot.SnapObject{
+		Kind: "procedure",
+		Opaque: &snapshot.SnapOpaque{
+			Kind: "procedure", Schema: "public", Name: "recalc_totals_old", Args: "integer", BodyHash: hash,
+		},
+	})
+	old := "recalc_totals_old"
+	desired := []pipeline.IRObject{
+		&ir.Procedure{
+			Schema: "public", Name: "recalc_totals",
+			Args:        []ir.FuncArg{{Type: ir.TypeRef{Name: "integer"}}},
+			Attrs:       ir.FuncAttrs{Language: "plpgsql", Body: body},
+			BodyHash:    hash,
+			RenamedFrom: &old,
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsSQL(ops, `ALTER PROCEDURE "public"."recalc_totals_old"(integer) RENAME TO "recalc_totals";`) {
+		t.Errorf("expected ALTER PROCEDURE ... RENAME TO, got: %v", sqlList(ops))
+	}
+	if containsSQL(ops, "DROP PROCEDURE") {
+		t.Errorf("rename should not DROP+CREATE, got: %v", sqlList(ops))
+	}
+}
+
+// TestDiffCreateAggregateEmitsDeprecatedComment and
+// TestDiffAggregateRenamedFromEmitsAlterRename are the AGGREGATE
+// counterparts (RFC audit items #9/#11).
+func TestDiffCreateAggregateEmitsDeprecatedComment(t *testing.T) {
+	d := New()
+	dep := "use amount_sum_v2 instead"
+	desired := []pipeline.IRObject{
+		&ir.Aggregate{
+			Schema: "public", Name: "amount_sum",
+			Args:       []ir.FuncArg{{Type: ir.TypeRef{Name: "numeric"}}},
+			Body:       "CREATE AGGREGATE public.amount_sum (numeric) (SFUNC = numeric_add, STYPE = numeric)",
+			Deprecated: &dep,
+		},
+	}
+	ops, err := d.Diff(desired, &pipeline.Snapshot{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsSQL(ops, "[DEPRECATED] use amount_sum_v2 instead") {
+		t.Errorf("expected COMMENT with [DEPRECATED] marker, got: %v", sqlList(ops))
+	}
+}
+
+func TestDiffAggregateRenamedFromEmitsAlterRename(t *testing.T) {
+	d := New()
+	options := []pipeline.StorageParam{{Key: "SFUNC", Value: "numeric_add"}, {Key: "STYPE", Value: "numeric"}}
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.amount_sum_old(numeric)", &snapshot.SnapObject{
+		Kind: "aggregate",
+		Opaque: &snapshot.SnapOpaque{
+			Kind: "aggregate", Schema: "public", Name: "amount_sum_old", Args: "numeric",
+			AggregateOptionsStructured: true,
+			AggregateOptions:           toComparableOptions(options, false),
+		},
+	})
+	old := "amount_sum_old"
+	desired := []pipeline.IRObject{
+		&ir.Aggregate{
+			Schema: "public", Name: "amount_sum",
+			Args:        []ir.FuncArg{{Type: ir.TypeRef{Name: "numeric"}}},
+			Body:        "CREATE AGGREGATE public.amount_sum (numeric) (SFUNC = numeric_add, STYPE = numeric)",
+			Options:     options,
+			RenamedFrom: &old,
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsSQL(ops, `ALTER AGGREGATE "public"."amount_sum_old"(numeric) RENAME TO "amount_sum";`) {
+		t.Errorf("expected ALTER AGGREGATE ... RENAME TO, got: %v", sqlList(ops))
+	}
+	if containsSQL(ops, "DROP AGGREGATE") {
+		t.Errorf("rename should not DROP+CREATE, got: %v", sqlList(ops))
+	}
+}
+
 // TestDiffProcedureBodyChangedUsesCreateOrReplace proves a changed procedure
 // body is re-emitted via CREATE OR REPLACE (unlike aggregates/other opaque
 // kinds, which need a DROP first) — PostgreSQL supports CREATE OR REPLACE
@@ -10085,6 +10553,118 @@ func TestDiffCreateDomainEmitsFullDefinition(t *testing.T) {
 	}
 }
 
+// TestDiffCreateEnumEmitsGrant and TestDiffEnumGrantAdded/Removed guard RFC
+// audit item #3 for ENUM specifically; TestDiffCreateDomainEmitsGrant and
+// TestDiffDomainGrantAdded cover DOMAIN, whose diff path is structurally
+// distinct (buildDomainSQL + property-level diffing, not a hash/opaque
+// compare) — both needed their own coverage, not just one variant standing
+// in for all 5. Real PostgreSQL's GRANT/REVOKE has no separate "ON DOMAIN"
+// target (confirmed live): a domain is granted exactly like any other type,
+// "GRANT ... ON TYPE domain_name ...".
+func TestDiffCreateEnumEmitsGrant(t *testing.T) {
+	d := New()
+	desired := []pipeline.IRObject{
+		&ir.Type{
+			Schema: "public", Name: "status", Variant: "ENUM",
+			EnumValues: []string{"active", "inactive"},
+			Grants:     []ir.Grant{{Privileges: []string{"USAGE"}, Roles: []string{"app_service"}}},
+		},
+	}
+	ops, err := d.Diff(desired, &pipeline.Snapshot{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsSQL(ops, `GRANT USAGE ON TYPE "public"."status" TO "app_service"`) {
+		t.Errorf("expected GRANT USAGE ON TYPE, got: %v", sqlList(ops))
+	}
+}
+
+func TestDiffEnumGrantAdded(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.status", &snapshot.SnapObject{
+		Kind: "type",
+		Type: &snapshot.SnapType{Schema: "public", Name: "status", Variant: "ENUM", Values: []string{"active", "inactive"}},
+	})
+	desired := []pipeline.IRObject{
+		&ir.Type{
+			Schema: "public", Name: "status", Variant: "ENUM",
+			EnumValues: []string{"active", "inactive"},
+			Grants:     []ir.Grant{{Privileges: []string{"USAGE"}, Roles: []string{"app_service"}}},
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsSQL(ops, `GRANT USAGE ON TYPE "public"."status" TO "app_service"`) {
+		t.Errorf("expected GRANT USAGE ON TYPE, got: %v", sqlList(ops))
+	}
+}
+
+func TestDiffEnumGrantRemoved(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.status", &snapshot.SnapObject{
+		Kind: "type",
+		Type: &snapshot.SnapType{
+			Schema: "public", Name: "status", Variant: "ENUM", Values: []string{"active", "inactive"},
+			Grants: []snapshot.SnapGrant{{Privileges: []string{"USAGE"}, Roles: []string{"app_service"}}},
+		},
+	})
+	desired := []pipeline.IRObject{
+		&ir.Type{Schema: "public", Name: "status", Variant: "ENUM", EnumValues: []string{"active", "inactive"}},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsSQL(ops, `REVOKE USAGE ON TYPE "public"."status" FROM "app_service"`) {
+		t.Errorf("expected REVOKE USAGE ON TYPE, got: %v", sqlList(ops))
+	}
+}
+
+func TestDiffCreateDomainEmitsGrant(t *testing.T) {
+	d := New()
+	desired := []pipeline.IRObject{
+		&ir.Type{
+			Schema: "public", Name: "positive_integer", Variant: "DOMAIN",
+			DomainBaseType: ir.TypeRef{Name: "integer"},
+			Grants:         []ir.Grant{{Privileges: []string{"USAGE"}, Roles: []string{"app_service"}}},
+		},
+	}
+	ops, err := d.Diff(desired, &pipeline.Snapshot{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsSQL(ops, `GRANT USAGE ON TYPE "public"."positive_integer" TO "app_service"`) {
+		t.Errorf("expected GRANT USAGE ON TYPE for domain, got: %v", sqlList(ops))
+	}
+}
+
+func TestDiffDomainGrantAdded(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.positive_integer", &snapshot.SnapObject{
+		Kind: "type",
+		Type: &snapshot.SnapType{Schema: "public", Name: "positive_integer", Variant: "DOMAIN", DomainBaseType: "integer"},
+	})
+	desired := []pipeline.IRObject{
+		&ir.Type{
+			Schema: "public", Name: "positive_integer", Variant: "DOMAIN",
+			DomainBaseType: ir.TypeRef{Name: "integer"},
+			Grants:         []ir.Grant{{Privileges: []string{"USAGE"}, Roles: []string{"app_service"}}},
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsSQL(ops, `GRANT USAGE ON TYPE "public"."positive_integer" TO "app_service"`) {
+		t.Errorf("expected GRANT USAGE ON TYPE for domain, got: %v", sqlList(ops))
+	}
+}
+
 func TestDiffDomainDefaultAddedIsSafe(t *testing.T) {
 	d := New()
 	snap := &pipeline.Snapshot{}
@@ -10444,6 +11024,69 @@ func TestDiffTablespaceUnchangedIsNoop(t *testing.T) {
 	}
 }
 
+// TestDiffCreateTablespaceEmitsGrant and TestDiffTablespaceGrantAdded/Removed
+// guard RFC audit item #4 (ir.Tablespace had no Grants/Revocations field).
+func TestDiffCreateTablespaceEmitsGrant(t *testing.T) {
+	d := New()
+	desired := []pipeline.IRObject{
+		&ir.Tablespace{
+			Name: "ts", Location: "/data/ts1", Body: "CREATE TABLESPACE ts LOCATION '/data/ts1'",
+			Grants: []ir.Grant{{Privileges: []string{"CREATE"}, Roles: []string{"app_service"}}},
+		},
+	}
+	ops, err := d.Diff(desired, &pipeline.Snapshot{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsSQL(ops, `GRANT CREATE ON TABLESPACE "ts" TO "app_service"`) {
+		t.Errorf("expected GRANT CREATE ON TABLESPACE, got: %v", sqlList(ops))
+	}
+}
+
+func TestDiffTablespaceGrantAdded(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("ts", &snapshot.SnapObject{
+		Kind:   "tablespace",
+		Opaque: &snapshot.SnapOpaque{Kind: "tablespace", Name: "ts", TablespaceLocation: "/data/ts1"},
+	})
+	desired := []pipeline.IRObject{
+		&ir.Tablespace{
+			Name: "ts", Location: "/data/ts1", Body: "CREATE TABLESPACE ts LOCATION '/data/ts1'",
+			Grants: []ir.Grant{{Privileges: []string{"CREATE"}, Roles: []string{"app_service"}}},
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsSQL(ops, `GRANT CREATE ON TABLESPACE "ts" TO "app_service"`) {
+		t.Errorf("expected GRANT CREATE ON TABLESPACE, got: %v", sqlList(ops))
+	}
+}
+
+func TestDiffTablespaceGrantRemoved(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("ts", &snapshot.SnapObject{
+		Kind: "tablespace",
+		Opaque: &snapshot.SnapOpaque{
+			Kind: "tablespace", Name: "ts", TablespaceLocation: "/data/ts1",
+			Grants: []snapshot.SnapGrant{{Privileges: []string{"CREATE"}, Roles: []string{"app_service"}}},
+		},
+	})
+	desired := []pipeline.IRObject{
+		&ir.Tablespace{Name: "ts", Location: "/data/ts1", Body: "CREATE TABLESPACE ts LOCATION '/data/ts1'"},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsSQL(ops, `REVOKE CREATE ON TABLESPACE "ts" FROM "app_service"`) {
+		t.Errorf("expected REVOKE CREATE ON TABLESPACE, got: %v", sqlList(ops))
+	}
+}
+
 // TestDiffTablespaceStaleSnapshotDoesNotRecreate is the G-live counterpart to
 // TestDiffDomainStaleSnapshotDoesNotRecreate: a snapshot written before
 // TablespaceLocation existed has the Go zero value "" even though the
@@ -10710,6 +11353,47 @@ func TestDiffFDWUnchangedIsNoop(t *testing.T) {
 	}
 }
 
+// TestDiffCreateFDWEmitsGrant and TestDiffFDWGrantAdded guard RFC audit item
+// #5 (ir.ForeignDataWrapper had no Grants/Revocations field).
+func TestDiffCreateFDWEmitsGrant(t *testing.T) {
+	d := New()
+	desired := []pipeline.IRObject{
+		&ir.ForeignDataWrapper{
+			Name: "myfdw", Body: "CREATE FOREIGN DATA WRAPPER myfdw",
+			Grants: []ir.Grant{{Privileges: []string{"USAGE"}, Roles: []string{"app_service"}}},
+		},
+	}
+	ops, err := d.Diff(desired, &pipeline.Snapshot{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsSQL(ops, `GRANT USAGE ON FOREIGN DATA WRAPPER "myfdw" TO "app_service"`) {
+		t.Errorf("expected GRANT USAGE ON FOREIGN DATA WRAPPER, got: %v", sqlList(ops))
+	}
+}
+
+func TestDiffFDWGrantAdded(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("myfdw", &snapshot.SnapObject{
+		Kind:   "fdw",
+		Opaque: &snapshot.SnapOpaque{Kind: "fdw", Name: "myfdw", OptionsStructured: true},
+	})
+	desired := []pipeline.IRObject{
+		&ir.ForeignDataWrapper{
+			Name: "myfdw", Body: "CREATE FOREIGN DATA WRAPPER myfdw",
+			Grants: []ir.Grant{{Privileges: []string{"USAGE"}, Roles: []string{"app_service"}}},
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsSQL(ops, `GRANT USAGE ON FOREIGN DATA WRAPPER "myfdw" TO "app_service"`) {
+		t.Errorf("expected GRANT USAGE ON FOREIGN DATA WRAPPER, got: %v", sqlList(ops))
+	}
+}
+
 func TestDiffFDWStaleSnapshotDoesNotRecreate(t *testing.T) {
 	d := New()
 	snap := &pipeline.Snapshot{}
@@ -10794,6 +11478,48 @@ func TestDiffForeignServerVersionChangeIsSafeAlter(t *testing.T) {
 	}
 	if !strings.Contains(ops[0].SQL(), "VERSION '2.0'") || ops[0].Safety() != pipeline.Safe {
 		t.Errorf("expected Safe ALTER SERVER VERSION '2.0', got %v: %s", ops[0].Safety(), ops[0].SQL())
+	}
+}
+
+// TestDiffCreateForeignServerEmitsGrant and TestDiffForeignServerGrantAdded
+// guard RFC audit item #6 (ir.ForeignServer had no Grants/Revocations
+// field).
+func TestDiffCreateForeignServerEmitsGrant(t *testing.T) {
+	d := New()
+	desired := []pipeline.IRObject{
+		&ir.ForeignServer{
+			Name: "srv", FDWName: "myfdw", Body: "CREATE SERVER srv FOREIGN DATA WRAPPER myfdw",
+			Grants: []ir.Grant{{Privileges: []string{"USAGE"}, Roles: []string{"app_service"}}},
+		},
+	}
+	ops, err := d.Diff(desired, &pipeline.Snapshot{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsSQL(ops, `GRANT USAGE ON FOREIGN SERVER "srv" TO "app_service"`) {
+		t.Errorf("expected GRANT USAGE ON FOREIGN SERVER, got: %v", sqlList(ops))
+	}
+}
+
+func TestDiffForeignServerGrantAdded(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("srv", &snapshot.SnapObject{
+		Kind:   "server",
+		Opaque: &snapshot.SnapOpaque{Kind: "server", Name: "srv", OptionsStructured: true, ServerFDWName: "myfdw"},
+	})
+	desired := []pipeline.IRObject{
+		&ir.ForeignServer{
+			Name: "srv", FDWName: "myfdw", Body: "CREATE SERVER srv FOREIGN DATA WRAPPER myfdw",
+			Grants: []ir.Grant{{Privileges: []string{"USAGE"}, Roles: []string{"app_service"}}},
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsSQL(ops, `GRANT USAGE ON FOREIGN SERVER "srv" TO "app_service"`) {
+		t.Errorf("expected GRANT USAGE ON FOREIGN SERVER, got: %v", sqlList(ops))
 	}
 }
 

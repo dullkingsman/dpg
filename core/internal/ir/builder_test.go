@@ -342,6 +342,27 @@ func TestBuildView(t *testing.T) {
 	}
 }
 
+// TestBuildRecursiveViewSetsFlag guards RFC audit item #27: buildView's
+// caller in Build() hardcoded recursive=false unconditionally, never reading
+// the scanner's already-correct pipeline.KindRecursiveView detection — so
+// ir.View.Recursive could never be true via real compilation even though the
+// scanner correctly classified "RECURSIVE VIEW" syntax. Mirrors
+// TestBuildUnloggedTableSetsFlag's shape (same "field exists, dispatch never
+// wires it" bug pattern).
+func TestBuildRecursiveViewSetsFlag(t *testing.T) {
+	obj := buildObject(t, pipeline.KindRecursiveView,
+		`t(n) AS (VALUES (1) UNION ALL SELECT n+1 FROM t WHERE n < 100)`,
+		``,
+	)
+	v, ok := obj.(*ir.View)
+	if !ok {
+		t.Fatalf("expected *ir.View, got %T", obj)
+	}
+	if !v.Recursive {
+		t.Error("expected Recursive = true")
+	}
+}
+
 // TestBuildMaterializedView guards a real bug found live-testing a demo
 // project: pg_query parses CREATE MATERIALIZED VIEW as CreateTableAsStmt
 // (Objtype == OBJECT_MATVIEW), not ViewStmt like a plain CREATE VIEW —
@@ -352,6 +373,80 @@ func TestBuildView(t *testing.T) {
 // "-- (no changes)" for a newly-declared MATERIALIZED VIEW instead of a
 // CREATE, because the malformed object's QualifiedName() was "" and never
 // matched anything, in either direction of the diff.
+// TestBuildTablespaceGrantsAndRevocations, TestBuildFDWGrantsAndRevocations,
+// and TestBuildServerGrantsAndRevocations guard RFC audit items #4/#5/#6:
+// ir.Tablespace/ForeignDataWrapper/ForeignServer had no Grants/Revocations
+// field at all — the same missing-field shape as the already-fixed
+// Schema-grants pattern, never generalized to these three kinds.
+func TestBuildTablespaceGrantsAndRevocations(t *testing.T) {
+	obj := buildObject(t, pipeline.KindTablespace,
+		`gl_ts LOCATION '/var/lib/postgresql/ts1'`,
+		`GRANTS { CREATE TO app_service; } REVOCATIONS { CREATE FROM PUBLIC; }`,
+	)
+	ts, ok := obj.(*ir.Tablespace)
+	if !ok {
+		t.Fatalf("expected *ir.Tablespace, got %T", obj)
+	}
+	if len(ts.Grants) != 1 {
+		t.Fatalf("Grants: got %d", len(ts.Grants))
+	}
+	if len(ts.Revocations) != 1 {
+		t.Fatalf("Revocations: got %d", len(ts.Revocations))
+	}
+}
+
+func TestBuildFDWGrantsAndRevocations(t *testing.T) {
+	obj := buildObject(t, pipeline.KindFDW,
+		`gl_fdw HANDLER file_fdw_handler`,
+		`GRANTS { USAGE TO app_service; } REVOCATIONS { USAGE FROM PUBLIC; }`,
+	)
+	f, ok := obj.(*ir.ForeignDataWrapper)
+	if !ok {
+		t.Fatalf("expected *ir.ForeignDataWrapper, got %T", obj)
+	}
+	if len(f.Grants) != 1 {
+		t.Fatalf("Grants: got %d", len(f.Grants))
+	}
+	if len(f.Revocations) != 1 {
+		t.Fatalf("Revocations: got %d", len(f.Revocations))
+	}
+}
+
+func TestBuildServerGrantsAndRevocations(t *testing.T) {
+	obj := buildObject(t, pipeline.KindServer,
+		`gl_srv FOREIGN DATA WRAPPER gl_fdw2`,
+		`GRANTS { USAGE TO app_service; } REVOCATIONS { USAGE FROM PUBLIC; }`,
+	)
+	s, ok := obj.(*ir.ForeignServer)
+	if !ok {
+		t.Fatalf("expected *ir.ForeignServer, got %T", obj)
+	}
+	if len(s.Grants) != 1 {
+		t.Fatalf("Grants: got %d", len(s.Grants))
+	}
+	if len(s.Revocations) != 1 {
+		t.Fatalf("Revocations: got %d", len(s.Revocations))
+	}
+}
+
+// TestBuildPublicationOwner guards RFC audit item #7: Publication had no
+// Owner field at all — real PostgreSQL supports ALTER PUBLICATION ... OWNER
+// TO, but nothing in the builder ever read the block's OWNER directive for
+// it.
+func TestBuildPublicationOwner(t *testing.T) {
+	obj := buildObject(t, pipeline.KindPublication,
+		`pub_all FOR ALL TABLES`,
+		`OWNER app_admin;`,
+	)
+	pub, ok := obj.(*ir.Publication)
+	if !ok {
+		t.Fatalf("expected *ir.Publication, got %T", obj)
+	}
+	if pub.Owner == nil || *pub.Owner != "app_admin" {
+		t.Errorf("Owner: got %v, want app_admin", pub.Owner)
+	}
+}
+
 func TestBuildMaterializedView(t *testing.T) {
 	obj := buildObject(t, pipeline.KindMaterializedView,
 		`order_status_summary AS SELECT status, count(*) AS order_count FROM orders GROUP BY status`,
@@ -458,6 +553,26 @@ func TestBuildEnum(t *testing.T) {
 	}
 	if tp.Comment == nil || *tp.Comment != "User lifecycle states" {
 		t.Errorf("Comment: got %v", tp.Comment)
+	}
+}
+
+// TestBuildEnumGrantsAndRevocations guards RFC audit item #3: ir.Type had
+// no Grants/Revocations field at all, for any of the 5 variants — a
+// declared GRANT/REVOCATION in a TYPE block was silently discarded.
+func TestBuildEnumGrantsAndRevocations(t *testing.T) {
+	obj := buildObject(t, pipeline.KindEnum,
+		`status AS ENUM ('active', 'pending', 'inactive')`,
+		`GRANTS { USAGE TO app_service; } REVOCATIONS { USAGE FROM PUBLIC; }`,
+	)
+	tp := obj.(*ir.Type)
+	if len(tp.Grants) != 1 {
+		t.Fatalf("Grants: got %d", len(tp.Grants))
+	}
+	if len(tp.Revocations) != 1 {
+		t.Fatalf("Revocations: got %d", len(tp.Revocations))
+	}
+	if len(tp.Revocations[0].Roles) != 1 || tp.Revocations[0].Roles[0] != "PUBLIC" {
+		t.Errorf("Revocations[0].Roles: got %v", tp.Revocations[0].Roles)
 	}
 }
 
@@ -688,6 +803,23 @@ func TestBuildDomainBlockSyntax(t *testing.T) {
 	}
 }
 
+// TestBuildDomainGrantsAndRevocations is TestBuildEnumGrantsAndRevocations's
+// DOMAIN counterpart (RFC audit item #3) — worth its own test since DOMAIN
+// has a distinct builder function (buildDomain) from ENUM's (buildEnum).
+func TestBuildDomainGrantsAndRevocations(t *testing.T) {
+	obj := buildObject(t, pipeline.KindDomainType,
+		`positive_integer AS integer`,
+		`GRANTS { USAGE TO app_service; } REVOCATIONS { USAGE FROM PUBLIC; }`,
+	)
+	tp := obj.(*ir.Type)
+	if len(tp.Grants) != 1 {
+		t.Fatalf("Grants: got %d", len(tp.Grants))
+	}
+	if len(tp.Revocations) != 1 {
+		t.Fatalf("Revocations: got %d", len(tp.Revocations))
+	}
+}
+
 // ── Schema ────────────────────────────────────────────────────────────────────
 
 func TestBuildSchema(t *testing.T) {
@@ -803,6 +935,48 @@ func TestBuildAggregateGrantsAndRevocations(t *testing.T) {
 	}
 	if len(agg.Revocations[0].Roles) != 1 || agg.Revocations[0].Roles[0] != "PUBLIC" {
 		t.Errorf("Revocations[0].Roles: got %v", agg.Revocations[0].Roles)
+	}
+}
+
+// TestBuildProcedureDeprecatedAndRenamedFrom guards RFC audit items #8/#10:
+// PROCEDURE never got Function's identical DEPRECATED/RENAMED FROM
+// func-block directive support despite sharing the same grammar (RFC
+// §9.3/9.4) — both were silently discarded (no field on ir.Procedure at
+// all).
+func TestBuildProcedureDeprecatedAndRenamedFrom(t *testing.T) {
+	obj := buildObject(t, pipeline.KindProcedure,
+		`mark_order_paid(bigint) LANGUAGE plpgsql AS $$ BEGIN NULL; END; $$;`,
+		`DEPRECATED 'use mark_order_settled instead'; RENAMED FROM mark_order_complete;`,
+	)
+	proc, ok := obj.(*ir.Procedure)
+	if !ok {
+		t.Fatalf("expected *ir.Procedure, got %T", obj)
+	}
+	if proc.Deprecated == nil || *proc.Deprecated != "use mark_order_settled instead" {
+		t.Errorf("Deprecated: got %v", proc.Deprecated)
+	}
+	if proc.RenamedFrom == nil || *proc.RenamedFrom != "mark_order_complete" {
+		t.Errorf("RenamedFrom: got %v", proc.RenamedFrom)
+	}
+}
+
+// TestBuildAggregateDeprecatedAndRenamedFrom is
+// TestBuildProcedureDeprecatedAndRenamedFrom's AGGREGATE counterpart (RFC
+// audit items #9/#11).
+func TestBuildAggregateDeprecatedAndRenamedFrom(t *testing.T) {
+	obj := buildObject(t, pipeline.KindAggregate,
+		`amount_product (numeric) (SFUNC = numeric_mul, STYPE = numeric, INITCOND = '1')`,
+		`DEPRECATED 'use amount_sum instead'; RENAMED FROM amount_mul;`,
+	)
+	agg, ok := obj.(*ir.Aggregate)
+	if !ok {
+		t.Fatalf("expected *ir.Aggregate, got %T", obj)
+	}
+	if agg.Deprecated == nil || *agg.Deprecated != "use amount_sum instead" {
+		t.Errorf("Deprecated: got %v", agg.Deprecated)
+	}
+	if agg.RenamedFrom == nil || *agg.RenamedFrom != "amount_mul" {
+		t.Errorf("RenamedFrom: got %v", agg.RenamedFrom)
 	}
 }
 
@@ -1227,6 +1401,42 @@ func TestBuildSequenceCycleUnspecified(t *testing.T) {
 	s := obj.(*ir.Sequence)
 	if s.Cycle != nil {
 		t.Errorf("Cycle: got %v, want nil", *s.Cycle)
+	}
+}
+
+// TestBuildSequenceNoMinMaxValue guards RFC audit item #20: pg_query
+// represents both "NO MINVALUE"/"NO MAXVALUE" and the option being omitted
+// entirely as the identical nil-Arg DefElem shape, so MinValue/MaxValue
+// alone (nil either way) can't tell them apart — the builder must capture
+// the explicit-NO case in its own field.
+func TestBuildSequenceNoMinMaxValue(t *testing.T) {
+	obj := buildObject(t, pipeline.KindSequence, `seq_id NO MINVALUE NO MAXVALUE`, ``)
+	s := obj.(*ir.Sequence)
+	if s.MinValue != nil {
+		t.Errorf("MinValue: got %v, want nil", *s.MinValue)
+	}
+	if !s.NoMinValue {
+		t.Error("NoMinValue: got false, want true")
+	}
+	if s.MaxValue != nil {
+		t.Errorf("MaxValue: got %v, want nil", *s.MaxValue)
+	}
+	if !s.NoMaxValue {
+		t.Error("NoMaxValue: got false, want true")
+	}
+}
+
+// TestBuildSequenceMinMaxValueUnspecified proves NoMinValue/NoMaxValue stay
+// false (not true) when the source doesn't mention MINVALUE/MAXVALUE at
+// all — mirrors TestBuildSequenceCycleUnspecified's reasoning.
+func TestBuildSequenceMinMaxValueUnspecified(t *testing.T) {
+	obj := buildObject(t, pipeline.KindSequence, `seq_id INCREMENT BY 1`, ``)
+	s := obj.(*ir.Sequence)
+	if s.NoMinValue {
+		t.Error("NoMinValue: got true, want false")
+	}
+	if s.NoMaxValue {
+		t.Error("NoMaxValue: got true, want false")
 	}
 }
 

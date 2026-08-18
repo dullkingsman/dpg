@@ -43,8 +43,11 @@ type SnapOpaque struct {
 	// the-parens shape.
 	Args        string      `json:"args,omitempty"`
 	Using       string      `json:"using,omitempty"` // index access method (operator_class/operator_family)
-	BodyHash    string      `json:"body_hash,omitempty"`
-	Comment     *string     `json:"comment,omitempty"`
+	BodyHash string  `json:"body_hash,omitempty"`
+	Comment  *string `json:"comment,omitempty"`
+	// Deprecated mirrors SnapFunction.Deprecated (RFC audit items #8/#9) —
+	// procedure and aggregate only.
+	Deprecated  *string     `json:"deprecated,omitempty"`
 	Grants      []SnapGrant `json:"grants,omitempty"`      // aggregate and procedure
 	Revocations []SnapGrant `json:"revocations,omitempty"` // procedure and aggregate
 	// SecurityLabels (RFC §14.11) covers every opaque kind SECURITY LABEL
@@ -94,6 +97,9 @@ type SnapOpaque struct {
 	// explicit-sentinel pattern as OptionsStructured above (Publish flags
 	// default true, AllTables can legitimately be false — no field is a
 	// reliable "not yet populated" signal on its own).
+	// PublicationOwner is RFC audit item #7's ALTER PUBLICATION ... OWNER TO
+	// diffing input — see ir.Publication.Owner's doc comment.
+	PublicationOwner             *string  `json:"publication_owner,omitempty"`
 	PublicationStructured        bool     `json:"publication_structured,omitempty"`
 	PublicationAllTables         bool     `json:"publication_all_tables,omitempty"`
 	PublicationTables            []string `json:"publication_tables,omitempty"`
@@ -412,6 +418,8 @@ type SnapType struct {
 	DomainConstraints []SnapConstraint    `json:"domain_constraints,omitempty"`
 	Comment           *string             `json:"comment,omitempty"`
 	Owner             *string             `json:"owner,omitempty"`
+	Grants            []SnapGrant         `json:"grants,omitempty"`
+	Revocations       []SnapGrant         `json:"revocations,omitempty"`
 	SecurityLabels    []SnapSecurityLabel `json:"security_labels,omitempty"`
 	NameMaps          []SnapNameMapEntry  `json:"name_maps,omitempty"`
 }
@@ -421,9 +429,13 @@ type SnapSequence struct {
 	Name           string              `json:"name"`
 	Owner          *string             `json:"owner,omitempty"`
 	Comment        *string             `json:"comment,omitempty"`
+	Grants         []SnapGrant         `json:"grants,omitempty"`
+	Revocations    []SnapGrant         `json:"revocations,omitempty"`
 	IncrementBy    *int64              `json:"increment_by,omitempty"`
 	MinValue       *int64              `json:"min_value,omitempty"`
 	MaxValue       *int64              `json:"max_value,omitempty"`
+	NoMinValue     bool                `json:"no_min_value,omitempty"`
+	NoMaxValue     bool                `json:"no_max_value,omitempty"`
 	StartValue     *int64              `json:"start_value,omitempty"`
 	Cache          *int64              `json:"cache,omitempty"`
 	Cycle          bool                `json:"cycle,omitempty"`

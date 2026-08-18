@@ -304,6 +304,22 @@ func renamedFromKey(obj pipeline.IRObject) string {
 		if o.RenamedFrom != nil {
 			return qualKey(o.Schema, *o.RenamedFrom)
 		}
+	case *ir.Procedure:
+		if o.RenamedFrom != nil {
+			// Unlike Function above, this includes the arg-types signature —
+			// ir.Procedure.QualifiedName() (the actual snapshot key) always
+			// does, including for a zero-arg procedure ("schema.name()"), so
+			// omitting it here would never match the stored key at all (RFC
+			// audit item #10, confirmed live: RENAMED FROM was rejected as
+			// stale on every real procedure rename attempt).
+			return fmt.Sprintf("%s(%s)", qualKey(o.Schema, *o.RenamedFrom), ir.ArgsKey(o.Args))
+		}
+	case *ir.Aggregate:
+		if o.RenamedFrom != nil {
+			// See ir.Procedure's identical reasoning just above (RFC audit
+			// item #11).
+			return fmt.Sprintf("%s(%s)", qualKey(o.Schema, *o.RenamedFrom), ir.ArgsKey(o.Args))
+		}
 	}
 	return ""
 }
@@ -328,6 +344,10 @@ func describeKind(obj pipeline.IRObject) string {
 		return "view"
 	case *ir.Function:
 		return "function"
+	case *ir.Procedure:
+		return "procedure"
+	case *ir.Aggregate:
+		return "aggregate"
 	}
 	return "object"
 }
@@ -617,7 +637,12 @@ func diffGrantSet(
 
 	for k, sg := range snapByKey {
 		if _, ok := desiredByKey[k]; !ok {
-			ops = append(ops, safeOp(
+			// Implicit revoke (a GRANT simply removed from source) can break
+			// another role's dependent access exactly like an explicit
+			// REVOCATION does — classified cautionOp to match DEFAULT
+			// PRIVILEGES's already-correct handling of the identical
+			// real-world event (RFC audit item #25).
+			ops = append(ops, cautionOp(
 				fmt.Sprintf("REVOKE %s ON %s FROM %s;", privStr(sg.Privileges), onClause, roleList(sg.Roles)),
 				pos,
 			))
@@ -981,18 +1006,33 @@ func createObject(obj pipeline.IRObject, vtypes map[string]string) ([]pipeline.D
 		return createAggregate(o)
 	case *ir.Tablespace:
 		ops, err := createOpaque(o.Name, o.Body, "TABLESPACE", "", o.SrcPos)
+		if err == nil {
+			ops = append(ops, createSimpleGrantOps("TABLESPACE", quoteIdent(o.Name), o.Grants, o.Revocations, o.SrcPos, true)...)
+		}
 		ops, err = appendCommentOp(ops, err, "tablespace", "", o.Name, "", "", o.Comment, o.SrcPos)
 		return appendSecurityLabelOps(ops, err, "tablespace", "", o.Name, "", "", o.SecurityLabels, o.SrcPos)
 	case *ir.ForeignDataWrapper:
 		ops, err := createOpaque(o.Name, o.Body, "FOREIGN DATA WRAPPER", "", o.SrcPos)
+		if err == nil {
+			ops = append(ops, createSimpleGrantOps("FOREIGN DATA WRAPPER", quoteIdent(o.Name), o.Grants, o.Revocations, o.SrcPos, false)...)
+		}
 		return appendCommentOp(ops, err, "fdw", "", o.Name, "", "", o.Comment, o.SrcPos)
 	case *ir.ForeignServer:
 		ops, err := createOpaque(o.Name, o.Body, "SERVER", "", o.SrcPos)
+		if err == nil {
+			ops = append(ops, createSimpleGrantOps("FOREIGN SERVER", quoteIdent(o.Name), o.Grants, o.Revocations, o.SrcPos, false)...)
+		}
 		return appendCommentOp(ops, err, "server", "", o.Name, "", "", o.Comment, o.SrcPos)
 	case *ir.UserMapping:
 		return createUserMapping(o)
 	case *ir.Publication:
 		ops, err := createOpaque(o.Name, o.Body, "PUBLICATION", "", o.SrcPos)
+		if err == nil && o.Owner != nil {
+			ops = append(ops, safeOp(
+				fmt.Sprintf("ALTER PUBLICATION %s OWNER TO %s;", quoteIdent(o.Name), quoteIdent(*o.Owner)),
+				o.SrcPos,
+			))
+		}
 		ops, err = appendCommentOp(ops, err, "publication", "", o.Name, "", "", o.Comment, o.SrcPos)
 		return appendSecurityLabelOps(ops, err, "publication", "", o.Name, "", "", o.SecurityLabels, o.SrcPos)
 	case *ir.Subscription:
@@ -1437,6 +1477,8 @@ func diffTablespace(o *ir.Tablespace, snap *snapshot.SnapOpaque) ([]pipeline.Dif
 				ops = append(ops, safeOp(sql, pos))
 			}
 		}
+		ops = append(ops, diffGrantSet(snap.Grants, o.Grants, onClause, pos)...)
+		ops = append(ops, diffRevocationSet(snap.Revocations, o.Revocations, onClause, pos)...)
 		ops = append(ops, diffSecurityLabelSet(snap.SecurityLabels, o.SecurityLabels, onClause, pos)...)
 		if len(ops) == 0 {
 			ops = append(ops, safeOp(fmt.Sprintf("-- refresh snapshot metadata for tablespace %s", quoteIdent(o.Name)), pos))
@@ -1450,6 +1492,7 @@ func diffTablespace(o *ir.Tablespace, snap *snapshot.SnapOpaque) ([]pipeline.Dif
 			return nil, err
 		}
 		ops = append(ops, createOps...)
+		ops = append(ops, createSimpleGrantOps("TABLESPACE", quoteIdent(o.Name), o.Grants, o.Revocations, pos, true)...)
 		ops, err = appendCommentOp(ops, nil, "tablespace", "", o.Name, "", "", o.Comment, pos)
 		if err != nil {
 			return nil, err
@@ -1463,6 +1506,8 @@ func diffTablespace(o *ir.Tablespace, snap *snapshot.SnapOpaque) ([]pipeline.Dif
 			ops = append(ops, safeOp(sql, pos))
 		}
 	}
+	ops = append(ops, diffGrantSet(snap.Grants, o.Grants, onClause, pos)...)
+	ops = append(ops, diffRevocationSet(snap.Revocations, o.Revocations, onClause, pos)...)
 	ops = append(ops, diffSecurityLabelSet(snap.SecurityLabels, o.SecurityLabels, onClause, pos)...)
 	return ops, nil
 }
@@ -1768,6 +1813,7 @@ func diffCollation(o *ir.Collation, snap *snapshot.SnapOpaque) ([]pipeline.DiffO
 // root cause).
 func diffFDW(o *ir.ForeignDataWrapper, snap *snapshot.SnapOpaque) ([]pipeline.DiffOp, error) {
 	pos := o.SrcPos
+	onClause := "FOREIGN DATA WRAPPER " + quoteIdent(o.Name)
 	// Stale snapshot predating these structured fields: unlike Tablespace/
 	// Cast/EventTrigger, no single field is guaranteed non-empty on a real
 	// FDW (a bare FOREIGN DATA WRAPPER with no HANDLER/VALIDATOR/OPTIONS
@@ -1779,6 +1825,8 @@ func diffFDW(o *ir.ForeignDataWrapper, snap *snapshot.SnapOpaque) ([]pipeline.Di
 				ops = append(ops, safeOp(sql, pos))
 			}
 		}
+		ops = append(ops, diffGrantSet(snap.Grants, o.Grants, onClause, pos)...)
+		ops = append(ops, diffRevocationSet(snap.Revocations, o.Revocations, onClause, pos)...)
 		if len(ops) == 0 {
 			ops = append(ops, safeOp(fmt.Sprintf("-- refresh snapshot metadata for foreign data wrapper %s", quoteIdent(o.Name)), pos))
 		}
@@ -1793,14 +1841,18 @@ func diffFDW(o *ir.ForeignDataWrapper, snap *snapshot.SnapOpaque) ([]pipeline.Di
 			return nil, err
 		}
 		ops = append(ops, createOps...)
+		ops = append(ops, createSimpleGrantOps("FOREIGN DATA WRAPPER", quoteIdent(o.Name), o.Grants, o.Revocations, pos, false)...)
 		return appendCommentOp(ops, nil, "fdw", "", o.Name, "", "", o.Comment, pos)
 	}
+	var ops []pipeline.DiffOp
 	if !ptrEq(o.Comment, snap.Comment) {
 		if sql := commentOnOpaqueSQL("fdw", "", o.Name, "", "", o.Comment); sql != "" {
-			return []pipeline.DiffOp{safeOp(sql, pos)}, nil
+			ops = append(ops, safeOp(sql, pos))
 		}
 	}
-	return nil, nil
+	ops = append(ops, diffGrantSet(snap.Grants, o.Grants, onClause, pos)...)
+	ops = append(ops, diffRevocationSet(snap.Revocations, o.Revocations, onClause, pos)...)
+	return ops, nil
 }
 
 // diffForeignServer implements RFC §14.9's structured diffing table: a
@@ -1816,6 +1868,7 @@ func diffFDW(o *ir.ForeignDataWrapper, snap *snapshot.SnapOpaque) ([]pipeline.Di
 func diffForeignServer(o *ir.ForeignServer, snap *snapshot.SnapOpaque) ([]pipeline.DiffOp, error) {
 	pos := o.SrcPos
 	ident := quoteIdent(o.Name)
+	onClause := "FOREIGN SERVER " + ident
 	if !snap.OptionsStructured {
 		var ops []pipeline.DiffOp
 		if !ptrEq(o.Comment, snap.Comment) {
@@ -1823,6 +1876,8 @@ func diffForeignServer(o *ir.ForeignServer, snap *snapshot.SnapOpaque) ([]pipeli
 				ops = append(ops, safeOp(sql, pos))
 			}
 		}
+		ops = append(ops, diffGrantSet(snap.Grants, o.Grants, onClause, pos)...)
+		ops = append(ops, diffRevocationSet(snap.Revocations, o.Revocations, onClause, pos)...)
 		if len(ops) == 0 {
 			ops = append(ops, safeOp(fmt.Sprintf("-- refresh snapshot metadata for server %s", ident), pos))
 		}
@@ -1835,6 +1890,7 @@ func diffForeignServer(o *ir.ForeignServer, snap *snapshot.SnapOpaque) ([]pipeli
 			return nil, err
 		}
 		ops = append(ops, createOps...)
+		ops = append(ops, createSimpleGrantOps("FOREIGN SERVER", ident, o.Grants, o.Revocations, pos, false)...)
 		return appendCommentOp(ops, nil, "server", "", o.Name, "", "", o.Comment, pos)
 	}
 	var ops []pipeline.DiffOp
@@ -1858,6 +1914,8 @@ func diffForeignServer(o *ir.ForeignServer, snap *snapshot.SnapOpaque) ([]pipeli
 			ops = append(ops, safeOp(sql, pos))
 		}
 	}
+	ops = append(ops, diffGrantSet(snap.Grants, o.Grants, onClause, pos)...)
+	ops = append(ops, diffRevocationSet(snap.Revocations, o.Revocations, onClause, pos)...)
 	return ops, nil
 }
 
@@ -1930,6 +1988,9 @@ func diffPublication(o *ir.Publication, snap *snapshot.SnapOpaque) ([]pipeline.D
 		// Stale snapshot predating these structured fields — same
 		// self-healing pattern as diffFDW/diffForeignServer.
 		var ops []pipeline.DiffOp
+		if !ptrEq(o.Owner, snap.PublicationOwner) && o.Owner != nil {
+			ops = append(ops, safeOp(fmt.Sprintf("ALTER PUBLICATION %s OWNER TO %s;", ident, quoteIdent(*o.Owner)), pos))
+		}
 		if !ptrEq(o.Comment, snap.Comment) {
 			if sql := commentOnOpaqueSQL("publication", "", o.Name, "", "", o.Comment); sql != "" {
 				ops = append(ops, safeOp(sql, pos))
@@ -1948,6 +2009,9 @@ func diffPublication(o *ir.Publication, snap *snapshot.SnapOpaque) ([]pipeline.D
 			return nil, err
 		}
 		ops = append(ops, createOps...)
+		if o.Owner != nil {
+			ops = append(ops, safeOp(fmt.Sprintf("ALTER PUBLICATION %s OWNER TO %s;", ident, quoteIdent(*o.Owner)), pos))
+		}
 		ops, err = appendCommentOp(ops, nil, "publication", "", o.Name, "", "", o.Comment, pos)
 		if err != nil {
 			return nil, err
@@ -1999,6 +2063,9 @@ func diffPublication(o *ir.Publication, snap *snapshot.SnapOpaque) ([]pipeline.D
 		o.Delete != snap.PublicationDelete || o.Truncate != snap.PublicationTruncate {
 		ops = append(ops, safeOp(fmt.Sprintf("ALTER PUBLICATION %s SET (publish = %s);", ident, quoteLit(publishClause(o))), pos))
 	}
+	if !ptrEq(o.Owner, snap.PublicationOwner) && o.Owner != nil {
+		ops = append(ops, safeOp(fmt.Sprintf("ALTER PUBLICATION %s OWNER TO %s;", ident, quoteIdent(*o.Owner)), pos))
+	}
 	if !ptrEq(o.Comment, snap.Comment) {
 		if sql := commentOnOpaqueSQL("publication", "", o.Name, "", "", o.Comment); sql != "" {
 			ops = append(ops, safeOp(sql, pos))
@@ -2045,8 +2112,8 @@ func buildProcedureSignature(o *ir.Procedure) string {
 func createProcedure(o *ir.Procedure) []pipeline.DiffOp {
 	ops := []pipeline.DiffOp{safeOp(ir.RenderCreateProcedureSQL(o), o.SrcPos)}
 	sig := buildProcedureSignature(o)
-	if o.Comment != nil {
-		ops = append(ops, safeOp(fmt.Sprintf("COMMENT ON PROCEDURE %s IS %s;", sig, quoteLit(*o.Comment)), o.SrcPos))
+	if txt := effectiveComment(o.Comment, o.Deprecated); txt != nil {
+		ops = append(ops, safeOp(fmt.Sprintf("COMMENT ON PROCEDURE %s IS %s;", sig, quoteLit(*txt)), o.SrcPos))
 	}
 	for _, g := range o.Grants {
 		sql := fmt.Sprintf("GRANT %s ON PROCEDURE %s TO %s", privStr(g.Privileges), sig, roleList(g.Roles))
@@ -2072,9 +2139,9 @@ func createAggregate(o *ir.Aggregate) ([]pipeline.DiffOp, error) {
 	}
 	sig := buildAggregateSignature(o)
 	ops := []pipeline.DiffOp{safeOp(o.Body+";", o.SrcPos)}
-	if o.Comment != nil {
+	if txt := effectiveComment(o.Comment, o.Deprecated); txt != nil {
 		ops = append(ops, safeOp(
-			fmt.Sprintf("COMMENT ON AGGREGATE %s IS %s;", sig, quoteLit(*o.Comment)),
+			fmt.Sprintf("COMMENT ON AGGREGATE %s IS %s;", sig, quoteLit(*txt)),
 			o.SrcPos,
 		))
 	}
@@ -2127,9 +2194,9 @@ func diffAggregate(o *ir.Aggregate, snap *snapshot.SnapOpaque) ([]pipeline.DiffO
 			destructiveOp(fmt.Sprintf("DROP AGGREGATE IF EXISTS %s;", sig), pos),
 			safeOp(o.Body+";", pos),
 		}
-		if o.Comment != nil {
+		if txt := effectiveComment(o.Comment, o.Deprecated); txt != nil {
 			ops = append(ops, safeOp(
-				fmt.Sprintf("COMMENT ON AGGREGATE %s IS %s;", sig, quoteLit(*o.Comment)),
+				fmt.Sprintf("COMMENT ON AGGREGATE %s IS %s;", sig, quoteLit(*txt)),
 				pos,
 			))
 		}
@@ -2140,10 +2207,16 @@ func diffAggregate(o *ir.Aggregate, snap *snapshot.SnapOpaque) ([]pipeline.DiffO
 	}
 
 	var ops []pipeline.DiffOp
-	if !ptrEq(o.Comment, snap.Comment) {
-		if o.Comment != nil {
+	// A rename (RFC audit item #11) needs its own targeted ALTER AGGREGATE
+	// ... RENAME TO — see diffProcedure's identical reasoning.
+	if snap.Name != o.Name {
+		oldSig := fmt.Sprintf("%s(%s)", qualIdent(o.Schema, snap.Name), ir.ArgsKey(o.Args))
+		ops = append(ops, safeOp(fmt.Sprintf("ALTER AGGREGATE %s RENAME TO %s;", oldSig, quoteIdent(o.Name)), pos))
+	}
+	if desiredTxt, snapTxt := effectiveComment(o.Comment, o.Deprecated), effectiveComment(snap.Comment, snap.Deprecated); !ptrEq(desiredTxt, snapTxt) {
+		if desiredTxt != nil {
 			ops = append(ops, safeOp(
-				fmt.Sprintf("COMMENT ON AGGREGATE %s IS %s;", sig, quoteLit(*o.Comment)),
+				fmt.Sprintf("COMMENT ON AGGREGATE %s IS %s;", sig, quoteLit(*desiredTxt)),
 				pos,
 			))
 		} else {
@@ -2861,7 +2934,9 @@ func colRevokeOp(sg snapshot.SnapGrant, tbl, col string, pos pipeline.SourcePos)
 			privParts = append(privParts, p+" ("+colIdent+")")
 		}
 	}
-	return safeOp(
+	// Implicit revoke — see the identical cautionOp reasoning in diffGrantSet
+	// (RFC audit item #25).
+	return cautionOp(
 		"REVOKE "+strings.Join(privParts, ", ")+" ON TABLE "+tbl+" FROM "+roleList(sg.Roles)+";",
 		pos,
 	)
@@ -2921,9 +2996,18 @@ func createView(o *ir.View) []pipeline.DiffOp {
 	b.WriteString("CREATE ")
 	if o.Materialized {
 		b.WriteString("MATERIALIZED ")
-	} else if o.Recursive {
-		b.WriteString("RECURSIVE ")
 	}
+	// o.Recursive deliberately does NOT get its own "RECURSIVE VIEW" DDL
+	// keyword here: pg_query's deparse of a RECURSIVE VIEW's query already
+	// returns a self-contained "WITH RECURSIVE ..." CTE (confirmed live —
+	// PostgreSQL desugars CREATE RECURSIVE VIEW into exactly this form
+	// internally), which is valid, self-sufficient recursion under a plain
+	// CREATE VIEW/CREATE MATERIALIZED VIEW — same reasoning already used by
+	// dump's identical View-rendering case. Emitting "CREATE RECURSIVE
+	// VIEW ... AS WITH RECURSIVE ..." is a real PostgreSQL syntax error
+	// (SQLSTATE 42601): CREATE RECURSIVE VIEW's own grammar expects a bare
+	// query, not one already wrapped in WITH RECURSIVE, and additionally
+	// requires an explicit column list DPG doesn't track separately from Query.
 	b.WriteString("VIEW ")
 	b.WriteString(qualIdent(o.Schema, o.Name))
 	b.WriteString(" AS ")
@@ -3035,6 +3119,7 @@ func createType(o *ir.Type, vtypes map[string]string) []pipeline.DiffOp {
 				o.SrcPos,
 			))
 		}
+		ops = append(ops, createTypeGrantOps(o)...)
 		ops = append(ops, createSecurityLabelOps(o.SecurityLabels, "DOMAIN "+qualIdent(o.Schema, o.Name), o.SrcPos)...)
 		return ops
 	default:
@@ -3054,7 +3139,72 @@ func createType(o *ir.Type, vtypes map[string]string) []pipeline.DiffOp {
 			o.SrcPos,
 		))
 	}
+	ops = append(ops, createTypeGrantOps(o)...)
 	ops = append(ops, createSecurityLabelOps(o.SecurityLabels, "TYPE "+qualIdent(o.Schema, o.Name), o.SrcPos)...)
+	return ops
+}
+
+// diffTypeGrantOps diffs a type's Grants/Revocations against its snapshot
+// (RFC audit item #3, uniform across all 5 variants — see createTypeGrantOps'
+// identical reasoning).
+func diffTypeGrantOps(o *ir.Type, snap *snapshot.SnapType, typeIdent string, pos pipeline.SourcePos) []pipeline.DiffOp {
+	var ops []pipeline.DiffOp
+	ops = append(ops, diffGrantSet(snap.Grants, o.Grants, "TYPE "+typeIdent, pos)...)
+	ops = append(ops, diffRevocationSet(snap.Revocations, o.Revocations, "TYPE "+typeIdent, pos)...)
+	return ops
+}
+
+// createTypeGrantOps emits GRANT/REVOKE ops for a newly-created type (RFC
+// audit item #3, uniform across all 5 variants — real PostgreSQL's GRANT/
+// REVOKE has no separate "ON DOMAIN" target, a domain is granted exactly
+// like any other type via "... ON TYPE domain_name ..." — confirmed live).
+func createTypeGrantOps(o *ir.Type) []pipeline.DiffOp {
+	var ops []pipeline.DiffOp
+	typeIdent := qualIdent(o.Schema, o.Name)
+	for _, g := range o.Grants {
+		sql := fmt.Sprintf("GRANT %s ON TYPE %s TO %s", privStr(g.Privileges), typeIdent, roleList(g.Roles))
+		if g.WithGrant {
+			sql += " WITH GRANT OPTION"
+		}
+		ops = append(ops, safeOp(sql+";", o.SrcPos))
+	}
+	for _, r := range o.Revocations {
+		ops = append(ops, explicitRevokeOp(r, "TYPE "+typeIdent, o.SrcPos))
+	}
+	return ops
+}
+
+// createSimpleGrantOps emits GRANT/REVOKE ops for a newly-created object
+// whose GRANT object-kind keyword is fixed and whose identifier is already
+// a bare quoted name (no schema qualification) — Tablespace/FDW/
+// ForeignServer (RFC audit items #4/#5/#6). manual must be true for
+// Tablespace specifically: CREATE/DROP TABLESPACE cannot run inside a
+// transaction block (see createOpaque's identical reasoning), and Emit
+// splits ops into a transactional batch that runs BEFORE the non-
+// transactional batch — a transactional (safeOp) GRANT ON TABLESPACE would
+// therefore execute before the manual CREATE TABLESPACE it depends on, live-
+// failing with "tablespace ... does not exist". FDW/ForeignServer have no
+// such restriction and pass false.
+func createSimpleGrantOps(grantKind, ident string, grants []ir.Grant, revocations []ir.Revocation, pos pipeline.SourcePos, manual bool) []pipeline.DiffOp {
+	var ops []pipeline.DiffOp
+	for _, g := range grants {
+		sql := fmt.Sprintf("GRANT %s ON %s %s TO %s", privStr(g.Privileges), grantKind, ident, roleList(g.Roles))
+		if g.WithGrant {
+			sql += " WITH GRANT OPTION"
+		}
+		if manual {
+			ops = append(ops, manualOp(sql+";", pos))
+		} else {
+			ops = append(ops, safeOp(sql+";", pos))
+		}
+	}
+	for _, r := range revocations {
+		ro := explicitRevokeOp(r, grantKind+" "+ident, pos)
+		if manual {
+			ro.txn = false
+		}
+		ops = append(ops, ro)
+	}
 	return ops
 }
 
@@ -3128,6 +3278,16 @@ func createSequence(o *ir.Sequence) []pipeline.DiffOp {
 			o.SrcPos,
 		))
 	}
+	for _, g := range o.Grants {
+		sql := fmt.Sprintf("GRANT %s ON SEQUENCE %s TO %s", privStr(g.Privileges), ident, roleList(g.Roles))
+		if g.WithGrant {
+			sql += " WITH GRANT OPTION"
+		}
+		ops = append(ops, safeOp(sql+";", o.SrcPos))
+	}
+	for _, r := range o.Revocations {
+		ops = append(ops, explicitRevokeOp(r, "SEQUENCE "+ident, o.SrcPos))
+	}
 	ops = append(ops, createSecurityLabelOps(o.SecurityLabels, "SEQUENCE "+ident, o.SrcPos)...)
 	return ops
 }
@@ -3137,10 +3297,17 @@ func writeSeqParams(b *strings.Builder, o *ir.Sequence) {
 	if o.IncrementBy != nil {
 		fmt.Fprintf(b, " INCREMENT BY %d", *o.IncrementBy)
 	}
-	if o.MinValue != nil {
+	if o.NoMinValue {
+		// Explicit "NO MINVALUE" must be emitted, not silenced, the same
+		// reasoning as NO CYCLE below — ALTER SEQUENCE never resets an
+		// omitted option to a default (RFC audit item #20).
+		b.WriteString(" NO MINVALUE")
+	} else if o.MinValue != nil {
 		fmt.Fprintf(b, " MINVALUE %d", *o.MinValue)
 	}
-	if o.MaxValue != nil {
+	if o.NoMaxValue {
+		b.WriteString(" NO MAXVALUE")
+	} else if o.MaxValue != nil {
 		fmt.Fprintf(b, " MAXVALUE %d", *o.MaxValue)
 	}
 	if o.StartValue != nil {
@@ -3867,9 +4034,17 @@ func diffProcedure(o *ir.Procedure, snap *snapshot.SnapOpaque) ([]pipeline.DiffO
 	}
 
 	var ops []pipeline.DiffOp
-	if !ptrEq(o.Comment, snap.Comment) {
-		if o.Comment != nil {
-			ops = append(ops, safeOp(fmt.Sprintf("COMMENT ON PROCEDURE %s IS %s;", sig, quoteLit(*o.Comment)), pos))
+	// A rename (RFC audit item #10) needs its own targeted ALTER PROCEDURE
+	// ... RENAME TO — unlike Function, mirrored here but genuinely acted
+	// on: the old name + arg-types signature identifies the live object,
+	// same shape DROP PROCEDURE already uses elsewhere.
+	if snap.Name != o.Name {
+		oldSig := fmt.Sprintf("%s(%s)", qualIdent(o.Schema, snap.Name), ir.ArgsKey(o.Args))
+		ops = append(ops, safeOp(fmt.Sprintf("ALTER PROCEDURE %s RENAME TO %s;", oldSig, quoteIdent(o.Name)), pos))
+	}
+	if desiredTxt, snapTxt := effectiveComment(o.Comment, o.Deprecated), effectiveComment(snap.Comment, snap.Deprecated); !ptrEq(desiredTxt, snapTxt) {
+		if desiredTxt != nil {
+			ops = append(ops, safeOp(fmt.Sprintf("COMMENT ON PROCEDURE %s IS %s;", sig, quoteLit(*desiredTxt)), pos))
 		} else {
 			ops = append(ops, safeOp(fmt.Sprintf("COMMENT ON PROCEDURE %s IS NULL;", sig), pos))
 		}
@@ -3913,8 +4088,8 @@ func diffSequence(o *ir.Sequence, snap *snapshot.SnapSequence) []pipeline.DiffOp
 	// Check if any explicitly-specified sequence params differ from the snapshot.
 	// Only compare params that the user set (non-nil in desired IR).
 	paramsChanged := (o.IncrementBy != nil && !int64PtrEq(o.IncrementBy, snap.IncrementBy)) ||
-		(o.MinValue != nil && !int64PtrEq(o.MinValue, snap.MinValue)) ||
-		(o.MaxValue != nil && !int64PtrEq(o.MaxValue, snap.MaxValue)) ||
+		seqBoundChanged(o.MinValue, o.NoMinValue, snap.MinValue, snap.NoMinValue) ||
+		seqBoundChanged(o.MaxValue, o.NoMaxValue, snap.MaxValue, snap.NoMaxValue) ||
 		(o.StartValue != nil && !int64PtrEq(o.StartValue, snap.StartValue)) ||
 		(o.Cache != nil && !int64PtrEq(o.Cache, snap.Cache)) ||
 		(o.Cycle != nil && *o.Cycle != snap.Cycle)
@@ -3938,8 +4113,28 @@ func diffSequence(o *ir.Sequence, snap *snapshot.SnapSequence) []pipeline.DiffOp
 			ops = append(ops, safeOp(fmt.Sprintf("COMMENT ON SEQUENCE %s IS NULL;", ident), pos))
 		}
 	}
+	ops = append(ops, diffGrantSet(snap.Grants, o.Grants, "SEQUENCE "+ident, pos)...)
+	ops = append(ops, diffRevocationSet(snap.Revocations, o.Revocations, "SEQUENCE "+ident, pos)...)
 	ops = append(ops, diffSecurityLabelSet(snap.SecurityLabels, o.SecurityLabels, "SEQUENCE "+ident, pos)...)
 	return ops
+}
+
+// seqBoundChanged compares a sequence's MINVALUE/MAXVALUE declared state
+// (RFC audit item #20) — desiredVal/desiredNo and snapVal/snapNo together
+// form a 3-way state: unspecified (both zero), an explicit numeric bound, or
+// an explicit "NO MINVALUE"/"NO MAXVALUE". An unspecified desired side never
+// counts as a change (DPG doesn't manage what source never mentions); an
+// explicit NO MINVALUE/NO MAXVALUE side changed if the snapshot wasn't
+// already recorded that way (regardless of what numeric bound it held,
+// since PostgreSQL doesn't expose one under NO MINVALUE/NO MAXVALUE either).
+func seqBoundChanged(desiredVal *int64, desiredNo bool, snapVal *int64, snapNo bool) bool {
+	if !desiredNo && desiredVal == nil {
+		return false
+	}
+	if desiredNo {
+		return !snapNo
+	}
+	return snapNo || !int64PtrEq(desiredVal, snapVal)
 }
 
 func int64PtrEq(a, b *int64) bool {
@@ -4442,6 +4637,7 @@ func diffType(o *ir.Type, snap *snapshot.SnapType, fullSnap *pipeline.Snapshot, 
 				ops = append(ops, safeOp(fmt.Sprintf("COMMENT ON TYPE %s IS NULL;", typeIdent), pos))
 			}
 		}
+		ops = append(ops, diffTypeGrantOps(o, snap, typeIdent, pos)...)
 		ops = append(ops, diffSecurityLabelSet(snap.SecurityLabels, o.SecurityLabels, "TYPE "+typeIdent, pos)...)
 		return ops, nil
 	}
@@ -4476,6 +4672,7 @@ func diffType(o *ir.Type, snap *snapshot.SnapType, fullSnap *pipeline.Snapshot, 
 					ops = append(ops, safeOp(fmt.Sprintf("COMMENT ON DOMAIN %s IS NULL;", typeIdent), pos))
 				}
 			}
+			ops = append(ops, diffTypeGrantOps(o, snap, typeIdent, pos)...)
 			ops = append(ops, diffSecurityLabelSet(snap.SecurityLabels, o.SecurityLabels, "DOMAIN "+typeIdent, pos)...)
 			// Same PROTECTED-field precedent as diffTable: if nothing else
 			// changed, ops would be empty and apply's len(ops)==0
@@ -4551,6 +4748,7 @@ func diffType(o *ir.Type, snap *snapshot.SnapType, fullSnap *pipeline.Snapshot, 
 				ops = append(ops, safeOp(fmt.Sprintf("COMMENT ON DOMAIN %s IS NULL;", typeIdent), pos))
 			}
 		}
+		ops = append(ops, diffTypeGrantOps(o, snap, typeIdent, pos)...)
 		ops = append(ops, diffSecurityLabelSet(snap.SecurityLabels, o.SecurityLabels, "DOMAIN "+typeIdent, pos)...)
 		return ops, nil
 	}
@@ -4589,6 +4787,7 @@ func diffType(o *ir.Type, snap *snapshot.SnapType, fullSnap *pipeline.Snapshot, 
 				ops = append(ops, safeOp(fmt.Sprintf("COMMENT ON TYPE %s IS NULL;", typeIdent), pos))
 			}
 		}
+		ops = append(ops, diffTypeGrantOps(o, snap, typeIdent, pos)...)
 		ops = append(ops, diffSecurityLabelSet(snap.SecurityLabels, o.SecurityLabels, "TYPE "+typeIdent, pos)...)
 		return ops, nil
 	}
@@ -4631,6 +4830,7 @@ func diffType(o *ir.Type, snap *snapshot.SnapType, fullSnap *pipeline.Snapshot, 
 			ops = append(ops, safeOp(fmt.Sprintf("COMMENT ON TYPE %s IS NULL;", typeIdent), pos))
 		}
 	}
+	ops = append(ops, diffTypeGrantOps(o, snap, typeIdent, pos)...)
 	ops = append(ops, diffSecurityLabelSet(snap.SecurityLabels, o.SecurityLabels, "TYPE "+typeIdent, pos)...)
 	return ops, nil
 }
@@ -4731,6 +4931,12 @@ func diffEnumRemove(o *ir.Type, snap *snapshot.SnapType, fullSnap *pipeline.Snap
 	if o.Comment != nil {
 		ops = append(ops, safeOp(fmt.Sprintf("COMMENT ON TYPE %s IS %s;", typeIdent, quoteLit(*o.Comment)), pos))
 	}
+
+	// Re-apply grants (RFC audit item #3): the old type (and any grants on
+	// it) is fully dropped in step 5, so a MIGRATE REMOVE cycle would
+	// otherwise silently lose them, the same reasoning as the comment
+	// re-apply just above.
+	ops = append(ops, createTypeGrantOps(o)...)
 
 	// Step 7: cleanup instruction for manual rollback.
 	ops = append(ops, manualOp(fmt.Sprintf("-- On failure run: DROP TYPE IF EXISTS %s;", shadowIdent), pos))
@@ -6419,7 +6625,9 @@ func diffPolicies(schema, table string, o *ir.Table, snap *snapshot.SnapTable) [
 
 	for _, sp := range snap.Policies {
 		if _, ok := desiredByName[sp.Name]; !ok {
-			ops = append(ops, safeOp(
+			// A dropped RLS policy silently widens row visibility —
+			// behavior-changing even though no data is lost (RFC audit item #26).
+			ops = append(ops, cautionOp(
 				fmt.Sprintf("DROP POLICY IF EXISTS %s ON %s;", quoteIdent(sp.Name), tblIdent),
 				pipeline.SourcePos{},
 			))
@@ -6434,7 +6642,7 @@ func diffPolicies(schema, table string, o *ir.Table, snap *snapshot.SnapTable) [
 			policyRoleKey(pol.Roles) != policyRoleKey(existing.Roles) ||
 			normalizeExprForCompare(ptrStr(pol.Using)) != normalizeExprForCompare(existing.Using) ||
 			normalizeExprForCompare(ptrStr(pol.WithCheck)) != normalizeExprForCompare(existing.WithCheck) {
-			ops = append(ops, safeOp(
+			ops = append(ops, cautionOp(
 				fmt.Sprintf("DROP POLICY IF EXISTS %s ON %s;", quoteIdent(pol.Name), tblIdent),
 				pol.Pos,
 			))
@@ -6471,7 +6679,9 @@ func diffTriggers(schema, table string, o *ir.Table, snap *snapshot.SnapTable) [
 
 	for _, st := range snap.Triggers {
 		if _, ok := desiredByName[st.Name]; !ok {
-			ops = append(ops, safeOp(
+			// A dropped trigger silently stops enforcing whatever business
+			// logic it implemented — behavior-changing (RFC audit item #26).
+			ops = append(ops, cautionOp(
 				fmt.Sprintf("DROP TRIGGER IF EXISTS %s ON %s;", quoteIdent(st.Name), tblIdent),
 				pipeline.SourcePos{},
 			))
@@ -6486,7 +6696,7 @@ func diffTriggers(schema, table string, o *ir.Table, snap *snapshot.SnapTable) [
 			trg.ForEach != existing.ForEach ||
 			qualifyFuncForCompare(trg.Function) != qualifyFuncForCompare(existing.Function) ||
 			foldTriggerPseudoRelNames(normalizeExprForCompare(ptrStr(trg.Condition))) != foldTriggerPseudoRelNames(normalizeExprForCompare(existing.Condition)) {
-			ops = append(ops, safeOp(
+			ops = append(ops, cautionOp(
 				fmt.Sprintf("DROP TRIGGER IF EXISTS %s ON %s;", quoteIdent(trg.Name), tblIdent),
 				trg.Pos,
 			))

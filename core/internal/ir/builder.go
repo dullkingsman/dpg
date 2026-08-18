@@ -70,7 +70,7 @@ func (b *Builder) Build(pg pipeline.PGParseResult, block pipeline.BlockAST) (pip
 	case *pg_query.Node_CreateForeignTableStmt:
 		obj, err = b.buildForeignTable(n.CreateForeignTableStmt, block, pos)
 	case *pg_query.Node_ViewStmt:
-		obj, err = b.buildView(n.ViewStmt, block, pos, false, false)
+		obj, err = b.buildView(n.ViewStmt, block, pos, false, pg.Kind == pipeline.KindRecursiveView)
 	case *pg_query.Node_CreateTableAsStmt:
 		if n.CreateTableAsStmt.Objtype == pg_query.ObjectType_OBJECT_MATVIEW {
 			obj, err = b.buildMaterializedView(n.CreateTableAsStmt, block, pos)
@@ -1240,6 +1240,12 @@ func (b *Builder) buildProcedure(cfs *pg_query.CreateFunctionStmt, pg pipeline.P
 	if block.Comment != nil {
 		proc.Comment = &block.Comment.Value
 	}
+	if block.RenamedFrom != nil {
+		proc.RenamedFrom = &block.RenamedFrom.Name
+	}
+	if block.Deprecated != nil {
+		proc.Deprecated = &block.Deprecated.Value
+	}
 	for _, g := range block.Grants {
 		proc.Grants = append(proc.Grants, blockGrantToIR(g))
 	}
@@ -1410,6 +1416,12 @@ func (b *Builder) buildEnum(cs *pg_query.CreateEnumStmt, block pipeline.BlockAST
 	if block.MigrateRemove != nil {
 		t.MigrateRemove = block.MigrateRemove
 	}
+	for _, g := range block.Grants {
+		t.Grants = append(t.Grants, blockGrantToIR(g))
+	}
+	for _, r := range block.Revocations {
+		t.Revocations = append(t.Revocations, blockRevocationToIR(r))
+	}
 	t.SecurityLabels = block.SecurityLabels
 	t.NameMaps = block.NameMaps
 	return t, nil
@@ -1461,6 +1473,12 @@ func (b *Builder) buildCompositeType(cs *pg_query.CompositeTypeStmt, block pipel
 	}
 	if block.Deprecated != nil {
 		t.Deprecated = &block.Deprecated.Value
+	}
+	for _, g := range block.Grants {
+		t.Grants = append(t.Grants, blockGrantToIR(g))
+	}
+	for _, r := range block.Revocations {
+		t.Revocations = append(t.Revocations, blockRevocationToIR(r))
 	}
 	t.SecurityLabels = block.SecurityLabels
 	t.NameMaps = block.NameMaps
@@ -1606,6 +1624,9 @@ func (b *Builder) buildSequence(cs *pg_query.CreateSeqStmt, block pipeline.Block
 	for _, g := range block.Grants {
 		s.Grants = append(s.Grants, blockGrantToIR(g))
 	}
+	for _, r := range block.Revocations {
+		s.Revocations = append(s.Revocations, blockRevocationToIR(r))
+	}
 	s.SecurityLabels = block.SecurityLabels
 	s.NameMaps = block.NameMaps
 	for _, opt := range cs.Options {
@@ -1620,9 +1641,21 @@ func (b *Builder) buildSequence(cs *pg_query.CreateSeqStmt, block pipeline.Block
 		case "start":
 			s.StartValue = v
 		case "minvalue":
-			s.MinValue = v
+			if de.Arg == nil {
+				// Explicit "NO MINVALUE" — same nil-Arg DefElem shape as the
+				// option being omitted entirely, so this must be captured
+				// here or it's indistinguishable from "not mentioned" (RFC
+				// audit item #20).
+				s.NoMinValue = true
+			} else {
+				s.MinValue = v
+			}
 		case "maxvalue":
-			s.MaxValue = v
+			if de.Arg == nil {
+				s.NoMaxValue = true
+			} else {
+				s.MaxValue = v
+			}
 		case "cache":
 			s.Cache = v
 		case "cycle":
@@ -1745,6 +1778,12 @@ func (b *Builder) buildTablespace(cs *pg_query.CreateTableSpaceStmt, block pipel
 	if block.Comment != nil {
 		ts.Comment = &block.Comment.Value
 	}
+	for _, g := range block.Grants {
+		ts.Grants = append(ts.Grants, blockGrantToIR(g))
+	}
+	for _, r := range block.Revocations {
+		ts.Revocations = append(ts.Revocations, blockRevocationToIR(r))
+	}
 	ts.SecurityLabels = block.SecurityLabels
 	return ts, nil
 }
@@ -1808,6 +1847,12 @@ func (b *Builder) buildFDW(cs *pg_query.CreateFdwStmt, block pipeline.BlockAST, 
 	if block.Comment != nil {
 		f.Comment = &block.Comment.Value
 	}
+	for _, g := range block.Grants {
+		f.Grants = append(f.Grants, blockGrantToIR(g))
+	}
+	for _, r := range block.Revocations {
+		f.Revocations = append(f.Revocations, blockRevocationToIR(r))
+	}
 	return f, nil
 }
 
@@ -1827,6 +1872,12 @@ func (b *Builder) buildServer(cs *pg_query.CreateForeignServerStmt, block pipeli
 	}
 	if block.Comment != nil {
 		s.Comment = &block.Comment.Value
+	}
+	for _, g := range block.Grants {
+		s.Grants = append(s.Grants, blockGrantToIR(g))
+	}
+	for _, r := range block.Revocations {
+		s.Revocations = append(s.Revocations, blockRevocationToIR(r))
 	}
 	return s, nil
 }
@@ -1911,6 +1962,12 @@ func (b *Builder) buildDomain(cs *pg_query.CreateDomainStmt, block pipeline.Bloc
 			Pos:  cst.Pos,
 		})
 	}
+	for _, g := range block.Grants {
+		t.Grants = append(t.Grants, blockGrantToIR(g))
+	}
+	for _, r := range block.Revocations {
+		t.Revocations = append(t.Revocations, blockRevocationToIR(r))
+	}
 	t.SecurityLabels = block.SecurityLabels
 	t.NameMaps = block.NameMaps
 	return t, nil
@@ -1947,6 +2004,12 @@ func (b *Builder) buildRangeType(cs *pg_query.CreateRangeStmt, block pipeline.Bl
 	}
 	if block.Owner != nil {
 		t.Owner = &block.Owner.Name
+	}
+	for _, g := range block.Grants {
+		t.Grants = append(t.Grants, blockGrantToIR(g))
+	}
+	for _, r := range block.Revocations {
+		t.Revocations = append(t.Revocations, blockRevocationToIR(r))
 	}
 	t.SecurityLabels = block.SecurityLabels
 	t.NameMaps = block.NameMaps
@@ -2059,6 +2122,12 @@ func (b *Builder) buildDefineStmt(ds *pg_query.DefineStmt, block pipeline.BlockA
 			t.Variant = "BASE"
 			t.Body = rawBody
 		}
+		for _, g := range block.Grants {
+			t.Grants = append(t.Grants, blockGrantToIR(g))
+		}
+		for _, r := range block.Revocations {
+			t.Revocations = append(t.Revocations, blockRevocationToIR(r))
+		}
 		t.SecurityLabels = block.SecurityLabels
 		t.NameMaps = block.NameMaps
 		return t, nil
@@ -2094,6 +2163,12 @@ func (b *Builder) buildDefineStmt(ds *pg_query.DefineStmt, block pipeline.BlockA
 		agg.Options = buildAggregateOptions(ds.Definition)
 		if block.Comment != nil {
 			agg.Comment = &block.Comment.Value
+		}
+		if block.RenamedFrom != nil {
+			agg.RenamedFrom = &block.RenamedFrom.Name
+		}
+		if block.Deprecated != nil {
+			agg.Deprecated = &block.Deprecated.Value
 		}
 		for _, g := range block.Grants {
 			agg.Grants = append(agg.Grants, blockGrantToIR(g))
@@ -2407,6 +2482,9 @@ func (b *Builder) buildOpaque(node *pg_query.Node, block pipeline.BlockAST, pos 
 		}
 		if block.Comment != nil {
 			pub.Comment = &block.Comment.Value
+		}
+		if block.Owner != nil {
+			pub.Owner = &block.Owner.Name
 		}
 		for _, obj := range n.CreatePublicationStmt.Pubobjects {
 			spec := obj.GetPublicationObjSpec()

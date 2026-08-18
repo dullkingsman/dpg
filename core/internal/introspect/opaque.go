@@ -238,7 +238,77 @@ ORDER  BY spcname`
 	if err := introspectTablespaceSecurityLabels(ctx, conn, out); err != nil {
 		return nil, err
 	}
+	if err := introspectSimpleGrants(ctx, conn, "pg_tablespace", "spcname", "spcacl", func(name string, g ir.Grant) {
+		for _, obj := range out {
+			if ts := obj.(*ir.Tablespace); ts.Name == name {
+				ts.Grants = append(ts.Grants, g)
+				return
+			}
+		}
+	}); err != nil {
+		return nil, err
+	}
 	return out, nil
+}
+
+// introspectSimpleGrants populates Grants (via addGrant) for a bare-named
+// (no schema) object kind using aclexplode on the given table/name/acl
+// columns — shared by Tablespace/ForeignDataWrapper/ForeignServer (RFC audit
+// items #4/#5/#6), mirroring introspectTableGrants' established shape.
+func introspectSimpleGrants(ctx context.Context, conn pipeline.Querier, table, nameCol, aclCol string, addGrant func(name string, g ir.Grant)) error {
+	q := fmt.Sprintf(`
+SELECT t.%s,
+       CASE WHEN a.grantee = 0 THEN 'PUBLIC' ELSE pg_get_userbyid(a.grantee) END AS grantee,
+       a.privilege_type, a.is_grantable
+FROM   %s t,
+       LATERAL aclexplode(t.%s) a
+ORDER  BY t.%s, grantee, a.privilege_type`, nameCol, table, aclCol, nameCol)
+
+	rs, err := conn.QueryRows(ctx, q)
+	if err != nil {
+		return fmt.Errorf("introspect %s grants: %w", table, err)
+	}
+	defer rs.Close()
+
+	type grantKey struct{ name, grantee string }
+	type grantEntry struct {
+		privs     []string
+		grantable bool
+	}
+	grants := make(map[grantKey]*grantEntry)
+	var order []grantKey
+
+	for rs.Next() {
+		var name, grantee, priv string
+		var grantable bool
+		if err := rs.Scan(&name, &grantee, &priv, &grantable); err != nil {
+			return err
+		}
+		k := grantKey{name, grantee}
+		e, ok := grants[k]
+		if !ok {
+			e = &grantEntry{}
+			grants[k] = e
+			order = append(order, k)
+		}
+		e.privs = append(e.privs, priv)
+		if grantable {
+			e.grantable = true
+		}
+	}
+	if err := rs.Err(); err != nil {
+		return err
+	}
+
+	for _, k := range order {
+		e := grants[k]
+		addGrant(k.name, ir.Grant{
+			Privileges: e.privs,
+			Roles:      []string{k.grantee},
+			WithGrant:  e.grantable,
+		})
+	}
+	return nil
 }
 
 // ── foreign data wrappers ─────────────────────────────────────────────────────
@@ -294,7 +364,20 @@ ORDER  BY f.fdwname`
 			Body: canonicalDDL(sb.String()), Comment: comment, Reconstructed: true,
 		})
 	}
-	return out, rs.Err()
+	if err := rs.Err(); err != nil {
+		return nil, err
+	}
+	if err := introspectSimpleGrants(ctx, conn, "pg_foreign_data_wrapper", "fdwname", "fdwacl", func(name string, g ir.Grant) {
+		for _, obj := range out {
+			if f := obj.(*ir.ForeignDataWrapper); f.Name == name {
+				f.Grants = append(f.Grants, g)
+				return
+			}
+		}
+	}); err != nil {
+		return nil, err
+	}
+	return out, nil
 }
 
 // ── foreign servers ───────────────────────────────────────────────────────────
@@ -347,7 +430,20 @@ ORDER  BY s.srvname`
 		}
 		out = append(out, srv)
 	}
-	return out, rs.Err()
+	if err := rs.Err(); err != nil {
+		return nil, err
+	}
+	if err := introspectSimpleGrants(ctx, conn, "pg_foreign_server", "srvname", "srvacl", func(name string, g ir.Grant) {
+		for _, obj := range out {
+			if s := obj.(*ir.ForeignServer); s.Name == name {
+				s.Grants = append(s.Grants, g)
+				return
+			}
+		}
+	}); err != nil {
+		return nil, err
+	}
+	return out, nil
 }
 
 // ── user mappings ─────────────────────────────────────────────────────────────
@@ -528,6 +624,7 @@ func introspectPublications(ctx context.Context, conn pipeline.Querier) ([]pipel
 	q := `
 SELECT p.oid, p.pubname, p.puballtables,
        p.pubinsert, p.pubupdate, p.pubdelete, p.pubtruncate,
+       pg_get_userbyid(p.pubowner) AS owner,
        obj_description(p.oid, 'pg_publication') AS comment
 FROM   pg_publication p
 WHERE  ` + notExtensionOwned("pg_publication", "p.oid") + `
@@ -543,12 +640,13 @@ ORDER  BY p.pubname`
 		oid                             uint32
 		name                            string
 		allTables, ins, upd, del, trunc bool
+		owner                           string
 		comment                         *string
 	}
 	var rows []pubRow
 	for rs.Next() {
 		var r pubRow
-		if err := rs.Scan(&r.oid, &r.name, &r.allTables, &r.ins, &r.upd, &r.del, &r.trunc, &r.comment); err != nil {
+		if err := rs.Scan(&r.oid, &r.name, &r.allTables, &r.ins, &r.upd, &r.del, &r.trunc, &r.owner, &r.comment); err != nil {
 			return nil, err
 		}
 		rows = append(rows, r)
@@ -576,10 +674,12 @@ ORDER  BY p.pubname`
 		if opt, ok := publishOption(r.ins, r.upd, r.del, r.trunc); ok {
 			fmt.Fprintf(&sb, " WITH (publish = %s)", quoteLit(opt))
 		}
+		owner := r.owner
 		pub := &ir.Publication{
 			Name: r.name, AllTables: r.allTables,
 			Insert: r.ins, Update: r.upd, Delete: r.del, Truncate: r.trunc,
-			Body: canonicalDDL(sb.String()), Comment: r.comment, Reconstructed: true,
+			Owner: &owner,
+			Body:  canonicalDDL(sb.String()), Comment: r.comment, Reconstructed: true,
 		}
 		if !r.allTables {
 			tables, err := publicationTableRefs(ctx, conn, r.oid)

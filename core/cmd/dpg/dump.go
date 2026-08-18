@@ -951,7 +951,7 @@ func renderObjectDPG(b *strings.Builder, obj pipeline.IRObject, fmtOpts format.O
 				b.WriteString(sqlStringLit(v))
 			}
 			b.WriteString(")")
-			writeTypeOwnerCommentBlock(b, ind, fmtOpts, o.Owner, o.Comment, o.SecurityLabels)
+			writeTypeOwnerCommentBlock(b, ind, fmtOpts, o.Owner, o.Comment, o.Grants, o.Revocations, o.SecurityLabels)
 		case "DOMAIN":
 			// Renders via the structured Domain* fields (RFC §5.4's block
 			// syntax), not o.Body — previously the entire domain (base type,
@@ -962,7 +962,8 @@ func renderObjectDPG(b *strings.Builder, obj pipeline.IRObject, fmtOpts format.O
 			// diff property-by-property (an inline blob round-trips back
 			// into Body, not into DomainDefault/DomainConstraints/etc.).
 			fmt.Fprintf(b, "\n%s %s %s %s", kw("DOMAIN"), quoteIdentIfNeeded(o.Name), kw("AS"), o.DomainBaseType.String())
-			if o.DomainDefault != nil || o.DomainNotNull || len(o.DomainConstraints) > 0 || o.Comment != nil || o.Owner != nil || len(o.SecurityLabels) > 0 {
+			if o.DomainDefault != nil || o.DomainNotNull || len(o.DomainConstraints) > 0 || o.Comment != nil || o.Owner != nil ||
+				len(o.Grants) > 0 || len(o.Revocations) > 0 || len(o.SecurityLabels) > 0 {
 				b.WriteString(" {\n")
 				if o.Owner != nil {
 					fmt.Fprintf(b, "%s%s %s;\n", ind, kw("OWNER"), quoteIdentIfNeeded(*o.Owner))
@@ -978,6 +979,28 @@ func renderObjectDPG(b *strings.Builder, obj pipeline.IRObject, fmtOpts format.O
 				}
 				if o.Comment != nil {
 					fmt.Fprintf(b, "%s%s %s;\n", ind, kw("COMMENT"), sqlStringLit(*o.Comment))
+				}
+				for _, g := range o.Grants {
+					priv := "ALL"
+					if len(g.Privileges) > 0 {
+						priv = strings.Join(g.Privileges, ", ")
+					}
+					fmt.Fprintf(b, "%s%s %s %s %s", ind, kw("GRANT"), priv, kw("TO"), strings.Join(g.Roles, ", "))
+					if g.WithGrant {
+						fmt.Fprintf(b, " %s %s %s", kw("WITH"), kw("GRANT"), kw("OPTION"))
+					}
+					b.WriteString(";\n")
+				}
+				for _, r := range o.Revocations {
+					priv := "ALL"
+					if len(r.Privileges) > 0 {
+						priv = strings.Join(r.Privileges, ", ")
+					}
+					fmt.Fprintf(b, "%s%s %s %s %s", ind, kw("REVOCATION"), priv, kw("FROM"), strings.Join(r.Roles, ", "))
+					if r.Cascade {
+						fmt.Fprintf(b, " %s", kw("CASCADE"))
+					}
+					b.WriteString(";\n")
 				}
 				writeSecurityLabels(b, ind, fmtOpts, o.SecurityLabels)
 				b.WriteString("}\n")
@@ -999,14 +1022,14 @@ func renderObjectDPG(b *strings.Builder, obj pipeline.IRObject, fmtOpts format.O
 				fmt.Fprintf(b, "%s %s", quoteIdentIfNeeded(attr.Name), attr.Type.String())
 			}
 			b.WriteString(")")
-			writeTypeOwnerCommentBlock(b, ind, fmtOpts, o.Owner, o.Comment, o.SecurityLabels)
+			writeTypeOwnerCommentBlock(b, ind, fmtOpts, o.Owner, o.Comment, o.Grants, o.Revocations, o.SecurityLabels)
 		case "RANGE":
 			// o.Body is introspectRangeBodies' reconstructed options text
 			// (e.g. "SUBTYPE = numeric") — same trailing-clause-only shape
 			// DOMAIN's Body already uses, no "CREATE TYPE ... AS RANGE"
 			// prefix baked in.
 			fmt.Fprintf(b, "\n%s %s %s %s (%s)", kw("TYPE"), quoteIdentIfNeeded(o.Name), kw("AS"), kw("RANGE"), o.Body)
-			writeTypeOwnerCommentBlock(b, ind, fmtOpts, o.Owner, o.Comment, o.SecurityLabels)
+			writeTypeOwnerCommentBlock(b, ind, fmtOpts, o.Owner, o.Comment, o.Grants, o.Revocations, o.SecurityLabels)
 		case "BASE":
 			// No live introspection reconstructs a base type's body today
 			// (would need to recover the original CREATE TYPE(...) options
@@ -1017,7 +1040,7 @@ func renderObjectDPG(b *strings.Builder, obj pipeline.IRObject, fmtOpts format.O
 			// options-only shape as RANGE, consistent with o.Body's doc
 			// comment ("raw Part1 for range/domain/base").
 			fmt.Fprintf(b, "\n%s %s (%s)", kw("TYPE"), quoteIdentIfNeeded(o.Name), o.Body)
-			writeTypeOwnerCommentBlock(b, ind, fmtOpts, o.Owner, o.Comment, o.SecurityLabels)
+			writeTypeOwnerCommentBlock(b, ind, fmtOpts, o.Owner, o.Comment, o.Grants, o.Revocations, o.SecurityLabels)
 		default:
 			fmt.Fprintf(b, "\n-- type %s (%s) omitted\n", o.Name, o.Variant)
 		}
@@ -1071,13 +1094,35 @@ func renderObjectDPG(b *strings.Builder, obj pipeline.IRObject, fmtOpts format.O
 			b.WriteString(" ")
 			b.WriteString(kw("CYCLE"))
 		}
-		if o.Owner != nil || o.Comment != nil || len(o.SecurityLabels) > 0 {
+		if o.Owner != nil || o.Comment != nil || len(o.Grants) > 0 || len(o.Revocations) > 0 || len(o.SecurityLabels) > 0 {
 			b.WriteString(" {\n")
 			if o.Owner != nil {
 				fmt.Fprintf(b, "%s%s %s;\n", ind, kw("OWNER"), quoteIdentIfNeeded(*o.Owner))
 			}
 			if o.Comment != nil {
 				fmt.Fprintf(b, "%s%s %s;\n", ind, kw("COMMENT"), sqlStringLit(*o.Comment))
+			}
+			for _, g := range o.Grants {
+				priv := "ALL"
+				if len(g.Privileges) > 0 {
+					priv = strings.Join(g.Privileges, ", ")
+				}
+				fmt.Fprintf(b, "%s%s %s %s %s", ind, kw("GRANT"), priv, kw("TO"), strings.Join(g.Roles, ", "))
+				if g.WithGrant {
+					fmt.Fprintf(b, " %s %s %s", kw("WITH"), kw("GRANT"), kw("OPTION"))
+				}
+				b.WriteString(";\n")
+			}
+			for _, r := range o.Revocations {
+				priv := "ALL"
+				if len(r.Privileges) > 0 {
+					priv = strings.Join(r.Privileges, ", ")
+				}
+				fmt.Fprintf(b, "%s%s %s %s %s", ind, kw("REVOCATION"), priv, kw("FROM"), strings.Join(r.Roles, ", "))
+				if r.Cascade {
+					fmt.Fprintf(b, " %s", kw("CASCADE"))
+				}
+				b.WriteString(";\n")
 			}
 			writeSecurityLabels(b, ind, fmtOpts, o.SecurityLabels)
 			b.WriteString("}\n")
@@ -1200,17 +1245,17 @@ func renderObjectDPG(b *strings.Builder, obj pipeline.IRObject, fmtOpts format.O
 	case *ir.EventTrigger:
 		renderOpaqueBodyWithLabels(b, ind, fmtOpts, o.Body, o.Comment, o.SecurityLabels)
 	case *ir.ForeignDataWrapper:
-		renderOpaqueBody(b, ind, fmtOpts, o.Body, o.Comment)
+		renderOpaqueBodyWithGrants(b, ind, fmtOpts, o.Body, o.Comment, o.Grants, o.Revocations)
 	case *ir.ForeignServer:
-		renderOpaqueBody(b, ind, fmtOpts, o.Body, o.Comment)
+		renderOpaqueBodyWithGrants(b, ind, fmtOpts, o.Body, o.Comment, o.Grants, o.Revocations)
 	case *ir.UserMapping:
 		renderOpaqueBody(b, ind, fmtOpts, o.Body, nil)
 	case *ir.Publication:
-		renderOpaqueBodyWithLabels(b, ind, fmtOpts, o.Body, o.Comment, o.SecurityLabels)
+		renderPublicationBody(b, ind, fmtOpts, o)
 	case *ir.Subscription:
 		renderOpaqueBodyWithLabels(b, ind, fmtOpts, o.Body, o.Comment, o.SecurityLabels)
 	case *ir.Tablespace:
-		renderOpaqueBodyWithLabels(b, ind, fmtOpts, o.Body, o.Comment, o.SecurityLabels)
+		renderOpaqueBodyWithGrantsAndLabels(b, ind, fmtOpts, o.Body, o.Comment, o.Grants, o.Revocations, o.SecurityLabels)
 	case *ir.Operator:
 		renderOpaqueBody(b, ind, fmtOpts, o.Body, o.Comment)
 	case *ir.OperatorClass:
@@ -1312,12 +1357,13 @@ func writeViewBlock(b *strings.Builder, ind string, fmtOpts format.Options, o *i
 }
 
 // writeTypeOwnerCommentBlock terminates an ENUM/COMPOSITE/RANGE/BASE type
-// declaration: a bare ";" when there's no OWNER/COMMENT to declare, or a
-// "{ }" block carrying them when there is. DOMAIN has its own richer block
-// (DEFAULT/NOT NULL/CONSTRAINT alongside OWNER/COMMENT) and doesn't use this.
-func writeTypeOwnerCommentBlock(b *strings.Builder, ind string, fmtOpts format.Options, owner, comment *string, securityLabels []pipeline.SecurityLabel) {
+// declaration: a bare ";" when there's nothing to declare, or a "{ }" block
+// carrying OWNER/COMMENT/GRANT/REVOCATION when there is. DOMAIN has its own
+// richer block (DEFAULT/NOT NULL/CONSTRAINT alongside OWNER/COMMENT) and
+// doesn't use this. Grants/Revocations rendering is RFC audit item #3.
+func writeTypeOwnerCommentBlock(b *strings.Builder, ind string, fmtOpts format.Options, owner, comment *string, grants []ir.Grant, revocations []ir.Revocation, securityLabels []pipeline.SecurityLabel) {
 	kw := fmtOpts.Keyword
-	if owner == nil && comment == nil && len(securityLabels) == 0 {
+	if owner == nil && comment == nil && len(grants) == 0 && len(revocations) == 0 && len(securityLabels) == 0 {
 		b.WriteString(";\n")
 		return
 	}
@@ -1327,6 +1373,28 @@ func writeTypeOwnerCommentBlock(b *strings.Builder, ind string, fmtOpts format.O
 	}
 	if comment != nil {
 		fmt.Fprintf(b, "%s%s %s;\n", ind, kw("COMMENT"), sqlStringLit(*comment))
+	}
+	for _, g := range grants {
+		priv := "ALL"
+		if len(g.Privileges) > 0 {
+			priv = strings.Join(g.Privileges, ", ")
+		}
+		fmt.Fprintf(b, "%s%s %s %s %s", ind, kw("GRANT"), priv, kw("TO"), strings.Join(g.Roles, ", "))
+		if g.WithGrant {
+			fmt.Fprintf(b, " %s %s %s", kw("WITH"), kw("GRANT"), kw("OPTION"))
+		}
+		b.WriteString(";\n")
+	}
+	for _, r := range revocations {
+		priv := "ALL"
+		if len(r.Privileges) > 0 {
+			priv = strings.Join(r.Privileges, ", ")
+		}
+		fmt.Fprintf(b, "%s%s %s %s %s", ind, kw("REVOCATION"), priv, kw("FROM"), strings.Join(r.Roles, ", "))
+		if r.Cascade {
+			fmt.Fprintf(b, " %s", kw("CASCADE"))
+		}
+		b.WriteString(";\n")
 	}
 	writeSecurityLabels(b, ind, fmtOpts, securityLabels)
 	b.WriteString("}\n")
@@ -1466,6 +1534,39 @@ func renderDefaultPrivileges(b *strings.Builder, ind string, fmtOpts format.Opti
 	b.WriteString("}\n")
 }
 
+// renderOpaqueBodyWithGrants is renderOpaqueBody plus Grants/Revocations
+// (RFC audit items #4/#5/#6) — Tablespace/ForeignDataWrapper/ForeignServer
+// only, the 3 opaque kinds that gained a Grants/Revocations field without
+// also having SecurityLabels (Tablespace has both, via
+// renderOpaqueBodyWithGrantsAndLabels below).
+func renderOpaqueBodyWithGrants(b *strings.Builder, ind string, fmtOpts format.Options, body string, comment *string, grants []ir.Grant, revocations []ir.Revocation) {
+	body = strings.TrimSpace(body)
+	const createPrefix = "CREATE "
+	if len(body) >= len(createPrefix) && strings.EqualFold(body[:len(createPrefix)], createPrefix) {
+		body = strings.TrimSpace(body[len(createPrefix):])
+	}
+	if body == "" {
+		return
+	}
+	fmt.Fprintf(b, "\n%s", body)
+	writeFuncBlock(b, ind, fmtOpts, comment, grants, revocations)
+}
+
+// renderOpaqueBodyWithGrantsAndLabels is renderOpaqueBodyWithGrants plus
+// SecurityLabels — Tablespace only (RFC audit item #4).
+func renderOpaqueBodyWithGrantsAndLabels(b *strings.Builder, ind string, fmtOpts format.Options, body string, comment *string, grants []ir.Grant, revocations []ir.Revocation, securityLabels []pipeline.SecurityLabel) {
+	body = strings.TrimSpace(body)
+	const createPrefix = "CREATE "
+	if len(body) >= len(createPrefix) && strings.EqualFold(body[:len(createPrefix)], createPrefix) {
+		body = strings.TrimSpace(body[len(createPrefix):])
+	}
+	if body == "" {
+		return
+	}
+	fmt.Fprintf(b, "\n%s", body)
+	writeFuncBlockWithLabels(b, ind, fmtOpts, comment, grants, revocations, securityLabels)
+}
+
 func renderOpaqueBody(b *strings.Builder, ind string, fmtOpts format.Options, body string, comment *string) {
 	body = strings.TrimSpace(body)
 	const createPrefix = "CREATE "
@@ -1498,6 +1599,37 @@ func renderOpaqueBodyWithLabels(b *strings.Builder, ind string, fmtOpts format.O
 	}
 	fmt.Fprintf(b, "\n%s", body)
 	writeFuncBlockWithLabels(b, ind, fmtOpts, comment, nil, nil, securityLabels)
+}
+
+// renderPublicationBody is renderOpaqueBodyWithLabels's Publication-specific
+// variant: Publication's OWNER (RFC audit item #7) has no counterpart in
+// any other opaque kind's IR, so it can't go through the shared
+// writeFuncBlockWithLabels helper without adding a parameter every other
+// caller would pass nil for.
+func renderPublicationBody(b *strings.Builder, ind string, fmtOpts format.Options, o *ir.Publication) {
+	kw := fmtOpts.Keyword
+	body := strings.TrimSpace(o.Body)
+	const createPrefix = "CREATE "
+	if len(body) >= len(createPrefix) && strings.EqualFold(body[:len(createPrefix)], createPrefix) {
+		body = strings.TrimSpace(body[len(createPrefix):])
+	}
+	if body == "" {
+		return
+	}
+	fmt.Fprintf(b, "\n%s", body)
+	if o.Owner == nil && o.Comment == nil && len(o.SecurityLabels) == 0 {
+		b.WriteString(";\n")
+		return
+	}
+	b.WriteString(" {\n")
+	if o.Owner != nil {
+		fmt.Fprintf(b, "%s%s %s;\n", ind, kw("OWNER"), quoteIdentIfNeeded(*o.Owner))
+	}
+	if o.Comment != nil {
+		fmt.Fprintf(b, "%s%s %s;\n", ind, kw("COMMENT"), sqlStringLit(*o.Comment))
+	}
+	writeSecurityLabels(b, ind, fmtOpts, o.SecurityLabels)
+	b.WriteString("}\n")
 }
 
 // renderTSConfigBody is renderOpaqueBody's TSConfig-specific variant: a text
