@@ -39,10 +39,20 @@ func (r *Resolver) Sort(objects []pipeline.IRObject) ([]pipeline.IRObject, error
 	// are out of DPG's scope and silently allowed.
 	idx := make(map[string]int, n)
 	schemaSet := make(map[string]bool)
+	// vtypeCaseIdx maps a declared VIRTUAL TYPE's lowercased qualified name to
+	// its correctly-cased qualified name — used solely to detect a column or
+	// composite-attribute type reference that case-insensitively matches a
+	// declared virtual type but isn't an exact match (see
+	// checkVirtualTypeCase's doc comment for why this is safe to flag
+	// unconditionally, unlike an ordinary unresolved custom-type reference).
+	vtypeCaseIdx := make(map[string]string)
 	for i, obj := range objects {
 		idx[obj.QualifiedName()] = i
 		if s, ok := obj.(*ir.Schema); ok {
 			schemaSet[s.Name] = true
+		}
+		if vt, ok := obj.(*ir.VirtualType); ok {
+			vtypeCaseIdx[strings.ToLower(vt.QualifiedName())] = vt.QualifiedName()
 		}
 	}
 
@@ -149,6 +159,45 @@ func (r *Resolver) Sort(objects []pipeline.IRObject) ([]pipeline.IRObject, error
 				dependsOn(objIdx, j)
 			}
 		}
+	}
+
+	// checkVirtualTypeCase reports a diagnostic when t's qualified name is a
+	// case-insensitive match for a declared VIRTUAL TYPE but not an exact
+	// match — e.g. a column declared `col MyJson` when the source actually
+	// declares `VIRTUAL TYPE myjson`. Unlike an ordinary custom TYPE/ENUM/
+	// DOMAIN reference (whose absence from idx might legitimately mean "a
+	// live-catalog PostgreSQL builtin, unknowable offline" — see
+	// typeRefEdge's own doc comment on why that case stays silent), VIRTUAL
+	// TYPE is DPG-native with zero catalog footprint (ir.VirtualType's own
+	// doc comment: "no backing PostgreSQL DDL is ever emitted"), so the full
+	// universe of valid virtual-type names is 100% known and closed at
+	// compile time — there is no ambiguity to preserve by staying silent.
+	// Before this check, a case-mismatched reference silently rendered as a
+	// bogus literal type name in the generated SQL and only failed much
+	// later as a confusing raw PostgreSQL error at apply time ("type ...
+	// does not exist") instead of a clear compile-time diagnostic citing the
+	// correct spelling.
+	//
+	// Only a near-miss is flagged, never an outright unrecognized name — an
+	// unrecognized name might still be a genuine PostgreSQL builtin or a
+	// forward reference to some other custom type, and this check has
+	// nothing useful to say about either.
+	checkVirtualTypeCase := func(t ir.TypeRef, fallbackSchema string, pos pipeline.SourcePos, context string) {
+		if t.Name == "" || t.Schema == "pg_catalog" {
+			return
+		}
+		schema := defaultSchema(t.Schema, fallbackSchema)
+		key := t.Name
+		if schema != "" {
+			key = schema + "." + t.Name
+		}
+		correct, ok := vtypeCaseIdx[strings.ToLower(key)]
+		if !ok || correct == key {
+			return
+		}
+		diags = append(diags, pipeline.Errorf(pos,
+			"%s references %q, which case-insensitively matches VIRTUAL TYPE %q but is not an exact match — VIRTUAL TYPE names are case-sensitive; did you mean %q?",
+			context, key, correct, correct))
 	}
 
 	// typeRefEdge adds a dependency from objIdx to the custom TYPE referenced
@@ -277,6 +326,8 @@ func (r *Resolver) Sort(objects []pipeline.IRObject) ([]pipeline.IRObject, error
 			// in source but the type isn't defined, that's a real bug — surface it
 			// rather than silently dropping the dependency.
 			for _, col := range o.Columns {
+				checkVirtualTypeCase(col.Type, o.Schema, col.SrcPos,
+					fmt.Sprintf("column %s.%s.%s", o.Schema, o.Name, col.Name))
 				if col.Type.Schema == "pg_catalog" {
 					continue
 				}
@@ -426,6 +477,14 @@ func (r *Resolver) Sort(objects []pipeline.IRObject) ([]pipeline.IRObject, error
 		case *ir.Type:
 			// Type/domain/enum depends on its schema.
 			schemaEdge(i, o.Schema)
+
+			// A composite type's attributes may reference a VIRTUAL TYPE
+			// directly (ir.VirtualType's own doc comment) — same case-
+			// mismatch hazard as a table column, see checkVirtualTypeCase.
+			for _, attr := range o.CompositeAttrs {
+				checkVirtualTypeCase(attr.Type, o.Schema, attr.SrcPos,
+					fmt.Sprintf("composite type attribute %s.%s.%s", o.Schema, o.Name, attr.Name))
+			}
 
 			// A BASE type's INPUT/OUTPUT/RECEIVE/SEND/... functions (and a
 			// RANGE type's CANONICAL/SUBTYPE_DIFF) must already exist before
@@ -877,6 +936,3 @@ func canDefer(objects []pipeline.IRObject, cycle []int, idx map[string]int) bool
 
 // Ensure Resolver implements pipeline.DependencyResolver.
 var _ pipeline.DependencyResolver = (*Resolver)(nil)
-
-// suppress unused import
-var _ = fmt.Sprintf

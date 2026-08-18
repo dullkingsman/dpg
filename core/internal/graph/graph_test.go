@@ -1,6 +1,7 @@
 package graph_test
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/dullkingsman/dpg/internal/graph"
@@ -342,6 +343,84 @@ func TestSort_UnresolvedTypeInManagedSchemaErrors(t *testing.T) {
 	_, err := r.Sort(objects)
 	if err == nil {
 		t.Fatal("expected error for unresolved type in managed schema")
+	}
+}
+
+// ── VIRTUAL TYPE case-mismatch detection ────────────────────────────────────
+// Regression guard: a column or composite attribute referencing a VIRTUAL
+// TYPE with the wrong case used to silently render as a bogus literal type
+// name, only failing much later as a confusing raw PostgreSQL error at
+// apply time. VIRTUAL TYPE is DPG-native with zero catalog footprint, so
+// unlike an ordinary custom type reference, its full name universe is known
+// offline — a case-insensitive near-miss is unambiguous and now errors.
+
+func vtype(schema, name string) *ir.VirtualType {
+	return &ir.VirtualType{Schema: schema, Name: name, Body: ir.VtypeTypeRef{Name: "jsonb"}}
+}
+
+func TestSort_VirtualTypeCaseMismatchInColumnErrors(t *testing.T) {
+	tbl := table("app", "events")
+	tbl.Columns = []*ir.Column{columnWithType("payload", "", "MyJson")}
+	objects := []pipeline.IRObject{schema("app"), tbl, vtype("app", "myjson")}
+
+	r := graph.New()
+	_, err := r.Sort(objects)
+	if err == nil {
+		t.Fatal("expected error for VIRTUAL TYPE case mismatch")
+	}
+	if !strings.Contains(err.Error(), "myjson") || !strings.Contains(err.Error(), "case-sensitive") {
+		t.Errorf("expected error to cite the correct casing, got: %v", err)
+	}
+}
+
+func TestSort_VirtualTypeQualifiedCaseMismatchErrors(t *testing.T) {
+	tbl := table("app", "events")
+	tbl.Columns = []*ir.Column{columnWithType("payload", "app", "MyJson")}
+	objects := []pipeline.IRObject{schema("app"), tbl, vtype("app", "myjson")}
+
+	r := graph.New()
+	_, err := r.Sort(objects)
+	if err == nil {
+		t.Fatal("expected error for qualified VIRTUAL TYPE case mismatch")
+	}
+}
+
+func TestSort_VirtualTypeExactCaseNoError(t *testing.T) {
+	tbl := table("app", "events")
+	tbl.Columns = []*ir.Column{columnWithType("payload", "", "myjson")}
+	objects := []pipeline.IRObject{schema("app"), tbl, vtype("app", "myjson")}
+
+	sorted := sortObjects(t, objects)
+	if len(sorted) != 3 {
+		t.Errorf("expected 3 objects, got %d", len(sorted))
+	}
+}
+
+func TestSort_OrdinaryBuiltinTypeNoVirtualTypeFalsePositive(t *testing.T) {
+	tbl := table("app", "events")
+	tbl.Columns = []*ir.Column{columnWithType("created_at", "", "TIMESTAMP")}
+	// A declared virtual type exists but shares no name with the column's
+	// type at all — must never be flagged.
+	objects := []pipeline.IRObject{schema("app"), tbl, vtype("app", "myjson")}
+
+	sorted := sortObjects(t, objects)
+	if len(sorted) != 3 {
+		t.Errorf("expected 3 objects, got %d", len(sorted))
+	}
+}
+
+func TestSort_CompositeAttrVirtualTypeCaseMismatchErrors(t *testing.T) {
+	comp := &ir.Type{
+		Schema: "app", Name: "envelope", Variant: "COMPOSITE",
+		CompositeAttrs: []*ir.Column{columnWithType("payload", "", "MyJson")},
+		SrcPos:         pos,
+	}
+	objects := []pipeline.IRObject{schema("app"), comp, vtype("app", "myjson")}
+
+	r := graph.New()
+	_, err := r.Sort(objects)
+	if err == nil {
+		t.Fatal("expected error for VIRTUAL TYPE case mismatch in a composite attribute")
 	}
 }
 
