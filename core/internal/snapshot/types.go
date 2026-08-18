@@ -320,7 +320,13 @@ type SnapPolicy struct {
 	Permissive bool   `json:"permissive"`
 	Using      string `json:"using,omitempty"`
 	WithCheck  string `json:"with_check,omitempty"`
-	Comment    string `json:"comment,omitempty"`
+	// Roles is empty when the source never wrote a TO clause (PostgreSQL's
+	// own default is then PUBLIC) — same nil-means-unspecified convention
+	// used throughout this file. diffPolicies normalizes an empty list and
+	// an explicit ["PUBLIC"] as equal, so this stays empty rather than
+	// eagerly writing "PUBLIC" here.
+	Roles   []string `json:"roles,omitempty"`
+	Comment string   `json:"comment,omitempty"`
 }
 
 type SnapTrigger struct {

@@ -655,6 +655,127 @@ func TestDiffViewChanged(t *testing.T) {
 	}
 }
 
+// TestDiffViewUnaliasedColumnRenameDropsAndRecreates is the regression
+// guard for RFC audit item #29: DPG emitted CREATE OR REPLACE VIEW
+// unconditionally on any query-text change, but real PostgreSQL rejects a
+// replacement that changes an existing output column's implicit name
+// (SQLSTATE 42P16) — the exact shape of an unaliased "SELECT col FROM t"
+// whose source column got renamed elsewhere in the same migration. RFC
+// §8.1 requires detecting this and falling back to DROP VIEW CASCADE;
+// CREATE VIEW (DESTRUCTIVE) instead of a migration-aborting CREATE OR
+// REPLACE.
+func TestDiffViewUnaliasedColumnRenameDropsAndRecreates(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.v", &snapshot.SnapObject{
+		Kind: "view",
+		View: &snapshot.SnapView{
+			Schema: "public",
+			Name:   "v",
+			Query:  "SELECT old_name FROM t",
+		},
+	})
+	desired := []pipeline.IRObject{
+		&ir.View{
+			Schema: "public",
+			Name:   "v",
+			Query:  "SELECT new_name FROM t",
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsSQL(ops, `DROP VIEW IF EXISTS "public"."v" CASCADE;`) {
+		t.Errorf("expected DROP VIEW ... CASCADE, got: %v", sqlList(ops))
+	}
+	if containsSQL(ops, "CREATE OR REPLACE VIEW") {
+		t.Errorf("must not use CREATE OR REPLACE VIEW when the output column name changed, got: %v", sqlList(ops))
+	}
+	if !containsSQL(ops, `CREATE VIEW "public"."v" AS SELECT new_name FROM t;`) {
+		t.Errorf("expected recreated CREATE VIEW, got: %v", sqlList(ops))
+	}
+	var dropOp pipeline.DiffOp
+	for _, op := range ops {
+		if strings.Contains(op.SQL(), "DROP VIEW") {
+			dropOp = op
+		}
+	}
+	if dropOp == nil || dropOp.Safety() != pipeline.Destructive {
+		t.Errorf("DROP VIEW safety = %v, want Destructive", dropOp)
+	}
+}
+
+// TestDiffViewSameOutputColumnsStaysReplace proves the companion case: a
+// query-text change that doesn't touch the output column list (aliased
+// selection, added WHERE clause, ...) must still use the SAFE CREATE OR
+// REPLACE VIEW path — the new detection must not over-trigger DESTRUCTIVE
+// for ordinary, harmless view edits.
+func TestDiffViewSameOutputColumnsStaysReplace(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.v", &snapshot.SnapObject{
+		Kind: "view",
+		View: &snapshot.SnapView{
+			Schema: "public",
+			Name:   "v",
+			Query:  "SELECT id, name FROM t",
+		},
+	})
+	desired := []pipeline.IRObject{
+		&ir.View{
+			Schema: "public",
+			Name:   "v",
+			Query:  "SELECT id, name FROM t WHERE active = true",
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if containsSQL(ops, "DROP VIEW") {
+		t.Errorf("must not DROP VIEW when the output column list is unchanged, got: %v", sqlList(ops))
+	}
+	if !containsSQL(ops, "CREATE OR REPLACE VIEW") {
+		t.Errorf("expected CREATE OR REPLACE VIEW, got: %v", sqlList(ops))
+	}
+}
+
+// TestDiffViewAliasedColumnRenameStaysReplace proves an aliased SELECT
+// (RFC §7.6's mechanism doesn't even apply here — the alias itself, not the
+// underlying source column, determines the output name) never triggers the
+// new DESTRUCTIVE path merely because the source column changed underneath
+// an unrelated, stable alias.
+func TestDiffViewAliasedColumnRenameStaysReplace(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.v", &snapshot.SnapObject{
+		Kind: "view",
+		View: &snapshot.SnapView{
+			Schema: "public",
+			Name:   "v",
+			Query:  "SELECT old_name AS label FROM t",
+		},
+	})
+	desired := []pipeline.IRObject{
+		&ir.View{
+			Schema: "public",
+			Name:   "v",
+			Query:  "SELECT new_name AS label FROM t",
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if containsSQL(ops, "DROP VIEW") {
+		t.Errorf("must not DROP VIEW when the alias keeps the output column name stable, got: %v", sqlList(ops))
+	}
+	if !containsSQL(ops, "CREATE OR REPLACE VIEW") {
+		t.Errorf("expected CREATE OR REPLACE VIEW, got: %v", sqlList(ops))
+	}
+}
+
 func TestDiffFunctionChanged(t *testing.T) {
 	d := New()
 	snap := &pipeline.Snapshot{}
@@ -6731,6 +6852,35 @@ func TestDiffSequenceCycleChangedWithoutOtherParams(t *testing.T) {
 	}
 }
 
+// TestDiffSequenceCycleToggledOffEmitsNoCycle is the regression guard for
+// RFC audit item #21: writeSeqParams only ever wrote "CYCLE" when Cycle was
+// true, so toggling an existing CYCLE sequence to NO CYCLE was detected as a
+// diff (paramsChanged correctly saw *o.Cycle != snap.Cycle) but emitted an
+// ALTER SEQUENCE statement with no CYCLE clause at all. Unlike CREATE
+// SEQUENCE, PostgreSQL's ALTER SEQUENCE does not reset an omitted option to
+// its default — so the live sequence kept cycling forever, and the snapshot
+// recorded the change as applied, permanently hiding the drift from future
+// diffs. The emitted SQL must say "NO CYCLE" explicitly.
+func TestDiffSequenceCycleToggledOffEmitsNoCycle(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.seq_id", &snapshot.SnapObject{
+		Kind:     "sequence",
+		Sequence: &snapshot.SnapSequence{Schema: "public", Name: "seq_id", Cycle: true},
+	})
+	cyc := false
+	desired := []pipeline.IRObject{
+		&ir.Sequence{Schema: "public", Name: "seq_id", Cycle: &cyc},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsSQL(ops, "ALTER SEQUENCE") || !containsSQL(ops, "NO CYCLE") {
+		t.Errorf("expected ALTER SEQUENCE ... NO CYCLE, got: %v", sqlList(ops))
+	}
+}
+
 // TestDiffSequenceCycleUnspecifiedIsNoop proves the nil-means-unspecified
 // semantics: a sequence source that never mentions CYCLE/NO CYCLE must not
 // touch an existing sequence's cycle setting either way.
@@ -11653,6 +11803,81 @@ func TestDiffCreatePolicyToPublicNotQuoted(t *testing.T) {
 	}
 }
 
+// TestDiffPolicyRoleListChangedIsDetected is the regression guard for RFC
+// audit item #19: SnapPolicy had no Roles field at all, so diffPolicies
+// could never see a TO role-list change — an edited policy silently kept
+// its old role list forever, on both plan/apply and --live verify.
+func TestDiffPolicyRoleListChangedIsDetected(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.t", &snapshot.SnapObject{
+		Kind: "table",
+		Table: &snapshot.SnapTable{
+			Schema:  "public",
+			Name:    "t",
+			Columns: []snapshot.SnapColumn{{Name: "id", Type: "bigint"}},
+			Policies: []snapshot.SnapPolicy{
+				{Name: "p_owner", Command: "SELECT", Permissive: true, Roles: []string{"app_readonly"}},
+			},
+		},
+	})
+	desired := []pipeline.IRObject{
+		&ir.Table{
+			Schema:  "public",
+			Name:    "t",
+			Columns: []*ir.Column{{Name: "id", Type: ir.TypeRef{Name: "bigint"}}},
+			Policies: []*ir.Policy{
+				{Name: "p_owner", Command: "SELECT", Permissive: true, Roles: []string{"app_admin"}},
+			},
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsSQL(ops, `DROP POLICY IF EXISTS "p_owner"`) || !containsSQL(ops, "TO") || !containsSQL(ops, "app_admin") {
+		t.Errorf("expected DROP+CREATE reflecting the new role list, got: %v", sqlList(ops))
+	}
+}
+
+// TestDiffPolicyUnspecifiedRolesEqualsExplicitPublicIsNoop proves the
+// normalization companion to the fix above: a policy that never wrote a TO
+// clause (Roles == nil, PostgreSQL's own implicit default is PUBLIC) must
+// not drift against a snapshot/live-introspected value of explicit
+// ["PUBLIC"] — introspection always reports a concrete role, never nil.
+func TestDiffPolicyUnspecifiedRolesEqualsExplicitPublicIsNoop(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.t", &snapshot.SnapObject{
+		Kind: "table",
+		Table: &snapshot.SnapTable{
+			Schema:  "public",
+			Name:    "t",
+			Columns: []snapshot.SnapColumn{{Name: "id", Type: "bigint"}},
+			Policies: []snapshot.SnapPolicy{
+				{Name: "p_owner", Command: "SELECT", Permissive: true, Roles: []string{"PUBLIC"}},
+			},
+		},
+	})
+	desired := []pipeline.IRObject{
+		&ir.Table{
+			Schema:  "public",
+			Name:    "t",
+			Columns: []*ir.Column{{Name: "id", Type: ir.TypeRef{Name: "bigint"}}},
+			Policies: []*ir.Policy{
+				{Name: "p_owner", Command: "SELECT", Permissive: true},
+			},
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ops) != 0 {
+		t.Errorf("expected no ops: unspecified TO clause must be treated as equal to explicit PUBLIC, got: %v", sqlList(ops))
+	}
+}
+
 // ── trivial helpers (coverage tail, see .dpg-notes/dpg-status-accounting.md §9's
 // "#5 diff coverage push, remaining tail") ─────────────────────────────────────
 
@@ -11702,36 +11927,161 @@ func TestInt64PtrEq(t *testing.T) {
 	}
 }
 
-// TestCompositeAttrsChanged covers compositeAttrsChanged's 3 change signals
-// (length, name, type) plus the unchanged control.
-func TestCompositeAttrsChanged(t *testing.T) {
-	base := []*ir.Column{
-		{Name: "a", Type: ir.TypeRef{Name: "integer"}},
-		{Name: "b", Type: ir.TypeRef{Name: "text"}},
+// ── Composite type attribute diffing (RFC §5.2, RFC audit items #12/#13) ────
+// Regression guards for two related bugs: buildCompositeType never read
+// block.Columns at all, so a declared `COLUMN attr { RENAMED FROM old; }`
+// sub-block was silently ignored (a rename looked like an unrelated
+// drop+add); and diffType treated ANY composite attribute change —
+// including a pure addition — as a bare DROP TYPE + recreate instead of the
+// RFC's granular, safety-differentiated ADD/DROP/ALTER/RENAME ATTRIBUTE ops.
+
+func compositeType(schema, name string, attrs ...*ir.Column) *ir.Type {
+	return &ir.Type{Schema: schema, Name: name, Variant: "COMPOSITE", CompositeAttrs: attrs}
+}
+
+func compositeSnap(schema, name string, attrs ...snapshot.SnapColumn) *snapshot.SnapObject {
+	return &snapshot.SnapObject{
+		Kind: "type",
+		Type: &snapshot.SnapType{Schema: schema, Name: name, Variant: "COMPOSITE", CompositeAttrs: attrs},
 	}
-	baseSnap := []snapshot.SnapColumn{
-		{Name: "a", Type: "integer"},
-		{Name: "b", Type: "text"},
+}
+
+func TestDiffCompositeAttrUnchangedIsNoop(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.addr", compositeSnap("public", "addr",
+		snapshot.SnapColumn{Name: "a", Type: "integer"},
+		snapshot.SnapColumn{Name: "b", Type: "text"},
+	))
+	desired := []pipeline.IRObject{
+		compositeType("public", "addr",
+			&ir.Column{Name: "a", Type: ir.TypeRef{Name: "integer"}},
+			&ir.Column{Name: "b", Type: ir.TypeRef{Name: "text"}},
+		),
 	}
-	if compositeAttrsChanged(base, baseSnap) {
-		t.Error("expected no change for identical attribute lists")
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if !compositeAttrsChanged(base[:1], baseSnap) {
-		t.Error("expected a change when the attribute count differs")
+	if len(ops) != 0 {
+		t.Errorf("expected no ops for an unchanged composite type, got: %v", sqlList(ops))
 	}
-	renamedSnap := []snapshot.SnapColumn{
-		{Name: "a", Type: "integer"},
-		{Name: "c", Type: "text"},
+}
+
+// TestDiffCompositeAttrAdded proves a pure addition emits the RFC's granular
+// ALTER TYPE ADD ATTRIBUTE (SAFE), not a DROP TYPE + recreate.
+func TestDiffCompositeAttrAdded(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.addr", compositeSnap("public", "addr",
+		snapshot.SnapColumn{Name: "a", Type: "integer"},
+	))
+	desired := []pipeline.IRObject{
+		compositeType("public", "addr",
+			&ir.Column{Name: "a", Type: ir.TypeRef{Name: "integer"}},
+			&ir.Column{Name: "b", Type: ir.TypeRef{Name: "text"}},
+		),
 	}
-	if !compositeAttrsChanged(base, renamedSnap) {
-		t.Error("expected a change when an attribute name differs")
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
 	}
-	retypedSnap := []snapshot.SnapColumn{
-		{Name: "a", Type: "integer"},
-		{Name: "b", Type: "varchar"},
+	if containsSQL(ops, "DROP TYPE") {
+		t.Errorf("a pure addition must not DROP TYPE, got: %v", sqlList(ops))
 	}
-	if !compositeAttrsChanged(base, retypedSnap) {
-		t.Error("expected a change when an attribute type differs")
+	if !containsSQL(ops, `ALTER TYPE "public"."addr" ADD ATTRIBUTE "b" text;`) {
+		t.Errorf("expected ALTER TYPE ... ADD ATTRIBUTE, got: %v", sqlList(ops))
+	}
+	for _, op := range ops {
+		if strings.Contains(op.SQL(), "ADD ATTRIBUTE") && op.Safety() != pipeline.Safe {
+			t.Errorf("ADD ATTRIBUTE safety = %v, want Safe", op.Safety())
+		}
+	}
+}
+
+// TestDiffCompositeAttrDropped proves a pure removal emits ALTER TYPE DROP
+// ATTRIBUTE (DESTRUCTIVE), not a blanket DROP TYPE + recreate.
+func TestDiffCompositeAttrDropped(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.addr", compositeSnap("public", "addr",
+		snapshot.SnapColumn{Name: "a", Type: "integer"},
+		snapshot.SnapColumn{Name: "b", Type: "text"},
+	))
+	desired := []pipeline.IRObject{
+		compositeType("public", "addr",
+			&ir.Column{Name: "a", Type: ir.TypeRef{Name: "integer"}},
+		),
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if containsSQL(ops, "DROP TYPE") {
+		t.Errorf("a pure drop must not use DROP TYPE, got: %v", sqlList(ops))
+	}
+	if !containsSQL(ops, `ALTER TYPE "public"."addr" DROP ATTRIBUTE "b";`) {
+		t.Errorf("expected ALTER TYPE ... DROP ATTRIBUTE, got: %v", sqlList(ops))
+	}
+	for _, op := range ops {
+		if strings.Contains(op.SQL(), "DROP ATTRIBUTE") && op.Safety() != pipeline.Destructive {
+			t.Errorf("DROP ATTRIBUTE safety = %v, want Destructive", op.Safety())
+		}
+	}
+}
+
+// TestDiffCompositeAttrTypeChanged proves a type change on an existing,
+// unrenamed attribute emits ALTER TYPE ALTER ATTRIBUTE ... TYPE
+// (DESTRUCTIVE).
+func TestDiffCompositeAttrTypeChanged(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.addr", compositeSnap("public", "addr",
+		snapshot.SnapColumn{Name: "a", Type: "integer"},
+	))
+	desired := []pipeline.IRObject{
+		compositeType("public", "addr",
+			&ir.Column{Name: "a", Type: ir.TypeRef{Name: "text"}},
+		),
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsSQL(ops, `ALTER TYPE "public"."addr" ALTER ATTRIBUTE "a" TYPE text;`) {
+		t.Errorf("expected ALTER TYPE ... ALTER ATTRIBUTE ... TYPE, got: %v", sqlList(ops))
+	}
+	for _, op := range ops {
+		if strings.Contains(op.SQL(), "ALTER ATTRIBUTE") && op.Safety() != pipeline.Destructive {
+			t.Errorf("ALTER ATTRIBUTE safety = %v, want Destructive", op.Safety())
+		}
+	}
+}
+
+// TestDiffCompositeAttrRenamed proves a builder-populated RenamedFrom (RFC
+// §5.2: "the same [COLUMN] mechanism applies to composite type attributes")
+// emits ALTER TYPE RENAME ATTRIBUTE, not an unrelated drop+add of two
+// differently-named attributes.
+func TestDiffCompositeAttrRenamed(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.addr", compositeSnap("public", "addr",
+		snapshot.SnapColumn{Name: "old_name", Type: "text"},
+	))
+	desired := []pipeline.IRObject{
+		compositeType("public", "addr",
+			&ir.Column{Name: "new_name", Type: ir.TypeRef{Name: "text"}, RenamedFrom: strPtr("old_name")},
+		),
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if containsSQL(ops, "DROP ATTRIBUTE") || containsSQL(ops, "ADD ATTRIBUTE") {
+		t.Errorf("a rename must not drop+add, got: %v", sqlList(ops))
+	}
+	if !containsSQL(ops, `ALTER TYPE "public"."addr" RENAME ATTRIBUTE "old_name" TO "new_name";`) {
+		t.Errorf("expected ALTER TYPE ... RENAME ATTRIBUTE, got: %v", sqlList(ops))
 	}
 }
 

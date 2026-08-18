@@ -852,16 +852,28 @@ func unquoteIdent(s string) string {
 	return s
 }
 
-// findCycle finds nodes involved in a cycle using DFS.
+// findCycle finds every node on a cycle using DFS, reconstructing the full
+// cycle path via parent pointers (the current DFS stack) rather than just
+// the two endpoints of the back-edge that closed it. For a cycle of 3+
+// nodes, a gray node w reached from v is not necessarily v's direct
+// predecessor — it can be any ancestor still on the DFS stack — so the full
+// cycle is the stack slice from w's position through v, not just {w, v}.
+// Returning only the back-edge endpoints let canDefer examine a strict
+// subset of the real cycle-closing FKs, silently missing a non-deferrable
+// FK on any node in between (RFC audit item #23).
 func findCycle(edges []map[int]bool, n int) []int {
 	color := make([]int, n) // 0=white, 1=gray, 2=black
+	var stack []int
+	stackPos := make(map[int]int, n)
 	var cycle []int
 	var dfs func(v int) bool
 	dfs = func(v int) bool {
 		color[v] = 1
+		stack = append(stack, v)
+		stackPos[v] = len(stack) - 1
 		for w := range edges[v] {
 			if color[w] == 1 {
-				cycle = append(cycle, w, v)
+				cycle = append(cycle, stack[stackPos[w]:]...)
 				return true
 			}
 			if color[w] == 0 && dfs(w) {
@@ -869,6 +881,8 @@ func findCycle(edges []map[int]bool, n int) []int {
 			}
 		}
 		color[v] = 2
+		stack = stack[:len(stack)-1]
+		delete(stackPos, v)
 		return false
 	}
 	for i := 0; i < n; i++ {

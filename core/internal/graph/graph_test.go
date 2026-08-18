@@ -277,6 +277,37 @@ func TestSort_CircularNonDeferrableFKErrors(t *testing.T) {
 	}
 }
 
+// TestSort_ThreeNodeCycleWithNonDeferrableMiddleFKErrors is the regression
+// guard for RFC audit item #23: findCycle used to record only the two
+// endpoints of the DFS back-edge that closed a cycle, not every node on the
+// cycle. For a 3+-node cycle, the middle member(s) never made it into the
+// returned cycle slice at all, so canDefer's contract ("resolvable only when
+// EVERY cycle-closing FK is DEFERRABLE") silently checked a strict subset of
+// the real cycle-closing FKs.
+//
+// Here A→C (deferrable), B→A (NOT deferrable), C→B (deferrable) form a
+// single 3-node cycle with pub.a first in the object list, so the DFS
+// deterministically enters at A, walks A→C→B, and finds the back edge B→A —
+// the buggy findCycle returned only [a, b], never mentioning c. canDefer
+// then only examined a's FK (→c, deferrable) and never saw b's FK (→a, NOT
+// deferrable) because c wasn't in its cycle set — wrongly approving the
+// cycle as resolvable. With the fix, findCycle reconstructs the full [a, c,
+// b] path via parent pointers, canDefer sees b's non-deferrable FK, and Sort
+// correctly refuses instead of silently leaving an undeferred, cycle-closing
+// FK to depend on removal of an unrelated edge.
+func TestSort_ThreeNodeCycleWithNonDeferrableMiddleFKErrors(t *testing.T) {
+	a := table("pub", "a", fk(`FOREIGN KEY (c_id) REFERENCES pub.c (id)`, true))
+	b := table("pub", "b", fk(`FOREIGN KEY (a_id) REFERENCES pub.a (id)`, false))
+	c := table("pub", "c", fk(`FOREIGN KEY (b_id) REFERENCES pub.b (id)`, true))
+	objects := []pipeline.IRObject{a, b, c}
+
+	r := graph.New()
+	_, err := r.Sort(objects)
+	if err == nil {
+		t.Fatal("expected error: cycle contains a non-deferrable closing FK (pub.b → pub.a) that a truncated cycle would miss")
+	}
+}
+
 // TestSort_RangeTypeAutoConstructorNoCycle is the regression guard for RFC
 // audit item C.1: dumping a real RANGE type crashed dpg dump/plan/apply with
 // a goroutine stack overflow. PostgreSQL auto-generates an eponymous

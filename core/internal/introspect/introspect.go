@@ -1238,7 +1238,10 @@ SELECT n.nspname, c.relname,
        p.polpermissive,
        pg_get_expr(p.polqual, p.polrelid) AS using_expr,
        pg_get_expr(p.polwithcheck, p.polrelid) AS check_expr,
-       obj_description(p.oid, 'pg_policy') AS comment
+       obj_description(p.oid, 'pg_policy') AS comment,
+       (SELECT array_agg(COALESCE(pr.rolname, 'PUBLIC') ORDER BY COALESCE(pr.rolname, 'PUBLIC'))
+          FROM unnest(p.polroles) AS role_oid
+          LEFT JOIN pg_roles pr ON pr.oid = role_oid) AS roles
 FROM   pg_policy p
 JOIN   pg_class c     ON c.oid = p.polrelid
 JOIN   pg_namespace n ON n.oid = c.relnamespace
@@ -1255,7 +1258,8 @@ ORDER  BY n.nspname, c.relname, p.polname`
 		var schema, table, name, cmd string
 		var permissive bool
 		var using, check, comment *string
-		if err := rs.Scan(&schema, &table, &name, &cmd, &permissive, &using, &check, &comment); err != nil {
+		var roles []string
+		if err := rs.Scan(&schema, &table, &name, &cmd, &permissive, &using, &check, &comment, &roles); err != nil {
 			return err
 		}
 		t, ok := idx[schema+"."+table]
@@ -1268,6 +1272,7 @@ ORDER  BY n.nspname, c.relname, p.polname`
 			Permissive: permissive,
 			Using:      using,
 			WithCheck:  check,
+			Roles:      roles,
 			Comment:    comment,
 		})
 	}

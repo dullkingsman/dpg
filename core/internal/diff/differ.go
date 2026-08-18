@@ -15,6 +15,8 @@ import (
 	"strings"
 	"unicode/utf8"
 
+	pg_query "github.com/pganalyze/pg_query_go/v6"
+
 	"github.com/dullkingsman/dpg/internal/ir"
 	"github.com/dullkingsman/dpg/internal/pipeline"
 	"github.com/dullkingsman/dpg/internal/snapshot"
@@ -438,19 +440,100 @@ func effectiveComment(comment, deprecated *string) *string {
 	return comment
 }
 
-// compositeAttrsChanged returns true if the composite type attribute list has
-// changed compared to the snapshot. Any addition, removal, or type change
-// counts as a change (PG requires DROP + CREATE for attribute changes).
-func compositeAttrsChanged(attrs []*ir.Column, snap []snapshot.SnapColumn) bool {
-	if len(attrs) != len(snap) {
-		return true
+// diffCompositeAttrs diffs a composite type's attribute list against the
+// snapshot, emitting the RFC §5.2-documented granular ops (ADD ATTRIBUTE =
+// SAFE, DROP ATTRIBUTE = DESTRUCTIVE, ALTER ATTRIBUTE TYPE = DESTRUCTIVE,
+// RENAME ATTRIBUTE via a COLUMN-equivalent RENAMED FROM sub-block) instead
+// of the previous behavior, which treated ANY attribute change — including
+// a pure, RFC-promised-safe addition — as a bare DROP TYPE + recreate, and
+// couldn't detect a rename at all (an attribute rename looked like an
+// unrelated drop+add). Deliberately not a call into diffColumns: composite
+// type attributes support none of a table column's extra machinery
+// (defaults, identity, generated, NOT NULL, grants, comments) — real
+// PostgreSQL's ALTER TYPE ... ATTRIBUTE grammar only has ADD/DROP/ALTER
+// TYPE/RENAME.
+func diffCompositeAttrs(typeIdent string, attrs []*ir.Column, snap []snapshot.SnapColumn, vtypes map[string]string) ([]pipeline.DiffOp, error) {
+	var ops []pipeline.DiffOp
+
+	snapByName := make(map[string]*snapshot.SnapColumn, len(snap))
+	for i := range snap {
+		snapByName[snap[i].Name] = &snap[i]
 	}
-	for i, attr := range attrs {
-		if attr.Name != snap[i].Name || attr.Type.String() != snap[i].Type {
-			return true
+	desiredHasName := make(map[string]bool, len(attrs))
+	for _, a := range attrs {
+		desiredHasName[a.Name] = true
+	}
+
+	// Attributes renamed in desired: map old→new name. Same validation shape
+	// as diffColumns' table-column rename handling (see its own doc comment),
+	// scaled down to composite attrs' much smaller feature surface.
+	renamedFrom := make(map[string]string) // snapName → desiredName
+	for _, a := range attrs {
+		if a.RenamedFrom == nil {
+			continue
+		}
+		if desiredHasName[*a.RenamedFrom] {
+			return nil, pipeline.Errorf(a.SrcPos,
+				"RENAMED FROM %q on composite attribute %q in %s collides with another attribute of the same name in the desired declaration. Remove the stale attribute.",
+				*a.RenamedFrom, a.Name, typeIdent)
+		}
+		_, oldInSnap := snapByName[*a.RenamedFrom]
+		_, newInSnap := snapByName[a.Name]
+		if newInSnap {
+			// Post-apply / no-op state: the snapshot already has the new name.
+			continue
+		}
+		if !oldInSnap {
+			return nil, pipeline.Errorf(a.SrcPos,
+				"RENAMED FROM %q on composite attribute %q in %s does not match the snapshot — neither the old nor the new name exists there. Remove RENAMED FROM if this is a genuinely new attribute.",
+				*a.RenamedFrom, a.Name, typeIdent)
+		}
+		renamedFrom[*a.RenamedFrom] = a.Name
+		ops = append(ops, safeOp(
+			fmt.Sprintf("ALTER TYPE %s RENAME ATTRIBUTE %s TO %s;", typeIdent, quoteIdent(*a.RenamedFrom), quoteIdent(a.Name)),
+			a.SrcPos,
+		))
+	}
+
+	// Drop attributes absent from desired (and not just renamed away).
+	for _, sc := range snap {
+		if _, ok := renamedFrom[sc.Name]; ok {
+			continue
+		}
+		if !desiredHasName[sc.Name] {
+			ops = append(ops, destructiveOp(
+				fmt.Sprintf("ALTER TYPE %s DROP ATTRIBUTE %s;", typeIdent, quoteIdent(sc.Name)),
+				pipeline.SourcePos{},
+			))
 		}
 	}
-	return false
+
+	// Add new attributes, or alter the type of a changed one.
+	for _, a := range attrs {
+		snapAttrName := a.Name
+		if a.RenamedFrom != nil {
+			if _, ok := snapByName[*a.RenamedFrom]; ok {
+				snapAttrName = *a.RenamedFrom
+			}
+		}
+		sc, exists := snapByName[snapAttrName]
+		resolvedType := resolveColType(a.Type, vtypes)
+		if !exists {
+			ops = append(ops, safeOp(
+				fmt.Sprintf("ALTER TYPE %s ADD ATTRIBUTE %s %s;", typeIdent, quoteIdent(a.Name), resolvedType),
+				a.SrcPos,
+			))
+			continue
+		}
+		if resolvedType != sc.Type {
+			ops = append(ops, destructiveOp(
+				fmt.Sprintf("ALTER TYPE %s ALTER ATTRIBUTE %s TYPE %s;", typeIdent, quoteIdent(a.Name), resolvedType),
+				a.SrcPos,
+			))
+		}
+	}
+
+	return ops, nil
 }
 
 func ptrStr(s *string) string {
@@ -3066,8 +3149,18 @@ func writeSeqParams(b *strings.Builder, o *ir.Sequence) {
 	if o.Cache != nil {
 		fmt.Fprintf(b, " CACHE %d", *o.Cache)
 	}
-	if o.Cycle != nil && *o.Cycle {
-		b.WriteString(" CYCLE")
+	if o.Cycle != nil {
+		// Unlike CREATE SEQUENCE (where an omitted option resets to the
+		// PostgreSQL default), ALTER SEQUENCE leaves any option not named in
+		// the statement untouched — so toggling CYCLE off must emit an
+		// explicit "NO CYCLE", not silence, or the live sequence keeps
+		// cycling forever with the drift invisible to future diffs (RFC
+		// audit item #21).
+		if *o.Cycle {
+			b.WriteString(" CYCLE")
+		} else {
+			b.WriteString(" NO CYCLE")
+		}
 	}
 }
 
@@ -4074,6 +4167,109 @@ func diffSchema(o *ir.Schema, snap *snapshot.SnapSchema) []pipeline.DiffOp {
 	return ops
 }
 
+// viewOutputColumnsChanged reports whether a view's output column list —
+// compared by name and ordinal position, per RFC §8.1 — differs between the
+// previous (snap) and desired query text. This is exactly what CREATE OR
+// REPLACE VIEW itself enforces: PostgreSQL rejects a replacement whose
+// implicit or explicit output column name would change (SQLSTATE 42P16),
+// most commonly hit by an unaliased "SELECT col FROM t" whose source column
+// got renamed elsewhere in the same migration. ok=false means the column
+// list couldn't be confidently determined for one or both sides (e.g. a
+// `SELECT *`/`t.*` expansion, whose true column count needs catalog
+// access) — callers should treat that the same as "unchanged," preserving
+// the prior (non-regressive) CREATE OR REPLACE behavior for those cases
+// rather than risk a false DESTRUCTIVE reclassification.
+func viewOutputColumnsChanged(desiredQuery, snapQuery string) (changed bool, ok bool) {
+	desiredNames, ok1 := viewOutputColumnNames(desiredQuery)
+	if !ok1 {
+		return false, false
+	}
+	snapNames, ok2 := viewOutputColumnNames(snapQuery)
+	if !ok2 {
+		return false, false
+	}
+	if len(desiredNames) != len(snapNames) {
+		return true, true
+	}
+	for i, n := range desiredNames {
+		if n != snapNames[i] {
+			return true, true
+		}
+	}
+	return false, true
+}
+
+// viewOutputColumnNames extracts the implicit or explicit output column
+// name for each item in query's top-level SELECT target list. An explicit
+// alias always wins; otherwise ir.FigureColname computes PostgreSQL's own
+// implicit name for the common expression shapes (a bare column reference,
+// a function call, a cast/COLLATE wrapper, ...). Any other expression
+// shape it can't name (arithmetic, CASE, a subquery, ...) is bucketed
+// under PostgreSQL's own literal fallback, "?column?" — not a fully
+// faithful reproduction of every FigureColnameInternal case, but safe here:
+// two unaliased complex expressions at the same position only compare
+// equal when they'd both fall into that same generic PostgreSQL bucket
+// too, which is all this comparison needs. Returns ok=false when the query
+// can't be parsed, isn't a plain SELECT (or a set-operation whose leftmost
+// leaf is), or contains a `*`/`t.*` star expansion, whose true output
+// column count isn't knowable without catalog access.
+func viewOutputColumnNames(query string) ([]string, bool) {
+	res, err := pg_query.Parse(query)
+	if err != nil || len(res.Stmts) == 0 {
+		return nil, false
+	}
+	sel := res.Stmts[0].GetStmt().GetSelectStmt()
+	if sel == nil {
+		return nil, false
+	}
+	// A set-operation (UNION/INTERSECT/EXCEPT) node has no target list of
+	// its own — only its leaf statements do — and PostgreSQL takes the
+	// leftmost leaf's column names for the combined result, so descend
+	// through Larg until a plain SELECT with a target list is reached.
+	for sel.Larg != nil {
+		sel = sel.Larg
+	}
+	if len(sel.TargetList) == 0 {
+		return nil, false
+	}
+	names := make([]string, 0, len(sel.TargetList))
+	for _, node := range sel.TargetList {
+		rt := node.GetResTarget()
+		if rt == nil {
+			return nil, false
+		}
+		if rt.Name != "" {
+			names = append(names, rt.Name)
+			continue
+		}
+		if viewTargetIsStar(rt.Val) {
+			return nil, false
+		}
+		name, _ := ir.FigureColname(rt.Val)
+		if name == "" {
+			name = "?column?"
+		}
+		names = append(names, name)
+	}
+	return names, true
+}
+
+// viewTargetIsStar reports whether val is a "*" or "t.*" star expansion —
+// the one shape viewOutputColumnNames can't assign a single name to at
+// all, since it stands for an a-priori unknown number of real columns.
+func viewTargetIsStar(val *pg_query.Node) bool {
+	cr := val.GetColumnRef()
+	if cr == nil {
+		return false
+	}
+	for _, f := range cr.Fields {
+		if f.GetAStar() != nil {
+			return true
+		}
+	}
+	return false
+}
+
 func diffView(o *ir.View, snap *snapshot.SnapView) []pipeline.DiffOp {
 	var ops []pipeline.DiffOp
 	pos := o.SrcPos
@@ -4101,6 +4297,22 @@ func diffView(o *ir.View, snap *snapshot.SnapView) []pipeline.DiffOp {
 	}
 
 	if normalizeWS(o.Query) != normalizeWS(snap.Query) {
+		// RFC §8.1: "Output column list changed (any way) → DROP VIEW
+		// CASCADE; CREATE VIEW → DESTRUCTIVE." Real PostgreSQL enforces this
+		// itself — CREATE OR REPLACE VIEW rejects a query whose replacement
+		// would change an existing output column's implicit or explicit
+		// name (SQLSTATE 42P16) — so emitting CREATE OR REPLACE
+		// unconditionally on every query-text change used to abort the
+		// whole migration on the common case of renaming a source column an
+		// unaliased "SELECT col FROM t" view references. viewOutputColumnsChanged
+		// only escalates when it can actually prove the column list
+		// changed; anything it can't confidently analyze (e.g. a `SELECT *`
+		// expansion) falls back to the prior, non-regressive behavior.
+		if changed, ok := viewOutputColumnsChanged(o.Query, snap.Query); ok && changed {
+			ops = append(ops, destructiveOp(fmt.Sprintf("DROP %s IF EXISTS %s CASCADE;", viewKind, tbl), pos))
+			ops = append(ops, createView(o)...)
+			return ops
+		}
 		ops = append(ops, safeOp(fmt.Sprintf("CREATE OR REPLACE VIEW %s AS %s;", tbl, o.Query), pos))
 	}
 
@@ -4218,14 +4430,11 @@ func diffType(o *ir.Type, snap *snapshot.SnapType, fullSnap *pipeline.Snapshot, 
 	}
 
 	if o.Variant == "COMPOSITE" && snap.Variant == "COMPOSITE" {
-		if compositeAttrsChanged(o.CompositeAttrs, snap.CompositeAttrs) {
-			// PG has no in-place ALTER TYPE … ALTER ATTRIBUTE for type changes;
-			// DROP + recreate is required.
-			ops = append(ops,
-				destructiveOp(fmt.Sprintf("DROP TYPE IF EXISTS %s;", typeIdent), pos),
-			)
-			ops = append(ops, safeOp(buildCompositeTypeSQL(o, vtypes), pos))
+		attrOps, err := diffCompositeAttrs(typeIdent, o.CompositeAttrs, snap.CompositeAttrs, vtypes)
+		if err != nil {
+			return nil, err
 		}
+		ops = append(ops, attrOps...)
 		if !ptrEq(o.Comment, snap.Comment) {
 			if o.Comment != nil {
 				ops = append(ops, safeOp(fmt.Sprintf("COMMENT ON TYPE %s IS %s;", typeIdent, quoteLit(*o.Comment)), pos))
@@ -6180,6 +6389,21 @@ func allDropped(cols []string, droppedCols map[string]bool) bool {
 	return true
 }
 
+// policyRoleKey returns a canonical, order-independent key for a policy's TO
+// role list, treating an empty list the same as an explicit ["PUBLIC"] —
+// PostgreSQL's own default (CREATE POLICY with no TO clause implicitly sets
+// polroles to {0}/PUBLIC) — so a live-introspected policy that always shows
+// a concrete PUBLIC role doesn't spuriously drift against source that never
+// wrote a TO clause at all.
+func policyRoleKey(roles []string) string {
+	r := append([]string(nil), roles...)
+	if len(r) == 0 {
+		r = []string{"PUBLIC"}
+	}
+	sort.Strings(r)
+	return strings.Join(r, ",")
+}
+
 func diffPolicies(schema, table string, o *ir.Table, snap *snapshot.SnapTable) []pipeline.DiffOp {
 	var ops []pipeline.DiffOp
 	tblIdent := qualIdent(schema, table)
@@ -6207,6 +6431,7 @@ func diffPolicies(schema, table string, o *ir.Table, snap *snapshot.SnapTable) [
 			ops = append(ops, createPolicy(schema, table, pol)...)
 		} else if pol.Command != existing.Command ||
 			pol.Permissive != existing.Permissive ||
+			policyRoleKey(pol.Roles) != policyRoleKey(existing.Roles) ||
 			normalizeExprForCompare(ptrStr(pol.Using)) != normalizeExprForCompare(existing.Using) ||
 			normalizeExprForCompare(ptrStr(pol.WithCheck)) != normalizeExprForCompare(existing.WithCheck) {
 			ops = append(ops, safeOp(

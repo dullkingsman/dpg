@@ -602,6 +602,7 @@ func toSnapPolicy(pol *ir.Policy) SnapPolicy {
 		Name:       pol.Name,
 		Command:    pol.Command,
 		Permissive: pol.Permissive,
+		Roles:      append([]string(nil), pol.Roles...),
 	}
 	if pol.Using != nil {
 		sp.Using = *pol.Using

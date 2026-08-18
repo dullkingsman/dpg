@@ -504,6 +504,63 @@ func TestBuildCompositeType(t *testing.T) {
 	}
 }
 
+// TestBuildCompositeTypeColumnBlockSetsRenamedFrom is the regression guard
+// for RFC audit item #12: buildCompositeType built CompositeAttrs purely
+// from the native CREATE TYPE ... AS ( ) coldeflist and never read
+// block.Columns at all — a COLUMN attr { RENAMED FROM old; } sub-block (RFC
+// §5.2: "the same [COLUMN] mechanism applies to composite type attributes")
+// was silently discarded before it ever reached the differ, which then saw
+// an unrelated drop+add of two differently-named attributes instead of a
+// rename.
+func TestBuildCompositeTypeColumnBlockSetsRenamedFrom(t *testing.T) {
+	obj := buildObject(t, pipeline.KindCompositeType,
+		`address AS (new_name text, city text)`,
+		`COLUMN new_name { RENAMED FROM old_name; }`,
+	)
+	tp := obj.(*ir.Type)
+	if len(tp.CompositeAttrs) != 2 {
+		t.Fatalf("CompositeAttrs: got %d, want 2", len(tp.CompositeAttrs))
+	}
+	attr := tp.CompositeAttrs[0]
+	if attr.Name != "new_name" {
+		t.Fatalf("CompositeAttrs[0].Name: got %q, want %q", attr.Name, "new_name")
+	}
+	if attr.RenamedFrom == nil || *attr.RenamedFrom != "old_name" {
+		t.Errorf("CompositeAttrs[0].RenamedFrom: got %v, want %q", attr.RenamedFrom, "old_name")
+	}
+	if tp.CompositeAttrs[1].RenamedFrom != nil {
+		t.Errorf("CompositeAttrs[1] (city) should have no RenamedFrom, got %v", tp.CompositeAttrs[1].RenamedFrom)
+	}
+}
+
+// TestBuildCompositeTypeRejectsUnknownColumnBlock mirrors
+// TestBuildTableRejectsUnknownColumnBlock for composite types: a COLUMN
+// block naming an attribute absent from the type's ( ) list must be a build
+// error, not a silently-invented phantom attribute.
+func TestBuildCompositeTypeRejectsUnknownColumnBlock(t *testing.T) {
+	p := pgparser.New()
+	pgResult, err := p.Parse(pipeline.KindCompositeType, `address AS (street text, city text)`, zeroPos)
+	if err != nil {
+		t.Fatalf("pg parse: %v", err)
+	}
+	bp := blockparser.New()
+	blockAST, err := bp.Parse(pipeline.KindCompositeType,
+		`COLUMN streets { RENAMED FROM street; }`, zeroPos)
+	if err != nil {
+		t.Fatalf("block parse: %v", err)
+	}
+	_, err = ir.NewBuilder().Build(pgResult, blockAST)
+	if err == nil {
+		t.Fatal("expected build error for unknown COLUMN block target, got nil")
+	}
+	msg := err.Error()
+	for _, want := range []string{`"streets"`, "street"} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("expected error to mention %s, got: %s", want, msg)
+		}
+	}
+}
+
 // TestBuildRangeType guards a real bug found live-testing a demo project,
 // the same shape as TestBuildMaterializedView/TestBuildCompositeType above:
 // CREATE TYPE name AS RANGE (options) parses as its own distinct node,

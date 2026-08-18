@@ -531,7 +531,7 @@ func buildConstraint(c *pg_query.Constraint, pos pipeline.SourcePos) *Constraint
 					cols = append(cols, ie.Name)
 				case ie.Expr != nil:
 					el.Expr = nodeToText(ie.Expr)
-					el.PredictedName, _ = figureIndexColname(ie.Expr)
+					el.PredictedName, _ = FigureColname(ie.Expr)
 				}
 				el.Collation = qualifiedNameText(ie.Collation)
 				el.OpClass = qualifiedNameText(ie.Opclass)
@@ -600,14 +600,17 @@ func lastNamePart(nodes []*pg_query.Node) string {
 	return names[len(names)-1]
 }
 
-// figureIndexColname ports PostgreSQL's FigureColnameInternal (parser/
-// parse_target.c), called via FigureIndexColname from parse_utilcmd.c's
-// transformIndexStmt BEFORE transformExpr runs — confirmed via source that
-// this genuinely operates on the raw, untransformed parse tree (no
-// catalog/OID resolution), and confirmed live across every case below
-// (NULLIF, nested casts, a cast wrapping an operator, a parenthesized bare
-// column, COALESCE, CASE, an array subscript, and COLLATE) that the real
-// output matches exactly.
+// FigureColname ports PostgreSQL's FigureColnameInternal (parser/
+// parse_target.c) — called via FigureIndexColname from parse_utilcmd.c's
+// transformIndexStmt for an EXCLUDE element's PredictedName, and via
+// internal/diff's view-rename detection (RFC §8.1's "compares the columns
+// produced by the view query by name and ordinal position") for an
+// unaliased SELECT target's implicit output column name — BEFORE
+// transformExpr runs — confirmed via source that this genuinely operates on
+// the raw, untransformed parse tree (no catalog/OID resolution), and
+// confirmed live across every case below (NULLIF, nested casts, a cast
+// wrapping an operator, a parenthesized bare column, COALESCE, CASE, an
+// array subscript, and COLLATE) that the real output matches exactly.
 //
 // Returns the predicted name and its strength: 0 = no information (caller
 // should not predict at all), 1 = a "weak" name (a cast's own target type,
@@ -628,7 +631,7 @@ func lastNamePart(nodes []*pg_query.Node) string {
 // EXCLUDE element): ColumnRef, FuncCall, TypeCast, A_Expr's NULLIF form,
 // A_Indirection (field access / array subscript), CollateClause, CaseExpr,
 // and CoalesceExpr cover every shape confirmed live.
-func figureIndexColname(node *pg_query.Node) (name string, strength int) {
+func FigureColname(node *pg_query.Node) (name string, strength int) {
 	if node == nil {
 		return "", 0
 	}
@@ -641,7 +644,7 @@ func figureIndexColname(node *pg_query.Node) (name string, strength int) {
 	case *pg_query.Node_FuncCall:
 		return lastNamePart(n.FuncCall.Funcname), 2
 	case *pg_query.Node_TypeCast:
-		innerName, innerStrength := figureIndexColname(n.TypeCast.Arg)
+		innerName, innerStrength := FigureColname(n.TypeCast.Arg)
 		if innerStrength > 1 {
 			return innerName, innerStrength
 		}
@@ -663,14 +666,14 @@ func figureIndexColname(node *pg_query.Node) (name string, strength int) {
 		if last := lastNamePart(n.AIndirection.Indirection); last != "" {
 			return last, 2
 		}
-		return figureIndexColname(n.AIndirection.Arg)
+		return FigureColname(n.AIndirection.Arg)
 	case *pg_query.Node_CollateClause:
-		return figureIndexColname(n.CollateClause.Arg)
+		return FigureColname(n.CollateClause.Arg)
 	case *pg_query.Node_CaseExpr:
 		// Only the ELSE clause (Defresult) is consulted — the WHEN branches
 		// are deliberately ignored, matching PG's own rule — falling back to
 		// the literal "case" (weak) when Defresult is absent or itself weak.
-		innerName, innerStrength := figureIndexColname(n.CaseExpr.Defresult)
+		innerName, innerStrength := FigureColname(n.CaseExpr.Defresult)
 		if innerStrength > 1 {
 			return innerName, innerStrength
 		}
@@ -1461,6 +1464,27 @@ func (b *Builder) buildCompositeType(cs *pg_query.CompositeTypeStmt, block pipel
 	}
 	t.SecurityLabels = block.SecurityLabels
 	t.NameMaps = block.NameMaps
+
+	// COLUMN attr { RENAMED FROM old; } sub-blocks (RFC §5.2: "the same
+	// mechanism applies to composite type attributes") — buildCompositeType
+	// previously never read block.Columns at all, so a declared rename was
+	// silently ignored and diffType saw an unrelated drop+add instead of the
+	// attribute rename it should have detected.
+	attrMap := make(map[string]*Column, len(t.CompositeAttrs))
+	for _, a := range t.CompositeAttrs {
+		attrMap[a.Name] = a
+	}
+	for _, cb := range block.Columns {
+		attr, ok := attrMap[cb.Name.Name]
+		if !ok {
+			return nil, pipeline.Errorf(cb.Pos,
+				"COLUMN %q is not declared in TYPE %s; the COLUMN block must reference an attribute listed in the type's ( ) section%s",
+				cb.Name.Name, qualName(t.Schema, t.Name), suggestColumns(cb.Name.Name, t.CompositeAttrs))
+		}
+		if cb.RenamedFrom != nil {
+			attr.RenamedFrom = &cb.RenamedFrom.Name
+		}
+	}
 	return t, nil
 }
 
