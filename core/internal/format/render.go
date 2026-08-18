@@ -2,6 +2,7 @@ package format
 
 import (
 	"strings"
+	"unicode/utf8"
 )
 
 // Format parses src (from file path) and returns the canonically formatted
@@ -92,6 +93,47 @@ func renderTable(b *strings.Builder, n *TableNode, opts Options, ind string) {
 
 	colInd := ind + opts.indent()
 	cols := sortColumns(n.Columns)
+
+	// Column alignment (RFC §18.7): pad each genuine column definition's
+	// name to the widest name in the list, so every column's type starts at
+	// the same position. Table-level constraint-clause entries in the same
+	// ( ) list (CONSTRAINT/PRIMARY KEY/UNIQUE/CHECK/EXCLUDE/FOREIGN KEY —
+	// recognizable because their first token is a keyword, not an
+	// identifier) are never aligned and never count toward the width, since
+	// they have no "name" field to align in the first place — padding them
+	// against genuine column names would misalign both.
+	//
+	// Classification and name-extraction run on the ORIGINAL RawText, before
+	// rekeyword ever sees it — a column's declared name must never be passed
+	// through keyword-casing at all, even when it happens to collide with a
+	// recognized DPG/PostgreSQL keyword (e.g. a column literally named
+	// "event" must stay "event", not become "EVENT" just because EVENT is
+	// also the EVENT TRIGGER keyword — confirmed live against a real
+	// project's audit_log.event column). rekeyword's own dot-adjacency guard
+	// already protects a qualified reference from this same ambiguity; a
+	// declaration's own name needs the equivalent protection, which it can
+	// only get by being pulled out before rekeyword runs on the remainder.
+	rest := make([]string, len(cols))
+	names := make([]string, len(cols))
+	isColumnDef := make([]bool, len(cols))
+	nameWidth := 0
+	for i, col := range cols {
+		if col.RawText == "" {
+			continue
+		}
+		name, tail, isCol := splitColumnName(col.RawText)
+		isColumnDef[i] = isCol
+		if isCol {
+			names[i] = name
+			rest[i] = rekeyword(tail, opts)
+			if w := utf8.RuneCountInString(name); w > nameWidth {
+				nameWidth = w
+			}
+		} else {
+			rest[i] = rekeyword(col.RawText, opts)
+		}
+	}
+
 	for i, col := range cols {
 		// Preserve blank line before this column's section block.
 		if col.BlankLineBefore {
@@ -105,7 +147,11 @@ func renderTable(b *strings.Builder, n *TableNode, opts Options, ind string) {
 		}
 		if col.RawText != "" {
 			b.WriteString(colInd)
-			b.WriteString(rekeyword(col.RawText, opts))
+			if isColumnDef[i] {
+				b.WriteString(names[i])
+				b.WriteString(strings.Repeat(" ", nameWidth-utf8.RuneCountInString(names[i])+1))
+			}
+			b.WriteString(rest[i])
 			if i < len(cols)-1 {
 				b.WriteByte(',')
 			}
@@ -204,4 +250,63 @@ func rekeyword(text string, opts Options) string {
 		}
 	}
 	return b.String()
+}
+
+// constraintClauseLeadWords is the exact, closed set of keywords that can
+// legally open a table-level constraint clause inside a TABLE's column list
+// — CONSTRAINT / PRIMARY KEY / UNIQUE / CHECK / EXCLUDE / FOREIGN KEY, real
+// PostgreSQL grammar's table_constraint production. Deliberately much
+// narrower than dpgKeywords, which the lexer uses to classify a token as
+// TokKeyword the instant it matches ANY recognized DPG/PostgreSQL keyword
+// anywhere in the whole grammar, with zero positional awareness — a column
+// can legitimately be NAMED after some unrelated keyword (e.g. "event",
+// colliding with EVENT TRIGGER's EVENT), and only this specific, small set
+// of words is ever grammatically valid at the START of a constraint-clause
+// entry. Checking against this set — not the lexer's generic TokKeyword
+// classification — is what correctly tells a genuine constraint clause
+// apart from a keyword-colliding column name.
+var constraintClauseLeadWords = map[string]bool{
+	"CONSTRAINT": true,
+	"PRIMARY":    true,
+	"UNIQUE":     true,
+	"CHECK":      true,
+	"EXCLUDE":    true,
+	"FOREIGN":    true,
+}
+
+// splitColumnName splits a table-column-list entry's ORIGINAL, not-yet-
+// keyword-cased RawText into its leading name token and the remainder, and
+// reports whether the entry is a genuine column definition (name TYPE ...)
+// rather than a table-level constraint clause — see
+// constraintClauseLeadWords's doc comment for why membership there, not the
+// lexer's TokKeyword classification, is the correct test.
+//
+// Must run before rekeyword, not after: a column's own declared name must
+// never be passed through keyword-casing at all, even when it happens to
+// collide with a recognized DPG/PostgreSQL keyword (e.g. a column literally
+// named "event" must stay "event", not become "EVENT" just because EVENT is
+// also the EVENT TRIGGER keyword — confirmed live against a real project's
+// audit_log.event column). rekeyword's own dot-adjacency guard already
+// protects a qualified reference from the identical ambiguity; a
+// declaration's own name needs the same protection, which it can only get
+// by being isolated before rekeyword ever runs on it. Used by renderTable's
+// column-alignment pass (RFC §18.7) to align only genuine column names
+// against each other and leave constraint clauses alone.
+func splitColumnName(rawText string) (name, rest string, isColumnDef bool) {
+	toks := Lex("", []byte(rawText))
+	if len(toks) == 0 {
+		return "", rawText, false
+	}
+	first := toks[0]
+	switch {
+	case first.Type == TokIdent, first.Type == TokQuotedIdent:
+		// Unambiguously a name.
+	case first.Type == TokKeyword && !constraintClauseLeadWords[strings.ToUpper(first.Text)]:
+		// Classified as a keyword only because it happens to collide with
+		// some unrelated keyword elsewhere in the grammar — still a
+		// genuine column name.
+	default:
+		return "", rawText, false
+	}
+	return first.Text, strings.TrimLeft(rawText[len(first.Text):], " \t"), true
 }

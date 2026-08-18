@@ -282,6 +282,125 @@ func TestFormat_EmptyFile(t *testing.T) {
 
 // ── Idempotence ───────────────────────────────────────────────────────────────
 
+// ── Column alignment (RFC §18.7) ────────────────────────────────────────────
+
+func TestFormat_ColumnAlignment(t *testing.T) {
+	src := `TABLE orders (
+    id BIGINT NOT NULL,
+    customer_id BIGINT NOT NULL,
+    status order_status
+);`
+	out := formatSrc(t, src, defaultOpts)
+	want := `TABLE orders (
+    id          BIGINT NOT NULL,
+    customer_id BIGINT NOT NULL,
+    status      order_status
+);
+`
+	if out != want {
+		t.Errorf("got:\n%s\nwant:\n%s", out, want)
+	}
+}
+
+// TestFormat_ColumnAlignmentSkipsConstraintClauses guards a real hazard: a
+// table-level constraint clause (CONSTRAINT/PRIMARY KEY/UNIQUE/CHECK/
+// EXCLUDE/FOREIGN KEY) can appear as its own entry in a TABLE's column list
+// alongside genuine column definitions. It has no "name" field to align —
+// its first token is a keyword, not an identifier — so it must never be
+// padded, and must never widen the alignment column the real columns share.
+func TestFormat_ColumnAlignmentSkipsConstraintClauses(t *testing.T) {
+	src := `TABLE orders (
+    id BIGINT NOT NULL,
+    customer_id BIGINT NOT NULL,
+    CONSTRAINT ck_positive CHECK (id > 0)
+);`
+	out := formatSrc(t, src, defaultOpts)
+	want := `TABLE orders (
+    id          BIGINT NOT NULL,
+    customer_id BIGINT NOT NULL,
+    CONSTRAINT ck_positive CHECK (id > 0)
+);
+`
+	if out != want {
+		t.Errorf("got:\n%s\nwant:\n%s", out, want)
+	}
+}
+
+// TestFormat_ColumnAlignmentQuotedIdentifier confirms a quoted column name
+// (a genuine identifier, just written case-sensitively) is treated as a
+// real column definition for alignment purposes, using its as-written text
+// (including quotes) as the name whose width counts toward the shared
+// column.
+func TestFormat_ColumnAlignmentQuotedIdentifier(t *testing.T) {
+	src := `TABLE t (
+    id BIGINT NOT NULL,
+    "Weird Name" TEXT
+);`
+	out := formatSrc(t, src, defaultOpts)
+	want := `TABLE t (
+    id           BIGINT NOT NULL,
+    "Weird Name" TEXT
+);
+`
+	if out != want {
+		t.Errorf("got:\n%s\nwant:\n%s", out, want)
+	}
+}
+
+func TestFormat_ColumnAlignmentSingleColumnNoPadding(t *testing.T) {
+	src := `TABLE t (
+    id BIGINT NOT NULL
+);`
+	out := formatSrc(t, src, defaultOpts)
+	want := `TABLE t (
+    id BIGINT NOT NULL
+);
+`
+	if out != want {
+		t.Errorf("got:\n%s\nwant:\n%s", out, want)
+	}
+}
+
+// TestFormat_ColumnNameNotRecasedAsKeyword is the regression guard for a
+// real bug found live-testing the demo project: a column literally named
+// "event" (a genuinely common name — e.g. an event-log table) was silently
+// rewritten to "EVENT" because EVENT is also a recognized DPG keyword (for
+// EVENT TRIGGER) and rekeyword had no way to know it was looking at a
+// column's own name-declaration position rather than ordinary body text.
+// Not a semantic break (PostgreSQL folds "event"/"EVENT" identically when
+// unquoted) but a real style bug: the column silently rendered differently
+// from every other lowercase-typed column in the same file.
+func TestFormat_ColumnNameNotRecasedAsKeyword(t *testing.T) {
+	src := `TABLE audit_log (
+    id bigint GENERATED ALWAYS AS IDENTITY,
+    event text NOT NULL
+);`
+	out := formatSrc(t, src, defaultOpts)
+	// "text" IS a recognized DPG keyword and correctly gets uppercased to
+	// "TEXT" per KeywordCase — only the column's own name ("event") must
+	// stay untouched.
+	if !strings.Contains(out, "event TEXT") {
+		t.Errorf("expected \"event TEXT\" (name untouched, type keyword-cased), got:\n%s", out)
+	}
+	if strings.Contains(out, "EVENT TEXT") {
+		t.Errorf("column name was incorrectly recased to EVENT, got:\n%s", out)
+	}
+}
+
+func TestFormat_ColumnAlignmentIdempotent(t *testing.T) {
+	src := `TABLE orders (
+    id BIGINT NOT NULL,
+    customer_id BIGINT NOT NULL,
+    status order_status,
+    CONSTRAINT ck_status CHECK (status IS NOT NULL)
+);`
+	first := formatSrc(t, src, defaultOpts)
+	second := formatSrc(t, first, defaultOpts)
+	if first != second {
+		t.Errorf("column alignment is not idempotent.\nFirst:\n%s\nSecond:\n%s", first, second)
+	}
+}
+
 func TestFormat_Idempotent(t *testing.T) {
 	src := `-- Users table
 TABLE users (
