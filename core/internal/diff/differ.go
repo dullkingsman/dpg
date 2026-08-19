@@ -52,6 +52,32 @@ func manualOp(sql string, pos pipeline.SourcePos) *op {
 	return &op{sql: sql, safety: pipeline.Manual, pos: pos, txn: false}
 }
 
+// wrapCreateWithOwner wraps createOp in SET ROLE/RESET ROLE when owner is
+// declared (RFC §11.5, audit item #28). PostgreSQL attributes default-
+// privilege eligibility (§11.4) to whichever role actually executed CREATE,
+// not to final ownership — creating directly as the declared owner (rather
+// than creating as the connecting role and reassigning afterward via a
+// trailing ALTER ... OWNER TO) matches real PostgreSQL creator semantics and
+// is what makes a matching DEFAULT PRIVILEGES FOR ROLE block actually fire.
+// Preserves createOp's own Safety()/Transactional() for the bookend ops, so
+// this works identically for an object whose CREATE must run outside a
+// transaction (e.g. TABLESPACE). Once an object exists, reassigning its
+// owner keeps using plain ALTER ... OWNER TO — see each diff*'s existing
+// "owner changed" branches, untouched by this helper.
+func wrapCreateWithOwner(createOp pipeline.DiffOp, owner *string, pos pipeline.SourcePos) []pipeline.DiffOp {
+	if owner == nil {
+		return []pipeline.DiffOp{createOp}
+	}
+	bookend := func(sql string) *op {
+		return &op{sql: sql, safety: createOp.Safety(), pos: pos, txn: createOp.Transactional()}
+	}
+	return []pipeline.DiffOp{
+		bookend(fmt.Sprintf("SET ROLE %s;", quoteIdent(*owner))),
+		createOp,
+		bookend("RESET ROLE;"),
+	}
+}
+
 // destructiveManualOp is destructiveOp's non-transactional counterpart —
 // Safety() and Transactional() are independent fields on op (Emit buckets
 // purely on Transactional(); apply's --allow-destructive gate checks purely
@@ -1027,11 +1053,8 @@ func createObject(obj pipeline.IRObject, vtypes map[string]string) ([]pipeline.D
 		return createUserMapping(o)
 	case *ir.Publication:
 		ops, err := createOpaque(o.Name, o.Body, "PUBLICATION", "", o.SrcPos)
-		if err == nil && o.Owner != nil {
-			ops = append(ops, safeOp(
-				fmt.Sprintf("ALTER PUBLICATION %s OWNER TO %s;", quoteIdent(o.Name), quoteIdent(*o.Owner)),
-				o.SrcPos,
-			))
+		if err == nil && o.Owner != nil && len(ops) > 0 {
+			ops = append(wrapCreateWithOwner(ops[0], o.Owner, o.SrcPos), ops[1:]...)
 		}
 		ops, err = appendCommentOp(ops, err, "publication", "", o.Name, "", "", o.Comment, o.SrcPos)
 		return appendSecurityLabelOps(ops, err, "publication", "", o.Name, "", "", o.SecurityLabels, o.SrcPos)
@@ -2355,7 +2378,7 @@ func createSchema(o *ir.Schema) []pipeline.DiffOp {
 		b.WriteString(quoteIdent(*o.Owner))
 	}
 	b.WriteString(";")
-	ops := []pipeline.DiffOp{safeOp(b.String(), o.SrcPos)}
+	ops := wrapCreateWithOwner(safeOp(b.String(), o.SrcPos), o.Owner, o.SrcPos)
 	if o.Comment != nil {
 		ops = append(ops, safeOp(
 			fmt.Sprintf("COMMENT ON SCHEMA %s IS %s;", quoteIdent(o.Name), quoteLit(*o.Comment)),
@@ -2601,17 +2624,11 @@ func createTable(o *ir.Table, vtypes map[string]string) []pipeline.DiffOp {
 	b.WriteString(";")
 
 	var ops []pipeline.DiffOp
-	ops = append(ops, safeOp(b.String(), o.SrcPos))
+	ops = append(ops, wrapCreateWithOwner(safeOp(b.String(), o.SrcPos), o.Owner, o.SrcPos)...)
 	for _, p := range o.Partitions {
 		ops = append(ops, createPartitionOps(o.Schema, qualIdent(o.Schema, o.Name), p)...)
 	}
 
-	if o.Owner != nil {
-		ops = append(ops, safeOp(
-			fmt.Sprintf("ALTER TABLE %s OWNER TO %s;", qualIdent(o.Schema, o.Name), quoteIdent(*o.Owner)),
-			o.SrcPos,
-		))
-	}
 	if txt := effectiveComment(o.Comment, o.Deprecated); txt != nil {
 		ops = append(ops, safeOp(
 			fmt.Sprintf("COMMENT ON TABLE %s IS %s;", qualIdent(o.Schema, o.Name), quoteLit(*txt)),
@@ -2832,6 +2849,17 @@ func createTrigger(schema, table string, trg *ir.Trigger) []pipeline.DiffOp {
 	b.WriteString(strings.Join(triggerEventClauses(trg), " OR "))
 	b.WriteString(" ON ")
 	b.WriteString(qualIdent(schema, table))
+	if trg.OldTransitionName != nil || trg.NewTransitionName != nil {
+		b.WriteString(" REFERENCING")
+		if trg.OldTransitionName != nil {
+			b.WriteString(" OLD TABLE AS ")
+			b.WriteString(quoteIdent(*trg.OldTransitionName))
+		}
+		if trg.NewTransitionName != nil {
+			b.WriteString(" NEW TABLE AS ")
+			b.WriteString(quoteIdent(*trg.NewTransitionName))
+		}
+	}
 	b.WriteString(" FOR EACH ")
 	b.WriteString(trg.ForEach)
 	if trg.Condition != nil {
@@ -3042,16 +3070,10 @@ func createView(o *ir.View) []pipeline.DiffOp {
 		b.WriteString(" WITH NO DATA")
 	}
 	b.WriteString(";")
-	ops := []pipeline.DiffOp{safeOp(b.String(), o.SrcPos)}
+	ops := wrapCreateWithOwner(safeOp(b.String(), o.SrcPos), o.Owner, o.SrcPos)
 	viewKind := "VIEW"
 	if o.Materialized {
 		viewKind = "MATERIALIZED VIEW"
-	}
-	if o.Owner != nil {
-		ops = append(ops, safeOp(
-			fmt.Sprintf("ALTER %s %s OWNER TO %s;", viewKind, qualIdent(o.Schema, o.Name), quoteIdent(*o.Owner)),
-			o.SrcPos,
-		))
 	}
 	if txt := effectiveComment(o.Comment, o.Deprecated); txt != nil {
 		ops = append(ops, safeOp(
@@ -3131,13 +3153,7 @@ func createType(o *ir.Type, vtypes map[string]string) []pipeline.DiffOp {
 	case "COMPOSITE":
 		ops = append(ops, safeOp(buildCompositeTypeSQL(o, vtypes), o.SrcPos))
 	case "DOMAIN":
-		ops = append(ops, safeOp(buildDomainSQL(o), o.SrcPos))
-		if o.Owner != nil {
-			ops = append(ops, safeOp(
-				fmt.Sprintf("ALTER DOMAIN %s OWNER TO %s;", qualIdent(o.Schema, o.Name), quoteIdent(*o.Owner)),
-				o.SrcPos,
-			))
-		}
+		ops = append(ops, wrapCreateWithOwner(safeOp(buildDomainSQL(o), o.SrcPos), o.Owner, o.SrcPos)...)
 		if o.Comment != nil {
 			ops = append(ops, safeOp(
 				fmt.Sprintf("COMMENT ON DOMAIN %s IS %s;", qualIdent(o.Schema, o.Name), quoteLit(*o.Comment)),
@@ -3152,11 +3168,8 @@ func createType(o *ir.Type, vtypes map[string]string) []pipeline.DiffOp {
 			ops = append(ops, safeOp(o.Body+";", o.SrcPos))
 		}
 	}
-	if o.Owner != nil {
-		ops = append(ops, safeOp(
-			fmt.Sprintf("ALTER TYPE %s OWNER TO %s;", qualIdent(o.Schema, o.Name), quoteIdent(*o.Owner)),
-			o.SrcPos,
-		))
+	if o.Owner != nil && len(ops) > 0 {
+		ops = append(wrapCreateWithOwner(ops[0], o.Owner, o.SrcPos), ops[1:]...)
 	}
 	if o.Comment != nil {
 		ops = append(ops, safeOp(
@@ -3298,13 +3311,7 @@ func createSequence(o *ir.Sequence) []pipeline.DiffOp {
 	}
 	writeSeqParams(&b, o)
 	b.WriteString(";")
-	ops := []pipeline.DiffOp{safeOp(b.String(), o.SrcPos)}
-	if o.Owner != nil {
-		ops = append(ops, safeOp(
-			fmt.Sprintf("ALTER SEQUENCE %s OWNER TO %s;", ident, quoteIdent(*o.Owner)),
-			o.SrcPos,
-		))
-	}
+	ops := wrapCreateWithOwner(safeOp(b.String(), o.SrcPos), o.Owner, o.SrcPos)
 	if o.Comment != nil {
 		ops = append(ops, safeOp(
 			fmt.Sprintf("COMMENT ON SEQUENCE %s IS %s;", ident, quoteLit(*o.Comment)),
@@ -6776,6 +6783,8 @@ func diffTriggers(schema, table string, o *ir.Table, snap *snapshot.SnapTable) [
 			strings.Join(trg.Events, ", ") != existing.Events ||
 			trg.ForEach != existing.ForEach ||
 			strings.Join(trg.UpdateOfColumns, ", ") != existing.UpdateOfColumns ||
+			ptrStr(trg.OldTransitionName) != existing.OldTransitionName ||
+			ptrStr(trg.NewTransitionName) != existing.NewTransitionName ||
 			qualifyFuncForCompare(trg.Function) != qualifyFuncForCompare(existing.Function) ||
 			foldTriggerPseudoRelNames(normalizeExprForCompare(ptrStr(trg.Condition))) != foldTriggerPseudoRelNames(normalizeExprForCompare(existing.Condition)) {
 			ops = append(ops, cautionOp(

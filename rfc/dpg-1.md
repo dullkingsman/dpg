@@ -2193,6 +2193,30 @@ referencing-clause = "REFERENCING"
 
    Trigger identity is `(schema, table, trigger_name)`.
 
+   **`REFERENCING` constraints (informative).** DPG performs no
+   clause-combination validation of its own for `REFERENCING` — every
+   other trigger clause is likewise passed through verbatim and left
+   entirely to PostgreSQL's own parser/executor to accept or reject
+   (see §7.9's grammar above: `WHEN` placement, a `CONSTRAINT`
+   trigger's clause set, and every other combination rule receive no
+   DPG-level check either). The following are PostgreSQL's own real
+   constraints on `REFERENCING`, confirmed live against PostgreSQL 17,
+   noted here only so a rejected trigger's error is understandable —
+   none of them is enforced by the compiler:
+
+   - Only an `AFTER` trigger may specify transition tables — `BEFORE`
+     and `INSTEAD OF` are rejected ("transition table name can only be
+     specified for an AFTER trigger").
+   - A `CONSTRAINT` trigger cannot use `REFERENCING` at all — real
+     PostgreSQL's grammar rejects the combination outright (a syntax
+     error, not a semantic one).
+   - Valid for both `FOR EACH ROW` and `FOR EACH STATEMENT`.
+   - A trigger on a view or a foreign table cannot have transition
+     tables ("Triggers on views/foreign tables cannot have transition
+     tables").
+   - A `TRUNCATE` trigger cannot have transition tables ("TRUNCATE
+     triggers with transition tables are not supported").
+
    Example:
 
 ```sql
@@ -3131,6 +3155,57 @@ ALTER DEFAULT PRIVILEGES FOR ROLE app_admin IN SCHEMA public
 ALTER DEFAULT PRIVILEGES FOR ROLE app_admin IN SCHEMA public
     GRANT USAGE ON SEQUENCES TO app_service;
 ```
+
+### 11.5. Owner Impersonation at Object Creation
+
+   PostgreSQL attributes default-privilege eligibility (§11.4) to
+   whichever role actually *executed* the `CREATE` statement — checked
+   against `pg_default_acl` via `current_user`/`current_role` — not to
+   an object's final `OWNER`.  A declared `OWNER` (§4.6) that is applied
+   only *after* creation, via a trailing `ALTER ... OWNER TO`, therefore
+   never satisfies a matching `DEFAULT PRIVILEGES FOR ROLE` block: the
+   role named in `FOR ROLE` never itself ran `CREATE`, so PostgreSQL
+   never consults its default-ACL entries for that object.
+
+   To make `OWNER` and `DEFAULT PRIVILEGES FOR ROLE` compose correctly,
+   the compiler MUST create every object that declares an `OWNER` (§4.6)
+   as that role, not as the connecting role. This is universal — it
+   applies to any object with a declared `OWNER`, not only objects
+   covered by a matching `DEFAULT PRIVILEGES FOR ROLE` block — because it
+   simply matches real PostgreSQL creator semantics: the role that
+   creates an object is that object's owner.
+
+   **Execution model.** Each such object's `CREATE` statement (and, for
+   an object whose `CREATE` MUST run outside a transaction — e.g.
+   `TABLESPACE`, §14.7 — the standalone statement) is wrapped as:
+
+```sql
+SET ROLE app_admin;
+CREATE TABLE ...;
+RESET ROLE;
+```
+
+   `SET ROLE` is used rather than `SET SESSION AUTHORIZATION`: it only
+   requires the connecting role to be a *member* of the target role (not
+   superuser), and it does not change `session_user` — the real
+   connecting identity is preserved for the audit trail, and only the
+   privilege-checking `current_user` changes for the wrapped statement.
+
+   Once an object exists, reassigning its owner continues to use
+   `ALTER ... OWNER TO` exactly as before (§11.1, and per-object-kind
+   diffing sections) — an existing object's ownership change does not
+   affect default-privilege attribution for objects already created, so
+   it needs no `SET ROLE` wrapping.
+
+   **Pre-flight membership validation.** Before the apply transaction
+   opens any DDL, the compiler MUST check, for every distinct role named
+   in an `OWNER` directive anywhere in the pending migration, that the
+   connecting role is a member of it (`pg_has_role(current_user, owner,
+   'MEMBER')`). If any declared `OWNER` fails this check, `apply` MUST
+   abort with error **DPG-E036** before executing any statement in the
+   migration, naming every role that failed the check in a single error
+   — not a bare PostgreSQL "permission denied to set role" surfacing
+   mid-transaction on whichever object happens to hit it first.
 
 ---
 
@@ -4989,8 +5064,12 @@ serial_sequence_declared      = "off"
    2.  A `REFERENCES` FK constraint creates an edge from the source
        table to the target table.
 
-   3.  A view's query that mentions table or view B creates an edge
-       from the view to B.
+   3.  A view's query that references table or view B creates an edge
+       from the view to B.  This is real static analysis of the parsed
+       query — every table/view reference reachable via `FROM`, `JOIN`,
+       a CTE, or a subquery — not a blanket "depends on every table in
+       the object set" approximation; a view that never mentions B
+       gets no edge to B.
 
    4.  A function's `search_path` or `SECURITY DEFINER` context
        creates an edge from the function to the schema.
@@ -5006,6 +5085,20 @@ serial_sequence_declared      = "off"
 
    8.  A partition creates an edge from the partition to its parent
        partitioned table.
+
+   9.  A `LANGUAGE sql` or `LANGUAGE plpgsql` function/procedure body
+       that statically references table or view B (a `FROM`/`JOIN`
+       clause, an `INSERT`/`UPDATE`/`DELETE` target, a CTE, or a
+       subquery, anywhere the body's SQL is reachable by parsing —
+       including a `plpgsql` body's embedded SQL fragments: a
+       `FOR`-loop query, an `EXECSQL` statement, a `RETURN QUERY`, a
+       condition or expression that itself contains a sub-`SELECT`)
+       creates an edge from the function/procedure to B.  Dynamic SQL
+       (an `EXECUTE` whose argument is built at runtime rather than a
+       literal query text) is invisible to this analysis — a known,
+       accepted limitation matching real PostgreSQL's own inability to
+       validate dynamic SQL either.  A function/procedure body in any
+       other language is not analysed for table references.
 
    The topological sort MUST use Kahn's algorithm or an equivalent
    O(V + E) algorithm.  The sort is deterministic: among nodes with no
@@ -5633,6 +5726,7 @@ SCHEMA public {
    | DPG-E023 | `temporary_table_declared` | `TEMPORARY TABLE` keyword found in a `.dpg` file. |
    | DPG-E024 | `unknown_block_directive` | Unknown directive for this object kind in a `{ }` block. |
    | DPG-E025 | `destructive_ops_blocked` | Migration contains `DESTRUCTIVE` ops but `--allow-destructive` not passed. |
+   | DPG-E036 | `owner_role_not_a_member` | Connecting role is not a member of one or more declared `OWNER` roles (§11.5). |
 
 ---
 
@@ -6968,6 +7062,9 @@ ENUM user_status ('active', 'inactive', 'banned') {
    | E.5 | 2026-08-16 | §D.11 added. `SERIAL`/`BIGSERIAL`/`SMALLSERIAL` column sugar specified as a first-class IR concept (`Column.Serial`, sibling marker to `Column.Type`): normalization table, `SERIAL`-implies-`NOT NULL` rule, literal-keyword emission with suppressed `NOT NULL`/`DEFAULT`, `pg_depend`-based introspection detection mirroring identity columns, non-reapplicable dump output fixed, `SnapColumn.serial` field, and a legacy-snapshot self-healing comparison for pre-existing snapshots that stored the literal `"serial"` type name. §D.3's `serial-sequence-declared` entry updated: now also triggers on `Column.Serial`, not `Column.Identity` only. |
    | E.6 | 2026-08-17 | §23 and §25 updated with four scope decisions that had previously been made and recorded only in project working notes, not in this document: `CREATE ACCESS METHOD`, `CREATE CONVERSION`, `CREATE [PROCEDURAL] LANGUAGE`, and `CREATE TRANSFORM` are all formally out of scope (covered either by the extension-install path DPG already manages, or by having no realistic hand-declared use case). Brings this document in line with the two sibling decisions (`CREATE DATABASE`, `REASSIGN OWNED BY`/`DROP OWNED BY`) it already documented. |
    | E.7 | 2026-08-17 | §3.3, §3.4, and §3.6 updated: cluster and database `name` were already documented as REQUIRED but the reference implementation never enforced it. §3.6's Discovery Algorithm now normatively requires validating that both names are non-empty and, per §3.3/§3.4's new constraint clauses, unique — cluster names project-wide, database names per-cluster only (the same database name legitimately recurring under a different cluster remains valid). Four new error codes added to §D.7: DPG-E032/E033 (empty name), DPG-E034/E035 (duplicate name). Also fixed a related implementation bug found alongside this: `dpg dump`'s default (no `-o`) output path was reconstructed from declared names rather than the already-resolved real directory, silently writing into a disconnected sibling directory whenever a project's directory name and declared name diverged — no RFC section previously specified this path should prefer the resolved directory, so no corresponding text amendment was needed beyond the behavior fix itself. |
+   | E.8 | 2026-08-19 | §11.5 added. `ALTER DEFAULT PRIVILEGES FOR ROLE` (§11.4) never actually applied to anything DPG created, because PostgreSQL attributes default-privilege eligibility to whichever role executed `CREATE`, and DPG always created objects as its connecting role, reassigning ownership only afterward via `ALTER ... OWNER TO`. The compiler now creates every object with a declared `OWNER` (§4.6) directly as that role via `SET ROLE`/`RESET ROLE`, matching real PostgreSQL creator semantics; a new pre-flight membership check (`pg_has_role`) runs before any DDL executes and aborts with error DPG-E036 (added to Appendix C) if the connecting role is not a member of a declared `OWNER`. |
+   | E.9 | 2026-08-19 | §22.1 updated. Edge source 3 (a view's query referencing table/view B) was documented as real query analysis but the reference implementation actually used a blunt "every view depends on every table in the object set" approximation — corrected to describe the real static analysis now backing it. New edge source 9 added: a `LANGUAGE sql`/`plpgsql` function or procedure body's static table/view references now create real dependency edges too (function/procedure bodies were previously opaque to the dependency graph entirely, for every language); dynamic SQL is documented as an accepted blind spot, matching real PostgreSQL's own inability to validate it either. |
+   | E.10 | 2026-08-19 | §7.9 updated. `REFERENCING OLD TABLE AS ... NEW TABLE AS ...` was already specified in this section's ABNF grammar and worked example, but the reference implementation had no handling for it at all — a hard parse error, not a silent no-op. Now implemented end-to-end (parser, IR, differ, snapshot, introspection, dump). New informative-only prose added documenting PostgreSQL's real constraints on `REFERENCING` (`AFTER`-only, no `CONSTRAINT` triggers, no views/foreign tables/`TRUNCATE`), confirmed live against PostgreSQL 17 — consistent with DPG's existing stance of performing zero trigger clause-combination validation of its own. |
 
 ---
 

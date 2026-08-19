@@ -2145,6 +2145,13 @@ func TestRoundtripSequenceOwner(t *testing.T) {
 	if _, err := conn.Exec(ctx, `CREATE ROLE rt_seq_owner_b`); err != nil {
 		t.Fatalf("create role rt_seq_owner_b: %v", err)
 	}
+	// RFC §11.5: a declared OWNER now creates the sequence directly as that
+	// role via SET ROLE, not as the connecting superuser reassigned
+	// afterward — so rt_seq_owner_a genuinely needs CREATE on schema public
+	// itself (postgres:17 revokes it from PUBLIC by default, unlike pre-15).
+	if _, err := conn.Exec(ctx, `GRANT CREATE ON SCHEMA public TO rt_seq_owner_a`); err != nil {
+		t.Fatalf("grant create on schema public to rt_seq_owner_a: %v", err)
+	}
 
 	dir := t.TempDir()
 	f := filepath.Join(dir, "schema.dpg")

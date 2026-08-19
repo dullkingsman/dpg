@@ -1984,6 +1984,15 @@ func renderTrigger(b *strings.Builder, trg *ir.Trigger, fmtOpts format.Options) 
 		}
 	}
 	fmt.Fprintf(b, " %s", strings.Join(events, " "+kw("OR")+" "))
+	if trg.OldTransitionName != nil || trg.NewTransitionName != nil {
+		fmt.Fprintf(b, " %s", kw("REFERENCING"))
+		if trg.OldTransitionName != nil {
+			fmt.Fprintf(b, " %s %s %s %s", kw("OLD"), kw("TABLE"), kw("AS"), quoteIdentIfNeeded(*trg.OldTransitionName))
+		}
+		if trg.NewTransitionName != nil {
+			fmt.Fprintf(b, " %s %s %s %s", kw("NEW"), kw("TABLE"), kw("AS"), quoteIdentIfNeeded(*trg.NewTransitionName))
+		}
+	}
 	fmt.Fprintf(b, " %s %s %s", kw("FOR"), kw("EACH"), kw(trg.ForEach))
 	if trg.Condition != nil {
 		fmt.Fprintf(b, " %s (%s)", kw("WHEN"), *trg.Condition)

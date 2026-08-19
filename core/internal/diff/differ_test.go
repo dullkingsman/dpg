@@ -97,6 +97,31 @@ func TestDiffSchemaCommentAdded(t *testing.T) {
 	}
 }
 
+// TestDiffCreateSchemaWithOwnerUsesSetRole is RFC §11.5's (audit item #28)
+// regression guard: a brand-new object with a declared OWNER must be
+// created directly as that role via SET ROLE/RESET ROLE — PostgreSQL
+// attributes default-privilege eligibility (§11.4) to whoever executed
+// CREATE, not to final ownership, so a role reassigned only afterward (via
+// ALTER ... OWNER TO, or via CREATE SCHEMA's own AUTHORIZATION clause
+// alone) never satisfies a matching DEFAULT PRIVILEGES FOR ROLE block.
+func TestDiffCreateSchemaWithOwnerUsesSetRole(t *testing.T) {
+	d := New()
+	owner := "app_admin"
+	desired := []pipeline.IRObject{
+		&ir.Schema{Name: "myschema", Owner: &owner},
+	}
+	ops, err := d.Diff(desired, &pipeline.Snapshot{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsSQL(ops, `SET ROLE "app_admin";`) || !containsSQL(ops, "RESET ROLE;") {
+		t.Errorf("expected SET ROLE/RESET ROLE wrapping the CREATE SCHEMA, got: %v", sqlList(ops))
+	}
+	if !containsSQL(ops, "AUTHORIZATION") {
+		t.Errorf("expected CREATE SCHEMA ... AUTHORIZATION to be kept, got: %v", sqlList(ops))
+	}
+}
+
 func TestDiffSchemaOwnerChanged(t *testing.T) {
 	d := New()
 	oldOwner := "alice"
@@ -4551,9 +4576,15 @@ func TestDiffCreateViewEmitsRevocation(t *testing.T) {
 // project: ir.View.Owner (and snapshot.SnapView.Owner) both existed and were
 // populated by the builder, but createView/diffView never referenced Owner
 // at all — an OWNER directive on a VIEW, RECURSIVE VIEW, or MATERIALIZED
-// VIEW silently vanished with no error, no diff, nothing. Unlike TABLE's
-// createTable (which always emits ALTER TABLE ... OWNER TO), createView had
-// no equivalent statement whatsoever.
+// VIEW silently vanished with no error, no diff, nothing.
+//
+// RFC §11.5 (audit item #28) changed how a new object's OWNER is applied: a
+// brand-new object is now created directly as its declared owner via
+// SET ROLE/RESET ROLE, not created as the connecting role and reassigned
+// afterward via a trailing ALTER ... OWNER TO — the latter never satisfies a
+// matching DEFAULT PRIVILEGES FOR ROLE block, since PostgreSQL attributes
+// default-privilege eligibility to whoever executed CREATE, not to final
+// ownership.
 func TestDiffCreateViewEmitsOwner(t *testing.T) {
 	d := New()
 	owner := "app_role"
@@ -4564,15 +4595,16 @@ func TestDiffCreateViewEmitsOwner(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := `ALTER VIEW "public"."v_active" OWNER TO "app_role";`
-	if !containsSQL(ops, want) {
-		t.Errorf("expected %q, got: %v", want, sqlList(ops))
+	if !containsSQL(ops, `SET ROLE "app_role";`) || !containsSQL(ops, "RESET ROLE;") {
+		t.Errorf("expected SET ROLE/RESET ROLE wrapping the CREATE VIEW, got: %v", sqlList(ops))
+	}
+	if containsSQL(ops, "OWNER TO") {
+		t.Errorf("expected no ALTER VIEW ... OWNER TO for a brand-new view, got: %v", sqlList(ops))
 	}
 }
 
 // TestDiffCreateMaterializedViewEmitsOwner is the materialized-view sibling
-// of TestDiffCreateViewEmitsOwner — real PG uses "ALTER MATERIALIZED VIEW",
-// not "ALTER VIEW", for a materialized view's owner.
+// of TestDiffCreateViewEmitsOwner.
 func TestDiffCreateMaterializedViewEmitsOwner(t *testing.T) {
 	d := New()
 	owner := "app_role"
@@ -4583,9 +4615,73 @@ func TestDiffCreateMaterializedViewEmitsOwner(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := `ALTER MATERIALIZED VIEW "public"."mv_totals" OWNER TO "app_role";`
-	if !containsSQL(ops, want) {
-		t.Errorf("expected %q, got: %v", want, sqlList(ops))
+	if !containsSQL(ops, `SET ROLE "app_role";`) || !containsSQL(ops, "RESET ROLE;") {
+		t.Errorf("expected SET ROLE/RESET ROLE wrapping the CREATE MATERIALIZED VIEW, got: %v", sqlList(ops))
+	}
+	if containsSQL(ops, "OWNER TO") {
+		t.Errorf("expected no ALTER MATERIALIZED VIEW ... OWNER TO for a brand-new matview, got: %v", sqlList(ops))
+	}
+}
+
+// TestDiffCreateTableWithOwnerUsesSetRole is RFC §11.5's (audit item #28)
+// table-kind sibling of TestDiffCreateViewEmitsOwner.
+func TestDiffCreateTableWithOwnerUsesSetRole(t *testing.T) {
+	d := New()
+	owner := "app_role"
+	desired := []pipeline.IRObject{
+		&ir.Table{Schema: "public", Name: "widgets", Owner: &owner, Columns: []*ir.Column{
+			{Name: "id", Type: ir.TypeRef{Name: "bigint"}},
+		}},
+	}
+	ops, err := d.Diff(desired, &pipeline.Snapshot{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsSQL(ops, `SET ROLE "app_role";`) || !containsSQL(ops, "RESET ROLE;") {
+		t.Errorf("expected SET ROLE/RESET ROLE wrapping the CREATE TABLE, got: %v", sqlList(ops))
+	}
+	if containsSQL(ops, "OWNER TO") {
+		t.Errorf("expected no ALTER TABLE ... OWNER TO for a brand-new table, got: %v", sqlList(ops))
+	}
+}
+
+// TestDiffCreateEnumTypeWithOwnerUsesSetRole and
+// TestDiffCreateDomainWithOwnerUsesSetRole are RFC §11.5's (audit item #28)
+// TYPE-kind siblings — ENUM and DOMAIN take different createType code paths
+// (see createType's switch), so both need their own coverage.
+func TestDiffCreateEnumTypeWithOwnerUsesSetRole(t *testing.T) {
+	d := New()
+	owner := "app_role"
+	desired := []pipeline.IRObject{
+		&ir.Type{Schema: "public", Name: "mood", Variant: "ENUM", EnumValues: []string{"sad", "ok", "happy"}, Owner: &owner},
+	}
+	ops, err := d.Diff(desired, &pipeline.Snapshot{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsSQL(ops, `SET ROLE "app_role";`) || !containsSQL(ops, "RESET ROLE;") {
+		t.Errorf("expected SET ROLE/RESET ROLE wrapping the CREATE TYPE, got: %v", sqlList(ops))
+	}
+	if containsSQL(ops, "OWNER TO") {
+		t.Errorf("expected no ALTER TYPE ... OWNER TO for a brand-new enum, got: %v", sqlList(ops))
+	}
+}
+
+func TestDiffCreateDomainWithOwnerUsesSetRole(t *testing.T) {
+	d := New()
+	owner := "app_role"
+	desired := []pipeline.IRObject{
+		&ir.Type{Schema: "public", Name: "posint", Variant: "DOMAIN", DomainBaseType: ir.TypeRef{Name: "integer"}, Owner: &owner},
+	}
+	ops, err := d.Diff(desired, &pipeline.Snapshot{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsSQL(ops, `SET ROLE "app_role";`) || !containsSQL(ops, "RESET ROLE;") {
+		t.Errorf("expected SET ROLE/RESET ROLE wrapping the CREATE DOMAIN, got: %v", sqlList(ops))
+	}
+	if containsSQL(ops, "OWNER TO") {
+		t.Errorf("expected no ALTER DOMAIN ... OWNER TO for a brand-new domain, got: %v", sqlList(ops))
 	}
 }
 
@@ -5513,6 +5609,143 @@ func TestDiffTriggerUpdateOfColumnsUnchangedIsNoop(t *testing.T) {
 	}
 	if len(ops) != 0 {
 		t.Errorf("expected no ops for an unchanged UPDATE OF list, got: %v", sqlList(ops))
+	}
+}
+
+// TestCreateTriggerEmitsReferencing and TestDiffTriggerReferencingChanged
+// guard RFC §7.9 (audit item #2): REFERENCING OLD/NEW TABLE AS was a hard
+// parse error before this fix; ir.Trigger now carries the two transition
+// names through to CREATE TRIGGER emission and change diffing.
+func TestCreateTriggerEmitsReferencing(t *testing.T) {
+	d := New()
+	oldName := "old_rows"
+	newName := "new_rows"
+	desired := []pipeline.IRObject{
+		&ir.Table{
+			Schema:  "public",
+			Name:    "t",
+			Columns: []*ir.Column{{Name: "id", Type: ir.TypeRef{Name: "bigint"}}},
+			Triggers: []*ir.Trigger{
+				{
+					Name: "audit_changes", When: "AFTER", Events: []string{"INSERT", "UPDATE"}, ForEach: "STATEMENT",
+					OldTransitionName: &oldName, NewTransitionName: &newName,
+					Function: "audit_table_changes",
+				},
+			},
+		},
+	}
+	ops, err := d.Diff(desired, &pipeline.Snapshot{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := `REFERENCING OLD TABLE AS "old_rows" NEW TABLE AS "new_rows"`
+	if !containsSQL(ops, want) {
+		t.Errorf("expected %q in CREATE TRIGGER, got: %v", want, sqlList(ops))
+	}
+}
+
+// TestCreateTriggerReferencingNewTableOnly proves only the declared side is
+// emitted — a single-sided REFERENCING must not spuriously emit "OLD TABLE
+// AS" when only NEW was declared.
+func TestCreateTriggerReferencingNewTableOnly(t *testing.T) {
+	d := New()
+	newName := "new_rows"
+	desired := []pipeline.IRObject{
+		&ir.Table{
+			Schema:  "public",
+			Name:    "t",
+			Columns: []*ir.Column{{Name: "id", Type: ir.TypeRef{Name: "bigint"}}},
+			Triggers: []*ir.Trigger{
+				{
+					Name: "audit_inserts", When: "AFTER", Events: []string{"INSERT"}, ForEach: "STATEMENT",
+					NewTransitionName: &newName,
+					Function:          "audit_table_changes",
+				},
+			},
+		},
+	}
+	ops, err := d.Diff(desired, &pipeline.Snapshot{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsSQL(ops, `NEW TABLE AS "new_rows"`) {
+		t.Errorf("expected NEW TABLE AS, got: %v", sqlList(ops))
+	}
+	if containsSQL(ops, "OLD TABLE") {
+		t.Errorf("expected no OLD TABLE clause, got: %v", sqlList(ops))
+	}
+}
+
+func TestDiffTriggerReferencingChanged(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.t", &snapshot.SnapObject{
+		Kind: "table",
+		Table: &snapshot.SnapTable{
+			Schema:  "public",
+			Name:    "t",
+			Columns: []snapshot.SnapColumn{{Name: "id", Type: "bigint"}},
+			Triggers: []snapshot.SnapTrigger{
+				{Name: "trg_a", When: "AFTER", Events: "INSERT", ForEach: "STATEMENT", NewTransitionName: "new_rows", Function: "public.audit_table_changes"},
+			},
+		},
+	})
+	newName := "new_rows2"
+	desired := []pipeline.IRObject{
+		&ir.Table{
+			Schema:  "public",
+			Name:    "t",
+			Columns: []*ir.Column{{Name: "id", Type: ir.TypeRef{Name: "bigint"}}},
+			Triggers: []*ir.Trigger{
+				{Name: "trg_a", When: "AFTER", Events: []string{"INSERT"}, ForEach: "STATEMENT", NewTransitionName: &newName, Function: "audit_table_changes"},
+			},
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsSQL(ops, `DROP TRIGGER IF EXISTS "trg_a"`) {
+		t.Errorf("expected DROP TRIGGER for a changed transition name, got: %v", sqlList(ops))
+	}
+	if !containsSQL(ops, `NEW TABLE AS "new_rows2"`) {
+		t.Errorf("expected re-CREATE TRIGGER with the new transition name, got: %v", sqlList(ops))
+	}
+}
+
+// TestDiffTriggerReferencingUnchangedIsNoop proves an identical transition
+// name doesn't trigger a spurious drop+recreate.
+func TestDiffTriggerReferencingUnchangedIsNoop(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.t", &snapshot.SnapObject{
+		Kind: "table",
+		Table: &snapshot.SnapTable{
+			Schema:  "public",
+			Name:    "t",
+			Columns: []snapshot.SnapColumn{{Name: "id", Type: "bigint"}},
+			Triggers: []snapshot.SnapTrigger{
+				{Name: "trg_a", When: "AFTER", Events: "INSERT", ForEach: "STATEMENT", NewTransitionName: "new_rows", Function: "public.audit_table_changes"},
+			},
+		},
+	})
+	newName := "new_rows"
+	desired := []pipeline.IRObject{
+		&ir.Table{
+			Schema:  "public",
+			Name:    "t",
+			Columns: []*ir.Column{{Name: "id", Type: ir.TypeRef{Name: "bigint"}}},
+			Triggers: []*ir.Trigger{
+				{Name: "trg_a", When: "AFTER", Events: []string{"INSERT"}, ForEach: "STATEMENT", NewTransitionName: &newName, Function: "audit_table_changes"},
+			},
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ops) != 0 {
+		t.Errorf("expected no ops for an unchanged transition name, got: %v", sqlList(ops))
 	}
 }
 
@@ -7590,8 +7823,15 @@ func TestDiffCreateSequenceWithOwner(t *testing.T) {
 	if !containsSQL(ops, "CREATE SEQUENCE IF NOT EXISTS") {
 		t.Errorf("expected CREATE SEQUENCE, got: %v", sqlList(ops))
 	}
-	if !containsSQL(ops, `ALTER SEQUENCE "public"."seq_id" OWNER TO "app_owner"`) {
-		t.Errorf("expected ALTER SEQUENCE ... OWNER TO for a new sequence, got: %v", sqlList(ops))
+	// RFC §11.5 (audit item #28): a brand-new object is created directly as
+	// its declared owner via SET ROLE/RESET ROLE, not reassigned afterward
+	// via ALTER ... OWNER TO — the latter never satisfies a matching
+	// DEFAULT PRIVILEGES FOR ROLE block.
+	if !containsSQL(ops, `SET ROLE "app_owner";`) || !containsSQL(ops, "RESET ROLE;") {
+		t.Errorf("expected SET ROLE/RESET ROLE wrapping the CREATE SEQUENCE, got: %v", sqlList(ops))
+	}
+	if containsSQL(ops, "OWNER TO") {
+		t.Errorf("expected no ALTER SEQUENCE ... OWNER TO for a brand-new sequence, got: %v", sqlList(ops))
 	}
 }
 
@@ -8505,8 +8745,15 @@ func TestCreatePublicationEmitsOwner(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !containsSQL(ops, `ALTER PUBLICATION "order_changes" OWNER TO "app_admin";`) {
-		t.Errorf("expected ALTER PUBLICATION ... OWNER TO, got: %v", sqlList(ops))
+	// RFC §11.5 (audit item #28): a brand-new object is created directly as
+	// its declared owner via SET ROLE/RESET ROLE, not reassigned afterward
+	// via ALTER ... OWNER TO — the latter never satisfies a matching
+	// DEFAULT PRIVILEGES FOR ROLE block.
+	if !containsSQL(ops, `SET ROLE "app_admin";`) || !containsSQL(ops, "RESET ROLE;") {
+		t.Errorf("expected SET ROLE/RESET ROLE wrapping the CREATE PUBLICATION, got: %v", sqlList(ops))
+	}
+	if containsSQL(ops, "OWNER TO") {
+		t.Errorf("expected no ALTER PUBLICATION ... OWNER TO for a brand-new publication, got: %v", sqlList(ops))
 	}
 }
 

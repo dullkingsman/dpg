@@ -267,8 +267,15 @@ type Trigger struct {
 	// a column-scoped trigger silently fired on every column update
 	// instead of just the declared ones.
 	UpdateOfColumns []string
-	Condition       *string
-	Function        string // qualified function name
+	// OldTransitionName/NewTransitionName are RFC §7.9's "REFERENCING OLD
+	// TABLE AS ... NEW TABLE AS ..." transition-table names (audit item
+	// #2) — nil when REFERENCING isn't present, or for whichever of
+	// OLD/NEW wasn't named. Mirrors UpdateOfColumns' optional-field
+	// pattern above.
+	OldTransitionName *string
+	NewTransitionName *string
+	Condition         *string
+	Function          string // qualified function name
 	Args            []string
 	Comment         *string
 	Pos             pipeline.SourcePos

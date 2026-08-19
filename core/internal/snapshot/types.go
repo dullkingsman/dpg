@@ -344,9 +344,15 @@ type SnapTrigger struct {
 	// column list, comma-separated — see ir.Trigger.UpdateOfColumns' doc
 	// comment.
 	UpdateOfColumns string `json:"update_of_columns,omitempty"`
-	Function        string `json:"function"`
-	Condition       string `json:"condition,omitempty"`
-	Comment         string `json:"comment,omitempty"`
+	// OldTransitionName/NewTransitionName are RFC §7.9's "REFERENCING OLD
+	// TABLE AS ... NEW TABLE AS ..." transition-table names (audit item
+	// #2) — "" means REFERENCING wasn't present for that side, same
+	// empty-means-unspecified convention as Condition below.
+	OldTransitionName string `json:"old_transition_name,omitempty"`
+	NewTransitionName string `json:"new_transition_name,omitempty"`
+	Function          string `json:"function"`
+	Condition         string `json:"condition,omitempty"`
+	Comment           string `json:"comment,omitempty"`
 }
 
 type SnapGrant struct {

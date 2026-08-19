@@ -309,6 +309,23 @@ func (r *Resolver) Sort(objects []pipeline.IRObject) ([]pipeline.IRObject, error
 		}
 	}
 
+	// tableRefEdges adds a dependency from objIdx to every table statically
+	// referenced in body — a real AST walk (ir.ExtractTableRefs, RFC §22.1
+	// item 9), not a heuristic: used for a view's query and a LANGUAGE
+	// sql/plpgsql function/procedure body. An unqualified reference falls
+	// back to "public", the same convention already used for Publication/
+	// EventTrigger/Cast's own unqualified references elsewhere in this
+	// file — PostgreSQL itself would actually resolve it via search_path at
+	// definition time, which DPG has no way to know at plan time.
+	tableRefEdges := func(objIdx int, language, body string) {
+		if !strings.EqualFold(language, "sql") && !strings.EqualFold(language, "plpgsql") {
+			return
+		}
+		for _, ref := range ir.ExtractTableRefs(language, body) {
+			refEdge(objIdx, defaultSchema(ref.Schema, "public")+"."+ref.Name)
+		}
+	}
+
 	// Circular FK edges that can be deferred.
 	type deferredFK struct {
 		table *ir.Table
@@ -457,14 +474,9 @@ func (r *Resolver) Sort(objects []pipeline.IRObject) ([]pipeline.IRObject, error
 		case *ir.View:
 			// View depends on its schema.
 			schemaEdge(i, o.Schema)
-			// Heuristic: all views depend on all tables (query AST analysis deferred).
-			for j, dep := range objects {
-				if j != i {
-					if _, ok := dep.(*ir.Table); ok {
-						dependsOn(i, j)
-					}
-				}
-			}
+			// Depends on every table its query statically references (RFC
+			// §22.1 item 9) — a real AST walk of Query, not a heuristic.
+			tableRefEdges(i, "sql", o.Query)
 
 		case *ir.Cast:
 			// Cast depends on its WITH FUNCTION target — same ordering
@@ -520,6 +532,19 @@ func (r *Resolver) Sort(objects []pipeline.IRObject) ([]pipeline.IRObject, error
 			if strings.EqualFold(o.Attrs.Language, "sql") {
 				bodyCallsFuncEdge(i, o.Attrs.Body)
 			}
+			// Depends on every table its body statically references (RFC
+			// §22.1 item 9) — real AST analysis, LANGUAGE sql/plpgsql only;
+			// dynamic SQL (EXECUTE '...') is invisible to it by design. A
+			// plpgsql body needs the full CREATE-statement wrapper, not the
+			// bare body — see ir.ExtractTableRefs's doc comment — built the
+			// same reconstructed-shim way HashFunctionBody's introspect-side
+			// caller already does (internal/introspect), since the object's
+			// original source text isn't retained here either.
+			if strings.EqualFold(o.Attrs.Language, "plpgsql") {
+				tableRefEdges(i, "plpgsql", ir.RenderCreateFunctionSQL(o))
+			} else {
+				tableRefEdges(i, o.Attrs.Language, o.Attrs.Body)
+			}
 
 		case *ir.Procedure:
 			schemaEdge(i, o.Schema)
@@ -535,6 +560,11 @@ func (r *Resolver) Sort(objects []pipeline.IRObject) ([]pipeline.IRObject, error
 			}
 			if strings.EqualFold(o.Attrs.Language, "sql") {
 				bodyCallsFuncEdge(i, o.Attrs.Body)
+			}
+			if strings.EqualFold(o.Attrs.Language, "plpgsql") {
+				tableRefEdges(i, "plpgsql", ir.RenderCreateProcedureSQL(o))
+			} else {
+				tableRefEdges(i, o.Attrs.Language, o.Attrs.Body)
 			}
 
 		case *ir.Aggregate:

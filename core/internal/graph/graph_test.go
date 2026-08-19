@@ -470,8 +470,17 @@ func TestSort_UnresolvedFKInExternalSchemaAllowed(t *testing.T) {
 
 // ── View heuristic ────────────────────────────────────────────────────────────
 
-func TestSort_ViewAfterAllTables(t *testing.T) {
-	v := &ir.View{Schema: "app", Name: "user_view", SrcPos: pos}
+// TestSort_ViewAfterReferencedTables is RFC §22.1 item 9's (audit item #30)
+// regression guard: a view's dependency edges now come from a real AST walk
+// of its query (ir.ExtractTableRefs), not the old "depends on every table in
+// the object set" heuristic (graph.go used to comment this explicitly:
+// "Heuristic: all views depend on all tables (query AST analysis
+// deferred)"). Table references here are schema-qualified because DPG never
+// wraps a view's CREATE VIEW with a SET search_path (unlike the opaque
+// object kinds that do) — an unqualified reference resolves via "public",
+// same convention as Publication/EventTrigger/Cast elsewhere in graph.go.
+func TestSort_ViewAfterReferencedTables(t *testing.T) {
+	v := &ir.View{Schema: "app", Name: "user_view", Query: "SELECT u.id FROM app.users u JOIN app.orders o ON o.user_id = u.id", SrcPos: pos}
 	u := table("app", "users")
 	o := table("app", "orders")
 	s := schema("app")
@@ -479,6 +488,26 @@ func TestSort_ViewAfterAllTables(t *testing.T) {
 	sorted := sortObjects(t, objects)
 	assertBefore(t, sorted, "app.users", "app.user_view")
 	assertBefore(t, sorted, "app.orders", "app.user_view")
+}
+
+// TestSort_ViewNotDependentOnUnreferencedTable is the sibling proof that the
+// real AST walk is actually narrower than the old heuristic, not just
+// additionally correct in the positive case: a table the view's query never
+// mentions must NOT gain a forced ordering relative to the view. v's query
+// references "app.users", deliberately absent from this test's object set —
+// refEdge only adds an edge when the target resolves in idx (see graph.go),
+// so there is no possible edge at all between v and unrelated here. Relies
+// on the same input-order-preservation property
+// TestSort_PlpgsqlFunctionBodyNotScanned already relies on to prove an
+// absent edge — mirrors that test's exact two-object shape (no schema
+// object either) so Kahn's algorithm's tie-breaking isn't perturbed by
+// unrelated schema edges.
+func TestSort_ViewNotDependentOnUnreferencedTable(t *testing.T) {
+	v := &ir.View{Schema: "app", Name: "user_view", Query: "SELECT u.id FROM app.users u", SrcPos: pos}
+	unrelated := table("app", "unrelated")
+	objects := []pipeline.IRObject{v, unrelated}
+	sorted := sortObjects(t, objects)
+	assertBefore(t, sorted, "app.user_view", "app.unrelated")
 }
 
 // A column whose custom type is written UNQUALIFIED (as introspected columns are
@@ -686,6 +715,80 @@ func TestSort_PublicationNoTableTargetNoError(t *testing.T) {
 // gap: real PostgreSQL validates a LANGUAGE sql body immediately at CREATE
 // FUNCTION time (unlike plpgsql, compiled lazily), so a LANGUAGE sql
 // function calling another not-yet-created function fails at apply time.
+// TestSort_SqlFunctionBodyReferencesTable and
+// TestSort_PlpgsqlFunctionBodyReferencesTable are RFC §22.1 item 9's (audit
+// item #30) core regression guard: a function/procedure body's SQL is now
+// scanned for real table references (bodies were previously opaque to the
+// dependency graph entirely, for every language) — a function that INSERTs
+// into a table must be ordered after that table. Both languages are covered
+// separately: unlike bodyCallsFuncEdge (function-calls-function, which
+// deliberately skips plpgsql — see TestSort_PlpgsqlFunctionBodyNotScanned),
+// table-reference extraction applies to plpgsql too (ir.ExtractTableRefs
+// reuses the same fragment-parsing machinery BodyHash already relies on).
+func TestSort_SqlFunctionBodyReferencesTable(t *testing.T) {
+	fn := &ir.Function{
+		Schema: "app", Name: "log_event",
+		Attrs:  ir.FuncAttrs{Language: "sql", Body: "INSERT INTO app.events (msg) VALUES ('x')"},
+		SrcPos: pos,
+	}
+	tbl := table("app", "events")
+	objects := []pipeline.IRObject{fn, tbl, schema("app")}
+	sorted := sortObjects(t, objects)
+	assertBefore(t, sorted, "app.events", "app.log_event()")
+}
+
+func TestSort_PlpgsqlFunctionBodyReferencesTable(t *testing.T) {
+	fn := &ir.Function{
+		Schema: "app", Name: "log_event",
+		Attrs:      ir.FuncAttrs{Language: "plpgsql", Body: "BEGIN INSERT INTO app.events (msg) VALUES ('x'); END;"},
+		ReturnType: ir.TypeRef{Name: "void"},
+		SrcPos:     pos,
+	}
+	tbl := table("app", "events")
+	objects := []pipeline.IRObject{fn, tbl, schema("app")}
+	sorted := sortObjects(t, objects)
+	assertBefore(t, sorted, "app.events", "app.log_event()")
+}
+
+// TestSort_ProcedureBodyReferencesTable is the *ir.Procedure sibling.
+func TestSort_ProcedureBodyReferencesTable(t *testing.T) {
+	proc := &ir.Procedure{
+		Schema: "app", Name: "log_event_proc",
+		Attrs:  ir.FuncAttrs{Language: "sql", Body: "INSERT INTO app.events (msg) VALUES ('x')"},
+		SrcPos: pos,
+	}
+	tbl := table("app", "events")
+	objects := []pipeline.IRObject{proc, tbl, schema("app")}
+	sorted := sortObjects(t, objects)
+	assertBefore(t, sorted, "app.events", "app.log_event_proc()")
+}
+
+// TestSort_TriggerFunctionNotSelfReferencingNoCycle guards the exact
+// regression the RFC §22.1 item 9 design conversation identified and
+// rejected a cheaper "function depends on all tables" heuristic over:
+// combined with the existing table→trigger-function edge (a trigger's
+// EXECUTE FUNCTION target must exist first), a blunt function→all-tables
+// heuristic would manufacture a 2-node cycle for every trigger-bearing
+// table, since the heuristic always includes the trigger's own table. A
+// real AST walk doesn't have this problem for the (overwhelmingly common)
+// case of a trigger function that never references its own table — proven
+// here with a real INSERT/UPDATE-touching-NEW-only body, no cycle, no error.
+func TestSort_TriggerFunctionNotSelfReferencingNoCycle(t *testing.T) {
+	tbl := table("app", "orders")
+	tbl.Triggers = []*ir.Trigger{
+		{Name: "touch", When: "BEFORE", Events: []string{"UPDATE"}, ForEach: "ROW", Function: "touch_updated_at", Pos: pos},
+	}
+	fn := &ir.Function{
+		Schema: "app", Name: "touch_updated_at",
+		Attrs:  ir.FuncAttrs{Language: "plpgsql", Body: "BEGIN NEW.updated_at := now(); RETURN NEW; END;"},
+		SrcPos: pos,
+	}
+	objects := []pipeline.IRObject{schema("app"), tbl, fn}
+	if _, err := graph.New().Sort(objects); err != nil {
+		t.Fatalf("expected no cycle for a non-self-referencing trigger function, got: %v", err)
+	}
+}
+
 func TestSort_SqlFunctionCallsAnotherFunction(t *testing.T) {
 	caller := &ir.Function{
 		Schema: "app", Name: "total_price",

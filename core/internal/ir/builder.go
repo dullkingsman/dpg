@@ -3000,13 +3000,15 @@ func blockPolicyToIR(pol pipeline.PolicyDef) *Policy {
 
 func blockTriggerToIR(tr pipeline.TriggerDef) *Trigger {
 	t := &Trigger{
-		Name:            tr.Name.Name,
-		When:            tr.When,
-		Events:          tr.Events,
-		ForEach:         tr.ForEach,
-		UpdateOfColumns: tr.UpdateOfColumns,
-		Args:            tr.Args,
-		Pos:             tr.Pos,
+		Name:              tr.Name.Name,
+		When:              tr.When,
+		Events:            tr.Events,
+		ForEach:           tr.ForEach,
+		UpdateOfColumns:   tr.UpdateOfColumns,
+		OldTransitionName: tr.OldTransitionName,
+		NewTransitionName: tr.NewTransitionName,
+		Args:              tr.Args,
+		Pos:               tr.Pos,
 	}
 	t.Function = tr.Function.String()
 	if tr.Condition != nil {

@@ -101,8 +101,16 @@ type TriggerDef struct {
 	// all (fires on any column update, PostgreSQL's own default). Only
 	// ever set when Events contains "UPDATE".
 	UpdateOfColumns []string
-	Condition       *RawExpr
-	Function        Identifier
+	// OldTransitionName/NewTransitionName are RFC §7.9's "REFERENCING OLD
+	// TABLE AS ... NEW TABLE AS ..." transition-table names (audit item
+	// #2) — nil when REFERENCING isn't present, or for whichever of
+	// OLD/NEW wasn't named. A transition relation name is always a plain,
+	// unqualified identifier (not a real relation, just a local alias
+	// scoped to the trigger's execution), unlike Function below.
+	OldTransitionName *string
+	NewTransitionName *string
+	Condition         *RawExpr
+	Function          Identifier
 	Args            []string
 	Comment         *StringLit
 	Pos             SourcePos

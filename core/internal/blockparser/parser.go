@@ -1544,6 +1544,51 @@ func (b *blockParser) parseOneTrigger() (pipeline.TriggerDef, error) {
 		}
 	}
 
+	// Optional REFERENCING { OLD | NEW } TABLE [AS] name [...] — real
+	// PostgreSQL grammar places this after the event list, before FOR EACH
+	// (RFC §7.9, audit item #2).
+	b.skipWS()
+	refMark := b.cur()
+	if strings.ToUpper(b.peekWord()) == "REFERENCING" {
+		b.readWord()
+		for {
+			b.skipWS()
+			which := strings.ToUpper(b.peekWord())
+			if which != "OLD" && which != "NEW" {
+				break
+			}
+			b.readWord()
+			if err := b.expect("TABLE"); err != nil {
+				return trig, err
+			}
+			b.skipWS()
+			if strings.ToUpper(b.peekWord()) == "AS" {
+				b.readWord()
+			}
+			b.skipWS()
+			var tname string
+			if b.peek() == '"' {
+				var qerr error
+				tname, qerr = b.readQuotedString()
+				if qerr != nil {
+					return trig, qerr
+				}
+			} else {
+				tname = b.readWord()
+				if tname == "" {
+					return trig, b.errorf("expected transition table name after %s TABLE", which)
+				}
+			}
+			if which == "OLD" {
+				trig.OldTransitionName = &tname
+			} else {
+				trig.NewTransitionName = &tname
+			}
+		}
+	} else {
+		b.restore(refMark)
+	}
+
 	// FOR EACH ROW | STATEMENT
 	if err := b.expect("FOR"); err != nil {
 		return trig, err

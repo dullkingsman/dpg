@@ -282,6 +282,14 @@ func runApply(
 	}
 	defer conn.Close(ctx)
 
+	// RFC §11.5: before any DDL runs, every role a SET ROLE/OWNER TO
+	// statement in this migration will target must count the connecting
+	// role as a member — checked upfront so a missing membership surfaces
+	// as one DPG-E036 error, not a bare PostgreSQL failure mid-migration.
+	if err := executor.ValidateOwnerMembership(ctx, conn, executableOps); err != nil {
+		return err
+	}
+
 	// Execute only non-instruction ops. Instruction ops are manual steps the
 	// operator must perform outside DPG; they must not be sent to the executor.
 	execMigration, err := emitter.Emit(executableOps, pipeline.MigrationMeta{

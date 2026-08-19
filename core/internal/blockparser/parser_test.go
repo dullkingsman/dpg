@@ -731,6 +731,72 @@ func TestTriggerUpdateWithoutOfColumns(t *testing.T) {
 	}
 }
 
+// TestTriggerReferencingBothTables guards RFC §7.9 (audit item #2):
+// REFERENCING OLD TABLE AS ... NEW TABLE AS ... was a hard parse error
+// before this fix — internal/blockparser had no handling for it at all.
+func TestTriggerReferencingBothTables(t *testing.T) {
+	src := `TRIGGERS {
+		audit_changes AFTER INSERT OR UPDATE OR DELETE
+			REFERENCING OLD TABLE AS old_rows NEW TABLE AS new_rows
+			FOR EACH STATEMENT
+			EXECUTE FUNCTION audit_table_changes();
+	}`
+	ast := parse(t, src)
+	if len(ast.Triggers) != 1 {
+		t.Fatalf("expected 1 trigger, got %d", len(ast.Triggers))
+	}
+	tr := ast.Triggers[0]
+	if tr.OldTransitionName == nil || *tr.OldTransitionName != "old_rows" {
+		t.Errorf("OldTransitionName: got %v, want old_rows", tr.OldTransitionName)
+	}
+	if tr.NewTransitionName == nil || *tr.NewTransitionName != "new_rows" {
+		t.Errorf("NewTransitionName: got %v, want new_rows", tr.NewTransitionName)
+	}
+}
+
+// TestTriggerReferencingNewTableOnly proves a single-sided REFERENCING (only
+// NEW TABLE, no OLD TABLE) leaves OldTransitionName nil — real PostgreSQL
+// allows either side independently (e.g. an INSERT-only audit trigger has no
+// OLD rows to reference at all).
+func TestTriggerReferencingNewTableOnly(t *testing.T) {
+	src := `TRIGGERS {
+		audit_inserts AFTER INSERT
+			REFERENCING NEW TABLE AS new_rows
+			FOR EACH STATEMENT
+			EXECUTE FUNCTION audit_table_changes();
+	}`
+	ast := parse(t, src)
+	if len(ast.Triggers) != 1 {
+		t.Fatalf("expected 1 trigger, got %d", len(ast.Triggers))
+	}
+	tr := ast.Triggers[0]
+	if tr.OldTransitionName != nil {
+		t.Errorf("OldTransitionName: got %v, want nil", tr.OldTransitionName)
+	}
+	if tr.NewTransitionName == nil || *tr.NewTransitionName != "new_rows" {
+		t.Errorf("NewTransitionName: got %v, want new_rows", tr.NewTransitionName)
+	}
+}
+
+// TestTriggerWithoutReferencing proves the transition-name fields stay nil
+// when REFERENCING isn't written at all — the overwhelmingly common case,
+// and the regression a naive fix could break (e.g. by requiring the clause).
+func TestTriggerWithoutReferencing(t *testing.T) {
+	src := `TRIGGERS {
+		trg AFTER UPDATE
+			FOR EACH ROW
+			EXECUTE FUNCTION f();
+	}`
+	ast := parse(t, src)
+	if len(ast.Triggers) != 1 {
+		t.Fatalf("expected 1 trigger, got %d", len(ast.Triggers))
+	}
+	tr := ast.Triggers[0]
+	if tr.OldTransitionName != nil || tr.NewTransitionName != nil {
+		t.Errorf("expected nil transition names, got old=%v new=%v", tr.OldTransitionName, tr.NewTransitionName)
+	}
+}
+
 func TestTriggerWithWhen(t *testing.T) {
 	src := `TRIGGERS {
 		after_email_change AFTER UPDATE

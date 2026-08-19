@@ -1302,6 +1302,12 @@ SELECT n.nspname, c.relname,
        pn.nspname AS func_schema,
        pg_get_triggerdef(t.oid, true) AS triggerdef,
        obj_description(t.oid, 'pg_trigger') AS comment,
+       -- RFC §7.9 (audit item #2): pg_trigger.tgoldtable/tgnewtable hold
+       -- the REFERENCING OLD/NEW TABLE AS transition-table names directly
+       -- (NULL when REFERENCING wasn't used for that side) — no deparse
+       -- needed, unlike the WHEN condition below.
+       t.tgoldtable AS old_transition_name,
+       t.tgnewtable AS new_transition_name,
        -- RFC audit item #1: pg_trigger.tgattr is the "UPDATE OF col, ..."
        -- column list as an int2vector of attnums (empty when the trigger
        -- has no OF clause at all) — unnest WITH ORDINALITY preserves the
@@ -1329,7 +1335,8 @@ ORDER  BY n.nspname, c.relname, t.tgname`
 		var schema, table, name, when, forEach, events, funcName, funcSchema, triggerDef string
 		var comment *string
 		var updateOfColumns []string
-		if err := rs.Scan(&schema, &table, &name, &when, &forEach, &events, &funcName, &funcSchema, &triggerDef, &comment, &updateOfColumns); err != nil {
+		var oldTransitionName, newTransitionName *string
+		if err := rs.Scan(&schema, &table, &name, &when, &forEach, &events, &funcName, &funcSchema, &triggerDef, &comment, &oldTransitionName, &newTransitionName, &updateOfColumns); err != nil {
 			return err
 		}
 		condition := extractTriggerWhenCondition(triggerDef)
@@ -1348,14 +1355,16 @@ ORDER  BY n.nspname, c.relname, t.tgname`
 			}
 		}
 		t.Triggers = append(t.Triggers, &ir.Trigger{
-			Name:            name,
-			When:            when,
-			Events:          cleanEvents,
-			ForEach:         forEach,
-			UpdateOfColumns: updateOfColumns,
-			Function:        fn,
-			Condition:       condition,
-			Comment:         comment,
+			Name:              name,
+			When:              when,
+			Events:            cleanEvents,
+			ForEach:           forEach,
+			UpdateOfColumns:   updateOfColumns,
+			OldTransitionName: oldTransitionName,
+			NewTransitionName: newTransitionName,
+			Function:          fn,
+			Condition:         condition,
+			Comment:           comment,
 		})
 	}
 	return rs.Err()

@@ -647,6 +647,12 @@ func toSnapTrigger(trg *ir.Trigger) SnapTrigger {
 		UpdateOfColumns: strings.Join(trg.UpdateOfColumns, ", "),
 		Function:        trg.Function,
 	}
+	if trg.OldTransitionName != nil {
+		st.OldTransitionName = *trg.OldTransitionName
+	}
+	if trg.NewTransitionName != nil {
+		st.NewTransitionName = *trg.NewTransitionName
+	}
 	if trg.Condition != nil {
 		st.Condition = *trg.Condition
 	}
