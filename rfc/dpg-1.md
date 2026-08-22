@@ -2,7 +2,7 @@
 title: "RFC DPG-1: Declarative PG"
 rfc_number: "DPG-001"
 rfc_status: "Standards Track"
-rfc_version: "0.9.0"
+rfc_version: "0.8.1"
 rfc_date: "2026-05-13"
 rfc_target: "PostgreSQL 14+"
 rfc_authors: "Daniel Tsegaw"
@@ -151,13 +151,14 @@ Copyright Notice
     15.2. Phase 1 — File Discovery ................................. 73
     15.3. Phase 2 — Macro Preprocessing ............................ 73
     15.4. Phase 3 — Tokenization ................................... 74
-    15.5. Phase 4 — PG SQL Parsing ................................. 75
-    15.6. Phase 5 — Block Parsing .................................. 76
-    15.7. Phase 6 — IR Construction ................................ 76
-    15.8. Phase 7 — Merging ........................................ 77
-    15.9. Phase 8 — Dependency Resolution .......................... 78
-    15.10.Phase 9 — Differencing ................................... 79
-    15.11.Phase 10 — Emission ...................................... 80
+    15.5. Phase 4a — PG SQL Parsing ................................ 75
+    15.6. Phase 4b — Block Parsing .................................. 75
+    15.7. Phase 5 — IR Construction ................................ 76
+    15.8. Phase 6 — Merging ........................................ 76
+    15.9. Phase 7 — Dependency Resolution .......................... 77
+    15.10.Phase 8 — Linting ......................................... 78
+    15.11.Phase 9 — Differencing .................................... 79
+    15.12.Phase 10 — Emission ...................................... 80
 16. Snapshot Format ................................................ 81
     16.1. Purpose and Placement .................................... 81
     16.2. Top-Level Fields ......................................... 81
@@ -203,14 +204,15 @@ Appendix D.  Corrections and Additions to Earlier Sections ....... 138
     D.5.  SecretResolver Protocol Specification ................... 146
     D.6.  Source Revision Detection ............................... 147
     D.7.  Additional CLI Error Codes .............................. 147
-    D.8.  Root dpg.toml Missing Sections ......................... 148
+    D.8.  Root dpg.toml — [fmt]/[migrations] Integrated .......... 148
     D.9.  CLI Command Corrections ................................ 149
     D.10. Name Maps .............................................. 150
     D.11. SERIAL / BIGSERIAL / SMALLSERIAL Column Sugar ........... 151
 Appendix E.  Revision History ..................................... 152
-Normative References .............................................. 152
-Informative References ............................................ 153
-Author's Address .................................................. 154
+Appendix F.  Standard SQL / PostgreSQL-Specific Classification .... 153
+Normative References .............................................. 156
+Informative References ............................................ 157
+Author's Address .................................................. 158
 ```
 
 ---
@@ -313,7 +315,14 @@ Author's Address .................................................. 154
    **Tenet 1 — Full PostgreSQL feature parity.**
    DPG MUST be capable of expressing anything that raw PostgreSQL DDL
    can express.  A PostgreSQL feature that cannot be declared in DPG
-   is a defect in DPG, not an out-of-scope request.
+   is a defect in DPG, not an out-of-scope request — with the sole
+   exception of the specific, itemized carve-outs enumerated in
+   Section 23 ("Deferred Features"), each justified there on its own
+   terms (e.g. a feature that is runtime/session-scoped rather than
+   schema DDL, or genuinely superseded by another PostgreSQL mechanism
+   DPG already manages).  Section 23's list is closed, not a general
+   license to omit — anything not named there is bound by this tenet
+   without exception.
 
    **Tenet 2 — Prefer PG syntax exactly.**
    When PostgreSQL already has a declarative way to express something,
@@ -325,7 +334,23 @@ Author's Address .................................................. 154
    internally.**
    The compiler knows which constructs are ISO/IEC 9075 Standard SQL
    and which are PostgreSQL-specific.  Users never annotate portability.
-   The compiler surfaces this via the `dpg portability` command.
+   The compiler surfaces this via the `dpg portability` command.  The
+   full per-construct classification is Appendix F.
+
+   **PostgreSQL version target:** this specification's floor is
+   **PostgreSQL 14**; there is no ceiling.  A feature introduced in any
+   PostgreSQL release is in scope for this document once a revision
+   adopts it (tracked in Appendix E's revision history and Appendix
+   F's classification table), on a rolling basis — this RFC is never
+   "done" catching up to a new PostgreSQL release the way a fixed
+   ceiling would require a new major RFC version to move past.  A
+   construct requiring PostgreSQL 15+ is documented as such at its own
+   point of use; nothing below PostgreSQL 14 is a supported target.
+   This is distinct from the per-project, user-configurable
+   `MIN_PG_VERSION` gating feature (§23) — that's a future compiler
+   feature for warning a *user* about their own project's version
+   floor; this is the floor for what *this specification itself*
+   documents at all.
 
    **Tenet 4 — Offline-first diffing.**
    DPG MUST NOT require a live database connection to generate a
@@ -519,10 +544,29 @@ warn_on_scalar_merge_conflict = true
 # Directory where snapshot JSON files are stored, relative to the
 # project root.
 directory = ".dpg/snapshots"
+
+[fmt]
+# Number of spaces per indentation level. Default: 4.
+indent = 4
+
+# Keyword casing applied to all DPG and PostgreSQL keywords.
+# Valid values: "upper" (default), "lower".
+keyword_case = "upper"
+
+[migrations]
+# Relative path from the project root where applied migration SQL
+# files are archived after a successful `dpg apply`. Default:
+# ".dpg/migrations". Set to "" to disable archiving entirely.
+directory = ".dpg/migrations"
 ```
 
    The compiler MUST reject any key in `dpg.toml` that is not listed
    above with error DPG-E001 (unknown configuration key).
+
+   `[fmt]` controls `dpg fmt` (§18.7).  `[migrations]` controls where
+   `dpg apply` (§18.2) archives applied SQL, one file per successful
+   apply, at `<directory>/<cluster>/<database>/<timestamp>_<short-hash>.sql`;
+   this directory SHOULD be committed to version control.
 
 ### 3.3. Cluster dpg.toml
 
@@ -639,7 +683,7 @@ default_schema = "public"
    directory within that same cluster (error DPG-E035 if not, naming
    both directories) — database name uniqueness is scoped per-cluster
    only, not project-wide.  These checks exist because `--cluster`/
-   `--database` selection (§D.2.4), the snapshot store, the migrations
+   `--database` selection (§D.2.2), the snapshot store, the migrations
    archive, and `dpg dump`'s default output path all key off the
    declared `name`, not the directory: an unvalidated empty or
    duplicate name causes silent misbehavior — an unreachable second
@@ -1268,34 +1312,49 @@ SCHEMA public {
 
 ### 5.4. Domain Types
 
-   Domains add constraints and a default to an existing base type.
-   The base type appears after `AS`.  Constraints and default appear in
-   the `{ }` block per Tenet 5.
+   Domains add a default and constraints to an existing base type.
+   The base type appears after `AS`.  `DEFAULT` and constraints are
+   native `CREATE DOMAIN` clauses in real PostgreSQL — they appear in
+   Part 1, exactly as PostgreSQL itself writes them, per Tenet 5 (which
+   reserves the `{ }` block for concepts PostgreSQL expresses as a
+   *separate* statement; a domain's own `DEFAULT`/`CHECK`/`NOT NULL`
+   have no such separate form — `ALTER DOMAIN ... SET DEFAULT`/`ADD
+   CONSTRAINT` are how an *existing* domain is later changed, not a
+   sign these clauses belong outside `CREATE DOMAIN` itself).  An
+   earlier draft of this section forced all three into the `{ }` block
+   in violation of Tenet 5's own rule; this is corrected as of
+   Appendix E's E.12 — see that entry for the resulting breaking
+   syntax change.
 
    **PG equivalent:**
-   `CREATE DOMAIN name AS base_type [DEFAULT expr] [CONSTRAINT name CHECK (expr)] ...`
+   `CREATE DOMAIN name AS base_type [DEFAULT expr] [[CONSTRAINT name] {NOT NULL | NULL | CHECK (expr)}] ...`
 
 ```abnf
-domain-decl   = "DOMAIN" WSP schema-name WSP "AS" WSP type-name ";"
-                "{" domain-block "}"
+domain-decl = "DOMAIN" WSP schema-name WSP "AS" WSP type-name
+              [ WSP "DEFAULT" WSP expr ]
+              *( WSP domain-constraint )
+              ";"
+              [ "{" domain-block "}" ]
 
-domain-block  = *( domain-directive ";" )
+domain-constraint = [ "CONSTRAINT" WSP identifier WSP ]
+                     ( "NOT NULL" / "NULL" / "CHECK" WSP "(" expr ")" )
 
-domain-directive = "DEFAULT" WSP expr
-                 / "CONSTRAINT" WSP identifier WSP "CHECK" WSP "(" expr ")"
-                 / "NOT NULL"
-                 / comment-dir
+domain-block = *( ( comment-dir / owner-dir / grants-block / revocations-block ) ";" )
 ```
+
+   The `{ }` block holds only what has no place in native `CREATE
+   DOMAIN` syntax: `COMMENT`, `OWNER`, `GRANTS`, `REVOCATIONS` — the
+   same directive set Tenet 5 already sanctions for every other object
+   kind.
 
    Example:
 
 ```sql
 SCHEMA public {
-    DOMAIN positive_integer AS INTEGER {
-        DEFAULT 1;
-        CONSTRAINT positive_only  CHECK (VALUE > 0);
+    DOMAIN positive_integer AS INTEGER
+        DEFAULT 1
+        CONSTRAINT positive_only  CHECK (VALUE > 0)
         CONSTRAINT reasonable_max CHECK (VALUE < 1000000);
-    }
 }
 ```
 
@@ -1566,7 +1625,7 @@ table-decl  = [ "UNLOGGED" WSP ] "TABLE" WSP schema-table-name WSP
 table-clause = WITH "(" storage-params ")"
              / TABLESPACE identifier
              / INHERITS "(" table-ref-list ")"
-             / PARTITION-BY-clause
+             / partition-by-clause
 
 table-block  = *( table-directive )
 
@@ -2298,6 +2357,12 @@ comment-dir      = "COMMENT" WSP SQUOTE text SQUOTE
 
    **`RENAMED FROM`:** See Section 7.6.
 
+   **Attaching a downstream naming convention:** a `NAME MAP`/`NAME
+   MAPS` directive can also appear in this block, independently of
+   `RENAMED FROM` — see §D.10 (Name Maps) for the full feature (ten
+   rule keywords, `[namemaps]` `dpg.toml` config, block-layer
+   directives, and snapshot representation).
+
 ### 7.12. Unlogged and Foreign Tables
 
    **Unlogged tables:**
@@ -2512,6 +2577,7 @@ matview-decl = "MATERIALIZED VIEW" WSP schema-view-name
 matview-block = *( matview-directive ";" )
 matview-directive = owner-dir / comment-dir / indices-block
                   / grants-block / revocations-block
+                  / renamed-from-dir / deprecated-dir
 ```
 
    The `{ }` block of a materialized view MAY contain `INDICES { }`
@@ -3161,15 +3227,19 @@ ALTER DEFAULT PRIVILEGES FOR ROLE app_admin IN SCHEMA public
    PostgreSQL attributes default-privilege eligibility (§11.4) to
    whichever role actually *executed* the `CREATE` statement — checked
    against `pg_default_acl` via `current_user`/`current_role` — not to
-   an object's final `OWNER`.  A declared `OWNER` (§4.6) that is applied
-   only *after* creation, via a trailing `ALTER ... OWNER TO`, therefore
+   an object's final `OWNER`.  A declared `OWNER` (`owner-dir`; see
+   §7.11 for Table's copy of this directive — every object kind that
+   supports `OWNER` defines its own local copy of the same grammar
+   rather than sharing one central production) that is applied only
+   *after* creation, via a trailing `ALTER ... OWNER TO`, therefore
    never satisfies a matching `DEFAULT PRIVILEGES FOR ROLE` block: the
    role named in `FOR ROLE` never itself ran `CREATE`, so PostgreSQL
    never consults its default-ACL entries for that object.
 
    To make `OWNER` and `DEFAULT PRIVILEGES FOR ROLE` compose correctly,
-   the compiler MUST create every object that declares an `OWNER` (§4.6)
-   as that role, not as the connecting role. This is universal — it
+   the compiler MUST create every object that declares an `OWNER`
+   (`owner-dir`, per object kind — see the note above) as that role,
+   not as the connecting role. This is universal — it
    applies to any object with a declared `OWNER`, not only objects
    covered by a matching `DEFAULT PRIVILEGES FOR ROLE` block — because it
    simply matches real PostgreSQL creator semantics: the role that
@@ -3334,7 +3404,7 @@ SCHEMA public {
    PostgreSQL's `CREATE PUBLICATION` syntax exactly.
 
    **PG equivalent:**
-   `CREATE PUBLICATION name [FOR TABLE table[, ...] | FOR ALL TABLES] [WITH (options)]`
+   `CREATE PUBLICATION name [FOR TABLE table[, ...] | FOR ALL TABLES | FOR TABLES IN SCHEMA schema[, ...]] [WITH (options)]`
 
 ```abnf
 publication-decl = "PUBLICATION" WSP identifier
@@ -3345,12 +3415,21 @@ publication-decl = "PUBLICATION" WSP identifier
 
 publication-scope = "FOR ALL TABLES"
                   / "FOR TABLE" WSP pub-table-list
-                  / "FOR ALL TABLES IN SCHEMA" WSP schema-list
+                  / "FOR TABLES IN SCHEMA" WSP schema-list
 
 pub-table-list    = pub-table *( "," WSP pub-table )
 pub-table         = schema-table-name
                     [ "(" col-list ")" ]
                     [ "WHERE" WSP "(" predicate ")" ]
+
+; pub-options (defined in Appendix A alongside storage-params/sub-options)
+; mirrors real CREATE PUBLICATION's WITH (...) clause verbatim — an
+; opaque key=value option list handed through as native PG text per
+; Tenet 2/5, so e.g. publish, publish_via_partition_root, and any later
+; PostgreSQL version's additions such as PG18's
+; publish_generated_columns are automatically expressible with zero
+; grammar changes here, the same passthrough pattern Subscription's
+; WITH options (§13.2) already uses.
 
 pub-block = *( ( comment-dir / grants-block ) ";" )
 ```
@@ -3727,6 +3806,27 @@ SCHEMA public {
    **PG equivalent:**
    `CREATE TABLESPACE name [OWNER owner] LOCATION 'path'`
 
+```abnf
+tablespace-decl = "TABLESPACE" WSP identifier
+                  [ WSP "OWNER" WSP role-spec ]
+                  WSP "LOCATION" WSP SQUOTE <text> SQUOTE
+                  ";"
+                  [ "{" tablespace-block "}" ]
+
+role-spec = identifier / "CURRENT_ROLE" / "CURRENT_USER" / "SESSION_USER"
+
+tablespace-block = *( comment-dir ";" )
+```
+
+   `OWNER` is inline in Part 1, matching real PostgreSQL's own
+   `CREATE TABLESPACE` grammar exactly (Tenet 2/5) rather than a `{ }`
+   block directive — unlike Table/View/etc., where `OWNER` has no
+   place in the native `CREATE` statement and is therefore a block
+   directive instead.  `WITH (tablespace_option = value, ...)` storage
+   parameters and the full `ALTER TABLESPACE` surface (`RENAME TO`,
+   `OWNER TO`, `SET`/`RESET` options) are a separate, still-open gap —
+   this section documents `CREATE`-time grammar only.
+
 ```sql
 -- production/cluster/tablespaces.dpg
 
@@ -3938,14 +4038,17 @@ Phase 4b: Block Parsing (BlockParser)
 Phase 5:  IR Construction (IRBuilder)
 Phase 6:  Merging (Merger)
 Phase 7:  Dependency Resolution (DependencyResolver)
-Phase 8:  Linting (Linter)       [dpg apply / dpg plan only]
+Phase 8:  Linting (Linter)       [dpg validate / dpg plan / dpg apply only]
 Phase 9:  Differencing (Differ)
 Phase 10: Emission (Emitter)
 ```
 
    Phases 4a and 4b operate in parallel on each raw object.  Phase 8
-   (Linting) runs after Merging; its diagnostics are advisory by default
-   (warnings), with `--strict` promoting them to hard errors.
+   (Linting) runs after Dependency Resolution (Phase 7), against the
+   fully-resolved object list; its diagnostics are advisory by default
+   (warnings) on all three commands that run it, with `--strict` (on
+   `dpg validate`/`dpg apply` only — `dpg plan` has no `--strict` flag,
+   see §15.10) promoting them to hard errors.
 
 ### 15.2. Phase 1 — File Discovery
 
@@ -4147,7 +4250,25 @@ Phase 10: Emission (Emitter)
    The output is an ordered `[]IRObject` slice such that every object
    appears after all objects it depends on.
 
-### 15.10. Phase 9 — Differencing
+### 15.10. Phase 8 — Linting
+
+   The Linter (interface `pipeline.Linter`), when registered, runs
+   against the fully-resolved `desired []IRObject` — Phase 7's
+   output — on `dpg validate`, `dpg plan`, and `dpg apply` only (not
+   `dpg dump`, `dpg diff`, or `dpg verify`).  It implements the rules
+   in Section 19 and returns `[]LintDiagnostic`, each carrying
+   `IsError`.
+
+   By default every diagnostic is advisory (a warning; never blocking).
+   `dpg validate` and `dpg apply` accept `--strict`, which promotes
+   every diagnostic's `IsError` to `true` — turning all warnings into
+   hard errors that produce a non-zero exit (`validate`) or abort the
+   apply (`apply`).  `dpg plan` has no `--strict` flag; its lint
+   diagnostics are always advisory-only.  Linting is purely
+   advisory-by-default analysis of already-resolved IR — it never
+   mutates `desired` or influences Phase 9's diffing.
+
+### 15.11. Phase 9 — Differencing
 
    The Differ (interface `pipeline.Differ`) takes:
 
@@ -4240,83 +4361,127 @@ Phase 10: Emission (Emitter)
 ### 16.3. Per-Object Snapshot Schema
 
    Each entry in `objects` maps the object's `QualifiedName()` to a
-   JSON object.  The `kind` field is REQUIRED on all entries.
-
-   **Schema:**
+   `SnapObject` — a **discriminated union wrapper**, not a flat record.
+   Its `kind` field (REQUIRED) selects which sub-object field is
+   populated:
 
 ```json
 {
   "public.users": {
     "kind": "table",
-    "schema": "public",
-    "name": "users",
-    "owner": "app_role",
-    "comment": "Primary identity store",
-    "rls_enabled": true,
-    "rls_forced": false,
-    "protected": false,
-    "drop_cascade": false,
-    "unlogged": false,
-    "columns": { ... },
-    "constraints": { ... },
-    "indexes": { ... },
-    "policies": { ... },
-    "triggers": { ... },
-    "grants": [ ... ]
+    "table": { <SnapTable fields, shown below> }
+  },
+  "public.get_user(text)": {
+    "kind": "function",
+    "function": { <SnapFunction fields, shown below> }
+  },
+  "public.user_state": {
+    "kind": "virtual_type",
+    "virtual_type": { <SnapVirtualType fields, shown below> }
   }
 }
 ```
 
+   The `kind` string values and their corresponding sub-object fields:
+
+   | `kind` value | Sub-object field | Object types covered |
+   |---|---|---|
+   | `"table"` | `table` | TABLE, UNLOGGED TABLE, FOREIGN TABLE |
+   | `"view"` | `view` | VIEW, MATERIALIZED VIEW, RECURSIVE VIEW |
+   | `"function"` | `function` | FUNCTION |
+   | `"type"` | `type` | ENUM, COMPOSITE, RANGE, DOMAIN, BASE |
+   | `"schema"` | `schema` | SCHEMA |
+   | `"extension"` | `extension` | EXTENSION |
+   | `"sequence"` | `sequence` | SEQUENCE |
+   | `"role"` | `role` | ROLE |
+   | `"virtual_type"` | `virtual_type` | VIRTUAL TYPE |
+   | `"procedure"`, `"aggregate"`, `"tablespace"`, `"fdw"`, `"server"`, `"user_mapping"`, `"publication"`, `"subscription"`, `"event_trigger"`, `"collation"`, `"operator"`, `"operator_class"`, `"operator_family"`, `"cast"`, `"statistics"`, `"ts_config"`, `"ts_dict"`, `"ts_parser"`, `"ts_template"` | `opaque` | All passthrough objects (§16.3.1) |
+
+   **SnapTable:**
+
+```json
+{
+  "schema": "public",
+  "name": "users",
+  "owner": "app_role",
+  "comment": "Primary identity store",
+  "rls_enabled": true,
+  "rls_forced": false,
+  "protected": false,
+  "drop_cascade": false,
+  "unlogged": false,
+  "columns": [ ... ],
+  "constraints": [ ... ],
+  "indexes": [ ... ],
+  "policies": [ ... ],
+  "triggers": [ ... ],
+  "grants": [ ... ]
+}
+```
+
+   `columns`, `constraints`, `indexes`, `policies`, `triggers`, and
+   `grants` are all **ordered slices (arrays)**, never maps — each
+   element's own `name` field identifies it.
+
    **Column snapshot record:**
 
 ```json
-"email": {
+{
+  "name": "email",
   "type": "text",
-  "nullable": false,
+  "not_null": true,
   "default": null,
   "identity": null,
   "generated": null,
   "comment": "Verified email address",
-  "statistics_target": 300,
+  "statistics": 300,
   "compression": null,
   "storage": null,
-  "grants": [
-    { "grantee": "reporting_role", "privileges": ["SELECT"] }
-  ]
+  "deprecated": null,
+  "renamed_from": null,
+  "grants": []
 }
 ```
+
+   `not_null` is `true` when the column IS `NOT NULL` — note the
+   inverted sense relative to a `nullable` field.  `identity` holds the
+   string `"ALWAYS"` or `"BY DEFAULT"` (or `null`), not a nested object.
 
    **Constraint snapshot record:**
 
 ```json
-"pk_users": {
+{
+  "name": "pk_users",
   "type": "PRIMARY KEY",
-  "columns": ["id"],
+  "expr": "(id)",
   "not_valid": false,
-  "deferrable": false,
-  "initially_deferred": false
+  "deferrable": false
 }
 ```
+
+   There is no top-level `columns` array or `initially_deferred`
+   field; `expr` is the raw constraint expression/definition text.
 
    **Index snapshot record:**
 
 ```json
-"idx_users_email": {
+{
+  "name": "idx_users_email",
   "unique": false,
   "method": "btree",
-  "columns": [{ "name": "email", "direction": "asc", "nulls": null }],
-  "include": [],
-  "where": null,
-  "with": {},
-  "tablespace": null,
-  "concurrently": true
+  "columns": "email",
+  "where": null
 }
 ```
+
+   `columns` is a single comma-separated string, not an array of
+   `{name, direction, nulls}` objects.
 
    **Policy snapshot record:**
 
 ```json
-"view_own": {
+{
+  "name": "view_own",
   "command": "SELECT",
   "permissive": true,
   "using": "user_id = auth.uid()",
@@ -4328,22 +4493,33 @@ Phase 10: Emission (Emitter)
    **Trigger snapshot record:**
 
 ```json
-"after_email_change": {
+{
+  "name": "after_email_change",
   "when": "AFTER",
-  "events": ["UPDATE"],
-  "update_of": ["email"],
+  "events": "UPDATE",
   "for_each": "ROW",
-  "condition": "OLD.email IS DISTINCT FROM NEW.email",
+  "update_of_columns": "email",
+  "old_transition_name": "",
+  "new_transition_name": "",
   "function": "public.notify_email_change",
-  "args": []
+  "condition": "OLD.email IS DISTINCT FROM NEW.email"
 }
 ```
+
+   `SnapTrigger` is simplified relative to `ir.Trigger`: it has no
+   `args` field, and `events` is a single comma-separated string, not
+   an array.  `update_of_columns` (comma-separated) and `condition`
+   ARE present as flat string fields, unlike an earlier draft of this
+   record claimed — both are populated once present in source.
+   `old_transition_name`/`new_transition_name` hold the `REFERENCING
+   OLD TABLE AS ...`/`NEW TABLE AS ...` names (§7.9); empty string
+   means that side of `REFERENCING` wasn't present, the same
+   empty-means-unspecified convention `condition` itself already uses.
 
    **Function snapshot record:**
 
 ```json
-"public.get_user(text)": {
-  "kind": "function",
+{
   "schema": "public",
   "name": "get_user",
   "args": [{ "name": "p_email", "type": "text", "mode": "IN" }],
@@ -4355,15 +4531,14 @@ Phase 10: Emission (Emitter)
   "parallel": "UNSAFE",
   "body_hash": "sha256:a3f7c91d...",
   "comment": "Fetch a user record by verified email address",
-  "grants": [{ "grantee": "app_service", "privileges": ["EXECUTE"] }]
+  "grants": [{ "privileges": ["EXECUTE"], "roles": ["app_service"], "with_grant": false }]
 }
 ```
 
    **Virtual type snapshot record:**
 
 ```json
-"public.user_state": {
-  "kind": "virtual_type",
+{
   "schema": "public",
   "name": "user_state",
   "body": "\"active\" | \"suspended\" | \"deleted\"",
@@ -4374,13 +4549,60 @@ Phase 10: Emission (Emitter)
    **Grant record (used in all per-object grant arrays):**
 
 ```json
-{ "grantee": "app_readonly", "privileges": ["SELECT"], "with_grant": false }
+{ "privileges": ["SELECT"], "roles": ["app_readonly", "app_readonly2"], "with_grant": false }
 ```
+
+   `roles` is an array of role names; there is no singular `grantee`
+   field.
 
    **Function body hash:** The `body_hash` field is the string
    `"sha256:"` followed by the lowercase hex-encoded SHA-256 digest of
    the normalised function body (Section 9.5).  The full body text is
    NOT stored in the snapshot; it lives in the `.dpg` source files.
+
+#### 16.3.1. SnapOpaque — Passthrough Object Records
+
+   Objects whose diff is body-text based (procedures, aggregates,
+   tablespaces, FDWs, servers, user mappings, publications,
+   subscriptions, event triggers, collations, operators, operator
+   classes, operator families, casts, statistics objects, and all four
+   text search object types) are stored as `SnapOpaque`:
+
+```json
+{
+  "kind": "procedure",
+  "opaque": {
+    "kind": "procedure",
+    "schema": "public",
+    "name": "process_settlements",
+    "args": "",
+    "body_hash": "sha256:b4f2a1...",
+    "comment": null,
+    "grants": []
+  }
+}
+```
+
+   Fields:
+
+   | Field | Type | Description |
+   |-------|------|-------------|
+   | `kind` | string | Object kind (same as outer `kind`). |
+   | `schema` | string | Schema name; empty for cluster-level objects. |
+   | `name` | string | Object name. |
+   | `args` | string | Type-only argument key for overloaded objects (procedures, aggregates). Empty for non-overloaded. |
+   | `body_hash` | string | `"sha256:<hex>"` of the normalised Part 1 body text. Empty string means body was empty. |
+   | `comment` | string\|null | Comment text if any. |
+   | `grants` | array | Grant records (for aggregate and procedure grants). |
+
+   The differ compares `body_hash` for changes.  Any change to the body
+   hash causes the compiler to emit `DROP ... CASCADE` + `CREATE ...`
+   for the object (Safety class per Section 17.2 for each type).
+
+   See §D.1.8/§D.1.9 for the complete `SnapSchema`, `SnapExtension`,
+   `SnapType`, `SnapSequence`, `SnapRole`, and cluster-level snapshot
+   file records — not repeated here since they follow the same shape
+   conventions established above.
 
 ### 16.4. Versioning
 
@@ -4591,6 +4813,41 @@ CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_users_email ON public.users (email);
 
 ## 18. CLI Commands
 
+   **Global options**, accepted before the subcommand name by every
+   command below:
+
+```
+dpg [global options] <command> ...
+
+Global options:
+  --dir <path>, -C <path>   Project root directory (default: current
+                             working directory).
+  --env <path>              Path to a .env file used to resolve link =
+                             connection strings (default:
+                             <project-root>/.env, if present; a missing
+                             file is not an error). Only consulted for
+                             commands that may need a live database
+                             connection: dpg apply, dpg verify, dpg dump,
+                             and dpg plan --live.
+```
+
+   **`.env` loading rules:**
+
+   1.  Loading is only performed when at least one cluster uses a
+       `link` connection string; clusters using an inline `url =`
+       never trigger it.
+   2.  Path resolution order: the path given by `--env <path>`, if
+       provided; otherwise `<project-root>/.env`, if it exists.
+   3.  Existing process environment variables are NEVER overwritten —
+       the file only sets variables not already present in the
+       process environment ("process env wins").
+   4.  File format: blank lines and lines starting with `#` are
+       ignored; a leading `export ` is stripped; entries are
+       `KEY=VALUE` or `KEY = VALUE`; single/double-quoted values have
+       the quotes stripped.
+   5.  A missing `.env` file is not an error — the command proceeds
+       using only the process environment.
+
 ### 18.1. dpg plan
 
    Computes the migration that would be applied and prints it to
@@ -4602,16 +4859,61 @@ dpg plan [options] [<cluster>[/<database>]]
 Options:
   --live                 Diff against the live catalog instead of the
                          committed snapshot. Requires a database connection.
-  --allow-destructive    Include DESTRUCTIVE operations in the output
-                         (they are shown but still only printed, not applied).
-  --format <fmt>         Output format: sql (default), json.
-  --no-color             Disable ANSI colour annotations.
-  --strict               Promote linter warnings to errors.
+  --format <fmt>         Output format: text (default), json. The text
+                         format is the emitted SQL migration itself.
+  --watch                Re-run whenever source files change (polls every 500ms).
   --cluster <name>       Target a specific cluster (default: all clusters).
   --database <name>      Target a specific database (default: all databases).
 ```
 
+   `dpg plan` always shows the full computed migration, including any
+   `DESTRUCTIVE` operations — there is no `--allow-destructive` or
+   `--no-color` flag on `plan`; those only gate `dpg apply` (§18.2),
+   since `plan` never executes anything.  `dpg plan` runs the linter
+   (Phase 8, §15.10) but has no `--strict` flag either — its lint
+   diagnostics are always advisory-only, never blocking; use
+   `dpg validate --strict` or `dpg apply --strict` to promote them to
+   errors.
+
    Exit codes: 0 = success (no changes); 1 = changes computed; 2 = error.
+
+   With `--format json`, each targeted database's plan is serialised to
+   stdout as one JSON object:
+
+```json
+{
+  "cluster":         "production",
+  "database":        "myapp",
+  "generated_at":    "2026-05-13T14:32:00Z",
+  "source_revision": "a3f7c91",
+  "ops": [
+    {
+      "sql":    "CREATE TABLE public.users (...);",
+      "safety": "SAFE",
+      "file":   "schemas/public/tables/users.dpg",
+      "line":   4
+    }
+  ],
+  "empty": false
+}
+```
+
+   | Field | Type | Description |
+   |-------|------|-------------|
+   | `cluster` | string | Cluster name. |
+   | `database` | string | Database name; empty for cluster-level plans. |
+   | `generated_at` | RFC 3339 string | UTC timestamp of plan generation. |
+   | `source_revision` | string | Git short SHA, or empty if unavailable. |
+   | `ops` | array | Ordered list of DiffOp objects. |
+   | `ops[].sql` | string | The SQL statement text. |
+   | `ops[].safety` | string | One of `"SAFE"`, `"CAUTION"`, `"DESTRUCTIVE"`, `"MANUAL"`. |
+   | `ops[].file` | string | Source file path relative to project root, or omitted if unknown. |
+   | `ops[].line` | integer | 1-based source line number, or omitted if unknown. |
+   | `empty` | boolean | `true` when `ops` is empty (no changes). |
+
+   When targeting multiple databases in one run, each produces its own
+   complete JSON object; multiple objects are printed sequentially,
+   separated by newlines (NDJSON, [NDJSON]).
 
 ### 18.2. dpg apply
 
@@ -4768,30 +5070,58 @@ Options:
    database connection required.
 
 ```
-dpg validate [options]
+dpg validate [file...] [options]
 
 Options:
-  --strict           Promote linter warnings to errors.
-  --format <fmt>     text (default), json.
+  --cluster <name>   cluster to validate (default: all)
+  --database <name>  database to validate (default: all)
+  --format <fmt>     output format: text or json (default: text)
+  --strict           promote all lint warnings to errors (non-zero exit)
 ```
 
-   Exit codes: 0 = no errors; 1 = errors found; 2 = internal error.
+   When one or more `.dpg` files are given as arguments, only those
+   files are validated, with no project discovery — this mode is what
+   an editor/LSP integration uses to validate a single file or buffer.
 
-   With `--format json` the output is a JSON array of diagnostic
-   objects:
+   Exit codes: 0 = no errors; non-zero = errors found or internal
+   error.
+
+   With `--format json` the output is a **single JSON object per
+   cluster/database scope**, not an array — multiple scopes each emit
+   a separate JSON object (one line per scope is NOT guaranteed; each
+   is a complete JSON object):
 
 ```json
-[
-  {
-    "file": "schemas/public/tables/users.dpg",
-    "line": 12,
-    "col": 5,
-    "rule": "hardcoded-role-password",
-    "message": "Role password must use env:VAR_NAME syntax",
-    "is_error": true
-  }
-]
+{
+  "cluster": "production",
+  "database": "myapp",
+  "objects": 42,
+  "errors": [
+    {
+      "rule": "hardcoded-password",
+      "message": "column 'password' has a hardcoded string default",
+      "file": "schemas/public/tables/users.dpg",
+      "line": 12,
+      "col": 5
+    }
+  ],
+  "warnings": []
+}
 ```
+
+   Fields:
+
+   | Field | Type | Description |
+   |-------|------|-------------|
+   | `cluster` | string | Cluster name. |
+   | `database` | string | Database name; `"(cluster)"` for cluster-level objects. |
+   | `objects` | integer | Number of IR objects successfully compiled. |
+   | `errors` | array | Diagnostics with `IsError = true`. Empty array if none. |
+   | `warnings` | array | Diagnostics with `IsError = false`. Empty array if none. |
+
+   Each diagnostic object has `rule`, `message`, `file`, `line`, `col`.
+   `rule` uses hyphen-separated IDs (e.g., `"hardcoded-password"`), per
+   §D.3.
 
 ### 18.7. dpg fmt
 
@@ -4807,26 +5137,43 @@ Options:
              Does not modify files.
 ```
 
+   Configured via the root `dpg.toml` `[fmt]` section (§3.2); the
+   TOML keys are `indent` (default 4) and `keyword_case` (`"upper"` or
+   `"lower"`, default `"upper"`).
+
    Canonical style rules:
 
-   -   Indentation: 4 spaces.
-   -   Keyword casing: uppercase for all DPG and PostgreSQL keywords.
-   -   Identifier casing: unquoted identifiers are lowercased.
-   -   Column alignment: column names and types are aligned in `( )` lists.
+   -   Indentation: configurable (default 4 spaces).
+   -   Keyword casing: `"upper"` uppercases DPG/PostgreSQL keywords;
+       `"lower"` lowercases them.
+   -   Column alignment: column names and types are aligned in `( )`
+       lists.
    -   Trailing whitespace: stripped.
    -   Blank lines: one blank line between top-level declarations.
    -   Comment style: `--` for single-line, `/* */` for multi-line.
 
+   `dpg fmt` deliberately does NOT touch identifier casing — unlike
+   keyword casing, identifiers are never rewritten, in either
+   direction.  This is intentional, not a gap: DPG's macro
+   preprocessor (§4.7) spreads identifiers across files verbatim, and
+   PostgreSQL identifiers are case-sensitive once quoted, so a
+   formatter that normalized casing could silently change which
+   objects a macro-expanded reference resolves to.  A case mismatch
+   that changes meaning is a compiler error (see the linter/compiler),
+   never something the formatter guesses at or silently corrects.
+
 ### 18.8. dpg portability
 
    Reports all PostgreSQL-specific constructs in use with SQL standard
-   alternatives noted where available.
+   alternatives noted where available.  Output is text only; there is
+   no `--format` flag.
 
 ```
 dpg portability [options]
 
 Options:
-  --format <fmt>   text (default), json.
+  --cluster <name>   cluster to analyze (default: all)
+  --database <name>  database to analyze (default: all)
 ```
 
    This command is OPTIONAL; it MUST NOT be a compilation gate.
@@ -4840,9 +5187,22 @@ Options:
 dpg init [options] [<dir>]
 
 Options:
-  --cluster <name>   Cluster name (default: "main").
-  --database <name>  Database name (default: "myapp").
-  --schema <name>    Default schema (default: "public").
+  --cluster <name>   Cluster directory name (default: "production").
+  --database <name>  Database directory name (default: "myapp").
+  --schema <name>    Default schema name (default: "public").
+  --url <url>        PostgreSQL connection URL (can be set later in dpg.toml).
+```
+
+   Existing files are skipped (not overwritten).  Directories are
+   created unconditionally.  Files created:
+
+```
+<dir>/dpg.toml                              root config
+<dir>/<cluster>/dpg.toml                    cluster config
+<dir>/<cluster>/<database>/dpg.toml         database config
+<dir>/<cluster>/cluster/                    cluster objects dir (empty)
+<dir>/<cluster>/<database>/schemas/<schema>/  schema source dir (empty)
+<dir>/.dpg/snapshots/                       snapshot storage
 ```
 
 ### 18.10. dpg completion
@@ -5348,7 +5708,6 @@ serial_sequence_declared      = "off"
    |---------|--------|-------|
    | Tables (regular) | Declared, Diffed | Full per-field diff |
    | Tables (unlogged) | Declared, Diffed | `UNLOGGED` prefix |
-   | Tables (foreign) | Declared, Diffed | `SERVER`/`OPTIONS` after `)` |
    | Tables (temporary) | Out of scope | Session-scoped |
    | Columns — all built-in types | Declared, Diffed | In `()` list |
    | Columns — generated (`ALWAYS AS`) | Declared, Diffed | In `()` list |
@@ -5391,7 +5750,7 @@ serial_sequence_declared      = "off"
    | Sequences | Declared, Diffed | |
    | Schemas | Declared, Diffed | |
    | Extensions | Declared, Diffed | |
-   | Roles | Declared, Diffed | Cluster-level; `PASSWORD` (§11.1) never live-introspected (superuser-only in PG), diffed offline via a hash of the declared text |
+   | Roles | Declared, Diffed | Cluster-level; `PASSWORD` (§11.1) never live-introspected (superuser-only in PG), diffed offline via a hash of the declared text. No `RENAME TO` (can be genuinely impossible via DROP+CREATE, since PostgreSQL refuses to drop a role that owns objects) and no `SET`/`RESET` session-config-parameter grammar |
    | Table-level grants | Declared, Diffed | Additive model |
    | Column-level grants | Declared, Diffed | Additive model |
    | Explicit revocations | Declared, Diffed | |
@@ -5401,7 +5760,7 @@ serial_sequence_declared      = "off"
    | Foreign Data Wrappers | Declared, Passthrough | Cluster-level; reconstructed from catalog, hash-diffed |
    | Foreign Servers | Declared, Passthrough | Reconstructed from catalog; hash-diffed |
    | User Mappings | Declared, Passthrough | Reconstructed from catalog; hash-diffed. `OPTIONS` may hold a `{{secret-uri}}` reference (§14.10, §D.5), resolved only immediately before `CREATE USER MAPPING` executes |
-   | Foreign Tables | Declared, Diffed | |
+   | Foreign Tables | Declared, Diffed | `SERVER`/`OPTIONS` after `)`; the implementation diffs `SERVER` change, `OPTIONS` change, and column add/drop correctly, but this section has no dedicated ALTER-semantics prose documenting that behavior — a reader of the spec text alone cannot yet derive it |
    | Partitioned Tables | Declared, Diffed | |
    | Sub-partitioning | Declared, Diffed | |
    | Publications | Declared, Passthrough | Reconstructed from catalog; hash-diffed |
@@ -5444,15 +5803,78 @@ serial_sequence_declared      = "off"
 ; Top-level source file
 dpg-file = *( WSP / comment / macro-decl / top-level-decl )
 
+; Every declaration kind DPG models, at the granularity a .dpg file
+; actually admits at top level (schema-scoped kinds also nest inside a
+; schema-decl's { } block via nested-object — both positions are legal,
+; see Section 3.6 on directory-inferred schema context for top-level use
+; without a wrapping SCHEMA block).
 top-level-decl = schema-decl
                / extension-decl
                / role-decl
                / tablespace-decl
                / fdw-decl
+               / server-decl
+               / user-mapping-decl
                / publication-decl
                / subscription-decl
                / event-trigger-decl
                / default-privileges-decl
+               / opaque-object-decl
+               / nested-object
+
+; security-label-decl (§14.11) is NOT a top-level declaration — it is a
+; { } block directive nested inside another object's own block (Table,
+; Column, Function, Publication, etc.), the same position comment-dir/
+; grants-block occupy.
+
+; Schema-scoped object kinds — legal directly at top level (relying on
+; directory-inferred schema, §3.6) or nested inside schema-block.
+nested-object = table-decl
+              / view-decl
+              / matview-decl
+              / function-decl
+              / procedure-decl
+              / aggregate-decl
+              / sequence-decl
+              / enum-decl
+              / composite-decl
+              / range-decl
+              / domain-decl
+              / base-type-decl
+              / virtual-type-decl
+              / tsconfig-decl
+
+; server-decl / user-mapping-decl have no dedicated ABNF block in their
+; own sections (§14.9/§14.10) any more than the opaque kinds below do —
+; named here distinctly only because they're referenced from other
+; productions (server-clause, terminator) that DO need a name to point
+; at, unlike the opaque-object-decl kinds, which nothing else references.
+server-decl       = "SERVER" WSP identifier <PG CREATE SERVER syntax, Part 1 passthrough>
+user-mapping-decl = "USER MAPPING FOR" WSP role-spec <PG CREATE USER MAPPING syntax, Part 1 passthrough>
+
+; base-type-decl is BASE type's own production name (§5.5) — named here
+; since it's referenced from nested-object above; its option list
+; (INPUT, OUTPUT, INTERNALLENGTH, ALIGNMENT, etc.) is the same
+; comma-separated key=value shape as storage-params, reused here rather
+; than inventing a separate name for an identical shape.
+base-type-decl = "TYPE" WSP schema-name WSP "(" storage-params ")" ";"
+
+; opaque-object-decl covers every remaining kind whose Part 1 body is
+; handed to pg_query as literal, unmodified native PostgreSQL DDL
+; (Tenet 2/5's passthrough pattern — the same kind list §16.3.1's
+; SnapOpaque table already enumerates for the snapshot side): Procedure
+; (body only — its declaration head is function-decl's own grammar,
+; §9.3), Foreign Data Wrapper, Collation, Operator, Operator Class,
+; Operator Family, Cast, Extended Statistics Object, and three of the
+; four Text Search object kinds (Dictionary, Parser, Template — Text
+; Search Configuration is the exception, with real structured grammar
+; of its own: tsconfig-decl, §12.1).  None of these has (or needs) a
+; DPG-specific ABNF production beyond
+; its own section's worked "PG equivalent" line — inventing one would
+; violate Tenet 2 by giving PostgreSQL's own syntax a second, redundant
+; DPG-specific name.
+opaque-object-decl = <the object kind's own native CREATE statement,
+                       verbatim, per its section's "PG equivalent" line>
 
 ; Common terminals
 WSP      = *( SP / HTAB / CRLF / LF )
@@ -5472,10 +5894,10 @@ safe-char   = <any Unicode character except DQUOTE>
 
 ; Common directives
 owner-dir        = "OWNER" WSP DQUOTE identifier DQUOTE
-comment-dir      = "COMMENT" WSP SQUOTE <text> SQUOTE
+comment-dir      = "COMMENT" WSP string-literal
 renamed-from-dir = "RENAMED FROM" WSP identifier
 protected-dir    = "PROTECTED"
-deprecated-dir   = "DEPRECATED" WSP SQUOTE <text> SQUOTE
+deprecated-dir   = "DEPRECATED" WSP string-literal
 drop-cascade-dir = "DROP CASCADE"
 
 ; Dollar-quoted string
@@ -5485,6 +5907,69 @@ dollar-delim  = "$" *( ALPHA / DIGIT / "_" ) "$"
 ; Type reference
 type-ref  = qual-name [ "(" type-mods ")" ] *( "[]" )
 type-mods = integer *( "," integer )
+
+; String literal
+string-literal = SQUOTE <text> SQUOTE
+
+; Option lists — the "WITH ( name [= value] [, ...] )" shape shared
+; verbatim by Table/Index/Sequence/Materialized-View storage params and
+; by Publication/Subscription's own WITH options (real PostgreSQL uses
+; the identical grammar in both places). A single shared production
+; means a later PostgreSQL version's new option (e.g. PG18's
+; publish_generated_columns) is automatically expressible with zero
+; grammar changes, the same passthrough reasoning Subscription's fully
+; opaque body already relies on.
+storage-params = storage-param *( "," WSP storage-param )
+storage-param  = identifier [ WSP "=" WSP option-value ]
+option-value   = string-literal / integer / boolean / identifier
+pub-options    = storage-params
+sub-options    = storage-params
+
+; Inline index parameters — real PostgreSQL's index_parameters clause,
+; usable both on a standalone CREATE INDEX (index-decl, §7.7) and
+; inline on a PRIMARY KEY/UNIQUE column or table constraint (col-
+; constraint/table-constraint-body, §7.2), which is what conflict-clause
+; exists to name for the latter, narrower position (no WHERE predicate
+; or CONCURRENTLY there — those are CREATE-INDEX-only).
+conflict-clause = [ WSP "INCLUDE" WSP "(" col-list ")" ]
+                  [ WSP "WITH" WSP "(" storage-params ")" ]
+                  [ WSP "USING INDEX TABLESPACE" WSP identifier ]
+
+; EXCLUDE constraint element list (§7.2) — mirrors real PostgreSQL's
+; exclude_element WITH operator repeating group exactly.
+excl-list    = excl-element *( "," WSP excl-element )
+excl-element = ( identifier / "(" expr ")" )
+               [ WSP identifier [ "(" storage-params ")" ] ]
+               [ WSP ( "ASC" / "DESC" ) ]
+               [ WSP "NULLS" WSP ( "FIRST" / "LAST" ) ]
+               WSP "WITH" WSP operator-symbol
+operator-symbol = <a PostgreSQL operator name/symbol, e.g. "=", "&&">
+
+; CONSTRAINT TRIGGER deferrability (§7.9) — identical real-PostgreSQL
+; shape to the table-constraint deferrable clause defined inline at
+; §7.2, named here since §7.9 references it by name.
+deferrable-clause = "NOT DEFERRABLE"
+                  / "DEFERRABLE" [ WSP ( "INITIALLY DEFERRED"
+                                       / "INITIALLY IMMEDIATE" ) ]
+
+; Bare function reference — a (possibly schema-qualified) function name
+; with no argument list or parentheses of its own; each call site
+; (Trigger's EXECUTE FUNCTION func-ref "(" arg-list ")", Event Trigger's
+; EXECUTE FUNCTION func-ref "()", Function's SUPPORT func-ref) appends
+; whatever parenthesization its own context requires.
+func-ref = qual-name
+
+; Text Search Configuration MAPPING FOR ... WITH ... (§12.1)
+token-type-list = identifier *( "," WSP identifier )
+dict-list       = qual-name *( "," WSP qual-name )
+
+; Event Trigger WHEN TAG IN (...) (§14.1) — command tag string list
+tag-list = string-literal *( "," WSP string-literal )
+
+; Table-level trailing TABLESPACE clause (§4.5's terminator rule) —
+; same shape already used inline for table-clause's own TABLESPACE
+; alternative (§7.1); named here since §4.5 references it by name.
+tablespace-clause = "TABLESPACE" WSP identifier
 
 ; Grants
 grants-block      = "GRANTS" WSP "{" *( grant-entry ";" ) "}"
@@ -5551,13 +6036,18 @@ default_schema = "public"
 ```sql
 -- production/cluster/roles.dpg
 
-ROLE app_service  {
-    LOGIN;
-    PASSWORD 'env:APP_SERVICE_PW';
+ROLE app_service
+    LOGIN
+    PASSWORD '{{vault:secret/roles/app_service#pw}}'
     CONNECTION LIMIT 20;
-}
-ROLE app_readonly { NOLOGIN; }
-ROLE app_admin    { LOGIN; SUPERUSER false; CREATEDB false; INHERIT; }
+
+ROLE app_readonly NOLOGIN;
+
+ROLE app_admin
+    LOGIN
+    NOSUPERUSER
+    NOCREATEDB
+    INHERIT;
 ```
 
 ```sql
@@ -5581,9 +6071,8 @@ SCHEMA public {
         COMMENT 'Billing lifecycle states for customer invoices';
     }
 
-    DOMAIN positive_money AS NUMERIC(12, 2) {
+    DOMAIN positive_money AS NUMERIC(12, 2)
         CONSTRAINT must_be_positive CHECK (VALUE >= 0);
-    }
 }
 ```
 
@@ -5745,6 +6234,16 @@ SCHEMA public {
    | DPG-E023 | `temporary_table_declared` | `TEMPORARY TABLE` keyword found in a `.dpg` file. |
    | DPG-E024 | `unknown_block_directive` | Unknown directive for this object kind in a `{ }` block. |
    | DPG-E025 | `destructive_ops_blocked` | Migration contains `DESTRUCTIVE` ops but `--allow-destructive` not passed. |
+   | DPG-E026 | `multiple_clusters_no_flag` | Multiple clusters found; `--cluster` required. |
+   | DPG-E027 | `cluster_not_found` | `--cluster` value does not match any cluster. |
+   | DPG-E028 | `multiple_databases_no_flag` | Multiple databases found; `--database` required. |
+   | DPG-E029 | `database_not_found` | `--database` value does not match any database. |
+   | DPG-E030 | `invalid_namemap_rule` | Unknown rule keyword in `[namemaps]` config or `NAME MAP` block directive. |
+   | DPG-E031 | `duplicate_namemap_tool` | Same tool key specified more than once at the same block level (warning only; last entry wins). |
+   | DPG-E032 | `cluster_name_required` | Cluster `dpg.toml` is missing a `[cluster] name` (§3.3). |
+   | DPG-E033 | `database_name_required` | Database `dpg.toml` is missing a `[database] name` (§3.4). |
+   | DPG-E034 | `duplicate_cluster_name` | Two cluster directories declare the same `name` (§3.6). |
+   | DPG-E035 | `duplicate_database_name` | Two database directories within the same cluster declare the same `name` (§3.6). |
    | DPG-E036 | `owner_role_not_a_member` | Connecting role is not a member of one or more declared `OWNER` roles (§11.5). |
 
 ---
@@ -5793,6 +6292,8 @@ SCHEMA public {
               algorithms", SIAM Journal on Computing, 1(2),
               pp. 146–160, 1972.
 
+   [NDJSON]   "Newline Delimited JSON", <http://ndjson.org/>.
+
 ---
 
 ## Author's Address
@@ -5813,178 +6314,17 @@ SCHEMA public {
 
 ### D.1. Snapshot Format — Actual Wire Schema (amends §16)
 
-#### D.1.1. The SnapObject Discriminated Union
+#### D.1.1. Corrections Integrated
 
-   Each entry in the `objects` map is NOT a flat object with a `kind`
-   field directly on the object record.  It is a **discriminated union
-   wrapper** (`SnapObject`) whose `kind` field selects which sub-object
-   field is populated:
-
-```json
-{
-  "public.users": {
-    "kind": "table",
-    "table": { <SnapTable fields> }
-  },
-  "public.get_user(text)": {
-    "kind": "function",
-    "function": { <SnapFunction fields> }
-  },
-  "public.user_state": {
-    "kind": "virtual_type",
-    "virtual_type": { <SnapVirtualType fields> }
-  }
-}
-```
-
-   The `kind` string values and their corresponding sub-object fields:
-
-   | `kind` value | Sub-object field | Object types covered |
-   |---|---|---|
-   | `"table"` | `table` | TABLE, UNLOGGED TABLE, FOREIGN TABLE |
-   | `"view"` | `view` | VIEW, MATERIALIZED VIEW, RECURSIVE VIEW |
-   | `"function"` | `function` | FUNCTION |
-   | `"type"` | `type` | ENUM, COMPOSITE, RANGE, DOMAIN, BASE |
-   | `"schema"` | `schema` | SCHEMA |
-   | `"extension"` | `extension` | EXTENSION |
-   | `"sequence"` | `sequence` | SEQUENCE |
-   | `"role"` | `role` | ROLE |
-   | `"virtual_type"` | `virtual_type` | VIRTUAL TYPE |
-   | `"procedure"`, `"aggregate"`, `"tablespace"`, `"fdw"`, `"server"`, `"user_mapping"`, `"publication"`, `"subscription"`, `"event_trigger"`, `"collation"`, `"operator"`, `"operator_class"`, `"operator_family"`, `"cast"`, `"statistics"`, `"ts_config"`, `"ts_dict"`, `"ts_parser"`, `"ts_template"` | `opaque` | All passthrough objects |
-
-#### D.1.2. SnapOpaque — Passthrough Object Records
-
-   Objects whose diff is body-text based (procedures, aggregates,
-   tablespaces, FDWs, servers, user mappings, publications,
-   subscriptions, event triggers, collations, operators, operator
-   classes, operator families, casts, statistics objects, and all four
-   text search object types) are stored as `SnapOpaque`:
-
-```json
-{
-  "kind": "procedure",
-  "opaque": {
-    "kind": "procedure",
-    "schema": "public",
-    "name": "process_settlements",
-    "args": "",
-    "body_hash": "sha256:b4f2a1...",
-    "comment": null,
-    "grants": []
-  }
-}
-```
-
-   Fields:
-
-   | Field | Type | Description |
-   |-------|------|-------------|
-   | `kind` | string | Object kind (same as outer `kind`). |
-   | `schema` | string | Schema name; empty for cluster-level objects. |
-   | `name` | string | Object name. |
-   | `args` | string | Type-only argument key for overloaded objects (procedures, aggregates). Empty for non-overloaded. |
-   | `body_hash` | string | `"sha256:<hex>"` of the normalised Part 1 body text. Empty string means body was empty. |
-   | `comment` | string\|null | Comment text if any. |
-   | `grants` | array | Grant records (for aggregate and procedure grants). |
-
-   The differ compares `body_hash` for changes.  Any change to the body
-   hash causes the compiler to emit `DROP ... CASCADE` + `CREATE ...`
-   for the object (Safety class per Section 17.2 for each type).
-
-#### D.1.3. Corrected Field Names in SnapColumn
-
-   The column snapshot record uses `not_null` (boolean, `true` means
-   NOT NULL), NOT `nullable` as described in §16.3.  The `identity`
-   field holds the string `"ALWAYS"` or `"BY DEFAULT"`, NOT a nested
-   object.
-
-   Corrected column snapshot record:
-
-```json
-"columns": [
-  {
-    "name": "email",
-    "type": "text",
-    "not_null": true,
-    "default": null,
-    "identity": null,
-    "generated": null,
-    "comment": "Verified email address",
-    "statistics": 300,
-    "compression": null,
-    "storage": null,
-    "deprecated": null,
-    "renamed_from": null,
-    "grants": []
-  }
-]
-```
-
-   Note: `columns`, `constraints`, `indexes`, `policies`, `triggers`,
-   and `grants` at the table level are all **ordered slices (arrays)**,
-   NOT maps.  The object's `name` field within each element identifies
-   it.
-
-#### D.1.4. Corrected SnapConstraint Fields
-
-   `SnapConstraint` does NOT have `columns` or `initially_deferred`
-   fields at the top level.  Instead it has `expr` (the raw constraint
-   expression/definition text) and `deferrable`:
-
-```json
-{
-  "name": "pk_users",
-  "type": "PRIMARY KEY",
-  "expr": "(id)",
-  "not_valid": false,
-  "deferrable": false
-}
-```
-
-#### D.1.5. Corrected SnapIndex Fields
-
-   `SnapIndex` stores columns as a single comma-separated string, NOT
-   as an array of objects:
-
-```json
-{
-  "name": "idx_users_email",
-  "unique": false,
-  "method": "btree",
-  "columns": "email",
-  "where": null
-}
-```
-
-#### D.1.6. Corrected SnapTrigger Fields
-
-   `SnapTrigger` is simplified — it does not have `update_of`,
-   `condition`, or `args` as separate fields.  The events are stored
-   as a comma-separated string:
-
-```json
-{
-  "name": "after_email_change",
-  "when": "AFTER",
-  "events": "UPDATE",
-  "for_each": "ROW",
-  "function": "public.notify_email_change"
-}
-```
-
-#### D.1.7. Corrected SnapGrant Fields
-
-   The grant record uses `roles` (an array of role names), NOT
-   `grantee` (a single string):
-
-```json
-{
-  "privileges": ["SELECT"],
-  "roles": ["app_readonly", "app_readonly2"],
-  "with_grant": false
-}
-```
-
+   Earlier drafts of §16.3 showed a flat per-object record with
+   several field names/shapes that didn't match the reference
+   implementation (originally corrected here across seven subsections,
+   D.1.1–D.1.7: the `SnapObject` discriminated-union wrapper, the
+   `SnapOpaque` passthrough shape, and corrected `SnapColumn`/
+   `SnapConstraint`/`SnapIndex`/`SnapTrigger`/`SnapGrant` field names).
+   Those corrections are now integrated directly into §16.3 and
+   §16.3.1, which are the single normative source for the per-object
+   snapshot schema — this entry is kept only as a historical pointer.
 #### D.1.8. SnapSchema, SnapExtension, SnapType, SnapSequence, SnapRole
 
    Complete records for all named sub-object types:
@@ -6080,86 +6420,18 @@ SCHEMA public {
 
 ---
 
-### D.2. CLI Command Corrections (amends §18)
+### D.2. dpg plan Corrections Integrated; Target Auto-Selection Rules (amends §18, §3.6)
 
-#### D.2.1. `dpg plan` — Corrected Flags
+#### D.2.1. dpg plan / dpg validate / --env — Corrections Integrated
 
-   The `--format` flag accepts `text` (default) or `json`, NOT `sql`.
-   The format `sql` is not a valid value.
+   The `dpg plan` flag corrections (`--format text|json`, not `sql`;
+   the `--watch` flag), the identical `dpg validate --format`
+   correction, and the `--env` flag / `.env`-loading algorithm are now
+   integrated directly into §18 (the global options intro) and §18.1 —
+   those are the single normative source; this entry is kept only as a
+   historical pointer.
 
-   Additional flag not previously documented:
-
-```
-  --watch    Re-run plan automatically whenever any .dpg source file's
-             modification time changes.  Polls every 500 milliseconds.
-             Exits cleanly on SIGINT (Ctrl-C) or SIGTERM.
-```
-
-   The `--watch` mode runs the plan once immediately, then enters a
-   polling loop.  Each iteration of the loop compares the modification
-   times of all discovered `.dpg` files against the previous snapshot.
-   If any file's mtime has changed, or if any files have been added or
-   removed, the plan is re-run.  Plan errors are printed to stderr but
-   do not stop the watch loop.
-
-   **All flags for `dpg plan`:**
-
-```
-dpg plan [--cluster name] [--database name]
-         [--live] [--format text|json] [--watch]
-```
-
-#### D.2.2. `dpg validate` — Corrected Format Flag
-
-   Same correction: `--format text|json`, not `--format sql|json`.
-
-#### D.2.3. `--env` Flag — `.env` File Loading
-
-   Commands that require a live database connection (`dpg apply`,
-   `dpg verify`, `dpg dump`, `dpg plan --live`) support an `--env`
-   flag that specifies the path to a `.env` file containing environment
-   variable definitions used to resolve `link =` connection strings.
-
-```
-  --env <path>   Path to a .env file.  Defaults to <project-root>/.env
-                 if a .env file exists there.  Non-fatal if absent.
-```
-
-   **`.env` file loading rules:**
-
-   1.  Loading is only performed when at least one cluster uses a `link`
-       connection string (i.e., `cl.IsLink() == true`).  Clusters using
-       inline `url =` strings do not trigger `.env` loading.
-
-   2.  Path resolution order:
-       a.  The path given by `--env <path>`, if provided.
-       b.  `<project-root>/.env`, if it exists.
-
-   3.  Existing process environment variables are NEVER overwritten.
-       The `.env` file only sets variables that are not already present
-       in `os.Environ()`.  ("process env wins")
-
-   4.  **`.env` file format:**
-       -   Lines that are blank or start with `#` are ignored.
-       -   Lines may begin with `export ` (stripped before parsing).
-       -   Format: `KEY=VALUE` or `KEY = VALUE`.
-       -   Values wrapped in single or double quotes have the quotes
-           stripped.
-       -   Variables already set in the process environment are NOT
-           overwritten.
-
-   5.  A missing `.env` file is NOT an error.  The command proceeds
-       using only the process environment.
-
-   **Example `.env`:**
-
-```
-# Production cluster credentials
-export PRODUCTION_DB_URL='postgresql://admin@db.prod:5432/postgres'
-APP_SERVICE_PW="s3cr3t"
-```
-
-#### D.2.4. Target Auto-Selection Rules
+#### D.2.2. Target Auto-Selection Rules
 
    When `--cluster` or `--database` are not specified, the compiler
    applies the following auto-selection algorithm:
@@ -6189,48 +6461,11 @@ APP_SERVICE_PW="s3cr3t"
    These rules apply to: `dpg plan`, `dpg apply`, `dpg verify`,
    `dpg dump`.
 
-#### D.2.5. `dpg plan --format json` — Output Schema
+#### D.2.3. dpg plan --format json — Output Schema Integrated
 
-   When `--format json` is used, each database's plan is serialised to
-   stdout as a JSON object with the following schema:
-
-```json
-{
-  "cluster":         "production",
-  "database":        "myapp",
-  "generated_at":    "2025-09-15T14:32:00Z",
-  "source_revision": "a3f7c91",
-  "ops": [
-    {
-      "sql":    "CREATE TABLE public.users (...);",
-      "safety": "SAFE",
-      "file":   "schemas/public/tables/users.dpg",
-      "line":   4
-    }
-  ],
-  "empty": false
-}
-```
-
-   Field descriptions:
-
-   | Field | Type | Description |
-   |-------|------|-------------|
-   | `cluster` | string | Cluster name. |
-   | `database` | string | Database name. Empty for cluster-level plans. |
-   | `generated_at` | RFC 3339 string | UTC timestamp of plan generation. |
-   | `source_revision` | string | Git short SHA, or empty if unavailable. |
-   | `ops` | array | Ordered list of DiffOp objects. |
-   | `ops[].sql` | string | The SQL statement text. |
-   | `ops[].safety` | string | One of `"SAFE"`, `"CAUTION"`, `"DESTRUCTIVE"`, `"MANUAL"`. |
-   | `ops[].file` | string | Source file path relative to project root, or omitted if unknown. |
-   | `ops[].line` | integer | 1-based source line number, or omitted if unknown. |
-   | `empty` | boolean | `true` when `ops` is empty (no changes). |
-
-   When targeting multiple databases in one run, each database produces
-   one JSON object.  Multiple JSON objects are printed sequentially to
-   stdout, separated by newlines.  Each object is complete and valid
-   JSON; the stream is NDJSON (Newline-Delimited JSON, [NDJSON]).
+   The `--format json` output schema is now documented directly in
+   §18.1, which is the single normative source; this entry is kept
+   only as a historical pointer.
 
 ---
 
@@ -6487,7 +6722,7 @@ type SecretResolver interface {
 
    Example: `link = "env:PRODUCTION_DB_URL"` → resolves `PRODUCTION_DB_URL`
    from the process environment (which may have been populated from the
-   `.env` file per §D.2.3).
+   `.env` file per §18's global `--env` option).
 
    **`vault:<mount>/<path>#<field>`** (`internal/secrets/vault.Resolver`)
 
@@ -6580,178 +6815,37 @@ type SecretResolver interface {
 
 ### D.7. Additional CLI Error Codes (extends Appendix C)
 
-   | Code | Name | Description |
-   |------|------|-------------|
-   | DPG-E026 | `multiple_clusters_no_flag` | Multiple clusters found; `--cluster` required. |
-   | DPG-E027 | `cluster_not_found` | `--cluster` value does not match any cluster. |
-   | DPG-E028 | `multiple_databases_no_flag` | Multiple databases found; `--database` required. |
-   | DPG-E029 | `database_not_found` | `--database` value does not match any database. |
-   | DPG-E032 | `cluster_name_required` | Cluster `dpg.toml` is missing a `[cluster] name` (§3.3). |
-   | DPG-E033 | `database_name_required` | Database `dpg.toml` is missing a `[database] name` (§3.4). |
-   | DPG-E034 | `duplicate_cluster_name` | Two cluster directories declare the same `name` (§3.6). |
-   | DPG-E035 | `duplicate_database_name` | Two database directories within the same cluster declare the same `name` (§3.6). |
+   DPG-E026–E029 and DPG-E032–E035, introduced by this addendum, are
+   now listed directly in Appendix C's main table alongside every
+   other error code — that table is the single normative reference;
+   this entry is kept only as a historical pointer to when and why
+   each code was added (see Appendix E, entry E.7).
 
 ---
 
-### D.8. Root dpg.toml Missing Sections (amends §3.2)
+### D.8. Root dpg.toml — [fmt]/[migrations] Integrated (amends §3.2)
 
-   Section 3.2 omits two TOML sections that are defined and in use in
-   the reference implementation:
-
-#### D.8.1. [fmt] — Formatter Configuration
-
-   The `[fmt]` section controls the behaviour of `dpg fmt`:
-
-```toml
-[fmt]
-# Number of spaces per indentation level. Default: 4.
-indent = 4
-
-# Keyword casing applied to all DPG and PostgreSQL keywords.
-# Valid values: "upper" (default), "lower".
-keyword_case = "upper"
-```
-
-   Note: The TOML key is `indent`, NOT `indent_size`.
-
-#### D.8.2. [migrations] — Migration Archive Configuration
-
-   The `[migrations]` section controls where applied SQL files are
-   archived after a successful `dpg apply`:
-
-```toml
-[migrations]
-# Relative path from the project root where applied migration SQL files
-# are written. Default: ".dpg/migrations".
-# Set to "" to disable archiving entirely.
-directory = ".dpg/migrations"
-```
-
-   On each successful `dpg apply`, the emitted SQL is saved to:
-
-```
-<directory>/<cluster>/<database>/<timestamp>_<short-hash>.sql
-```
-
-   This directory SHOULD be committed to version control.
+   `[fmt]` and `[migrations]` were originally documented only here,
+   omitted from §3.2's own example. Both are now integrated directly
+   into §3.2, which is the single normative source for the root
+   `dpg.toml` schema; this entry is kept only as a historical pointer.
 
 ---
 
 ### D.9. CLI Command Corrections (amends §18)
 
-#### D.9.1. dpg validate — Correct Flags and JSON Schema (amends §18.6)
+#### D.9.1. dpg validate, dpg portability, dpg init, dpg fmt — corrections integrated
 
-   The actual `dpg validate` flags are:
-
-```
-dpg validate [options]
-
-Options:
-  --cluster <name>   cluster to validate (default: all)
-  --database <name>  database to validate (default: all)
-  --format <fmt>     output format: text or json (default: text)
-```
-
-   There is NO `--strict` flag on `dpg validate`.  Linter rule severity
-   is configured exclusively through `dpg.toml [linter]` settings.
-
-   The `--format json` output is a **single JSON object** per
-   cluster/database scope, NOT an array:
-
-```json
-{
-  "cluster": "production",
-  "database": "myapp",
-  "objects": 42,
-  "errors": [
-    {
-      "rule": "hardcoded-password",
-      "message": "column 'password' has a hardcoded string default",
-      "file": "schemas/public/tables/users.dpg",
-      "line": 12,
-      "col": 5
-    }
-  ],
-  "warnings": []
-}
-```
-
-   Fields:
-
-   | Field | Type | Description |
-   |-------|------|-------------|
-   | `cluster` | string | Cluster name. |
-   | `database` | string | Database name; `"(cluster)"` for cluster-level objects. |
-   | `objects` | integer | Number of IR objects successfully compiled. |
-   | `errors` | array | Diagnostics with `IsError = true`. Empty array if none. |
-   | `warnings` | array | Diagnostics with `IsError = false`. Empty array if none. |
-
-   Each diagnostic object has `rule`, `message`, `file`, `line`, `col`.
-   Note: `rule` uses hyphen-separated IDs (e.g., `"hardcoded-password"`)
-   per the correction in §D.3.
-
-   Exit codes: 0 = no errors; non-zero = errors found or internal
-   error.  Multiple scopes each emit a separate JSON object (one line
-   per scope is NOT guaranteed — each is a complete JSON object).
-
-#### D.9.2. dpg portability — No --format Flag (amends §18.8)
-
-   The `dpg portability` command does NOT support `--format`.  Its
-   output is text only.  The actual flags are:
-
-```
-dpg portability [options]
-
-Options:
-  --cluster <name>   cluster to analyze (default: all)
-  --database <name>  database to analyze (default: all)
-```
-
-#### D.9.3. dpg init — Correct Defaults and Flags (amends §18.9)
-
-   The actual `dpg init` defaults and flags are:
-
-```
-dpg init [options] [<dir>]
-
-Options:
-  --cluster <name>   Cluster directory name (default: "production")
-  --database <name>  Database directory name (default: "myapp")
-  --schema <name>    Default schema name (default: "public")
-  --url <url>        PostgreSQL connection URL (can be set later in dpg.toml)
-```
-
-   Note: the default cluster name is `"production"`, NOT `"main"`.
-
-   Files created:
-
-```
-<dir>/dpg.toml                              root config
-<dir>/<cluster>/dpg.toml                    cluster config
-<dir>/<cluster>/<database>/dpg.toml         database config
-<dir>/<cluster>/cluster/                    cluster objects dir (empty)
-<dir>/<cluster>/<database>/schemas/<schema>/  schema source dir (empty)
-<dir>/.dpg/snapshots/                       snapshot storage
-```
-
-   Existing files are skipped (not overwritten).  Directories are
-   created unconditionally with `os.MkdirAll`.
-
-#### D.9.4. dpg fmt — Correct Config Key Names (amends §18.7)
-
-   The `[fmt]` section in `dpg.toml` uses the TOML key `indent` (not
-   `indent_size`).  The `keyword_case` valid values are `"upper"` and
-   `"lower"` (not `"uppercase"` or `"lowercase"`).
-
-   The formatter applies:
-   -   Indentation: configurable (default 4 spaces).
-   -   Keyword casing: `"upper"` uppercases DPG/PG keywords;
-       `"lower"` lowercases them.
-
-   The RFC canonical-style list in §18.7 (column alignment, identifier
-   lowercasing) SHOULD be treated as aspirational.  The reference
-   implementation DOES NOT currently enforce column alignment or
-   identifier casing beyond keywords.
+   Earlier drafts of §18.6, §18.7, §18.8, and §18.9 documented flag
+   sets, defaults, and behavior that didn't match the reference
+   implementation.  Those corrections (originally recorded here as
+   D.9.1–D.9.4) have since been integrated directly into §18.6, §18.7,
+   §18.8, and §18.9 themselves — those sections are now the single
+   normative source for each command's interface, and this entry is
+   kept only as a historical pointer so a reader following an old
+   cross-reference to "D.9.x" lands somewhere useful.  See Appendix E,
+   entries E.9 and the entry documenting this integration, for when
+   each correction was made.
 
 ---
 
@@ -7081,10 +7175,118 @@ ENUM user_status ('active', 'inactive', 'banned') {
    | E.5 | 2026-08-16 | §D.11 added. `SERIAL`/`BIGSERIAL`/`SMALLSERIAL` column sugar specified as a first-class IR concept (`Column.Serial`, sibling marker to `Column.Type`): normalization table, `SERIAL`-implies-`NOT NULL` rule, literal-keyword emission with suppressed `NOT NULL`/`DEFAULT`, `pg_depend`-based introspection detection mirroring identity columns, non-reapplicable dump output fixed, `SnapColumn.serial` field, and a legacy-snapshot self-healing comparison for pre-existing snapshots that stored the literal `"serial"` type name. §D.3's `serial-sequence-declared` entry updated: now also triggers on `Column.Serial`, not `Column.Identity` only. |
    | E.6 | 2026-08-17 | §23 and §25 updated with four scope decisions that had previously been made and recorded only in project working notes, not in this document: `CREATE ACCESS METHOD`, `CREATE CONVERSION`, `CREATE [PROCEDURAL] LANGUAGE`, and `CREATE TRANSFORM` are all formally out of scope (covered either by the extension-install path DPG already manages, or by having no realistic hand-declared use case). Brings this document in line with the two sibling decisions (`CREATE DATABASE`, `REASSIGN OWNED BY`/`DROP OWNED BY`) it already documented. |
    | E.7 | 2026-08-17 | §3.3, §3.4, and §3.6 updated: cluster and database `name` were already documented as REQUIRED but the reference implementation never enforced it. §3.6's Discovery Algorithm now normatively requires validating that both names are non-empty and, per §3.3/§3.4's new constraint clauses, unique — cluster names project-wide, database names per-cluster only (the same database name legitimately recurring under a different cluster remains valid). Four new error codes added to §D.7: DPG-E032/E033 (empty name), DPG-E034/E035 (duplicate name). Also fixed a related implementation bug found alongside this: `dpg dump`'s default (no `-o`) output path was reconstructed from declared names rather than the already-resolved real directory, silently writing into a disconnected sibling directory whenever a project's directory name and declared name diverged — no RFC section previously specified this path should prefer the resolved directory, so no corresponding text amendment was needed beyond the behavior fix itself. |
-   | E.8 | 2026-08-19 | §11.5 added. `ALTER DEFAULT PRIVILEGES FOR ROLE` (§11.4) never actually applied to anything DPG created, because PostgreSQL attributes default-privilege eligibility to whichever role executed `CREATE`, and DPG always created objects as its connecting role, reassigning ownership only afterward via `ALTER ... OWNER TO`. The compiler now creates every object with a declared `OWNER` (§4.6) directly as that role via `SET ROLE`/`RESET ROLE`, matching real PostgreSQL creator semantics; a new pre-flight membership check (`pg_has_role`) runs before any DDL executes and aborts with error DPG-E036 (added to Appendix C) if the connecting role is not a member of a declared `OWNER`. |
+   | E.8 | 2026-08-19 | §11.5 added. `ALTER DEFAULT PRIVILEGES FOR ROLE` (§11.4) never actually applied to anything DPG created, because PostgreSQL attributes default-privilege eligibility to whichever role executed `CREATE`, and DPG always created objects as its connecting role, reassigning ownership only afterward via `ALTER ... OWNER TO`. The compiler now creates every object with a declared `OWNER` (`owner-dir`; see §7.11 for Table's copy — every object kind defines its own) directly as that role via `SET ROLE`/`RESET ROLE`, matching real PostgreSQL creator semantics; a new pre-flight membership check (`pg_has_role`) runs before any DDL executes and aborts with error DPG-E036 (added to Appendix C) if the connecting role is not a member of a declared `OWNER`. |
    | E.9 | 2026-08-19 | §22.1 updated. Edge source 3 (a view's query referencing table/view B) was documented as real query analysis but the reference implementation actually used a blunt "every view depends on every table in the object set" approximation — corrected to describe the real static analysis now backing it. New edge source 9 added: a `LANGUAGE sql`/`plpgsql` function or procedure body's static table/view references now create real dependency edges too (function/procedure bodies were previously opaque to the dependency graph entirely, for every language); dynamic SQL is documented as an accepted blind spot, matching real PostgreSQL's own inability to validate it either. |
    | E.10 | 2026-08-19 | §7.9 updated. `REFERENCING OLD TABLE AS ... NEW TABLE AS ...` was already specified in this section's ABNF grammar and worked example, but the reference implementation had no handling for it at all — a hard parse error, not a silent no-op. Now implemented end-to-end (parser, IR, differ, snapshot, introspection, dump). New informative-only prose added documenting PostgreSQL's real constraints on `REFERENCING` (`AFTER`-only, no `CONSTRAINT` triggers, no views/foreign tables/`TRUNCATE`), confirmed live against PostgreSQL 17 — consistent with DPG's existing stance of performing zero trigger clause-combination validation of its own. |
    | E.11 | 2026-08-23 | §22.1 edge source 9 corrected. E.9 extended edge source 9 to `LANGUAGE plpgsql` bodies as well as `sql`, but combined with the pre-existing edge source 6 (table→trigger-function) this could construct a 2-node table/function cycle with zero FK edges in it — a shape §22.2's `DEFERRABLE`-only cycle-breaker has no mechanism to resolve — for an entirely ordinary pattern: a validation/audit trigger function whose body queries its own table. Edge source 9 is now `LANGUAGE sql`-only, matching the reference implementation's pre-existing (and correct) function-calls-function edge, which already exempted `plpgsql` for the identical reason: PostgreSQL compiles `plpgsql` lazily and never resolves embedded SQL against the catalog at `CREATE FUNCTION` time, so the edge was never actually required for a successful `apply`. Confirmed live against PostgreSQL 17: the reference implementation reproduced the cycle before this fix and applies cleanly after it. |
+   | E.12 | 2026-08-23 | Appendix F added: the full Standard SQL / PostgreSQL-specific classification Tenet 3 (§1.4) promises but never previously published anywhere in normative text — closes the gap the reference `dpg portability` command's own design has relied on informally since initial publication. §1.4 also gained an explicit PostgreSQL version target (floor 14, no ceiling, rolling) — previously only implied by front-matter metadata, never stated in body text. §5.4 (Domain Types) rewritten: `DEFAULT`/`CONSTRAINT ... CHECK`/`NOT NULL` moved from the `{ }` block into native Part 1 `CREATE DOMAIN` syntax, correcting a Tenet-5 self-violation identified by the RFC completeness audit's finding #1 (this is a breaking syntax change for any existing `.dpg` source declaring a Domain with these clauses — reference implementation update tracked separately, not part of this revision). |
+
+---
+
+## Appendix F. Standard SQL / PostgreSQL-Specific Classification
+
+   This appendix satisfies Tenet 3 (§1.4): for every construct this
+   specification documents, whether it is ISO/IEC 9075 (Standard SQL)
+   or PostgreSQL-specific — the classification `dpg portability`
+   reports to users.  Three classifications are used:
+
+   -   **Standard** — part of ISO/IEC 9075 in some edition (a
+       standard-conformant database may support a different dialect of
+       the same feature, e.g. a different `CREATE TABLE` grammar, but
+       the *concept* is standardized).
+   -   **PGSpecific** — a PostgreSQL extension with no ISO/IEC 9075
+       equivalent, or a PostgreSQL-only spelling of a concept another
+       vendor would express differently.
+   -   **N/A** — not a real PostgreSQL DDL construct at all: DPG-native
+       syntax that generates no SQL of its own (RFC §23's "No SQL"
+       classification in §25's coverage matrix), or a DPG lifecycle/
+       tooling directive (`RENAMED FROM`, `PROTECTED`, `DEPRECATED`,
+       `MIGRATE REMOVE`, Name Maps, macros).  Tenet 3's Standard/
+       PGSpecific dichotomy doesn't apply to these; `dpg portability`
+       never reports them.
+
+   A row classifies the construct as a whole; a construct with both a
+   standard core and PostgreSQL-specific optional clauses is marked
+   **Mixed**, with the PG-specific sub-clauses named in Notes.
+
+   | Section | Construct | Classification | Notes |
+   |---|---|---|---|
+   | §4.1-4.6 | Basic lexical rules (identifiers, comments, dollar-quoting, statement terminators) | N/A | DPG source-file syntax, not PostgreSQL DDL. |
+   | §5.1 | `CREATE TYPE ... AS ENUM` | PGSpecific | ISO SQL has no enumerated type; closest standard analogue is a `CHECK` constraint or `DOMAIN`. |
+   | §5.2 | `CREATE TYPE ... AS (...)` (composite) | PGSpecific | Structured/row types exist in SQL:1999+ but with different syntax and semantics (`CREATE TYPE ... AS (...)` the PostgreSQL way is not the standard's `CREATE TYPE` for UDTs). |
+   | §5.3 | `CREATE TYPE ... AS RANGE` | PGSpecific | No standard range type. |
+   | §5.4 | `CREATE DOMAIN` core (name, base type) | Standard | SQL:1999+ `CREATE DOMAIN`. |
+   | §5.4 | Domain `DEFAULT`/`CONSTRAINT ... CHECK`/`NOT NULL` | Standard | Same standard `CREATE DOMAIN` clauses. |
+   | §5.4 | Domain `COLLATE` | PGSpecific | PostgreSQL-specific collation attachment syntax (the standard has collations, but not this clause shape). |
+   | §5.5 | `CREATE TYPE (...)` (base/shell type) | PGSpecific | C-level storage type definition; no standard equivalent. |
+   | §5.6 | `VIRTUAL TYPE` | N/A | DPG-native, generates no SQL. |
+   | §6 | `CREATE EXTENSION` | PGSpecific | PostgreSQL's own extension-packaging mechanism. |
+   | §7.1-7.2 | `CREATE TABLE` core (columns, types, `PRIMARY KEY`/`UNIQUE`/`CHECK`/`FOREIGN KEY`) | Standard | Core relational DDL. |
+   | §7.1 | `WITH (storage_params)` | PGSpecific | PostgreSQL storage parameters. |
+   | §7.1 | `TABLESPACE` | PGSpecific | No standard tablespace concept. |
+   | §7.1 | `INHERITS` | PGSpecific | PostgreSQL table inheritance; not in the standard. |
+   | §7.1 | `UNLOGGED` | PGSpecific | PostgreSQL crash-safety trade-off, no standard equivalent. |
+   | §7.2 | Generated columns (`GENERATED ALWAYS AS ... STORED`) | Standard | SQL:2003 generated columns (PostgreSQL only implements the `STORED` variant; `VIRTUAL` is PostgreSQL 18+ and also standard). |
+   | §7.2 | Identity columns (`GENERATED ... AS IDENTITY`) | Standard | SQL:2003 identity columns. |
+   | §7.2 | `SERIAL`/`BIGSERIAL`/`SMALLSERIAL` | PGSpecific | Pre-standard PostgreSQL sequence sugar; `IDENTITY` is the standard-conformant replacement. |
+   | §7.2 | Column `COMPRESSION`/`STORAGE` | PGSpecific | PostgreSQL TOAST-related storage tuning. |
+   | §7.2 | `EXCLUDE` constraints | PGSpecific | No standard exclusion-constraint concept. |
+   | §7.2 | `NOT VALID`/`VALIDATE CONSTRAINT` | PGSpecific | PostgreSQL's incremental constraint-validation lifecycle. |
+   | §7.7 | `CREATE INDEX` core | Mixed | Indexes exist informally across all vendors but are not in ISO/IEC 9075 at all — classified PGSpecific as a whole (see next row), since "index" is not a standard DDL concept, only a near-universal vendor extension. |
+   | §7.7 | `CREATE INDEX` (all forms: access methods, partial, expression, covering, opclass) | PGSpecific | No SQL-standard `CREATE INDEX` statement exists; every vendor's index DDL is proprietary. |
+   | §7.8 | `ROW LEVEL SECURITY`/`CREATE POLICY` | PGSpecific | No standard row-security mechanism. |
+   | §7.9 | `CREATE TRIGGER` core (`BEFORE`/`AFTER`, events, `FOR EACH ROW`) | Standard | SQL:1999+ triggers. |
+   | §7.9 | `REFERENCING OLD/NEW TABLE` (transition tables) | Standard | SQL:1999+ triggers include transition tables. |
+   | §7.9 | `WHEN (condition)`, `EXECUTE FUNCTION` | PGSpecific | PostgreSQL trigger-function-calling model differs from the standard's inline trigger action. |
+   | §7.11 | `RENAMED FROM`, `PROTECTED`, `DEPRECATED`, `DROP CASCADE` (directives) | N/A | DPG-native lifecycle metadata. |
+   | §7.11 | `OWNER` | PGSpecific | PostgreSQL's object-ownership model (`ALTER ... OWNER TO`) has no standard equivalent (the standard ties privileges to the creating authorization identifier with no separate transferable "owner"). |
+   | §7.12 | `UNLOGGED TABLE` | PGSpecific | See §7.1 row. |
+   | §7.12 | `CREATE FOREIGN TABLE` | Standard | SQL/MED (ISO/IEC 9075-9) standardizes foreign tables; PostgreSQL's FDW mechanism implements it. |
+   | §7.13 | `PARTITION BY`/`PARTITION OF` | Standard | SQL:2016 adds declarative partitioning as a standard concept, though exact grammar varies by vendor; PostgreSQL's own syntax is a PG-specific dialect of a standardized concept — classified Mixed in spirit, PGSpecific in literal grammar. |
+   | §8 | `CREATE VIEW` | Standard | Core SQL. |
+   | §8 | `CREATE MATERIALIZED VIEW` | PGSpecific | Materialized views are a common vendor extension, not in ISO/IEC 9075. |
+   | §8 | `RECURSIVE VIEW`/`WITH RECURSIVE` | Standard | SQL:1999+ recursive query support. |
+   | §9.1-9.2 | `CREATE FUNCTION` core (name, args, `RETURNS`, `LANGUAGE`) | Standard | SQL/PSM (ISO/IEC 9075-4) standardizes stored routines; PostgreSQL's concrete grammar and `LANGUAGE` mechanism are its own dialect of the standardized concept. |
+   | §9.1 | `LANGUAGE sql`/`plpgsql` dollar-quoted bodies | PGSpecific | Dollar-quoting itself, and `plpgsql`, are PostgreSQL-specific; SQL/PSM's own procedural language differs. |
+   | §9.1 | PG14+ `sql_body`/`BEGIN ATOMIC` form | Standard | The ISO-standard-conformant alternative to dollar-quoting for `LANGUAGE sql` functions. |
+   | §9.2 | `VOLATILE`/`STABLE`/`IMMUTABLE`, `PARALLEL SAFE`/etc., `COST`/`ROWS`, `SUPPORT` | PGSpecific | Query-planner hints with no standard equivalent. |
+   | §9.2 | `SECURITY DEFINER`/`SECURITY INVOKER` | Standard | SQL/PSM standardizes routine security characteristics (exact keyword differs by vendor, but the concept is standard). |
+   | §9.3 | `CREATE PROCEDURE` | Standard | SQL/PSM standardizes procedures distinct from functions. |
+   | §9.4 | `CREATE AGGREGATE` | PGSpecific | User-defined aggregates with this declaration shape (`SFUNC`/`STYPE`/etc.) are PostgreSQL-specific; the standard has no equivalent `CREATE AGGREGATE`. |
+   | §10 | `CREATE SEQUENCE` | Standard | SQL:2003+ standardizes sequences (`AS`/`INCREMENT`/`MINVALUE`/`MAXVALUE`/`START`/`CACHE`/`CYCLE` are all standard clauses). |
+   | §10 | `OWNED BY` | PGSpecific | PostgreSQL's sequence-to-column ownership link has no standard equivalent. |
+   | §11.1 | `CREATE ROLE`/`CREATE USER` core (`LOGIN`, `PASSWORD`) | Standard | SQL standardizes authorization identifiers, though PostgreSQL's unified role model (merging users and groups) is its own design. |
+   | §11.1 | `SUPERUSER`/`CREATEDB`/`CREATEROLE`/`REPLICATION`/`BYPASSRLS`/`CONNECTION LIMIT` | PGSpecific | PostgreSQL-specific role attributes. |
+   | §11.2 | `GRANT`/`REVOKE` core | Standard | Core SQL privilege model. |
+   | §11.2 | `MAINTAIN` privilege (PG17) | PGSpecific | PostgreSQL-specific privilege covering VACUUM/ANALYZE/CLUSTER/REINDEX. |
+   | §11.3 | Role membership (`GRANT role TO role`, `WITH ADMIN OPTION`/`WITH INHERIT`/`WITH SET`) | Mixed | Standard SQL has roles and role grants; `WITH ADMIN OPTION` is standard, `WITH INHERIT`/`WITH SET` (PG16+) are PostgreSQL-specific refinements of role-attribute inheritance. |
+   | §11.4 | `ALTER DEFAULT PRIVILEGES` | PGSpecific | No standard mechanism for privilege templates applied to not-yet-created objects. |
+   | §11.5 | Owner impersonation (`SET ROLE`/`RESET ROLE`) | Standard | SQL standardizes `SET ROLE`; PostgreSQL's specific creator-attribution semantics this section documents are PostgreSQL's own catalog behavior. |
+   | §12.1 | `CREATE TEXT SEARCH CONFIGURATION`/`MAPPING FOR ... WITH ...` | PGSpecific | PostgreSQL full-text search is entirely proprietary. |
+   | §12.2-12.4 | Text Search Dictionary/Parser/Template | PGSpecific | Same as above. |
+   | §13.1 | `CREATE PUBLICATION` | PGSpecific | PostgreSQL's own logical-replication publish/subscribe model. |
+   | §13.2 | `CREATE SUBSCRIPTION` | PGSpecific | Same. |
+   | §14.1 | `CREATE EVENT TRIGGER` | PGSpecific | No standard DDL-event trigger mechanism. |
+   | §14.2 | `CREATE COLLATION` | Standard | SQL:2003+ standardizes collations; PostgreSQL's ICU/libc provider mechanism is its own extension of the standard concept. |
+   | §14.3 | `CREATE CAST` | Standard | SQL standardizes user-defined casts (`CREATE CAST`), though PostgreSQL's `WITH FUNCTION`/`WITHOUT FUNCTION`/`WITH INOUT` grammar has PostgreSQL-specific shorthand forms. |
+   | §14.4 | `CREATE OPERATOR`/`OPERATOR CLASS`/`OPERATOR FAMILY` | PGSpecific | User-defined operators and index access-method integration are PostgreSQL-specific; the standard has no equivalent. |
+   | §14.5 | (Cast — see §14.3) | — | Cross-reference; see §14.3 row. |
+   | §14.6 | `CREATE STATISTICS` (extended statistics objects) | PGSpecific | PostgreSQL planner-statistics extension. |
+   | §14.7 | `CREATE TABLESPACE` | PGSpecific | No standard physical-storage-location concept. |
+   | §14.8 | `CREATE FOREIGN DATA WRAPPER` | Standard | SQL/MED standardizes the FDW concept (`CREATE FOREIGN DATA WRAPPER`), though HANDLER/VALIDATOR functions are PostgreSQL's own extension mechanism. |
+   | §14.9 | `CREATE SERVER` | Standard | SQL/MED standardizes foreign servers. |
+   | §14.10 | `CREATE USER MAPPING` | Standard | SQL/MED standardizes user mappings for foreign servers. |
+   | §14.11 | `SECURITY LABEL` | PGSpecific | PostgreSQL's MAC/label-security integration point (SELinux/sepgsql etc.); no standard equivalent. |
+   | §15-21 | Compilation pipeline, snapshot format, CLI, linter, safety classification, diffing semantics | N/A | DPG tooling, not PostgreSQL DDL. |
+   | §22 | Dependency graph / topological sort | N/A | DPG compiler internals. |
+   | Throughout | `COMMENT ON ...` | Standard | SQL:1999+ standardizes `COMMENT ON`, though PostgreSQL supports it on a broader set of object kinds than the standard requires. |
+   | Throughout | `{ }` block itself, Name Maps, macros | N/A | DPG-native source syntax; generates no SQL directly. |
+
+   **How this table is maintained:** a construct newly documented by a
+   future revision of this specification MUST be classified here in
+   the same revision (Appendix E's entry for that revision should note
+   the addition) — this is what keeps Tenet 3 checkable rather than
+   aspirational, the defect this appendix was added to close.
 
 ---
 
