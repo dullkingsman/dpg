@@ -7,6 +7,7 @@
 !.env*.example
 
 # agent / AI-tool artifacts
+.mcp.json
 .cursor/
 .clinerules
 .claude/

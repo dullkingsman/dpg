@@ -5086,19 +5086,38 @@ serial_sequence_declared      = "off"
    8.  A partition creates an edge from the partition to its parent
        partitioned table.
 
-   9.  A `LANGUAGE sql` or `LANGUAGE plpgsql` function/procedure body
-       that statically references table or view B (a `FROM`/`JOIN`
-       clause, an `INSERT`/`UPDATE`/`DELETE` target, a CTE, or a
-       subquery, anywhere the body's SQL is reachable by parsing —
-       including a `plpgsql` body's embedded SQL fragments: a
-       `FOR`-loop query, an `EXECSQL` statement, a `RETURN QUERY`, a
-       condition or expression that itself contains a sub-`SELECT`)
+   9.  A `LANGUAGE sql` function/procedure body that statically
+       references table or view B (a `FROM`/`JOIN` clause, an
+       `INSERT`/`UPDATE`/`DELETE` target, a CTE, or a subquery)
        creates an edge from the function/procedure to B.  Dynamic SQL
        (an `EXECUTE` whose argument is built at runtime rather than a
        literal query text) is invisible to this analysis — a known,
        accepted limitation matching real PostgreSQL's own inability to
-       validate dynamic SQL either.  A function/procedure body in any
-       other language is not analysed for table references.
+       validate dynamic SQL either.  A `LANGUAGE plpgsql`
+       function/procedure body is deliberately **not** analysed for
+       table references, even though it is analysed for embedded SQL
+       when computing its body hash (§16.3) — see the note below this
+       list for why.  A function/procedure body in any other language
+       is not analysed for table references.
+
+       **Why `plpgsql` is exempt:** PostgreSQL compiles a `plpgsql`
+       body lazily — the embedded SQL statements are not resolved
+       against the catalog until the function is first called, so a
+       `plpgsql` function can be created referencing a table (or
+       another function) that does not exist yet.  Adding a
+       function→table edge for `plpgsql` bodies is therefore never
+       required for a successful `apply`, and doing so anyway can
+       manufacture an unresolvable cycle for an entirely ordinary
+       pattern: a validation or audit trigger function whose body
+       queries the very table the trigger is attached to.  That shape
+       combines with edge source 6 (table→trigger-function) into a
+       2-node cycle with no `FOREIGN KEY` anywhere in it, which §22.2's
+       cycle-breaker cannot resolve (step 2a's `DEFERRABLE` check has
+       nothing to examine, since the cycle contains no FK edge at
+       all).  Exempting `plpgsql` here mirrors the reasoning already
+       used for function-calls-function edges: a `LANGUAGE sql` body
+       calling another function creates an edge (`sql` is validated
+       eagerly), a `plpgsql` body calling another function does not.
 
    The topological sort MUST use Kahn's algorithm or an equivalent
    O(V + E) algorithm.  The sort is deterministic: among nodes with no
@@ -7065,6 +7084,7 @@ ENUM user_status ('active', 'inactive', 'banned') {
    | E.8 | 2026-08-19 | §11.5 added. `ALTER DEFAULT PRIVILEGES FOR ROLE` (§11.4) never actually applied to anything DPG created, because PostgreSQL attributes default-privilege eligibility to whichever role executed `CREATE`, and DPG always created objects as its connecting role, reassigning ownership only afterward via `ALTER ... OWNER TO`. The compiler now creates every object with a declared `OWNER` (§4.6) directly as that role via `SET ROLE`/`RESET ROLE`, matching real PostgreSQL creator semantics; a new pre-flight membership check (`pg_has_role`) runs before any DDL executes and aborts with error DPG-E036 (added to Appendix C) if the connecting role is not a member of a declared `OWNER`. |
    | E.9 | 2026-08-19 | §22.1 updated. Edge source 3 (a view's query referencing table/view B) was documented as real query analysis but the reference implementation actually used a blunt "every view depends on every table in the object set" approximation — corrected to describe the real static analysis now backing it. New edge source 9 added: a `LANGUAGE sql`/`plpgsql` function or procedure body's static table/view references now create real dependency edges too (function/procedure bodies were previously opaque to the dependency graph entirely, for every language); dynamic SQL is documented as an accepted blind spot, matching real PostgreSQL's own inability to validate it either. |
    | E.10 | 2026-08-19 | §7.9 updated. `REFERENCING OLD TABLE AS ... NEW TABLE AS ...` was already specified in this section's ABNF grammar and worked example, but the reference implementation had no handling for it at all — a hard parse error, not a silent no-op. Now implemented end-to-end (parser, IR, differ, snapshot, introspection, dump). New informative-only prose added documenting PostgreSQL's real constraints on `REFERENCING` (`AFTER`-only, no `CONSTRAINT` triggers, no views/foreign tables/`TRUNCATE`), confirmed live against PostgreSQL 17 — consistent with DPG's existing stance of performing zero trigger clause-combination validation of its own. |
+   | E.11 | 2026-08-23 | §22.1 edge source 9 corrected. E.9 extended edge source 9 to `LANGUAGE plpgsql` bodies as well as `sql`, but combined with the pre-existing edge source 6 (table→trigger-function) this could construct a 2-node table/function cycle with zero FK edges in it — a shape §22.2's `DEFERRABLE`-only cycle-breaker has no mechanism to resolve — for an entirely ordinary pattern: a validation/audit trigger function whose body queries its own table. Edge source 9 is now `LANGUAGE sql`-only, matching the reference implementation's pre-existing (and correct) function-calls-function edge, which already exempted `plpgsql` for the identical reason: PostgreSQL compiles `plpgsql` lazily and never resolves embedded SQL against the catalog at `CREATE FUNCTION` time, so the edge was never actually required for a successful `apply`. Confirmed live against PostgreSQL 17: the reference implementation reproduced the cycle before this fix and applies cleanly after it. |
 
 ---
 

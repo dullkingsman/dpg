@@ -149,3 +149,73 @@ TABLE widgets (
 		t.Fatalf("re-diff must not error (spurious function<->table cycle): %v", err)
 	}
 }
+
+// TestApplyTriggerFunctionSelfReferenceOwnTableNoCycle is the live-database
+// proof for RFC audit finding #121: unlike the sibling test above (a trigger
+// function that only touches NEW/OLD), THIS trigger function's plpgsql body
+// does statically reference its own table — an entirely ordinary validation
+// pattern (a uniqueness/dupe check via SELECT ... FROM the same table the
+// trigger is on). That combines the pre-existing table→trigger-function edge
+// (edge source 6) with a function→table edge from the plpgsql body (edge
+// source 9) into a genuine 2-node cycle with zero FK constraints anywhere in
+// it — a shape §22.2's cycle-breaker has no mechanism to resolve (it only
+// knows how to break FK cycles via DEFERRABLE). Fixed by not scanning
+// plpgsql bodies for table references at all (see graph.go's *ir.Function
+// case): PostgreSQL compiles plpgsql lazily and never resolves embedded SQL
+// against the catalog at CREATE FUNCTION time, so the edge was never
+// correctness-load-bearing for plpgsql to begin with — confirmed here by
+// applying this exact shape against a real postgres:17 and it succeeding.
+func TestApplyTriggerFunctionSelfReferenceOwnTableNoCycle(t *testing.T) {
+	ctx := context.Background()
+	connStr := testpg.Start(t)
+
+	conn, err := executor.Connect(ctx, connStr)
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	defer conn.Close(ctx)
+
+	differ := diff.New()
+	emitter := emit.New()
+	applyExec := executor.New()
+	store := newMemStore()
+
+	dir := t.TempDir()
+	f := filepath.Join(dir, "schema.dpg")
+	src := `FUNCTION check_dupe_order() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+    IF EXISTS (SELECT 1 FROM orders WHERE id = NEW.id) THEN
+        RAISE EXCEPTION 'duplicate order id %', NEW.id;
+    END IF;
+    RETURN NEW;
+END;
+$$ {}
+
+TABLE orders (
+    id bigint PRIMARY KEY
+) {
+    TRIGGER trg_check_dupe BEFORE INSERT FOR EACH ROW EXECUTE FUNCTION check_dupe_order();
+}`
+	if err := os.WriteFile(f, []byte(src), 0o644); err != nil {
+		t.Fatalf("write fixture: %v", err)
+	}
+
+	applyFixture(t, ctx, conn, []string{f}, dir, differ, emitter, applyExec, store)
+
+	if _, err := conn.Exec(ctx, `INSERT INTO orders (id) VALUES (1)`); err != nil {
+		t.Fatalf("insert: %v", err)
+	}
+	if _, err := conn.Exec(ctx, `INSERT INTO orders (id) VALUES (1)`); err == nil {
+		t.Fatal("expected duplicate insert to be rejected by the trigger")
+	}
+
+	// Same no-op re-plan/re-diff guard as the sibling test above.
+	desired, _, err := compiler.Compile([]string{f}, dir, pipeline.Default)
+	if err != nil {
+		t.Fatalf("recompile: %v", err)
+	}
+	prevSnap, _ := store.Load("test", "dpgtest")
+	if _, err := differ.Diff(desired, prevSnap); err != nil {
+		t.Fatalf("re-diff must not error (spurious function<->table cycle): %v", err)
+	}
+}

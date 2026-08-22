@@ -737,7 +737,19 @@ func TestSort_SqlFunctionBodyReferencesTable(t *testing.T) {
 	assertBefore(t, sorted, "app.events", "app.log_event()")
 }
 
-func TestSort_PlpgsqlFunctionBodyReferencesTable(t *testing.T) {
+// TestSort_PlpgsqlFunctionBodyTableRefsNotScanned mirrors
+// TestSort_PlpgsqlFunctionBodyNotScanned but for table references instead of
+// function calls: a plpgsql body is deliberately NOT scanned for tables it
+// INSERTs into either, for the identical reason (PostgreSQL compiles
+// plpgsql lazily and never resolves embedded SQL against the catalog at
+// CREATE FUNCTION time, so there's no matching ordering hazard to guard
+// against). Forcing this edge anyway is what let RFC audit finding #121's
+// self-referencing-trigger-function cycle happen — see
+// TestSort_TriggerFunctionSelfReferencingNoCycle. Proven the same
+// no-forced-order way: fn declared before tbl with nothing else creating a
+// dependency between them, so if an edge were wrongly added, tbl would sort
+// first instead.
+func TestSort_PlpgsqlFunctionBodyTableRefsNotScanned(t *testing.T) {
 	fn := &ir.Function{
 		Schema: "app", Name: "log_event",
 		Attrs:      ir.FuncAttrs{Language: "plpgsql", Body: "BEGIN INSERT INTO app.events (msg) VALUES ('x'); END;"},
@@ -747,7 +759,7 @@ func TestSort_PlpgsqlFunctionBodyReferencesTable(t *testing.T) {
 	tbl := table("app", "events")
 	objects := []pipeline.IRObject{fn, tbl, schema("app")}
 	sorted := sortObjects(t, objects)
-	assertBefore(t, sorted, "app.events", "app.log_event()")
+	assertBefore(t, sorted, "app.log_event()", "app.events")
 }
 
 // TestSort_ProcedureBodyReferencesTable is the *ir.Procedure sibling.
@@ -786,6 +798,31 @@ func TestSort_TriggerFunctionNotSelfReferencingNoCycle(t *testing.T) {
 	objects := []pipeline.IRObject{schema("app"), tbl, fn}
 	if _, err := graph.New().Sort(objects); err != nil {
 		t.Fatalf("expected no cycle for a non-self-referencing trigger function, got: %v", err)
+	}
+}
+
+// TestSort_TriggerFunctionSelfReferencingNoCycle is the counterpart RFC audit
+// finding #121 flagged: an ordinary validation/audit trigger function whose
+// body queries its OWN table (e.g. `SELECT count(*) FROM app.orders`) closes
+// a 2-node cycle with the pre-existing table→trigger-function edge (source
+// 6) plus a function→table edge from the same table (source 9) — a shape
+// §22.2's cycle-breaker can't resolve since it only knows how to break FK
+// cycles via DEFERRABLE, and there is no FK anywhere in this cycle. Must not
+// error.
+func TestSort_TriggerFunctionSelfReferencingNoCycle(t *testing.T) {
+	tbl := table("app", "orders")
+	tbl.Triggers = []*ir.Trigger{
+		{Name: "check_dupe", When: "BEFORE", Events: []string{"INSERT"}, ForEach: "ROW", Function: "check_dupe_order", Pos: pos},
+	}
+	fn := &ir.Function{
+		Schema: "app", Name: "check_dupe_order",
+		Attrs:      ir.FuncAttrs{Language: "plpgsql", Body: "BEGIN PERFORM 1 FROM app.orders WHERE id = NEW.id; RETURN NEW; END;"},
+		ReturnType: ir.TypeRef{Name: "trigger"},
+		SrcPos:     pos,
+	}
+	objects := []pipeline.IRObject{schema("app"), tbl, fn}
+	if _, err := graph.New().Sort(objects); err != nil {
+		t.Fatalf("expected no cycle for a trigger function referencing its own table, got: %v", err)
 	}
 }
 
