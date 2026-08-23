@@ -15760,8 +15760,131 @@ func TestDiffPolicyRoleListChangedIsDetected(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !containsSQL(ops, `DROP POLICY IF EXISTS "p_owner"`) || !containsSQL(ops, "TO") || !containsSQL(ops, "app_admin") {
-		t.Errorf("expected DROP+CREATE reflecting the new role list, got: %v", sqlList(ops))
+	// RFC audit item #77: a Roles-only change is a targeted ALTER POLICY,
+	// not a drop+recreate (real PostgreSQL's ALTER POLICY ... TO ... covers
+	// it in one atomic, SAFE statement).
+	if containsSQL(ops, "DROP POLICY") {
+		t.Errorf("expected no DROP POLICY for a roles-only change, got: %v", sqlList(ops))
+	}
+	if !containsSQL(ops, `ALTER POLICY "p_owner" ON "public"."t" TO "app_admin";`) {
+		t.Errorf("expected ALTER POLICY ... TO app_admin, got: %v", sqlList(ops))
+	}
+	if ops[0].Safety() != pipeline.Safe {
+		t.Errorf("expected ALTER POLICY to be Safe, got %s", ops[0].Safety())
+	}
+}
+
+// TestDiffPolicyUsingChangedIsAlterPolicy guards RFC audit item #77's other
+// half: a USING-only change also gets a targeted ALTER POLICY rather than
+// drop+recreate.
+func TestDiffPolicyUsingChangedIsAlterPolicy(t *testing.T) {
+	d := New()
+	oldUsing, newUsing := "owner_id = current_user_id()", "owner_id = current_user_id() OR is_admin()"
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.t", &snapshot.SnapObject{
+		Kind: "table",
+		Table: &snapshot.SnapTable{
+			Schema:  "public",
+			Name:    "t",
+			Columns: []snapshot.SnapColumn{{Name: "id", Type: "bigint"}},
+			Policies: []snapshot.SnapPolicy{
+				{Name: "p_owner", Command: "SELECT", Permissive: true, Using: oldUsing},
+			},
+		},
+	})
+	desired := []pipeline.IRObject{
+		&ir.Table{
+			Schema:  "public",
+			Name:    "t",
+			Columns: []*ir.Column{{Name: "id", Type: ir.TypeRef{Name: "bigint"}}},
+			Policies: []*ir.Policy{
+				{Name: "p_owner", Command: "SELECT", Permissive: true, Using: &newUsing},
+			},
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if containsSQL(ops, "DROP POLICY") {
+		t.Errorf("expected no DROP POLICY for a USING-only change, got: %v", sqlList(ops))
+	}
+	if !containsSQL(ops, "ALTER POLICY") || !containsSQL(ops, "is_admin()") {
+		t.Errorf("expected ALTER POLICY reflecting the new USING expr, got: %v", sqlList(ops))
+	}
+}
+
+// TestDiffPolicyCommandChangedStillDropsAndRecreates proves the boundary of
+// #77's fix: Command and Permissive have no ALTER POLICY clause in real
+// PostgreSQL, so a change to either must still be a CAUTION drop+recreate.
+func TestDiffPolicyCommandChangedStillDropsAndRecreates(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.t", &snapshot.SnapObject{
+		Kind: "table",
+		Table: &snapshot.SnapTable{
+			Schema:  "public",
+			Name:    "t",
+			Columns: []snapshot.SnapColumn{{Name: "id", Type: "bigint"}},
+			Policies: []snapshot.SnapPolicy{
+				{Name: "p_owner", Command: "SELECT", Permissive: true},
+			},
+		},
+	})
+	desired := []pipeline.IRObject{
+		&ir.Table{
+			Schema:  "public",
+			Name:    "t",
+			Columns: []*ir.Column{{Name: "id", Type: ir.TypeRef{Name: "bigint"}}},
+			Policies: []*ir.Policy{
+				{Name: "p_owner", Command: "ALL", Permissive: true},
+			},
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsSQL(ops, `DROP POLICY IF EXISTS "p_owner"`) {
+		t.Errorf("expected DROP+CREATE for a Command change, got: %v", sqlList(ops))
+	}
+}
+
+// TestDiffPolicyUsingRemovedStillDropsAndRecreates proves the other boundary:
+// ALTER POLICY can only replace an existing USING/WITH CHECK expression, it
+// cannot clear one back to unset — going from set to unset needs
+// drop+recreate.
+func TestDiffPolicyUsingRemovedStillDropsAndRecreates(t *testing.T) {
+	d := New()
+	oldUsing := "owner_id = current_user_id()"
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.t", &snapshot.SnapObject{
+		Kind: "table",
+		Table: &snapshot.SnapTable{
+			Schema:  "public",
+			Name:    "t",
+			Columns: []snapshot.SnapColumn{{Name: "id", Type: "bigint"}},
+			Policies: []snapshot.SnapPolicy{
+				{Name: "p_owner", Command: "SELECT", Permissive: true, Using: oldUsing},
+			},
+		},
+	})
+	desired := []pipeline.IRObject{
+		&ir.Table{
+			Schema:  "public",
+			Name:    "t",
+			Columns: []*ir.Column{{Name: "id", Type: ir.TypeRef{Name: "bigint"}}},
+			Policies: []*ir.Policy{
+				{Name: "p_owner", Command: "SELECT", Permissive: true},
+			},
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsSQL(ops, `DROP POLICY IF EXISTS "p_owner"`) {
+		t.Errorf("expected DROP+CREATE when USING is removed, got: %v", sqlList(ops))
 	}
 }
 

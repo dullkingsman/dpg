@@ -7816,16 +7816,65 @@ func diffPolicies(schema, table string, o *ir.Table, snap *snapshot.SnapTable) [
 		existing, exists := snapByName[pol.Name]
 		if !exists {
 			ops = append(ops, createPolicy(schema, table, pol)...)
-		} else if pol.Command != existing.Command ||
-			pol.Permissive != existing.Permissive ||
-			policyRoleKey(pol.Roles) != policyRoleKey(existing.Roles) ||
-			normalizeExprForCompare(ptrStr(pol.Using)) != normalizeExprForCompare(existing.Using) ||
-			normalizeExprForCompare(ptrStr(pol.WithCheck)) != normalizeExprForCompare(existing.WithCheck) {
+		} else if pol.Command != existing.Command || pol.Permissive != existing.Permissive {
+			// Command (FOR ...) and PERMISSIVE/RESTRICTIVE are fixed at
+			// creation — real PostgreSQL's ALTER POLICY has no clause for
+			// either, so a change here still requires drop + recreate.
 			ops = append(ops, cautionOp(
 				fmt.Sprintf("DROP POLICY IF EXISTS %s ON %s;", quoteIdent(pol.Name), tblIdent),
 				pol.Pos,
 			))
 			ops = append(ops, createPolicy(schema, table, pol)...)
+		} else if usingRemoved, withCheckRemoved := existing.Using != "" && pol.Using == nil, existing.WithCheck != "" && pol.WithCheck == nil; usingRemoved || withCheckRemoved {
+			// ALTER POLICY has no way to clear an existing USING/WITH CHECK
+			// clause back to unset — it can only replace one expression
+			// with another. Going from set to unset genuinely needs
+			// drop + recreate, same as the Command/Permissive branch above.
+			ops = append(ops, cautionOp(
+				fmt.Sprintf("DROP POLICY IF EXISTS %s ON %s;", quoteIdent(pol.Name), tblIdent),
+				pol.Pos,
+			))
+			ops = append(ops, createPolicy(schema, table, pol)...)
+		} else if rolesChanged, usingChanged, withCheckChanged :=
+			policyRoleKey(pol.Roles) != policyRoleKey(existing.Roles),
+			normalizeExprForCompare(ptrStr(pol.Using)) != normalizeExprForCompare(existing.Using),
+			normalizeExprForCompare(ptrStr(pol.WithCheck)) != normalizeExprForCompare(existing.WithCheck); rolesChanged || usingChanged || withCheckChanged {
+			// RFC audit item #77: real PostgreSQL's ALTER POLICY ... TO ...
+			// USING (...) WITH CHECK (...) (confirmed via pg_query.Parse)
+			// covers all three in one atomic, SAFE statement — no need for
+			// drop+recreate, which previously opened a window with zero
+			// active policy for the command in between.
+			var b strings.Builder
+			fmt.Fprintf(&b, "ALTER POLICY %s ON %s", quoteIdent(pol.Name), tblIdent)
+			if rolesChanged {
+				b.WriteString(" TO ")
+				if len(pol.Roles) > 0 {
+					b.WriteString(roleList(pol.Roles))
+				} else {
+					b.WriteString("PUBLIC")
+				}
+			}
+			if usingChanged {
+				fmt.Fprintf(&b, " USING (%s)", ptrStr(pol.Using))
+			}
+			if withCheckChanged {
+				fmt.Fprintf(&b, " WITH CHECK (%s)", ptrStr(pol.WithCheck))
+			}
+			b.WriteString(";")
+			ops = append(ops, safeOp(b.String(), pol.Pos))
+			if ptrStr(pol.Comment) != existing.Comment {
+				if pol.Comment != nil {
+					ops = append(ops, safeOp(
+						fmt.Sprintf("COMMENT ON POLICY %s ON %s IS %s;", quoteIdent(pol.Name), tblIdent, quoteLit(*pol.Comment)),
+						pol.Pos,
+					))
+				} else {
+					ops = append(ops, safeOp(
+						fmt.Sprintf("COMMENT ON POLICY %s ON %s IS NULL;", quoteIdent(pol.Name), tblIdent),
+						pol.Pos,
+					))
+				}
+			}
 		} else if ptrStr(pol.Comment) != existing.Comment {
 			if pol.Comment != nil {
 				ops = append(ops, safeOp(

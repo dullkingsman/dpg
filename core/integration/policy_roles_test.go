@@ -20,15 +20,17 @@ import (
 )
 
 // TestRoundtripPolicyRoleListChanged is the regression guard for RFC audit
-// item #19: RLS Policy TO role-list changes were a silent no-op end-to-end.
-// SnapPolicy had no Roles field, diffPolicies never compared it, and
-// introspectPolicies didn't even SELECT p.polroles — so an edited policy
-// silently kept its old role list on plan/apply, AND --live verify couldn't
-// see the drift either (introspection never read the live roles at all).
-// This proves: (a) editing a policy's TO clause is detected and actually
-// reapplied against a real database, (b) the new role list is genuinely
-// live on pg_policy, and (c) a fresh introspect pass afterward sees zero
-// drift — the live-verify blindness half of the bug.
+// items #19 and #77: RLS Policy TO role-list changes were originally a
+// silent no-op end-to-end (SnapPolicy had no Roles field, diffPolicies never
+// compared it, and introspectPolicies didn't even SELECT p.polroles), and
+// once #19 closed the visibility gap, a Roles-only change still did a
+// destructive drop+recreate instead of real PostgreSQL's targeted
+// ALTER POLICY ... TO ... (confirmed via pg_query.Parse) — #77's fix. This
+// proves: (a) editing a policy's TO clause is detected and actually
+// reapplied against a real database via a metadata-only ALTER (stable
+// policy OID, not dropped and recreated), (b) the new role list is
+// genuinely live on pg_policy, and (c) a fresh introspect pass afterward
+// sees zero drift.
 func TestRoundtripPolicyRoleListChanged(t *testing.T) {
 	connStr := testpg.Start(t)
 	ctx := context.Background()
@@ -61,15 +63,16 @@ TABLE t (id INTEGER, owner_id INTEGER) {
 	}
 	applyFixture(t, ctx, conn, []string{f}, dir, differ, emitter, applyExec, store)
 
-	livePolicyRoles := func() []string {
+	livePolicyState := func() ([]string, int64) {
 		t.Helper()
 		rows, err := conn.QueryRows(ctx, `
-SELECT array_agg(COALESCE(pr.rolname, 'PUBLIC') ORDER BY COALESCE(pr.rolname, 'PUBLIC'))
+SELECT array_agg(COALESCE(pr.rolname, 'PUBLIC') ORDER BY COALESCE(pr.rolname, 'PUBLIC')), p.oid::bigint
 FROM pg_policy p
 JOIN pg_class c ON c.oid = p.polrelid
 LEFT JOIN LATERAL unnest(p.polroles) AS role_oid ON true
 LEFT JOIN pg_roles pr ON pr.oid = role_oid
-WHERE c.relname = 't' AND p.polname = 'p_owner'`)
+WHERE c.relname = 't' AND p.polname = 'p_owner'
+GROUP BY p.oid`)
 		if err != nil {
 			t.Fatalf("query pg_policy roles: %v", err)
 		}
@@ -78,14 +81,16 @@ WHERE c.relname = 't' AND p.polname = 'p_owner'`)
 			t.Fatal("pg_policy has no row for p_owner")
 		}
 		var roles []string
-		if err := rows.Scan(&roles); err != nil {
+		var oid int64
+		if err := rows.Scan(&roles, &oid); err != nil {
 			t.Fatalf("scan roles: %v", err)
 		}
-		return roles
+		return roles, oid
 	}
 
-	if got := livePolicyRoles(); len(got) != 1 || got[0] != "app_readonly" {
-		t.Fatalf("p_owner: live roles = %v after initial apply, want [app_readonly] — test setup is broken", got)
+	roles, oldOID := livePolicyState()
+	if len(roles) != 1 || roles[0] != "app_readonly" {
+		t.Fatalf("p_owner: live roles = %v after initial apply, want [app_readonly] — test setup is broken", roles)
 	}
 
 	// Edit the TO clause to a different role.
@@ -102,24 +107,28 @@ WHERE c.relname = 't' AND p.polname = 'p_owner'`)
 	if err != nil {
 		t.Fatalf("diff (role change): %v", err)
 	}
-	var sawDrop, sawCreateWithNewRole bool
+	var sawAlterWithNewRole bool
 	for _, op := range ops {
 		sql := op.SQL()
-		if strings.Contains(sql, `DROP POLICY IF EXISTS "p_owner"`) {
-			sawDrop = true
+		if strings.Contains(sql, "DROP POLICY") {
+			t.Errorf("expected no DROP POLICY for a roles-only change (bug #77 regressed), got: %v", opsSQL(ops))
 		}
-		if strings.Contains(sql, "CREATE POLICY") && strings.Contains(sql, "app_admin") {
-			sawCreateWithNewRole = true
+		if strings.Contains(sql, `ALTER POLICY "p_owner"`) && strings.Contains(sql, "app_admin") {
+			sawAlterWithNewRole = true
 		}
 	}
-	if !sawDrop || !sawCreateWithNewRole {
-		t.Fatalf("expected DROP+CREATE reflecting the new role list, got: %v", opsSQL(ops))
+	if !sawAlterWithNewRole {
+		t.Fatalf("expected ALTER POLICY reflecting the new role list, got: %v", opsSQL(ops))
 	}
 
 	applyFixture(t, ctx, conn, []string{f}, dir, differ, emitter, applyExec, store)
 
-	if got := livePolicyRoles(); len(got) != 1 || got[0] != "app_admin" {
-		t.Fatalf("p_owner: live roles = %v after role-list edit — bug #19 regressed (drift invisible)", got)
+	roles, newOID := livePolicyState()
+	if len(roles) != 1 || roles[0] != "app_admin" {
+		t.Fatalf("p_owner: live roles = %v after role-list edit — bug #19 regressed (drift invisible)", roles)
+	}
+	if newOID != oldOID {
+		t.Fatalf("p_owner has a different OID (%d) than before (%d) — dropped and recreated instead of a targeted ALTER (bug #77 regressed)", newOID, oldOID)
 	}
 
 	// The live-verify blindness half of the bug: a fresh introspect pass
