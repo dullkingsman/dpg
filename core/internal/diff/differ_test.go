@@ -8103,11 +8103,12 @@ func TestDiffCreateExtensionCascade(t *testing.T) {
 	}
 }
 
-// TestDiffExtensionSchemaChangeDropsAndRecreates guards RFC audit item #16:
-// SnapExtension.Schema existed but diffExtension never compared it — a
-// spurious no-op on a genuine SCHEMA change, which the RFC's own diffing
-// table (line 1539) requires to be a DESTRUCTIVE drop + recreate.
-func TestDiffExtensionSchemaChangeDropsAndRecreates(t *testing.T) {
+// TestDiffExtensionSchemaChangeEmitsSetSchema guards RFC audit item #50:
+// real PostgreSQL supports ALTER EXTENSION ... SET SCHEMA (confirmed via
+// pg_query.Parse), so a SCHEMA change must be a targeted SAFE ALTER, not a
+// destructive drop + recreate — previously SnapExtension.Schema existed but
+// diffExtension never compared it at all, a spurious no-op.
+func TestDiffExtensionSchemaChangeEmitsSetSchema(t *testing.T) {
 	d := New()
 	oldSchema, newSchema := "public", "extensions"
 	snap := &pipeline.Snapshot{}
@@ -8122,15 +8123,15 @@ func TestDiffExtensionSchemaChangeDropsAndRecreates(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !containsSQL(ops, "DROP EXTENSION IF EXISTS") {
-		t.Errorf("expected DROP EXTENSION for a schema change, got: %v", sqlList(ops))
+	if containsSQL(ops, "DROP EXTENSION") {
+		t.Errorf("expected no DROP EXTENSION for a schema change, got: %v", sqlList(ops))
 	}
-	if !containsSQL(ops, `SCHEMA "extensions"`) {
-		t.Errorf("expected re-CREATE EXTENSION with the new schema, got: %v", sqlList(ops))
+	if !containsSQL(ops, `ALTER EXTENSION "postgis" SET SCHEMA "extensions"`) {
+		t.Errorf("expected ALTER EXTENSION SET SCHEMA, got: %v", sqlList(ops))
 	}
-	dropOp := ops[0]
-	if dropOp.Safety() != pipeline.Destructive {
-		t.Errorf("expected DROP EXTENSION to be Destructive, got %s", dropOp.Safety())
+	setSchemaOp := ops[0]
+	if setSchemaOp.Safety() != pipeline.Safe {
+		t.Errorf("expected ALTER EXTENSION SET SCHEMA to be Safe, got %s", setSchemaOp.Safety())
 	}
 }
 

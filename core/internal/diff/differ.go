@@ -4711,17 +4711,22 @@ func diffProcedure(o *ir.Procedure, snap *snapshot.SnapOpaque) ([]pipeline.DiffO
 
 func diffExtension(o *ir.Extension, snap *snapshot.SnapExtension) []pipeline.DiffOp {
 	pos := o.SrcPos
-	// SCHEMA change (RFC audit item #16): PostgreSQL has no
-	// ALTER EXTENSION ... SET SCHEMA that also moves every object the
-	// extension owns consistently for every extension (some don't support
-	// it at all), so the RFC's own diffing table requires drop + recreate,
-	// DESTRUCTIVE — previously SnapExtension.Schema existed but was never
-	// compared at all, a spurious no-op on a real change.
-	if !ptrEq(o.Schema, snap.Schema) && o.Schema != nil {
-		ops := []pipeline.DiffOp{destructiveOp(fmt.Sprintf("DROP EXTENSION IF EXISTS %s;", quoteIdent(o.Name)), pos)}
-		return append(ops, createExtension(o)...)
-	}
 	var ops []pipeline.DiffOp
+	// SCHEMA change (RFC audit item #16, #50): real PostgreSQL supports
+	// ALTER EXTENSION ... SET SCHEMA (confirmed via pg_query.Parse) — it
+	// moves the extension and every object it owns in one step, same as
+	// any other SET SCHEMA-capable kind. It errors at apply time for a
+	// non-relocatable extension ("extension is not relocatable"), but
+	// that's a real PostgreSQL constraint on the target, not a reason for
+	// DPG to preemptively drop+recreate every relocatable extension too.
+	// Previously SnapExtension.Schema existed but was never compared at
+	// all, a spurious no-op on a real change.
+	if !ptrEq(o.Schema, snap.Schema) && o.Schema != nil {
+		ops = append(ops, safeOp(
+			fmt.Sprintf("ALTER EXTENSION %s SET SCHEMA %s;", quoteIdent(o.Name), quoteIdent(*o.Schema)),
+			pos,
+		))
+	}
 	if !ptrEq(o.Version, snap.Version) && o.Version != nil {
 		ops = append(ops, safeOp(
 			fmt.Sprintf("ALTER EXTENSION %s UPDATE TO %s;", quoteIdent(o.Name), quoteLit(*o.Version)),

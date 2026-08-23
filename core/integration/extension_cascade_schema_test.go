@@ -80,10 +80,13 @@ func TestRoundtripExtensionCascade(t *testing.T) {
 }
 
 // TestRoundtripExtensionSchemaChange is the regression guard for RFC audit
-// item #16: SnapExtension.Schema existed but diffExtension never compared
-// it, a spurious no-op on a genuine SCHEMA change that the RFC requires to
-// be a DESTRUCTIVE drop + recreate. This proves the extension actually
-// moves to the new schema live.
+// items #16/#50: SnapExtension.Schema existed but diffExtension never
+// compared it (a spurious no-op on a genuine SCHEMA change), and once it
+// was compared, real PostgreSQL's ALTER EXTENSION ... SET SCHEMA (confirmed
+// via pg_query.Parse) means the fix must be a targeted SAFE ALTER, not a
+// destructive drop + recreate. This proves the extension actually moves to
+// the new schema live via a metadata-only ALTER (stable extension OID
+// across the move, not dropped and recreated).
 func TestRoundtripExtensionSchemaChange(t *testing.T) {
 	connStr := testpg.Start(t)
 	ctx := context.Background()
@@ -99,9 +102,9 @@ func TestRoundtripExtensionSchemaChange(t *testing.T) {
 	}
 	defer conn.Close(ctx)
 
-	liveSchema := func() string {
+	liveState := func() (string, int64) {
 		t.Helper()
-		rows, err := conn.QueryRows(ctx, `SELECT n.nspname FROM pg_extension e JOIN pg_namespace n ON n.oid = e.extnamespace WHERE e.extname = 'pg_trgm'`)
+		rows, err := conn.QueryRows(ctx, `SELECT n.nspname, e.oid::bigint FROM pg_extension e JOIN pg_namespace n ON n.oid = e.extnamespace WHERE e.extname = 'pg_trgm'`)
 		if err != nil {
 			t.Fatalf("query pg_extension schema: %v", err)
 		}
@@ -110,10 +113,11 @@ func TestRoundtripExtensionSchemaChange(t *testing.T) {
 			t.Fatal("pg_extension has no row for pg_trgm")
 		}
 		var schema string
-		if err := rows.Scan(&schema); err != nil {
+		var oid int64
+		if err := rows.Scan(&schema, &oid); err != nil {
 			t.Fatalf("scan: %v", err)
 		}
-		return schema
+		return schema, oid
 	}
 
 	dir := t.TempDir()
@@ -127,8 +131,9 @@ EXTENSION pg_trgm SCHEMA public;`
 	}
 	applyFixture(t, ctx, conn, []string{f}, dir, differ, emitter, applyExec, store)
 
-	if got := liveSchema(); got != "public" {
-		t.Fatalf("pg_trgm: live schema = %q after initial apply, want public — test setup is broken", got)
+	schema, oldOID := liveState()
+	if schema != "public" {
+		t.Fatalf("pg_trgm: live schema = %q after initial apply, want public — test setup is broken", schema)
 	}
 
 	v2 := `SCHEMA ext_schema {}
@@ -146,26 +151,30 @@ EXTENSION pg_trgm SCHEMA ext_schema;`
 	if err != nil {
 		t.Fatalf("diff (schema change): %v", err)
 	}
-	var sawDrop, sawRecreate bool
+	var sawSetSchema bool
 	for _, op := range ops {
 		if strings.Contains(op.SQL(), "DROP EXTENSION") {
-			sawDrop = true
-			if op.Safety() != pipeline.Destructive {
-				t.Errorf("expected DROP EXTENSION for a schema change to be Destructive, got %s", op.Safety())
+			t.Errorf("expected no DROP EXTENSION for a schema change, got: %v", opsSQL(ops))
+		}
+		if strings.Contains(op.SQL(), "ALTER EXTENSION") && strings.Contains(op.SQL(), `SET SCHEMA "ext_schema"`) {
+			sawSetSchema = true
+			if op.Safety() != pipeline.Safe {
+				t.Errorf("expected ALTER EXTENSION SET SCHEMA to be Safe, got %s", op.Safety())
 			}
 		}
-		if strings.Contains(op.SQL(), "CREATE EXTENSION") && strings.Contains(op.SQL(), `SCHEMA "ext_schema"`) {
-			sawRecreate = true
-		}
 	}
-	if !sawDrop || !sawRecreate {
-		t.Fatalf("expected DROP+CREATE reflecting the new schema, got: %v", opsSQL(ops))
+	if !sawSetSchema {
+		t.Fatalf("expected ALTER EXTENSION ... SET SCHEMA, got: %v", opsSQL(ops))
 	}
 
 	applyFixture(t, ctx, conn, []string{f}, dir, differ, emitter, applyExec, store)
 
-	if got := liveSchema(); got != "ext_schema" {
-		t.Fatalf("pg_trgm: live schema = %q after SCHEMA change — bug #16 regressed", got)
+	schema, newOID := liveState()
+	if schema != "ext_schema" {
+		t.Fatalf("pg_trgm: live schema = %q after SCHEMA change — bug #16 regressed", schema)
+	}
+	if newOID != oldOID {
+		t.Fatalf("pg_trgm has a different OID (%d) than before (%d) — dropped and recreated instead of a targeted ALTER", newOID, oldOID)
 	}
 
 	newSnap, _ := store.Load("test", "dpgtest")
