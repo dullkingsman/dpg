@@ -8542,6 +8542,55 @@ func TestDiffRoleCommentAdded(t *testing.T) {
 	}
 }
 
+// TestDiffRoleRenamedFromEmitsAlterRename is the regression guard for Role
+// rename detection: before this, ir.Role had no RenamedFrom field at all
+// (and renamedFromKey had no *ir.Role case), so a renamed role was
+// indistinguishable from "old role dropped, new one added" — a real
+// DROP ROLE that PostgreSQL can outright refuse if the role still owns any
+// object, per the RFC's own documented severity for this gap.
+func TestDiffRoleRenamedFromEmitsAlterRename(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("app_role_old", &snapshot.SnapObject{
+		Kind: "role",
+		Role: &snapshot.SnapRole{Name: "app_role_old"},
+	})
+	old := "app_role_old"
+	desired := []pipeline.IRObject{
+		&ir.Role{Name: "app_role", RenamedFrom: &old},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if containsSQL(ops, "DROP ROLE") || containsSQL(ops, "CREATE ROLE") {
+		t.Fatalf("renamed role should match by RENAMED FROM, not drop+create, got: %v", sqlList(ops))
+	}
+	want := `ALTER ROLE "app_role_old" RENAME TO "app_role";`
+	if !containsSQL(ops, want) {
+		t.Errorf("expected %q, got: %v", want, sqlList(ops))
+	}
+	for _, o := range ops {
+		if strings.Contains(o.SQL(), "RENAME TO") && o.Safety() != pipeline.Caution {
+			t.Errorf("expected CAUTION safety for ALTER ROLE RENAME TO, got %v", o.Safety())
+		}
+	}
+}
+
+// TestDiffRoleRenamedFromStaleErrors mirrors every other kind's identical
+// stale-RENAMED-FROM validation (Differ.Diff's shared top-level Pass 1).
+func TestDiffRoleRenamedFromStaleErrors(t *testing.T) {
+	d := New()
+	old := "nonexistent_old_role"
+	desired := []pipeline.IRObject{
+		&ir.Role{Name: "app_role", RenamedFrom: &old},
+	}
+	_, err := d.Diff(desired, &pipeline.Snapshot{})
+	if err == nil {
+		t.Fatal("expected an error for a stale RENAMED FROM matching no snapshot role")
+	}
+}
+
 // ── DefaultPrivileges diffing ─────────────────────────────────────────────────
 
 func TestDiffDefaultPrivilegesCreate(t *testing.T) {
@@ -10603,6 +10652,152 @@ func TestDiffTSConfigMappingUnchangedIsNoop(t *testing.T) {
 	}
 	if containsSQL(ops, "MAPPING") {
 		t.Errorf("expected no MAPPING ops for unchanged mappings, got: %v", sqlList(ops))
+	}
+}
+
+// TestDiffTSDictRenamedFromEmitsAlterRename is the regression guard for
+// TSDict rename detection: before this, ir.TSDict had no RenamedFrom field
+// at all, so a renamed dictionary was indistinguishable from "old one
+// dropped, new one added."
+func TestDiffTSDictRenamedFromEmitsAlterRename(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.ispell_old", &snapshot.SnapObject{
+		Kind: "ts_dict",
+		Opaque: &snapshot.SnapOpaque{
+			Kind: "ts_dict", Schema: "public", Name: "ispell_old",
+			BodyHash: hashText("CREATE TEXT SEARCH DICTIONARY public.ispell_old (TEMPLATE = ispell)"),
+		},
+	})
+	old := "ispell_old"
+	desired := []pipeline.IRObject{
+		&ir.TSDict{
+			Schema: "public", Name: "ispell", RenamedFrom: &old,
+			Body: "CREATE TEXT SEARCH DICTIONARY public.ispell_old (TEMPLATE = ispell)",
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if containsSQL(ops, "DROP TEXT SEARCH DICTIONARY") {
+		t.Fatalf("renamed dictionary should match by RENAMED FROM, not drop+create, got: %v", sqlList(ops))
+	}
+	want := `ALTER TEXT SEARCH DICTIONARY "public"."ispell_old" RENAME TO "ispell";`
+	if !containsSQL(ops, want) {
+		t.Errorf("expected %q, got: %v", want, sqlList(ops))
+	}
+	for _, o := range ops {
+		if strings.Contains(o.SQL(), "RENAME TO") && o.Safety() != pipeline.Caution {
+			t.Errorf("expected CAUTION safety for ALTER TEXT SEARCH DICTIONARY RENAME TO, got %v", o.Safety())
+		}
+	}
+}
+
+// TestDiffTSDictRenamedFromAndBodyChanged confirms a simultaneous rename +
+// TEMPLATE/option change still requires DROP+CREATE, with no redundant
+// separate rename — createOpaque already creates under the final (new)
+// name.
+func TestDiffTSDictRenamedFromAndBodyChanged(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.ispell_old", &snapshot.SnapObject{
+		Kind: "ts_dict",
+		Opaque: &snapshot.SnapOpaque{
+			Kind: "ts_dict", Schema: "public", Name: "ispell_old",
+			BodyHash: hashText("CREATE TEXT SEARCH DICTIONARY public.ispell_old (TEMPLATE = ispell)"),
+		},
+	})
+	old := "ispell_old"
+	desired := []pipeline.IRObject{
+		&ir.TSDict{
+			Schema: "public", Name: "ispell", RenamedFrom: &old,
+			Body: "CREATE TEXT SEARCH DICTIONARY public.ispell (TEMPLATE = snowball)",
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsSQL(ops, `DROP TEXT SEARCH DICTIONARY IF EXISTS "public"."ispell_old";`) {
+		t.Errorf("expected DROP referencing the dictionary's actual (old) name, got: %v", sqlList(ops))
+	}
+	for _, o := range ops {
+		if strings.Contains(o.SQL(), "RENAME TO") {
+			t.Errorf("did not expect a separate RENAME TO alongside drop+create, got: %v", sqlList(ops))
+		}
+	}
+}
+
+// TestDiffTSParserRenamedFromEmitsAlterRename is TSDict's TSParser
+// counterpart.
+func TestDiffTSParserRenamedFromEmitsAlterRename(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	body := "CREATE TEXT SEARCH PARSER public.prs_old (START = prsd_start, GETTOKEN = prsd_nexttoken, END = prsd_end, LEXTYPES = prsd_lextype)"
+	_ = snap.SetObject("public.prs_old", &snapshot.SnapObject{
+		Kind: "ts_parser",
+		Opaque: &snapshot.SnapOpaque{
+			Kind: "ts_parser", Schema: "public", Name: "prs_old", BodyHash: hashText(body),
+		},
+	})
+	old := "prs_old"
+	desired := []pipeline.IRObject{
+		&ir.TSParser{Schema: "public", Name: "prs", RenamedFrom: &old, Body: body},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if containsSQL(ops, "DROP TEXT SEARCH PARSER") {
+		t.Fatalf("renamed parser should match by RENAMED FROM, not drop+create, got: %v", sqlList(ops))
+	}
+	want := `ALTER TEXT SEARCH PARSER "public"."prs_old" RENAME TO "prs";`
+	if !containsSQL(ops, want) {
+		t.Errorf("expected %q, got: %v", want, sqlList(ops))
+	}
+}
+
+// TestDiffTSTemplateRenamedFromEmitsAlterRename is TSDict's TSTemplate
+// counterpart.
+func TestDiffTSTemplateRenamedFromEmitsAlterRename(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	body := "CREATE TEXT SEARCH TEMPLATE public.tmpl_old (LEXIZE = dsimple_lexize)"
+	_ = snap.SetObject("public.tmpl_old", &snapshot.SnapObject{
+		Kind: "ts_template",
+		Opaque: &snapshot.SnapOpaque{
+			Kind: "ts_template", Schema: "public", Name: "tmpl_old", BodyHash: hashText(body),
+		},
+	})
+	old := "tmpl_old"
+	desired := []pipeline.IRObject{
+		&ir.TSTemplate{Schema: "public", Name: "tmpl", RenamedFrom: &old, Body: body},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if containsSQL(ops, "DROP TEXT SEARCH TEMPLATE") {
+		t.Fatalf("renamed template should match by RENAMED FROM, not drop+create, got: %v", sqlList(ops))
+	}
+	want := `ALTER TEXT SEARCH TEMPLATE "public"."tmpl_old" RENAME TO "tmpl";`
+	if !containsSQL(ops, want) {
+		t.Errorf("expected %q, got: %v", want, sqlList(ops))
+	}
+}
+
+// TestDiffTSDictRenamedFromStaleErrors mirrors every other kind's identical
+// stale-RENAMED-FROM validation.
+func TestDiffTSDictRenamedFromStaleErrors(t *testing.T) {
+	d := New()
+	old := "nonexistent_old_dict"
+	desired := []pipeline.IRObject{
+		&ir.TSDict{Schema: "public", Name: "ispell", RenamedFrom: &old, Body: "CREATE TEXT SEARCH DICTIONARY public.ispell (TEMPLATE = ispell)"},
+	}
+	_, err := d.Diff(desired, &pipeline.Snapshot{})
+	if err == nil {
+		t.Fatal("expected an error for a stale RENAMED FROM matching no snapshot dictionary")
 	}
 }
 
@@ -12742,6 +12937,99 @@ func TestDiffEventTriggerStaleSnapshotDoesNotRecreate(t *testing.T) {
 	}
 	if containsSQL(ops, "DROP EVENT TRIGGER") {
 		t.Errorf("stale snapshot must not trigger DROP EVENT TRIGGER, got: %v", sqlList(ops))
+	}
+}
+
+// TestDiffEventTriggerRenamedFromEmitsAlterRename is the regression guard
+// for EventTrigger rename detection: before this, ir.EventTrigger had no
+// RenamedFrom field at all — the struct's own doc comment explicitly said
+// none of ENABLE/DISABLE/OWNER TO/RENAME TO were modeled — so a renamed
+// event trigger was indistinguishable from "old one dropped, new one added."
+func TestDiffEventTriggerRenamedFromEmitsAlterRename(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("et_old", &snapshot.SnapObject{
+		Kind: "event_trigger",
+		Opaque: &snapshot.SnapOpaque{
+			Kind: "event_trigger", Name: "et_old",
+			EventTriggerEvent: "sql_drop", EventTriggerTags: []string{"DROP TABLE"}, EventTriggerFunction: "public.f1",
+		},
+	})
+	old := "et_old"
+	desired := []pipeline.IRObject{
+		&ir.EventTrigger{
+			Name: "et", Event: "sql_drop", Tags: []string{"DROP TABLE"}, Function: "f1",
+			RenamedFrom: &old,
+			Body:        "CREATE EVENT TRIGGER et ON sql_drop WHEN TAG IN ('DROP TABLE') EXECUTE FUNCTION f1()",
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if containsSQL(ops, "DROP EVENT TRIGGER") || containsSQL(ops, "CREATE EVENT TRIGGER") {
+		t.Fatalf("renamed event trigger should match by RENAMED FROM, not drop+create, got: %v", sqlList(ops))
+	}
+	want := `ALTER EVENT TRIGGER "et_old" RENAME TO "et";`
+	if !containsSQL(ops, want) {
+		t.Errorf("expected %q, got: %v", want, sqlList(ops))
+	}
+	for _, o := range ops {
+		if strings.Contains(o.SQL(), "RENAME TO") && o.Safety() != pipeline.Caution {
+			t.Errorf("expected CAUTION safety for ALTER EVENT TRIGGER RENAME TO, got %v", o.Safety())
+		}
+	}
+}
+
+// TestDiffEventTriggerRenamedFromAndTagChanged confirms a simultaneous
+// rename + structural change (Event/Tags/Function) still requires
+// DROP+CREATE (no ALTER EVENT TRIGGER path changes those), with no
+// redundant separate rename — createOpaque already creates under the final
+// (new) name. Drops via dropObject's own embedded snap identity (the
+// matched, old name), same as diffCollation/diffType's identical reasoning.
+func TestDiffEventTriggerRenamedFromAndTagChanged(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("et_old", &snapshot.SnapObject{
+		Kind: "event_trigger",
+		Opaque: &snapshot.SnapOpaque{
+			Kind: "event_trigger", Name: "et_old",
+			EventTriggerEvent: "sql_drop", EventTriggerTags: []string{"DROP TABLE"}, EventTriggerFunction: "public.f1",
+		},
+	})
+	old := "et_old"
+	desired := []pipeline.IRObject{
+		&ir.EventTrigger{
+			Name: "et", Event: "sql_drop", Tags: []string{"DROP TABLE", "DROP SCHEMA"}, Function: "f1",
+			RenamedFrom: &old,
+			Body:        "CREATE EVENT TRIGGER et ON sql_drop WHEN TAG IN ('DROP TABLE', 'DROP SCHEMA') EXECUTE FUNCTION f1()",
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsSQL(ops, `DROP EVENT TRIGGER IF EXISTS "et_old";`) {
+		t.Errorf("expected DROP EVENT TRIGGER referencing the trigger's actual (old) name, got: %v", sqlList(ops))
+	}
+	for _, o := range ops {
+		if strings.Contains(o.SQL(), "RENAME TO") {
+			t.Errorf("did not expect a separate ALTER EVENT TRIGGER RENAME TO alongside drop+create, got: %v", sqlList(ops))
+		}
+	}
+}
+
+// TestDiffEventTriggerRenamedFromStaleErrors mirrors every other kind's
+// identical stale-RENAMED-FROM validation.
+func TestDiffEventTriggerRenamedFromStaleErrors(t *testing.T) {
+	d := New()
+	old := "nonexistent_old_et"
+	desired := []pipeline.IRObject{
+		&ir.EventTrigger{Name: "et", Event: "sql_drop", Function: "f1", RenamedFrom: &old},
+	}
+	_, err := d.Diff(desired, &pipeline.Snapshot{})
+	if err == nil {
+		t.Fatal("expected an error for a stale RENAMED FROM matching no snapshot event trigger")
 	}
 }
 

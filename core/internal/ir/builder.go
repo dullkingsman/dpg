@@ -1825,6 +1825,9 @@ func (b *Builder) buildRole(cs *pg_query.CreateRoleStmt, block pipeline.BlockAST
 	if block.Comment != nil {
 		r.Comment = &block.Comment.Value
 	}
+	if block.RenamedFrom != nil {
+		r.RenamedFrom = &block.RenamedFrom.Name
+	}
 	r.SecurityLabels = block.SecurityLabels
 	r.NameMaps = block.NameMaps
 	return r, nil
@@ -2375,6 +2378,10 @@ func (b *Builder) buildDefineStmt(ds *pg_query.DefineStmt, block pipeline.BlockA
 			// field for whether it's actually wired, not just declared.
 			td.Comment = &block.Comment.Value
 		}
+		if block.RenamedFrom != nil {
+			td.RenamedFrom = &block.RenamedFrom.Name
+			td.RenamedFromSchema = renamedFromSchema(block.RenamedFrom)
+		}
 		return td, nil
 
 	case pg_query.ObjectType_OBJECT_TSPARSER:
@@ -2388,6 +2395,10 @@ func (b *Builder) buildDefineStmt(ds *pg_query.DefineStmt, block pipeline.BlockA
 		if block.Comment != nil {
 			prs.Comment = &block.Comment.Value
 		}
+		if block.RenamedFrom != nil {
+			prs.RenamedFrom = &block.RenamedFrom.Name
+			prs.RenamedFromSchema = renamedFromSchema(block.RenamedFrom)
+		}
 		return prs, nil
 
 	case pg_query.ObjectType_OBJECT_TSTEMPLATE:
@@ -2400,6 +2411,10 @@ func (b *Builder) buildDefineStmt(ds *pg_query.DefineStmt, block pipeline.BlockA
 		tmpl := &TSTemplate{Schema: schema, Name: name, Functions: funcs, Body: rawBody, SrcPos: pos}
 		if block.Comment != nil {
 			tmpl.Comment = &block.Comment.Value
+		}
+		if block.RenamedFrom != nil {
+			tmpl.RenamedFrom = &block.RenamedFrom.Name
+			tmpl.RenamedFromSchema = renamedFromSchema(block.RenamedFrom)
 		}
 		return tmpl, nil
 	}
@@ -2643,6 +2658,9 @@ func (b *Builder) buildOpaque(node *pg_query.Node, block pipeline.BlockAST, pos 
 		}
 		if block.Comment != nil {
 			evt.Comment = &block.Comment.Value
+		}
+		if block.RenamedFrom != nil {
+			evt.RenamedFrom = &block.RenamedFrom.Name
 		}
 		evt.SecurityLabels = block.SecurityLabels
 		return evt, nil

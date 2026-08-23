@@ -359,6 +359,29 @@ func renamedFromKey(obj pipeline.IRObject) string {
 		if o.RenamedFrom != nil {
 			return qualKey(oldSchema(o.Schema, o.RenamedFromSchema), *o.RenamedFrom)
 		}
+	case *ir.Role:
+		// Bare, like *ir.Schema above — cluster-level, no schema component.
+		if o.RenamedFrom != nil {
+			return *o.RenamedFrom
+		}
+	case *ir.TSDict:
+		if o.RenamedFrom != nil {
+			return qualKey(oldSchema(o.Schema, o.RenamedFromSchema), *o.RenamedFrom)
+		}
+	case *ir.TSParser:
+		if o.RenamedFrom != nil {
+			return qualKey(oldSchema(o.Schema, o.RenamedFromSchema), *o.RenamedFrom)
+		}
+	case *ir.TSTemplate:
+		if o.RenamedFrom != nil {
+			return qualKey(oldSchema(o.Schema, o.RenamedFromSchema), *o.RenamedFrom)
+		}
+	case *ir.EventTrigger:
+		// Bare, like *ir.Schema/*ir.Role above — database-level, no schema
+		// component.
+		if o.RenamedFrom != nil {
+			return *o.RenamedFrom
+		}
 	}
 	return ""
 }
@@ -403,6 +426,16 @@ func describeKind(obj pipeline.IRObject) string {
 		return "type"
 	case *ir.Collation:
 		return "collation"
+	case *ir.Role:
+		return "role"
+	case *ir.TSDict:
+		return "text search dictionary"
+	case *ir.TSParser:
+		return "text search parser"
+	case *ir.TSTemplate:
+		return "text search template"
+	case *ir.EventTrigger:
+		return "event trigger"
 	}
 	return "object"
 }
@@ -1623,12 +1656,28 @@ func diffCast(o *ir.Cast, snap *snapshot.SnapOpaque) ([]pipeline.DiffOp, error) 
 func diffEventTrigger(o *ir.EventTrigger, snap *snapshot.SnapOpaque) ([]pipeline.DiffOp, error) {
 	pos := o.SrcPos
 	onClause := "EVENT TRIGGER " + quoteIdent(o.Name)
+
+	// RENAME TO (Section 14.1) applies regardless of whether the structured
+	// Event/Tags/Function comparison below is trustworthy — Name is a basic
+	// identity field, not one of those three. Uses snap's matched (old)
+	// name for the FROM side, same reasoning as diffType/diffCollation's
+	// identical rename handling. Not merged into the drop+create branch
+	// below — a simultaneous rename needs no separate ALTER there, since
+	// createOpaque already creates the trigger under its final (new) name.
+	var renameOps []pipeline.DiffOp
+	if snap.Name != o.Name {
+		renameOps = append(renameOps, cautionOp(
+			fmt.Sprintf("ALTER EVENT TRIGGER %s RENAME TO %s;", quoteIdent(snap.Name), quoteIdent(o.Name)),
+			pos,
+		))
+	}
+
 	// Stale snapshot predating these structured fields: EventTriggerEvent
 	// is always non-empty for a real event trigger (required by CREATE
 	// EVENT TRIGGER's grammar), never the Go zero value — same
 	// self-healing guard pattern as diffTablespace/diffCast.
 	if snap.EventTriggerEvent == "" {
-		var ops []pipeline.DiffOp
+		ops := renameOps
 		if !ptrEq(o.Comment, snap.Comment) {
 			if sql := commentOnOpaqueSQL("event_trigger", "", o.Name, "", "", o.Comment); sql != "" {
 				ops = append(ops, safeOp(sql, pos))
@@ -1656,7 +1705,7 @@ func diffEventTrigger(o *ir.EventTrigger, snap *snapshot.SnapOpaque) ([]pipeline
 		ops = append(ops, createSecurityLabelOps(o.SecurityLabels, onClause, pos)...)
 		return ops, nil
 	}
-	var ops []pipeline.DiffOp
+	ops := renameOps
 	if !ptrEq(o.Comment, snap.Comment) {
 		if sql := commentOnOpaqueSQL("event_trigger", "", o.Name, "", "", o.Comment); sql != "" {
 			ops = append(ops, safeOp(sql, pos))
@@ -3681,17 +3730,17 @@ func diffObject(desired pipeline.IRObject, snap *snapshot.SnapObject, fullSnap *
 		if snap.Opaque == nil {
 			return nil, nil
 		}
-		return diffOpaqueIR(o.QualifiedName(), o.Body, o.Reconstructed, o.Comment, snap.Opaque, o.SrcPos)
+		return diffTSDict(o, snap.Opaque)
 	case *ir.TSParser:
 		if snap.Opaque == nil {
 			return nil, nil
 		}
-		return diffOpaqueIR(o.QualifiedName(), o.Body, o.Reconstructed, o.Comment, snap.Opaque, o.SrcPos)
+		return diffTSParser(o, snap.Opaque)
 	case *ir.TSTemplate:
 		if snap.Opaque == nil {
 			return nil, nil
 		}
-		return diffOpaqueIR(o.QualifiedName(), o.Body, o.Reconstructed, o.Comment, snap.Opaque, o.SrcPos)
+		return diffTSTemplate(o, snap.Opaque)
 	case *ir.DefaultPrivileges:
 		if snap.DefaultPrivileges == nil {
 			return nil, nil
@@ -4077,6 +4126,64 @@ func dropCreateOpaque(name, body string, comment *string, snap *snapshot.SnapOpa
 	return appendCommentOp(ops, nil, snap.Kind, snap.Schema, snap.Name, snap.Args, snap.Using, comment, pos)
 }
 
+// renameOpaqueIfUnchanged appends an ALTER <alterKW> ... RENAME TO op when
+// snap's matched (old) name differs from the desired name, unless ops
+// already contains a Destructive op — a body/definition change already
+// recreates the object under its final (new) name directly via
+// createOpaque, so no separate rename statement is needed in that combined
+// case. Shared by diffTSDict/diffTSParser/diffTSTemplate's thin wrappers
+// (RFC Sections 12.2-12.4): kept out of diffOpaqueIR itself since several of
+// its other callers (Operator, OperatorClass, OperatorFamily) have no
+// rename concept in real PostgreSQL at all and shouldn't gain one by
+// extending the shared function's signature.
+func renameOpaqueIfUnchanged(ops []pipeline.DiffOp, alterKW string, snap *snapshot.SnapOpaque, desiredName string, pos pipeline.SourcePos) []pipeline.DiffOp {
+	if snap.Name == desiredName {
+		return ops
+	}
+	for _, op := range ops {
+		if op.Safety() == pipeline.Destructive {
+			return ops
+		}
+	}
+	return append(ops, cautionOp(
+		fmt.Sprintf("ALTER %s %s RENAME TO %s;", alterKW, qualIdent(snap.Schema, snap.Name), quoteIdent(desiredName)),
+		pos,
+	))
+}
+
+// diffTSDict is diffOpaqueIR's TSDict-specific wrapper: adds RENAME TO
+// detection (RFC Section 12.2), which diffOpaqueIR knows nothing about — see
+// renameOpaqueIfUnchanged's doc comment for why this lives in a per-kind
+// wrapper instead of the shared function.
+func diffTSDict(o *ir.TSDict, snap *snapshot.SnapOpaque) ([]pipeline.DiffOp, error) {
+	ops, err := diffOpaqueIR(o.QualifiedName(), o.Body, o.Reconstructed, o.Comment, snap, o.SrcPos)
+	if err != nil {
+		return nil, err
+	}
+	return renameOpaqueIfUnchanged(ops, "TEXT SEARCH DICTIONARY", snap, o.Name, o.SrcPos), nil
+}
+
+// diffTSParser is diffTSDict's TSParser-specific counterpart (RFC Section
+// 12.3). Real PostgreSQL has no OWNER concept for a parser at all, unlike
+// TSDict, so there is no analogous Owner gap to track here.
+func diffTSParser(o *ir.TSParser, snap *snapshot.SnapOpaque) ([]pipeline.DiffOp, error) {
+	ops, err := diffOpaqueIR(o.QualifiedName(), o.Body, o.Reconstructed, o.Comment, snap, o.SrcPos)
+	if err != nil {
+		return nil, err
+	}
+	return renameOpaqueIfUnchanged(ops, "TEXT SEARCH PARSER", snap, o.Name, o.SrcPos), nil
+}
+
+// diffTSTemplate is diffTSDict's TSTemplate-specific counterpart (RFC
+// Section 12.4). Same no-OWNER-concept note as diffTSParser.
+func diffTSTemplate(o *ir.TSTemplate, snap *snapshot.SnapOpaque) ([]pipeline.DiffOp, error) {
+	ops, err := diffOpaqueIR(o.QualifiedName(), o.Body, o.Reconstructed, o.Comment, snap, o.SrcPos)
+	if err != nil {
+		return nil, err
+	}
+	return renameOpaqueIfUnchanged(ops, "TEXT SEARCH TEMPLATE", snap, o.Name, o.SrcPos), nil
+}
+
 // diffTSConfig is diffOpaqueIR's TSConfig-specific wrapper: MAPPING FOR
 // entries (RFC §12.1) are a TSConfig-only concern diffOpaqueIR knows nothing
 // about. When the base diff triggers a full DROP+CREATE (body/PARSER
@@ -4421,6 +4528,21 @@ func diffRole(o *ir.Role, snap *snapshot.SnapRole) []pipeline.DiffOp {
 	var ops []pipeline.DiffOp
 	pos := o.SrcPos
 	ident := quoteIdent(o.Name)
+
+	// RENAMED FROM on a role is schema-agnostic — roles are cluster-level,
+	// not schema-scoped, so the generic cross-schema extension other kinds
+	// use never applies here; only the bare RENAME TO form is meaningful.
+	// This can close a gap that would otherwise be genuinely impossible to
+	// work around: PostgreSQL refuses to DROP ROLE a role that still owns
+	// any object, so drop-and-recreate isn't always a viable fallback.
+	// Uses snap's matched (old) name for the FROM side; every later op in
+	// this function uses ident (o.Name) for the already-renamed identity.
+	if snap.Name != o.Name {
+		ops = append(ops, cautionOp(
+			fmt.Sprintf("ALTER ROLE %s RENAME TO %s;", quoteIdent(snap.Name), ident),
+			pos,
+		))
+	}
 
 	// Every non-PASSWORD, non-membership attribute the declaration manages,
 	// batched into one ALTER ROLE (mirrors diffSequence's identical

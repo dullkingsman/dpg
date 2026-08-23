@@ -688,9 +688,14 @@ type Role struct {
 	RoleMembers     []string // ROLE role-list: these become members of this role
 	AdminRoles      []string // ADMIN role-list: these become members of this role, WITH ADMIN OPTION
 	Comment         *string
-	SecurityLabels  []pipeline.SecurityLabel
-	NameMaps        []pipeline.NameMapEntry
-	SrcPos          pipeline.SourcePos
+	// RenamedFrom names the role's prior identity (RENAMED FROM, Section
+	// 11.1) — schema-agnostic, unlike Table/View/Type/Collation's identical
+	// field: roles are cluster-level, not schema-scoped, so there is no
+	// RenamedFromSchema counterpart here.
+	RenamedFrom    *string
+	SecurityLabels []pipeline.SecurityLabel
+	NameMaps       []pipeline.NameMapEntry
+	SrcPos         pipeline.SourcePos
 }
 
 func (r *Role) QualifiedName() string   { return r.Name }
@@ -941,9 +946,16 @@ type EventTrigger struct {
 	// generic { COMMENT '...'; } was silently discarded for every one of
 	// them — no field existed to store it, so dpg plan reported
 	// "-- (no changes)" with no error and no effect.
-	Comment        *string
-	Body           string
-	Reconstructed  bool // Body rebuilt from the catalog; see Tablespace.Reconstructed
+	Comment       *string
+	Body          string
+	Reconstructed bool // Body rebuilt from the catalog; see Tablespace.Reconstructed
+	// RenamedFrom names the event trigger's prior identity (RENAMED FROM,
+	// Section 14.1) — bare, like Role's identical field: event triggers are
+	// database-level, not schema-scoped, so there is no RenamedFromSchema
+	// counterpart here. Owner and ENABLE/DISABLE state (Section 14.1's other
+	// two ALTER EVENT TRIGGER capabilities) are separate, still-open gaps,
+	// out of scope here.
+	RenamedFrom    *string
 	SecurityLabels []pipeline.SecurityLabel
 	SrcPos         pipeline.SourcePos
 }
@@ -1258,7 +1270,12 @@ type TSDict struct {
 	Body           string
 	Comment        *string
 	Reconstructed  bool // Body rebuilt from the catalog; see Tablespace.Reconstructed
-	SrcPos         pipeline.SourcePos
+	// RenamedFrom/RenamedFromSchema — see Table's identical doc comments;
+	// real PostgreSQL supports ALTER TEXT SEARCH DICTIONARY ... RENAME TO/
+	// SET SCHEMA (Owner is a separate, still-open gap, out of scope here).
+	RenamedFrom       *string
+	RenamedFromSchema *string
+	SrcPos            pipeline.SourcePos
 }
 
 func (t *TSDict) QualifiedName() string   { return qualName(t.Schema, t.Name) }
@@ -1283,7 +1300,13 @@ type TSParser struct {
 	Comment       *string // see EventTrigger.Comment
 	Body          string
 	Reconstructed bool // Body rebuilt from the catalog; see Tablespace.Reconstructed
-	SrcPos        pipeline.SourcePos
+	// RenamedFrom/RenamedFromSchema — see Table's identical doc comments;
+	// real PostgreSQL supports ALTER TEXT SEARCH PARSER ... RENAME TO/SET
+	// SCHEMA, but genuinely has no OWNER concept for a parser at all (unlike
+	// TSDict), so there is no analogous Owner gap here to track.
+	RenamedFrom       *string
+	RenamedFromSchema *string
+	SrcPos            pipeline.SourcePos
 }
 
 func (t *TSParser) QualifiedName() string   { return qualName(t.Schema, t.Name) }
@@ -1300,7 +1323,11 @@ type TSTemplate struct {
 	Comment       *string // see EventTrigger.Comment
 	Body          string
 	Reconstructed bool // Body rebuilt from the catalog; see Tablespace.Reconstructed
-	SrcPos        pipeline.SourcePos
+	// RenamedFrom/RenamedFromSchema — see TSParser's identical doc comment
+	// (same "RENAME TO/SET SCHEMA exist, OWNER does not" shape).
+	RenamedFrom       *string
+	RenamedFromSchema *string
+	SrcPos            pipeline.SourcePos
 }
 
 func (t *TSTemplate) QualifiedName() string   { return qualName(t.Schema, t.Name) }
