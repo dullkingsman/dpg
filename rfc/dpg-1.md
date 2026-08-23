@@ -847,21 +847,25 @@ terminator = paren-close SP* [ with-clause / tablespace-clause /
 ```
 
    **Rule T1.** A declaration whose Part 1 ends with a closing
-   parenthesis `)` — tables, composite types, range types, aggregates
-   — MUST NOT have a semicolon between `)` and the `{ }` block.  The
-   `)` (optionally followed by `WITH`, `TABLESPACE`, `INHERITS`, or
-   `PARTITION BY` clauses) is the Part 1 terminator.
+   parenthesis `)` — tables, composite types, range types, aggregates,
+   base (shell) types declared with a full option list — MUST NOT have
+   a semicolon between `)` and the `{ }` block.  The `)` (optionally
+   followed by `WITH`, `TABLESPACE`, `INHERITS`, or `PARTITION BY`
+   clauses) is the Part 1 terminator.
 
    **Rule T2.** A declaration whose Part 1 ends with a dollar-quoted
    body — functions, procedures — terminates with `$$;` or `$tag$;`.
    The semicolon is mandatory after the closing delimiter.  An optional
    `{ }` block MUST follow immediately after, with no intervening
-   whitespace beyond optional newlines.
+   whitespace beyond optional newlines. A `BEGIN ATOMIC ... END` body
+   (§9.1, PG14+ standard-SQL form) follows the same rule with `END;`
+   in place of `$$;`.
 
    **Rule T3.** All other declarations — views, ENUM types, sequences,
    roles, publications, subscriptions, extensions, schemas without
-   nested objects — terminate their Part 1 with `;`.  An optional
-   `{ }` block follows immediately after `;`.
+   nested objects, domains, and a bare forward-declared base (shell)
+   type (`TYPE name;`, no option list — §5.5) — terminate their Part 1
+   with `;`.  An optional `{ }` block follows immediately after `;`.
 
    **Rule T4.** A declaration with a `{ }` block but no Part 1
    terminator issue is the `SCHEMA` object: the schema body IS the
@@ -1141,8 +1145,21 @@ INDEX idx_status (status) WHERE (status = 'active');
 
    ENUM types use PostgreSQL's natural parenthesised list syntax.
    The Part 1 body is the value list enclosed in `( )`, terminated with
-   `;` per Rule T3.  An optional `{ }` block holds comments and
-   value-removal migration directives.
+   `;` per Rule T3.  An optional `{ }` block holds comments, owner,
+   rename, and value-removal migration directives.
+
+   `owner-dir`/`renamed-from-dir` in `enum-block` follow the same rules
+   as every other object kind: `OWNER "..."` emits `ALTER TYPE name
+   OWNER TO role` (`SAFE`); `RENAMED FROM old` emits `ALTER TYPE old
+   RENAME TO new` (`CAUTION`), and — per §7.6's generic cross-schema
+   extension to `renamed-from-dir` — a schema-qualified old name also
+   emits `ALTER TYPE old_schema.name SET SCHEMA new_schema` (`SAFE`).
+   This closes the same gap for ENUM that §7.6/§7.11 already closed for
+   Table/View/Sequence: real PostgreSQL's `ALTER TYPE` supports
+   `RENAME TO`/`OWNER TO`/`SET SCHEMA` for every `CREATE TYPE` variant
+   (ENUM, Composite, Range, Domain, Base) identically — see §5.2's,
+   §5.3's, and §5.5's own `{ }` blocks below for the same three
+   directives applied consistently.
 
    **PG equivalent:** `CREATE TYPE name AS ENUM ('v1', 'v2', ...)`
 
@@ -1151,12 +1168,16 @@ enum-decl     = "ENUM" WSP identifier WSP
                 "(" enum-values ")" ";"
                 [ "{" enum-block "}" ]
 
-enum-values   = SQUOTE identifier SQUOTE
-                *( "," WSP SQUOTE identifier SQUOTE )
+enum-values   = enum-value *( "," WSP enum-value )
+enum-value    = SQUOTE identifier SQUOTE
+                [ WSP ( "BEFORE" / "AFTER" ) WSP SQUOTE identifier SQUOTE ]
+                [ WSP "RENAMED FROM" WSP SQUOTE identifier SQUOTE ]
 
 enum-block    = *( enum-directive ";" )
 
 enum-directive = comment-dir
+               / owner-dir
+               / renamed-from-dir
                / migrate-remove-dir
 ```
 
@@ -1198,6 +1219,25 @@ ALTER TYPE <schema>.<name> ADD VALUE '<new_value>';
    the server version at apply time and choose accordingly.  When the
    server version is unknown (offline plan), the compiler MUST emit it
    as non-transactional.
+
+   **Positional control (`BEFORE`/`AFTER`):** An `enum-value` written as
+   `'new_value' BEFORE 'existing_value'` (or `AFTER`) emits `ALTER TYPE
+   <schema>.<name> ADD VALUE '<new_value>' BEFORE '<existing_value>'` —
+   same transactional restriction and Safety as plain `ADD VALUE` above.
+   Omitting `BEFORE`/`AFTER` always appends at the end, matching real
+   PostgreSQL's own default.
+
+   **Renaming a value (`RENAMED FROM`):** An `enum-value` written as
+   `'new_value' RENAMED FROM 'old_value'` — where `'old_value'` is
+   present in the snapshot and `'new_value'` is not — emits `ALTER TYPE
+   <schema>.<name> RENAME VALUE '<old_value>' TO '<new_value>'`, Safety
+   `SAFE` (a catalog-only rename, unlike `ADD VALUE` it has no
+   transactional restriction in any supported PostgreSQL version).
+   Follows the same three-state resolution algorithm as column/table
+   `RENAMED FROM` (§7.6) — a value already present under its new name is
+   a no-op; neither name present is a stale-directive error (DPG-E021).
+   Without this, an enum value rename is unexpressable except as a
+   destructive remove-and-add pair.
 
 #### 5.1.2. Removing ENUM Values
 
@@ -1253,24 +1293,46 @@ ALTER TYPE <schema>.<name> ADD VALUE '<new_value>';
    Composite types declare a row-structured type with named, typed
    attributes.  The attribute list uses `( )` per Rule T1.
 
-   **PG equivalent:** `CREATE TYPE name AS (attr1 type1, attr2 type2, ...)`
+   **PG equivalent:** `CREATE TYPE name AS (attr1 type1 [COLLATE collation], attr2 type2, ...)`
 
 ```abnf
 composite-decl = "TYPE" WSP schema-name WSP "AS" WSP
-                 "(" attribute-list ")" ";"
+                 "(" attribute-list ")"
+                 [ ";" ]
+                 [ "{" composite-block "}" ]
+
+attribute-list = attribute *( "," WSP attribute )
+attribute      = identifier WSP type-ref [ WSP "COLLATE" WSP collation-name ]
+
+composite-block = *( composite-directive ";" )
+composite-directive = comment-dir / owner-dir / renamed-from-dir
+                     / attribute-block
+
+; COLUMN-equivalent sub-block for attribute renames — same shape as
+; §7.4's column-block, reused here per that section's own cross-
+; reference rather than inventing a parallel "ATTRIBUTE { }" name.
+attribute-block = "COLUMN" WSP identifier WSP "{" "RENAMED FROM" WSP identifier ";" "}"
 ```
+
+   **`COLLATE`** is valid only on attributes whose type has a
+   collatable base type (`text`, `varchar`, etc.) — DPG performs no
+   validation of this itself, left to PostgreSQL's own parser (same
+   passthrough principle used throughout this document).
 
    Example:
 
 ```sql
 SCHEMA public {
     TYPE address AS (
-        street      TEXT,
+        street      TEXT COLLATE "en_US",
         city        TEXT,
         state       CHAR(2),
         postal_code TEXT,
         country     CHAR(2)
-    );
+    )
+    {
+        OWNER "schema_admin";
+    }
 }
 ```
 
@@ -1278,10 +1340,12 @@ SCHEMA public {
 
    -   Adding an attribute: `ALTER TYPE <name> ADD ATTRIBUTE <col> <type>` — `SAFE`.
    -   Dropping an attribute: `ALTER TYPE <name> DROP ATTRIBUTE <col>` — `DESTRUCTIVE`.
-   -   Changing an attribute type: `ALTER TYPE <name> ALTER ATTRIBUTE <col> TYPE <new>` — `DESTRUCTIVE`.
-   -   Renaming an attribute: Use `RENAMED FROM` inside a `COLUMN`-equivalent
-       sub-block (see Section 7.6 for the syntax; the same mechanism applies
-       to composite type attributes).
+   -   Changing an attribute type or `COLLATE`: `ALTER TYPE <name> ALTER ATTRIBUTE <col> TYPE <new> [COLLATE collation]` — `DESTRUCTIVE`.
+   -   Renaming an attribute: `COLUMN new_name { RENAMED FROM old_name; }` inside the `{ }` block —
+       the same `RENAMED FROM` mechanism as table columns (§7.6) — emits
+       `ALTER TYPE <name> RENAME ATTRIBUTE old_name TO new_name` — `SAFE`.
+   -   Owner changed: `ALTER TYPE <name> OWNER TO role` — `SAFE`.
+   -   Renamed (`RENAMED FROM` on the type itself, §5.1's cross-reference): `ALTER TYPE old RENAME TO new` — `CAUTION`; schema-qualified additionally emits `ALTER TYPE old_schema.name SET SCHEMA new_schema` — `SAFE`.
 
 ### 5.3. Range Types
 
@@ -1292,7 +1356,11 @@ SCHEMA public {
 
 ```abnf
 range-decl = "TYPE" WSP schema-name WSP "AS RANGE" WSP
-             "(" range-options ")" ";"
+             "(" range-options ")"
+             [ ";" ]
+             [ "{" range-block "}" ]
+
+range-block = *( ( comment-dir / owner-dir / renamed-from-dir ) ";" )
 ```
 
    Example:
@@ -1308,7 +1376,17 @@ SCHEMA public {
 
    **Diffing semantics:** Any change to a range type's options requires
    `DROP TYPE CASCADE` followed by `CREATE TYPE`.  This is classified
-   as `DESTRUCTIVE`.
+   as `DESTRUCTIVE`.  `OWNER`/`RENAMED FROM` follow the standard rules
+   (§5.1): `ALTER TYPE name OWNER TO role` (`SAFE`); `ALTER TYPE old
+   RENAME TO new` (`CAUTION`), plus `SET SCHEMA` when schema-qualified
+   (`SAFE`).
+
+   **Multirange types:** Every range type gets an auto-created
+   multirange companion type (PostgreSQL 14+, e.g. `float8range` →
+   `float8multirange`) the same way every type gets an auto-created
+   array companion — DPG does not declare it separately, and no DDL is
+   ever emitted for it; it is created and dropped automatically by
+   PostgreSQL alongside the range type itself.
 
 ### 5.4. Domain Types
 
@@ -1327,25 +1405,58 @@ SCHEMA public {
    syntax change.
 
    **PG equivalent:**
-   `CREATE DOMAIN name AS base_type [DEFAULT expr] [[CONSTRAINT name] {NOT NULL | NULL | CHECK (expr)}] ...`
+   `CREATE DOMAIN name AS base_type [COLLATE collation] [DEFAULT expr] [[CONSTRAINT name] {NOT NULL | NULL | CHECK (expr) [NOT VALID]}] ...`
 
 ```abnf
 domain-decl = "DOMAIN" WSP schema-name WSP "AS" WSP type-name
+              [ WSP "COLLATE" WSP collation-name ]
               [ WSP "DEFAULT" WSP expr ]
               *( WSP domain-constraint )
               ";"
               [ "{" domain-block "}" ]
 
 domain-constraint = [ "CONSTRAINT" WSP identifier WSP ]
-                     ( "NOT NULL" / "NULL" / "CHECK" WSP "(" expr ")" )
+                     ( "NOT NULL" / "NULL" / "CHECK" WSP "(" expr ")" [ WSP "NOT VALID" ] )
+                     [ WSP "RENAMED FROM" WSP identifier ]
 
-domain-block = *( ( comment-dir / owner-dir / grants-block / revocations-block ) ";" )
+domain-block = *( ( comment-dir / owner-dir / renamed-from-dir
+                   / grants-block / revocations-block ) ";" )
 ```
 
    The `{ }` block holds only what has no place in native `CREATE
-   DOMAIN` syntax: `COMMENT`, `OWNER`, `GRANTS`, `REVOCATIONS` — the
-   same directive set Tenet 5 already sanctions for every other object
-   kind.
+   DOMAIN` syntax: `COMMENT`, `OWNER`, `RENAMED FROM` (§7.6's generic
+   cross-schema `SET SCHEMA` extension applies here identically),
+   `GRANTS`, `REVOCATIONS` — the same directive set Tenet 5 already
+   sanctions for every other object kind.
+
+   **`COLLATE`** on the domain itself is valid only when the base type
+   is collatable — left to PostgreSQL's own parser to enforce, same
+   passthrough principle as everywhere else in this document.
+
+   **`NOT VALID`:** Real PostgreSQL's `CREATE DOMAIN` grammar has no
+   `NOT VALID` option — it exists only on `ALTER DOMAIN ... ADD
+   CONSTRAINT`. `domain-constraint`'s `NOT VALID` is therefore only
+   meaningful when the differ is *adding a constraint to an
+   already-existing domain* (the domain itself present in the
+   snapshot, the named constraint absent): that case emits `ALTER
+   DOMAIN <name> ADD CONSTRAINT <name> CHECK (...) NOT VALID` —
+   `CAUTION`.  When the whole `CREATE DOMAIN` statement itself is being
+   emitted for a brand-new domain, `NOT VALID` on any of its
+   constraints is silently omitted from that statement (there is
+   nothing yet to skip validating) — this mirrors the "no separate
+   opt-in step needed at creation" logic table constraints already
+   follow, without needing table's placement restriction (§7.3), since
+   Domain has no `( )`-list-vs-`{ }`-block distinction to enforce here.
+
+   **`VALIDATE CONSTRAINT`:** When `NOT VALID` is removed from an
+   existing constraint in source, the compiler emits `ALTER DOMAIN
+   <name> VALIDATE CONSTRAINT <name>` — `CAUTION` — the same two-step
+   lifecycle as table constraints (§7.3).
+
+   **`RENAMED FROM` on a constraint** emits `ALTER DOMAIN <name> RENAME
+   CONSTRAINT old TO new` — `SAFE` — instead of the drop-and-recreate a
+   name-only difference would otherwise trigger under name-based
+   constraint identity.
 
    Example:
 
@@ -1362,9 +1473,13 @@ SCHEMA public {
 
    -   Adding a `DEFAULT`: `ALTER DOMAIN <name> SET DEFAULT <expr>` — `SAFE`.
    -   Dropping a `DEFAULT`: `ALTER DOMAIN <name> DROP DEFAULT` — `SAFE`.
-   -   Adding a constraint: `ALTER DOMAIN <name> ADD CONSTRAINT <name> CHECK (...)` — `CAUTION`.
+   -   Adding a constraint: `ALTER DOMAIN <name> ADD CONSTRAINT <name> CHECK (...) [NOT VALID]` — `CAUTION`.
+   -   `NOT VALID` removed from an existing constraint: `ALTER DOMAIN <name> VALIDATE CONSTRAINT <name>` — `CAUTION`.
+   -   Constraint renamed only (`RENAMED FROM`): `ALTER DOMAIN <name> RENAME CONSTRAINT old TO new` — `SAFE`.
    -   Dropping a constraint: `ALTER DOMAIN <name> DROP CONSTRAINT <name>` — `SAFE`.
-   -   Changing the base type: requires `DROP DOMAIN CASCADE` + `CREATE DOMAIN` — `DESTRUCTIVE`.
+   -   Changing the base type or `COLLATE`: requires `DROP DOMAIN CASCADE` + `CREATE DOMAIN` — `DESTRUCTIVE`.
+   -   Owner changed: `ALTER DOMAIN <name> OWNER TO role` — `SAFE`.
+   -   Renamed (`RENAMED FROM` on the domain itself): `ALTER DOMAIN old RENAME TO new` — `CAUTION`; schema-qualified additionally emits `ALTER DOMAIN old_schema.name SET SCHEMA new_schema` — `SAFE`.
 
 ### 5.5. Base (Shell) Types
 
@@ -1373,7 +1488,41 @@ SCHEMA public {
    list.  Diffing is by text hash only (`SAFE` for additions;
    `DESTRUCTIVE` for any change or removal).
 
-   **PG equivalent:** `CREATE TYPE name (INPUT = func, OUTPUT = func, ...)`
+   **PG equivalent:** `CREATE TYPE name (INPUT = func, OUTPUT = func, ...)` — or, forward-declared, bare `CREATE TYPE name;`
+
+```abnf
+base-type-decl = "TYPE" WSP schema-name
+                 ( WSP "(" storage-params ")" [ ";" ]
+                 / ";" )
+                 [ "{" base-type-block "}" ]
+
+base-type-block = *( ( comment-dir / owner-dir / renamed-from-dir ) ";" )
+```
+
+   **Bare forward-declaration shell:** `TYPE name;` with no option list
+   and no support functions is a complete, standalone declaration — real
+   PostgreSQL's "shell type," a placeholder with only a name and an
+   owner.  This is the first half of the standard workflow for a
+   self-referential base type: the type's own `INPUT`/`OUTPUT`
+   functions (§9, `LANGUAGE C`) must declare an argument or return type
+   of `mytype` before `mytype` itself has a full definition, which is
+   impossible unless the shell already exists.
+
+   **Automatic cycle-breaking:** When a full-option `base-type-decl`
+   (e.g. `TYPE mytype (INPUT = mytype_in, OUTPUT = mytype_out, ...)`) is
+   new and its `INPUT`/`OUTPUT`/etc. functions are *also* new and
+   themselves reference `mytype` in their own argument or return type
+   (§9, e.g. `FUNCTION mytype_in(cstring) RETURNS mytype ...`), the
+   dependency graph (§22) detects the resulting circular reference the
+   same way it already detects circular `DEFERRABLE` foreign keys
+   (§22.2) — a distinct cycle *kind*, broken by a distinct mechanism
+   specific to this case rather than §22.2's FK-specific algorithm: the
+   compiler emits the bare shell `CREATE TYPE mytype;` first, then the
+   `CREATE FUNCTION` statements that reference it, then the full
+   `CREATE TYPE mytype (INPUT = ..., OUTPUT = ..., ...)` — which real
+   PostgreSQL treats as replacing the shell entry rather than an error.
+   A user writing a self-referential base type declares only the single
+   full-option form in source; the two-step emission is internal.
 
 ```sql
 SCHEMA public {
@@ -1385,6 +1534,10 @@ SCHEMA public {
     );
 }
 ```
+
+   `OWNER`/`RENAMED FROM` follow the standard rules (§5.1): `ALTER TYPE
+   name OWNER TO role` (`SAFE`); `ALTER TYPE old RENAME TO new`
+   (`CAUTION`), plus `SET SCHEMA` when schema-qualified (`SAFE`).
 
 ### 5.6. Virtual Types
 
@@ -3009,8 +3162,26 @@ SCHEMA public {
 function-decl = "FUNCTION" WSP schema-func-name "(" [ arg-list ] ")"
                 WSP return-clause
                 *( func-attribute )
-                WSP "AS" WSP dollar-string ";"
+                func-body
+                ";"
                 [ "{" func-block "}" ]
+
+; The dollar-quoted form is overwhelmingly the common case (PL/pgSQL,
+; SQL, and every other procedural-language extension). LANGUAGE C and
+; LANGUAGE internal use a different, string-literal AS form instead —
+; DPG does not validate which LANGUAGE pairs with which func-body form,
+; left to PostgreSQL's own parser (passthrough principle, as elsewhere
+; in this document). BEGIN ATOMIC is PG14+'s standard-SQL-conformant
+; alternative to the whole "AS dollar-string" shape, for LANGUAGE SQL
+; only — see the BEGIN ATOMIC note below.
+func-body     = WSP "AS" WSP dollar-string
+              / WSP "AS" WSP string-literal [ WSP "," WSP string-literal ]
+              / WSP "BEGIN ATOMIC" WSP sql-stmt-list WSP "END"
+
+; One or more semicolon-terminated SQL statements, real PostgreSQL's
+; own BEGIN ATOMIC body — each statement diffed the same as a
+; LANGUAGE SQL body (§9.5's SQL canonicalisation applies here too).
+sql-stmt-list = 1*( <SQL statement> ";" )
 
 return-clause  = "RETURNS" WSP return-type
                / "RETURNS TABLE" WSP "(" col-def-list ")"
@@ -3021,6 +3192,7 @@ func-attribute = "LANGUAGE" WSP lang-name
                / "CALLED ON NULL INPUT" / "RETURNS NULL ON NULL INPUT"
                  / "STRICT"
                / "SECURITY DEFINER" / "SECURITY INVOKER"
+               / "LEAKPROOF" / "NOT LEAKPROOF"
                / "PARALLEL UNSAFE" / "PARALLEL RESTRICTED" / "PARALLEL SAFE"
                / "COST" WSP number
                / "ROWS" WSP number
@@ -3028,10 +3200,20 @@ func-attribute = "LANGUAGE" WSP lang-name
                / "WINDOW"
                / "SET" WSP identifier WSP "=" WSP expr
                / "SET" WSP identifier WSP "FROM CURRENT"
+               / "TRANSFORM" WSP transform-for-type-list
+
+transform-for-type-list = "FOR TYPE" WSP type-ref
+                           *( "," WSP "FOR TYPE" WSP type-ref )
 
 func-block     = *( func-directive ";" )
-func-directive = comment-dir / grants-block / deprecated-dir
-               / renamed-from-dir
+func-directive = comment-dir / owner-dir / grants-block / revocations-block
+               / deprecated-dir / renamed-from-dir / depends-on-extension-dir
+
+; Applies to Function/Procedure only — real PostgreSQL's ALTER AGGREGATE
+; has no DEPENDS ON EXTENSION clause, even though Aggregate shares this
+; same func-block production. DPG does not reject it on Aggregate itself
+; (passthrough principle); PostgreSQL's own parser does.
+depends-on-extension-dir = [ "NO" WSP ] "DEPENDS ON EXTENSION" WSP identifier
 ```
 
    Function attributes MUST appear in PostgreSQL's own documented
@@ -3041,6 +3223,66 @@ func-directive = comment-dir / grants-block / deprecated-dir
    to options accepted by `CREATE FUNCTION` in PostgreSQL 14+.  The
    compiler passes them through verbatim when reconstructing the `CREATE
    OR REPLACE FUNCTION` statement.
+
+   **`AS 'obj_file', 'link_symbol'` / `AS 'name'`:** `LANGUAGE C`
+   functions load a symbol from a shared object file — `'link_symbol'`
+   defaults to the SQL function name when omitted.  `LANGUAGE internal`
+   functions reference an already-compiled function built into the
+   server by its C name.  Both use `func-body`'s string-literal form
+   instead of a dollar-quoted body — no procedural code of DPG's own to
+   store, so it is diffed the same way any other function attribute
+   change is (§9.5's generic "signature/attribute changed" path), not
+   via body-hash. This closes the same gap `TYPE ... (INPUT = ...)`
+   base types (§5.5) depend on: their `INPUT`/`OUTPUT`/etc. support
+   functions are routinely `LANGUAGE C` functions using exactly this
+   form.
+
+   **`BEGIN ATOMIC ... END`:** PostgreSQL 14+'s standard-SQL-conformant
+   alternative to the dollar-quoted `AS` body, `LANGUAGE SQL` only — see
+   `func-body` above.  Where the plain dollar-quoted form is the
+   PostgreSQL-specific idiom, `BEGIN ATOMIC` is the form the SQL
+   standard itself defines, directly relevant to Tenet 3 (Standard SQL
+   vs. PostgreSQL-specific): a source file may choose either without
+   DPG preferring one.  Diffed identically to a dollar-quoted
+   `LANGUAGE SQL` body (§9.5's SQL canonicalisation applies verbatim,
+   since the body content is ordinary SQL statements either way).
+
+   **`TRANSFORM FOR TYPE type_name [, FOR TYPE type_name ...]`:**
+   References a `CREATE TRANSFORM`-registered marshaling pair for the
+   named type(s) — e.g. a PL/Python function accepting/returning
+   `hstore` via `hstore_plpython`'s transform.  This *references* an
+   already-installed transform; it does not declare one — `CREATE
+   TRANSFORM` itself remains correctly out of scope (§23), the same
+   distinction access-method `USING` (§7.1) draws against `CREATE
+   ACCESS METHOD`.
+
+   **`[NO] DEPENDS ON EXTENSION extension_name`** (Function/Procedure
+   only, `func-block`): declares (or removes) an auto-drop dependency
+   between the function and an extension, so the function is dropped
+   automatically if the extension is — PostgreSQL's mechanism for a
+   function that logically belongs to an extension without itself being
+   a member object of it. Diffed as a set: an added entry emits `ALTER
+   FUNCTION name(...) DEPENDS ON EXTENSION ext` (`SAFE`); a removed one
+   emits `ALTER FUNCTION name(...) NO DEPENDS ON EXTENSION ext`
+   (`SAFE`).
+
+   **`OWNER`/`RENAMED FROM`** (`func-block`) follow the standard rules
+   (§7.6): `ALTER FUNCTION name(...) OWNER TO role` (`SAFE`); `ALTER
+   FUNCTION old(...) RENAME TO new` (`CAUTION`), plus `SET SCHEMA` when
+   schema-qualified (`SAFE`) — the same generic `renamed-from-dir`
+   extension §7.6 introduced. **Significant for Aggregate specifically**
+   (§9.4, which reuses `func-block`): real PostgreSQL's `ALTER
+   AGGREGATE` supports *only* `RENAME TO`/`OWNER TO`/`SET SCHEMA` —
+   every other change requires drop and recreate — so this closes a
+   full third of Aggregate's entire incremental-`ALTER` surface, not
+   just Function/Procedure's.
+
+   **`REVOCATIONS { }`** (`func-block`, §11.3's `revoke-entry` grammar)
+   was already implemented in `core/` but had no grammar slot in this
+   document — `func-directive` previously listed only `grants-block`,
+   silently discarding any declared Function/Procedure/Aggregate
+   revocation at the spec level even though the compiler itself already
+   supported it.
 
 ### 9.2. Function Attributes Reference
 
@@ -3052,6 +3294,8 @@ func-directive = comment-dir / grants-block / deprecated-dir
    | `STRICT` | Alias for `RETURNS NULL ON NULL INPUT`. Returns NULL if any argument is NULL. |
    | `SECURITY DEFINER` | Executes with the privileges of the function owner. |
    | `SECURITY INVOKER` | Default. Executes with the privileges of the calling role. |
+   | `LEAKPROOF` | Never leaks argument data via errors/side channels — governs whether the planner may push a qual through an RLS-restricted view. |
+   | `NOT LEAKPROOF` | Default. May leak argument data. |
    | `PARALLEL SAFE` | Safe for parallel execution in any worker. |
    | `PARALLEL RESTRICTED` | Parallel-safe but must run in the leader process. |
    | `PARALLEL UNSAFE` | Default. Cannot run in parallel. |
@@ -3061,6 +3305,7 @@ func-directive = comment-dir / grants-block / deprecated-dir
    | `SET param = value` | Sets the named GUC to `value` for the duration of the call. |
    | `SET param FROM CURRENT` | Sets the named GUC from its current session value. |
    | `WINDOW` | Declares the function as a window function. |
+   | `TRANSFORM FOR TYPE t [, ...]` | References an already-installed transform for marshaling type `t`. |
 
    **`SECURITY DEFINER` + `search_path`:** Functions declared with
    `SECURITY DEFINER` SHOULD include `SET search_path = schema [, ...]`
@@ -3163,6 +3408,33 @@ agg-input-list = "*"
 
 ordered-set-sig = type-ref *( "," type-ref )
                   WSP "ORDER BY" WSP type-ref *( "," type-ref )
+
+; Every option real PostgreSQL's CREATE AGGREGATE accepts (normal-
+; aggregate form) — previously referenced but never enumerated here.
+agg-options = agg-option *( "," WSP agg-option )
+agg-option  = "SFUNC" WSP "=" WSP func-ref
+            / "STYPE" WSP "=" WSP type-ref
+            / "SSPACE" WSP "=" WSP integer
+            / "FINALFUNC" WSP "=" WSP func-ref
+            / "FINALFUNC_EXTRA"
+            / "FINALFUNC_MODIFY" WSP "=" WSP modify-mode
+            / "COMBINEFUNC" WSP "=" WSP func-ref
+            / "SERIALFUNC" WSP "=" WSP func-ref
+            / "DESERIALFUNC" WSP "=" WSP func-ref
+            / "INITCOND" WSP "=" WSP string-literal
+            / "MSFUNC" WSP "=" WSP func-ref
+            / "MINVFUNC" WSP "=" WSP func-ref
+            / "MSTYPE" WSP "=" WSP type-ref
+            / "MSSPACE" WSP "=" WSP integer
+            / "MFINALFUNC" WSP "=" WSP func-ref
+            / "MFINALFUNC_EXTRA"
+            / "MFINALFUNC_MODIFY" WSP "=" WSP modify-mode
+            / "MINITCOND" WSP "=" WSP string-literal
+            / "SORTOP" WSP "=" WSP operator-symbol
+            / "PARALLEL" WSP "=" WSP ( "SAFE" / "RESTRICTED" / "UNSAFE" )
+            / "HYPOTHETICAL"
+
+modify-mode = "READ_ONLY" / "SHAREABLE" / "READ_WRITE"
 ```
 
    Example:
@@ -3182,9 +3454,29 @@ SCHEMA public {
 ```
 
    **Diffing semantics:** Aggregate identity is `(schema, name, input_types)`.
-   Changes to `SFUNC`, `STYPE`, `INITCOND`, `FINALFUNC`, `COMBINEFUNC`,
-   or `SERIALFUNC` require `DROP AGGREGATE CASCADE` followed by
-   `CREATE AGGREGATE` — classified as `DESTRUCTIVE`.
+   A change to *any* `agg-option` above — not only the six previously
+   named here (`SFUNC`/`STYPE`/`INITCOND`/`FINALFUNC`/`COMBINEFUNC`/
+   `SERIALFUNC`) but every field the declaration grammar can express
+   (`SSPACE`/`DESERIALFUNC`/`MSFUNC`/`MINVFUNC`/`MSTYPE`/`MSSPACE`/
+   `MFINALFUNC`/`MINITCOND`/`SORTOP`/`PARALLEL`/`HYPOTHETICAL`/
+   `FINALFUNC_EXTRA`/`FINALFUNC_MODIFY`/`MFINALFUNC_EXTRA`/
+   `MFINALFUNC_MODIFY`) — requires `DROP AGGREGATE CASCADE` followed by
+   `CREATE AGGREGATE`, classified as `DESTRUCTIVE`.  Real PostgreSQL's
+   `ALTER AGGREGATE` supports only three operations, all metadata-only:
+
+   -   Renamed (`RENAMED FROM`, `func-block`): `ALTER AGGREGATE name
+       (input_types) RENAME TO new_name` — `CAUTION`; schema-qualified
+       additionally emits `ALTER AGGREGATE ... SET SCHEMA new_schema`
+       (`SAFE`), the same `renamed-from-dir` extension as every other
+       kind (§7.6).
+   -   Owner changed (`owner-dir`, `func-block`): `ALTER AGGREGATE name
+       (input_types) OWNER TO role` — `SAFE`.
+   -   `SET SCHEMA` — covered by the schema-qualified rename above; not
+       independently expressible without a rename in real PostgreSQL's
+       own grammar either.
+
+   Every `agg-option` change remains `DESTRUCTIVE` as above; only these
+   three metadata operations bypass drop-and-recreate.
 
 ### 9.5. Function Body Diffing Semantics
 
@@ -3200,7 +3492,12 @@ SCHEMA public {
        object kinds (Tablespace, FDW, Collation, etc. — see Section 25).
        On any parse failure (a body the parser rejects for any reason),
        the compiler falls back to the plain normalisation below rather
-       than erroring.
+       than erroring.  A `BEGIN ATOMIC ... END` body (§9.1) is
+       canonicalised identically — each statement between `BEGIN ATOMIC`
+       and `END` is ordinary SQL, parsed/re-deparsed/hashed the same way
+       a dollar-quoted `LANGUAGE SQL` body is; the two forms are
+       interchangeable from the differ's perspective, only their Part 1
+       spelling differs.
    -   **`LANGUAGE plpgsql`:** the body is compiled through the real
        PL/pgSQL compiler (via `libpg_query`'s PL/pgSQL parse-to-JSON
        entry point, fed a full, argument-accurate
@@ -3279,8 +3576,10 @@ SCHEMA public {
 
    -   Changes to attributes that `CREATE OR REPLACE FUNCTION` can
        update (`SECURITY DEFINER`, `STRICT`, `VOLATILE`/`STABLE`/
-       `IMMUTABLE`, `PARALLEL`, `COST`, `ROWS`, `SET` options):
-       emit `CREATE OR REPLACE FUNCTION` — Safety `SAFE`.
+       `IMMUTABLE`, `LEAKPROOF`, `PARALLEL`, `COST`, `ROWS`, `SET`
+       options): emit `CREATE OR REPLACE FUNCTION` — Safety `SAFE`.
+       (Setting `LEAKPROOF` requires superuser privilege at apply time —
+       a PostgreSQL-level restriction, not a DPG one.)
 
    -   Changes to the argument list or return type: PostgreSQL does
        not support `CREATE OR REPLACE` for these.  The compiler emits
@@ -5796,11 +6095,21 @@ serial_sequence_declared      = "off"
    |-------|--------|-----|--------|
    | New function | Absent in snapshot | `CREATE OR REPLACE FUNCTION ...` | `SAFE` |
    | Body hash changed | `body_hash` differs | `CREATE OR REPLACE FUNCTION ...` | `SAFE` |
-   | Attribute changed (volatility, strict, security, parallel, cost, rows, set options) | Field differs | `CREATE OR REPLACE FUNCTION ...` | `SAFE` |
+   | Attribute changed (volatility, strict, security, leakproof, parallel, cost, rows, set options) | Field differs | `CREATE OR REPLACE FUNCTION ...` | `SAFE` |
    | Argument list or return type changed | Type key differs | `DROP FUNCTION CASCADE; CREATE FUNCTION` | `DESTRUCTIVE` |
+   | `[NO] DEPENDS ON EXTENSION` changed (Function/Procedure, §9.1/§9.2) | Extension-dependency set differs | `ALTER FUNCTION ... [NO] DEPENDS ON EXTENSION ext` | `SAFE` |
    | Grant added | Not in snapshot | `GRANT EXECUTE ON FUNCTION ...` | `SAFE` |
+   | Revocation added | Not in snapshot | `REVOKE EXECUTE ON FUNCTION ... FROM role` | `SAFE` |
+   | Owner changed | `owner` differs | `ALTER FUNCTION ... OWNER TO role` | `SAFE` |
    | Comment changed | `comment` differs | `COMMENT ON FUNCTION ...` | `SAFE` |
+   | Renamed (`RENAMED FROM`) | `renamed_from` set | `ALTER FUNCTION ... RENAME TO new` | `CAUTION` |
+   | Moved to another schema (`RENAMED FROM` schema-qualified) | Schema component differs | `ALTER FUNCTION ... SET SCHEMA new_schema` | `SAFE` |
    | Function dropped | Absent in desired | `DROP FUNCTION name(...) [CASCADE]` | `DESTRUCTIVE` |
+
+   Aggregate reuses this same table for its three metadata-only
+   operations (rename/owner/schema-move, §9.4); every other Aggregate
+   field change is `DESTRUCTIVE` per §9.4's own table, unlike Function/
+   Procedure's mostly-`SAFE` attribute set above.
 
    **VIEW:**
 
@@ -5817,10 +6126,21 @@ serial_sequence_declared      = "off"
 
    | Change | DDL | Safety |
    |--------|-----|--------|
-   | New value | `ALTER TYPE name ADD VALUE 'v'` | `MANUAL` |
+   | New value | `ALTER TYPE name ADD VALUE 'v' [BEFORE/AFTER 'existing']` | `MANUAL` |
+   | Value renamed (`RENAMED FROM`, §5.1.1) | `ALTER TYPE name RENAME VALUE 'old' TO 'new'` | `SAFE` |
    | Value removed (guarded) | MIGRATE REMOVE procedure (§5.1.2) | `DESTRUCTIVE` |
    | Value removed (unguarded) | Error DPG-E014 (or with `--allow-destructive`) | `DESTRUCTIVE` |
    | Comment changed | `COMMENT ON TYPE name IS '...'` | `SAFE` |
+   | Owner changed | `ALTER TYPE name OWNER TO role` | `SAFE` |
+   | Renamed (`RENAMED FROM` on the type) | `ALTER TYPE old RENAME TO new` | `CAUTION` |
+   | Moved to another schema (`RENAMED FROM` schema-qualified) | `ALTER TYPE old_schema.name SET SCHEMA new_schema` | `SAFE` |
+
+   Composite, Range, Domain, and Base types follow the same
+   Owner/Renamed/Moved-to-another-schema rows as ENUM above (§5.1's
+   cross-reference) — not repeated per kind here; each kind's own
+   section (§5.2-§5.5) documents any additional kind-specific rows
+   (Composite attribute rename, Domain constraint `NOT VALID`/rename,
+   etc.).
 
    **SEQUENCE:**
 
@@ -6180,18 +6500,18 @@ serial_sequence_declared      = "off"
    | Indexes — covering (`INCLUDE`) | Declared, Diffed | Drop + recreate on change |
    | Indexes — concurrent creation | Declared, Manual | `CREATE INDEX CONCURRENTLY` |
    | Indexes — `ON ONLY`, opclass parameters, `NULLS [NOT] DISTINCT`, rename | Declared, Diffed | `ONLY` suppresses partition recursion; rename is metadata-only (§7.7) |
-   | ENUM types | Declared, Diffed | `MIGRATE REMOVE` for value removal |
-   | Composite types | Declared, Diffed | |
-   | Range types | Declared, Diffed | Any change = DESTRUCTIVE |
-   | Domain types | Declared, Diffed | |
-   | Base (shell) types | Declared, Passthrough | |
+   | ENUM types | Declared, Diffed | `MIGRATE REMOVE` for value removal; `BEFORE`/`AFTER` positional `ADD VALUE`, `RENAME VALUE`, `OWNER`, `RENAMED FROM`/`SET SCHEMA` |
+   | Composite types | Declared, Diffed | Attribute `COLLATE`; `OWNER`, `RENAMED FROM`/`SET SCHEMA` |
+   | Range types | Declared, Diffed | Any option change = DESTRUCTIVE; `OWNER`, `RENAMED FROM`/`SET SCHEMA`; multirange companion auto-created, never separately declared |
+   | Domain types | Declared, Diffed | `COLLATE`; `NOT VALID`/`VALIDATE CONSTRAINT`/`RENAME CONSTRAINT` lifecycle; `OWNER`, `RENAMED FROM`/`SET SCHEMA` |
+   | Base (shell) types | Declared, Passthrough | Bare forward-declaration shell + automatic cycle-breaking for self-referential support functions (§5.5); `OWNER`, `RENAMED FROM`/`SET SCHEMA` |
    | Virtual types | Declared, No SQL | DPG-native; snapshot only |
    | Views | Declared, Diffed | Column list change = DESTRUCTIVE; `RENAMED FROM` and cross-schema `SET SCHEMA` supported (§7.6, §8.1) |
    | Materialized views | Declared, Diffed | Query change = DESTRUCTIVE; `RENAMED FROM`/`SET SCHEMA` supported (§8.2) |
    | Recursive views | Declared, Diffed | |
-   | Functions — all languages | Declared, Passthrough body | Body hash-diffed |
-   | Procedures | Declared, Passthrough body | |
-   | Aggregates | Declared, Diffed | Option change = DESTRUCTIVE |
+   | Functions — all languages | Declared, Passthrough body | Body hash-diffed; `LEAKPROOF`, `TRANSFORM FOR TYPE`, C/`internal` `AS` forms, PG14+ `BEGIN ATOMIC`, `[NO] DEPENDS ON EXTENSION`, `OWNER`, `REVOCATIONS`, `RENAMED FROM`/`SET SCHEMA` |
+   | Procedures | Declared, Passthrough body | Same additions as Functions above (`[NO] DEPENDS ON EXTENSION`, `OWNER`, `REVOCATIONS`, `RENAMED FROM`/`SET SCHEMA`) |
+   | Aggregates | Declared, Diffed | Full `agg-options` set (§9.4) diffed; any option change = DESTRUCTIVE; `RENAME TO`/`OWNER TO`/`SET SCHEMA` are the only non-destructive ALTER operations, matching real PostgreSQL's `ALTER AGGREGATE` surface |
    | Window functions | Declared, Passthrough body | |
    | Row Level Security | Declared, Diffed | |
    | Triggers | Declared, Diffed | |
