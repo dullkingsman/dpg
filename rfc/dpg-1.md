@@ -3224,6 +3224,11 @@ detached-from-dir = "DETACHED FROM" WSP table-ref [ WSP "CONCURRENTLY" ] ";"
    `{ }` block holds grants, a comment, owner, and other externally-
    attachable concerns.
 
+   **Temporary views** are session-scoped for the same reason temporary
+   tables are (§7.12) and are excluded on the same terms: DPG MUST NOT
+   manage them, and a `TEMPORARY VIEW` (or `TEMP VIEW`) keyword anywhere
+   in a `.dpg` file is a compiler error (DPG-E023).
+
    **PG equivalent:**
    `CREATE [OR REPLACE] VIEW name [(col-list)] [WITH (options)] AS query [WITH CHECK OPTION]`
 
@@ -4123,6 +4128,24 @@ ROLE app_admin
    requires an explicit revoke-and-regrant cycle which the operator
    SHOULD perform manually).
 
+   **Privilege list is untyped, by design — an accepted offline
+   limitation:** `privilege` (Appendix A) is a single flat union shared
+   verbatim across every object kind's `GRANTS { }`/`REVOCATIONS { }`
+   block, not PostgreSQL's real per-object-type privilege subsets
+   (e.g. `TABLE` accepts `SELECT`/`INSERT`/`UPDATE`/`DELETE`/
+   `TRUNCATE`/`REFERENCES`/`TRIGGER`/`MAINTAIN`; `SEQUENCE` accepts only
+   `USAGE`/`SELECT`/`UPDATE`; `SCHEMA` only `CREATE`/`USAGE`; `FUNCTION`/
+   `PROCEDURE` only `EXECUTE`; and so on).  Every real privilege word
+   PostgreSQL has is present in the union, so this is not a Tenet-1
+   expressiveness gap — nothing is unexpressable — but DPG offers no
+   offline validation contract catching "wrong privilege for this
+   object kind" (e.g. `EXECUTE ON TABLE`) at `plan` time; such a
+   mistake surfaces only as a PostgreSQL parse/grammar error at `apply`
+   time, the same passthrough-to-PostgreSQL's-own-parser principle used
+   throughout this document for clause-combination validation generally
+   (e.g. §7.9's `REFERENCING` note).  Stated here explicitly per
+   Tenet 3, rather than left as a silent gap.
+
 ### 11.3. Revocations
 
    Explicit revocations are declared in `REVOCATIONS { }` blocks and
@@ -4996,15 +5019,28 @@ SCHEMA public {
 ### 14.6. Extended Statistics Objects
 
    **PG equivalent:**
-   `CREATE STATISTICS [IF NOT EXISTS] name [(kinds)] ON col1, col2 [, ...] FROM table`
+   `CREATE STATISTICS [IF NOT EXISTS] name [(kinds)] ON { column | (expression) } [, ...] FROM table`
 
 ```sql
 SCHEMA public {
     STATISTICS orders_stats (dependencies, ndistinct, mcv)
         ON customer_id, created_at
         FROM orders;
+
+    -- Extended statistics on an expression (PostgreSQL 14+), not just
+    -- plain columns.
+    STATISTICS orders_date_stats (ndistinct)
+        ON (date_trunc('month', created_at)), customer_id
+        FROM orders;
 }
 ```
+
+   Extended Statistics is an `opaque-object-decl` kind (Appendix A) —
+   the whole `ON ... FROM ...` clause, expressions included, is Part 1
+   passthrough handed to `pg_query` verbatim, the same as every other
+   property shown above. Confirmed: DPG performs no column-list parsing
+   of its own here, so a `(expression)` entry needs no DPG-side grammar
+   and works today exactly like the plain-column form.
 
    **Diffing semantics:**
 
@@ -7118,6 +7154,7 @@ serial_sequence_declared      = "off"
    | `IMPORT FOREIGN SCHEMA` | Out of scope | Runtime discovery |
    | `REFRESH MATERIALIZED VIEW` | Out of scope | Runtime DML |
    | Temporary tables | Out of scope | Session-scoped |
+   | Temporary views | Out of scope | Session-scoped, same reasoning as temporary tables (§8.1) |
    | Inline data seeding | Out of scope | DPG is a schema tool; data management is outside its scope |
    | Database management (`CREATE`/`ALTER`/`DROP DATABASE`) | Out of scope | Cluster-provisioning, not schema management; see §23 — permanent, not deferred |
    | `REASSIGN OWNED BY` / `DROP OWNED BY` | Out of scope | One-shot maintenance command, not a declarable object; see §23 |
@@ -7601,63 +7638,6 @@ SCHEMA public {
    | DPG-E034 | `duplicate_cluster_name` | Two cluster directories declare the same `name` (§3.6). |
    | DPG-E035 | `duplicate_database_name` | Two database directories within the same cluster declare the same `name` (§3.6). |
    | DPG-E036 | `owner_role_not_a_member` | Connecting role is not a member of one or more declared `OWNER` roles (§11.5). |
-
----
-
-## Normative References
-
-   [RFC2119]  Bradner, S., "Key words for use in RFCs to Indicate
-              Requirement Levels", BCP 14, RFC 2119,
-              DOI 10.17487/RFC2119, March 1997,
-              <https://www.rfc-editor.org/rfc/rfc2119>.
-
-   [RFC5234]  Crocker, D. and P. Overell, "Augmented BNF for Syntax
-              Specifications: ABNF", STD 68, RFC 5234,
-              DOI 10.17487/RFC5234, January 2008,
-              <https://www.rfc-editor.org/rfc/rfc5234>.
-
-   [RFC8174]  Leiba, B., "Ambiguity of Uppercase vs Lowercase in
-              RFC 2119 Key Words", BCP 14, RFC 8174,
-              DOI 10.17487/RFC8174, May 2017,
-              <https://www.rfc-editor.org/rfc/rfc8174>.
-
-   [RFC3629]  Yergeau, F., "UTF-8, a transformation format of
-              ISO 10646", STD 63, RFC 3629,
-              DOI 10.17487/RFC3629, November 2003,
-              <https://www.rfc-editor.org/rfc/rfc3629>.
-
-   [PGDOC14]  The PostgreSQL Global Development Group, "PostgreSQL 14
-              Documentation", 2021,
-              <https://www.postgresql.org/docs/14/>.
-
-## Informative References
-
-   [ATLAS]    Ariga, "Atlas — Database Schema Management",
-              <https://atlasgo.io/>.
-
-   [PRISMA]   Prisma Data, "Prisma ORM — Schema reference",
-              <https://www.prisma.io/docs/concepts/components/prisma-schema>.
-
-   [FLYWAY]   Redgate, "Flyway — Database Migrations Made Easy",
-              <https://flywaydb.org/>.
-
-   [KAHN62]   Kahn, A.B., "Topological sorting of large networks",
-              Communications of the ACM, 5(11), pp. 558–562, 1962.
-
-   [TARJAN72] Tarjan, R., "Depth-first search and linear graph
-              algorithms", SIAM Journal on Computing, 1(2),
-              pp. 146–160, 1972.
-
-   [NDJSON]   "Newline Delimited JSON", <http://ndjson.org/>.
-
----
-
-## Author's Address
-
-   Daniel Tsegaw
-   Independent
-
-   Email: danieltsegaw.b@gmail.com
 
 ---
 
@@ -8536,6 +8516,12 @@ ENUM user_status ('active', 'inactive', 'banned') {
    | E.10 | 2026-08-19 | §7.9 updated. `REFERENCING OLD TABLE AS ... NEW TABLE AS ...` was already specified in this section's ABNF grammar and worked example, but the reference implementation had no handling for it at all — a hard parse error, not a silent no-op. Now implemented end-to-end (parser, IR, differ, snapshot, introspection, dump). New informative-only prose added documenting PostgreSQL's real constraints on `REFERENCING` (`AFTER`-only, no `CONSTRAINT` triggers, no views/foreign tables/`TRUNCATE`), confirmed live against PostgreSQL 17 — consistent with DPG's existing stance of performing zero trigger clause-combination validation of its own. |
    | E.11 | 2026-08-23 | §22.1 edge source 9 corrected. E.9 extended edge source 9 to `LANGUAGE plpgsql` bodies as well as `sql`, but combined with the pre-existing edge source 6 (table→trigger-function) this could construct a 2-node table/function cycle with zero FK edges in it — a shape §22.2's `DEFERRABLE`-only cycle-breaker has no mechanism to resolve — for an entirely ordinary pattern: a validation/audit trigger function whose body queries its own table. Edge source 9 is now `LANGUAGE sql`-only, matching the reference implementation's pre-existing (and correct) function-calls-function edge, which already exempted `plpgsql` for the identical reason: PostgreSQL compiles `plpgsql` lazily and never resolves embedded SQL against the catalog at `CREATE FUNCTION` time, so the edge was never actually required for a successful `apply`. Confirmed live against PostgreSQL 17: the reference implementation reproduced the cycle before this fix and applies cleanly after it. |
    | E.12 | 2026-08-23 | Appendix F added: the full Standard SQL / PostgreSQL-specific classification Tenet 3 (§1.4) promises but never previously published anywhere in normative text — closes the gap the reference `dpg portability` command's own design has relied on informally since initial publication. §1.4 also gained an explicit PostgreSQL version target (floor 14, no ceiling, rolling) — previously only implied by front-matter metadata, never stated in body text. §5.4 (Domain Types) rewritten: `DEFAULT`/`CONSTRAINT ... CHECK`/`NOT NULL` moved from the `{ }` block into native Part 1 `CREATE DOMAIN` syntax, correcting a Tenet-5 self-violation identified by the RFC completeness audit's finding #1 (this is a breaking syntax change for any existing `.dpg` source declaring a Domain with these clauses — reference implementation update tracked separately, not part of this revision). |
+   | E.13 | 2026-08-23 | §7/§21/§25 updated: new grammar for Tables/Views/Indexes/Sequences closing the RFC-completeness audit's largest cluster — `LIKE`, typed tables (`OF type_name`), `USING` access method, index `ONLY`/opclass parameters/`NULLS [NOT] DISTINCT`/rename, `ATTACH`/`DETACH PARTITION [CONCURRENTLY]` via new `ATTACHED FROM`/`DETACHED FROM` directives, `REPLICA IDENTITY`, `CLUSTER ON`, trigger enable-state, constraint rename and deferrability-only `ALTER CONSTRAINT`, generated-column/identity-column ALTER paths, Sequence `UNLOGGED`/`OWNED BY NONE`/`RESTART`/`REVOCATIONS`. Introduced the generic cross-schema `SET SCHEMA` mechanism (`renamed-from-dir`: `identifier` → `qual-name`, additive) reused by every later revision below. Folded in Table `LOGGED`/`UNLOGGED` DESTRUCTIVE→safe-`ALTER` swap (§7.12). |
+   | E.14 | 2026-08-23 | §5/§9/§21/§25 updated: new grammar for Types/Domains/Functions/Procedures/Aggregates. ENUM positional `ADD VALUE`/`RENAME VALUE`; Composite attribute `COLLATE` and a `{ }` block it previously entirely lacked; Range/Base type `{ }` blocks (owner/rename) added likewise; Domain `COLLATE`/`NOT VALID`/`VALIDATE CONSTRAINT`/`RENAME CONSTRAINT`; Base type bare forward-declaration shell plus automatic shell-then-redefine cycle-breaking for self-referential support functions; Function/Procedure `LEAKPROOF`, `TRANSFORM FOR TYPE`, C/`internal` `AS` body forms, PG14+ `BEGIN ATOMIC`, `[NO] DEPENDS ON EXTENSION`, `OWNER`, `REVOCATIONS`; Aggregate `agg-options` formally defined (previously referenced but never enumerated) with `RENAME TO`/`OWNER TO`/`SET SCHEMA` as its only non-destructive `ALTER` operations, matching real PostgreSQL's actual `ALTER AGGREGATE` surface. |
+   | E.15 | 2026-08-23 | §7/§11/§14/§21/§25 updated: new Access Control grammar. Table `MAINTAIN` privilege (PG17) and `GRANTED BY role`; Trigger `[NO] DEPENDS ON EXTENSION`; Role `WITH ADMIN`/`INHERIT`/`SET` membership modifiers (PG16+), `SET`/`RESET [IN DATABASE]` session config, `RENAMED FROM` (closing a rename gap that could be genuinely impossible to work around via drop-and-recreate, since PostgreSQL refuses to drop a role that owns objects); Event Trigger gained a `{ }` block for the first time (enable-state, `OWNER`, `RENAME TO`). New §11.6 Parameter Privileges: `GRANT {SET\|ALTER SYSTEM} ON PARAMETER`, explicitly distinguished from the `ALTER SYSTEM` command itself remaining out of scope (§23). |
+   | E.16 | 2026-08-23 | §6/§7/§12/§13/§14/§21/§25 updated. Full-Text Search: TS Configuration `OWNER`/`ALTER MAPPING REPLACE`; TS Dictionary/Parser/Template gained `{ }` blocks for the first time. Namespace/Storage/FDW/Replication: Publication `OWNER`/`RENAMED FROM`; Foreign Server gained a `{ }` block plus bare `VERSION`-only change; Tablespace `RENAMED FROM` and post-creation `OWNER` diffing; Collation gained a `{ }` block, PG16+ `RULES`, and `REFRESH VERSION` (PG15+); Foreign Table's previously entirely-missing diffing table added (verified directly against `internal/diff/differ.go`: `SERVER` change is `DESTRUCTIVE`, real PostgreSQL has no `ALTER FOREIGN TABLE` clause for it); `ALTER EXTENSION ADD`/`DROP member_object` added as an explicit non-goal. Also closed the last 4 of 5 Phase-5 DESTRUCTIVE→safe-`ALTER` swaps identified in the 2026-08-18 audit: Extension `SET SCHEMA`, Base type property changes (`ALTER TYPE ... SET (...)`, diffing model changed from a single opaque hash to per-key comparison), TS Dictionary option changes, and RLS Policy `TO`/`USING`/`WITH CHECK`-only changes via `ALTER POLICY` (closing a real safety gap: drop-and-recreate previously opened a window with zero active policy for that command). |
+   | E.17 | 2026-08-23 | §5-§7/§11/§14/§21/§25 updated: newer-PostgreSQL-version grammar (PG15-18), closing the RFC-completeness audit's last cluster. Generated-column `VIRTUAL` (PG18); `NOT NULL ... NO INHERIT`; `ENFORCED`/`NOT ENFORCED` on `CHECK`/`FOREIGN KEY` (PG18); `WITHOUT OVERLAPS`/`PERIOD` temporal keys (PG18, SQL:2011) with a new `PERIOD FOR` column-item production; table-level named `NOT NULL` constraint with its own `NOT VALID`/`VALIDATE CONSTRAINT`/`[NO] INHERIT` lifecycle (PG18); FK `ON DELETE`/`ON UPDATE SET NULL`/`SET DEFAULT (col-list)` (PG15); `SET STATISTICS DEFAULT` (PG17); Event Trigger `login` event (PG17, verified against PostgreSQL's own documentation). Confirmed (not gaps, no grammar change) that `EXCLUDE`/identity columns on partitioned tables (PG17), foreign-table `TRUNCATE` triggers (PG16) and `NOT NULL` (PG18), and `ALTER GROUP` role-membership syntax were all already covered by existing generic grammar. `DROP CONSTRAINT ... ONLY` on partitioned tables (PG18) documented as a known, narrow open gap rather than force-fitting unusable grammar. Fixed a factual error in §5.1.1: `ALTER TYPE ADD VALUE`'s transaction-block restriction was lifted in PostgreSQL 12, not 16 as previously stated (verified against PostgreSQL 12.0's release notes) — `core/`'s implementation has the identical error, not corrected as part of this (spec-only) revision. |
+   | E.18 | 2026-08-23 | Closed the RFC-completeness audit's final mop-up items and a structural defect: §11.2 documents GRANT's untyped, cross-object-kind-shared privilege list as an accepted offline validation limitation (every real privilege word is expressible; nothing is unexpressable, but DPG performs no offline "wrong privilege for this object kind" check); §14.6 confirms Extended Statistics on an expression (not just plain columns, PG14+) passes through cleanly as `opaque-object-decl` Part 1 text; §8.1/§25 note temporary views are excluded on the same terms as temporary tables (§7.12). Also: this document's own physical section order was corrected to match its Table of Contents — Normative References/Informative References/Author's Address, previously sandwiched between Appendix C and Appendix D, now correctly follow Appendix F as the final sections (standard IETF convention), matching how every other RFC-style document in this family is laid out. |
 
 ---
 
@@ -8643,6 +8629,63 @@ ENUM user_status ('active', 'inactive', 'banned') {
    the same revision (Appendix E's entry for that revision should note
    the addition) — this is what keeps Tenet 3 checkable rather than
    aspirational, the defect this appendix was added to close.
+
+---
+
+## Normative References
+
+   [RFC2119]  Bradner, S., "Key words for use in RFCs to Indicate
+              Requirement Levels", BCP 14, RFC 2119,
+              DOI 10.17487/RFC2119, March 1997,
+              <https://www.rfc-editor.org/rfc/rfc2119>.
+
+   [RFC5234]  Crocker, D. and P. Overell, "Augmented BNF for Syntax
+              Specifications: ABNF", STD 68, RFC 5234,
+              DOI 10.17487/RFC5234, January 2008,
+              <https://www.rfc-editor.org/rfc/rfc5234>.
+
+   [RFC8174]  Leiba, B., "Ambiguity of Uppercase vs Lowercase in
+              RFC 2119 Key Words", BCP 14, RFC 8174,
+              DOI 10.17487/RFC8174, May 2017,
+              <https://www.rfc-editor.org/rfc/rfc8174>.
+
+   [RFC3629]  Yergeau, F., "UTF-8, a transformation format of
+              ISO 10646", STD 63, RFC 3629,
+              DOI 10.17487/RFC3629, November 2003,
+              <https://www.rfc-editor.org/rfc/rfc3629>.
+
+   [PGDOC14]  The PostgreSQL Global Development Group, "PostgreSQL 14
+              Documentation", 2021,
+              <https://www.postgresql.org/docs/14/>.
+
+## Informative References
+
+   [ATLAS]    Ariga, "Atlas — Database Schema Management",
+              <https://atlasgo.io/>.
+
+   [PRISMA]   Prisma Data, "Prisma ORM — Schema reference",
+              <https://www.prisma.io/docs/concepts/components/prisma-schema>.
+
+   [FLYWAY]   Redgate, "Flyway — Database Migrations Made Easy",
+              <https://flywaydb.org/>.
+
+   [KAHN62]   Kahn, A.B., "Topological sorting of large networks",
+              Communications of the ACM, 5(11), pp. 558–562, 1962.
+
+   [TARJAN72] Tarjan, R., "Depth-first search and linear graph
+              algorithms", SIAM Journal on Computing, 1(2),
+              pp. 146–160, 1972.
+
+   [NDJSON]   "Newline Delimited JSON", <http://ndjson.org/>.
+
+---
+
+## Author's Address
+
+   Daniel Tsegaw
+   Independent
+
+   Email: danieltsegaw.b@gmail.com
 
 ---
 
