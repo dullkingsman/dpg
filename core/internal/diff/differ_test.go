@@ -9050,6 +9050,43 @@ func TestDiffOperatorFamilyRenamedFromEmitsAlterRename(t *testing.T) {
 	}
 }
 
+// TestDiffOperatorFamilyRenamedFromCrossSchema is diffTable's
+// TestDiffRenameTableCrossSchema counterpart for OperatorFamily.
+func TestDiffOperatorFamilyRenamedFromCrossSchema(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	sm := snapshot.SnapOpFamilyMember{Number: 1, NameSchema: "pg_catalog", Name: "<", LeftType: "integer", RightType: "bigint"}
+	oldBody := `CREATE OPERATOR FAMILY "old_schema"."member_fam" USING btree`
+	newBody := `CREATE OPERATOR FAMILY "new_schema"."member_fam" USING btree`
+	_ = snap.SetObject("old_schema.member_fam USING btree FAMILY", &snapshot.SnapObject{
+		Kind: "operator_family",
+		Opaque: &snapshot.SnapOpaque{
+			Kind: "operator_family", Schema: "old_schema", Name: "member_fam", Using: "btree",
+			BodyHash:                  hashText(oldBody),
+			OpFamilyMembersStructured: true, OpFamilyMembers: []snapshot.SnapOpFamilyMember{sm},
+		},
+	})
+	old := "member_fam"
+	oldSchema := "old_schema"
+	m := pipeline.OpFamilyMember{Number: 1, Name: pipeline.Identifier{Name: "<"}, LeftType: "integer", RightType: "bigint"}
+	desired := &ir.OperatorFamily{
+		Schema: "new_schema", Name: "member_fam", AccessMethod: "btree",
+		Body: newBody, Members: []pipeline.OpFamilyMember{m},
+		RenamedFrom: &old, RenamedFromSchema: &oldSchema,
+	}
+	ops, err := d.Diff([]pipeline.IRObject{desired}, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if containsSQL(ops, "DROP OPERATOR FAMILY") {
+		t.Fatalf("cross-schema rename should match the existing operator family, not drop+create, got: %v", sqlList(ops))
+	}
+	want := `ALTER OPERATOR FAMILY "old_schema"."member_fam" USING btree SET SCHEMA "new_schema";`
+	if !containsSQL(ops, want) {
+		t.Errorf("expected %q, got: %v", want, sqlList(ops))
+	}
+}
+
 // TestDiffOperatorFamilyRenamedFromStaleErrors mirrors every other kind's
 // identical stale-RENAMED-FROM validation.
 func TestDiffOperatorFamilyRenamedFromStaleErrors(t *testing.T) {
@@ -9270,6 +9307,45 @@ func TestDiffOperatorClassRenamedFromEmitsAlterRename(t *testing.T) {
 		if strings.Contains(o.SQL(), "RENAME TO") && o.Safety() != pipeline.Caution {
 			t.Errorf("expected CAUTION safety for ALTER OPERATOR CLASS RENAME TO, got %v", o.Safety())
 		}
+	}
+}
+
+// TestDiffOperatorClassRenamedFromCrossSchema is diffTable's
+// TestDiffRenameTableCrossSchema counterpart for OperatorClass.
+func TestDiffOperatorClassRenamedFromCrossSchema(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("old_schema.my_ops USING btree", &snapshot.SnapObject{
+		Kind: "operator_class",
+		Opaque: &snapshot.SnapOpaque{
+			Kind: "operator_class", Schema: "old_schema", Name: "my_ops", Using: "btree",
+			BodyHash:                       fmt.Sprintf("%x", sha256Sum("CREATE OPERATOR CLASS old_schema.my_ops FOR TYPE int4 USING btree FAMILY old_schema.shared_family AS OPERATOR 1 <(integer, integer), OPERATOR 3 =(integer, integer), FUNCTION 1 (integer, integer) btint4cmp(integer, integer)")),
+			OperatorClassMembersStructured: true,
+			OperatorClassMembers:           opClassMemberFixtureIntrospected(),
+			OperatorClassFamilySchema:      "old_schema", OperatorClassFamilyName: "shared_family",
+		},
+	})
+	old := "my_ops"
+	oldSchema := "old_schema"
+	desired := []pipeline.IRObject{
+		&ir.OperatorClass{
+			Schema: "new_schema", Name: "my_ops", AccessMethod: "btree",
+			FamilySchema: "old_schema", FamilyName: "shared_family",
+			RenamedFrom: &old, RenamedFromSchema: &oldSchema,
+			Body:    "CREATE OPERATOR CLASS new_schema.my_ops FOR TYPE int4 USING btree FAMILY old_schema.shared_family AS OPERATOR 1 <, OPERATOR 3 =, FUNCTION 1 btint4cmp(int4, int4)",
+			Members: opClassMemberFixture(),
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if containsSQL(ops, "DROP OPERATOR CLASS") {
+		t.Fatalf("cross-schema rename should match the existing operator class, not drop+create, got: %v", sqlList(ops))
+	}
+	want := `ALTER OPERATOR CLASS "old_schema"."my_ops" USING btree SET SCHEMA "new_schema";`
+	if !containsSQL(ops, want) {
+		t.Errorf("expected %q, got: %v", want, sqlList(ops))
 	}
 }
 
@@ -11134,6 +11210,94 @@ func TestDiffTSTemplateRenamedFromEmitsAlterRename(t *testing.T) {
 	}
 }
 
+// TestDiffTSDictRenamedFromCrossSchema is diffTable's
+// TestDiffRenameTableCrossSchema counterpart for TSDict.
+func TestDiffTSDictRenamedFromCrossSchema(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("old_schema.ispell", &snapshot.SnapObject{
+		Kind: "ts_dict",
+		Opaque: &snapshot.SnapOpaque{
+			Kind: "ts_dict", Schema: "old_schema", Name: "ispell",
+			BodyHash: hashText("CREATE TEXT SEARCH DICTIONARY old_schema.ispell (TEMPLATE = ispell)"),
+		},
+	})
+	old := "ispell"
+	oldSchema := "old_schema"
+	desired := []pipeline.IRObject{
+		&ir.TSDict{
+			Schema: "new_schema", Name: "ispell", RenamedFrom: &old, RenamedFromSchema: &oldSchema,
+			Body: "CREATE TEXT SEARCH DICTIONARY new_schema.ispell (TEMPLATE = ispell)",
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if containsSQL(ops, "DROP TEXT SEARCH DICTIONARY") {
+		t.Fatalf("cross-schema rename should match the existing dictionary, not drop+create, got: %v", sqlList(ops))
+	}
+	want := `ALTER TEXT SEARCH DICTIONARY "old_schema"."ispell" SET SCHEMA "new_schema";`
+	if !containsSQL(ops, want) {
+		t.Errorf("expected %q, got: %v", want, sqlList(ops))
+	}
+}
+
+// TestDiffTSParserRenamedFromCrossSchema is TSDict's TSParser counterpart.
+func TestDiffTSParserRenamedFromCrossSchema(t *testing.T) {
+	d := New()
+	body := "CREATE TEXT SEARCH PARSER old_schema.prs (START = prsd_start, GETTOKEN = prsd_nexttoken, END = prsd_end, LEXTYPES = prsd_lextype)"
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("old_schema.prs", &snapshot.SnapObject{
+		Kind: "ts_parser",
+		Opaque: &snapshot.SnapOpaque{
+			Kind: "ts_parser", Schema: "old_schema", Name: "prs", BodyHash: hashText(body),
+		},
+	})
+	old := "prs"
+	oldSchema := "old_schema"
+	newBody := "CREATE TEXT SEARCH PARSER new_schema.prs (START = prsd_start, GETTOKEN = prsd_nexttoken, END = prsd_end, LEXTYPES = prsd_lextype)"
+	desired := []pipeline.IRObject{
+		&ir.TSParser{Schema: "new_schema", Name: "prs", RenamedFrom: &old, RenamedFromSchema: &oldSchema, Body: newBody},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := `ALTER TEXT SEARCH PARSER "old_schema"."prs" SET SCHEMA "new_schema";`
+	if !containsSQL(ops, want) {
+		t.Errorf("expected %q, got: %v", want, sqlList(ops))
+	}
+}
+
+// TestDiffTSTemplateRenamedFromCrossSchema is TSDict's TSTemplate
+// counterpart.
+func TestDiffTSTemplateRenamedFromCrossSchema(t *testing.T) {
+	d := New()
+	body := "CREATE TEXT SEARCH TEMPLATE old_schema.tmpl (LEXIZE = dsimple_lexize)"
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("old_schema.tmpl", &snapshot.SnapObject{
+		Kind: "ts_template",
+		Opaque: &snapshot.SnapOpaque{
+			Kind: "ts_template", Schema: "old_schema", Name: "tmpl", BodyHash: hashText(body),
+		},
+	})
+	old := "tmpl"
+	oldSchema := "old_schema"
+	newBody := "CREATE TEXT SEARCH TEMPLATE new_schema.tmpl (LEXIZE = dsimple_lexize)"
+	desired := []pipeline.IRObject{
+		&ir.TSTemplate{Schema: "new_schema", Name: "tmpl", RenamedFrom: &old, RenamedFromSchema: &oldSchema, Body: newBody},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := `ALTER TEXT SEARCH TEMPLATE "old_schema"."tmpl" SET SCHEMA "new_schema";`
+	if !containsSQL(ops, want) {
+		t.Errorf("expected %q, got: %v", want, sqlList(ops))
+	}
+}
+
 // TestDiffTSDictRenamedFromStaleErrors mirrors every other kind's identical
 // stale-RENAMED-FROM validation.
 func TestDiffTSDictRenamedFromStaleErrors(t *testing.T) {
@@ -11813,8 +11977,11 @@ func TestDiffFunctionRenamedFromCrossSchema(t *testing.T) {
 	if containsSQL(ops, "DROP FUNCTION") {
 		t.Errorf("cross-schema rename should match the existing function, not DROP+CREATE, got: %v", sqlList(ops))
 	}
-	if !containsSQL(ops, `ALTER FUNCTION "old_schema"."calc_total"(integer) RENAME TO "calc_total_v2";`) {
-		t.Errorf("expected ALTER FUNCTION referencing the function's actual (old) schema, got: %v", sqlList(ops))
+	if !containsSQL(ops, `ALTER FUNCTION "old_schema"."calc_total"(integer) SET SCHEMA "new_schema";`) {
+		t.Errorf("expected SET SCHEMA referencing the function's actual (old) schema, got: %v", sqlList(ops))
+	}
+	if !containsSQL(ops, `ALTER FUNCTION "new_schema"."calc_total"(integer) RENAME TO "calc_total_v2";`) {
+		t.Errorf("expected RENAME TO after the schema move, got: %v", sqlList(ops))
 	}
 }
 
@@ -11888,8 +12055,11 @@ func TestDiffProcedureRenamedFromCrossSchema(t *testing.T) {
 	if containsSQL(ops, "DROP PROCEDURE") {
 		t.Errorf("cross-schema rename should match the existing procedure, not DROP+CREATE, got: %v", sqlList(ops))
 	}
-	if !containsSQL(ops, `ALTER PROCEDURE "old_schema"."recalc_totals_old"(integer) RENAME TO "recalc_totals";`) {
-		t.Errorf("expected ALTER PROCEDURE referencing the procedure's actual (old) schema, got: %v", sqlList(ops))
+	if !containsSQL(ops, `ALTER PROCEDURE "old_schema"."recalc_totals_old"(integer) SET SCHEMA "new_schema";`) {
+		t.Errorf("expected SET SCHEMA referencing the procedure's actual (old) schema, got: %v", sqlList(ops))
+	}
+	if !containsSQL(ops, `ALTER PROCEDURE "new_schema"."recalc_totals_old"(integer) RENAME TO "recalc_totals";`) {
+		t.Errorf("expected RENAME TO after the schema move, got: %v", sqlList(ops))
 	}
 }
 
@@ -11947,6 +12117,44 @@ func TestDiffAggregateRenamedFromEmitsAlterRename(t *testing.T) {
 	}
 	if containsSQL(ops, "DROP AGGREGATE") {
 		t.Errorf("rename should not DROP+CREATE, got: %v", sqlList(ops))
+	}
+}
+
+// TestDiffAggregateRenamedFromCrossSchema is diffTable's
+// TestDiffRenameTableCrossSchema counterpart for Aggregate.
+func TestDiffAggregateRenamedFromCrossSchema(t *testing.T) {
+	d := New()
+	options := []pipeline.StorageParam{{Key: "SFUNC", Value: "numeric_add"}, {Key: "STYPE", Value: "numeric"}}
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("old_schema.amount_sum(numeric)", &snapshot.SnapObject{
+		Kind: "aggregate",
+		Opaque: &snapshot.SnapOpaque{
+			Kind: "aggregate", Schema: "old_schema", Name: "amount_sum", Args: "numeric",
+			AggregateOptionsStructured: true,
+			AggregateOptions:           toComparableOptions(options, false),
+		},
+	})
+	old := "amount_sum"
+	oldSchema := "old_schema"
+	desired := []pipeline.IRObject{
+		&ir.Aggregate{
+			Schema: "new_schema", Name: "amount_sum",
+			Args:              []ir.FuncArg{{Type: ir.TypeRef{Name: "numeric"}}},
+			Body:              "CREATE AGGREGATE new_schema.amount_sum (numeric) (SFUNC = numeric_add, STYPE = numeric)",
+			Options:           options,
+			RenamedFrom:       &old,
+			RenamedFromSchema: &oldSchema,
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if containsSQL(ops, "DROP AGGREGATE") {
+		t.Errorf("cross-schema rename should match the existing aggregate, not DROP+CREATE, got: %v", sqlList(ops))
+	}
+	if !containsSQL(ops, `ALTER AGGREGATE "old_schema"."amount_sum"(numeric) SET SCHEMA "new_schema";`) {
+		t.Errorf("expected SET SCHEMA referencing the aggregate's actual (old) schema, got: %v", sqlList(ops))
 	}
 }
 
@@ -14650,6 +14858,40 @@ func TestDiffStatisticsObjectRenamedFromEmitsAlterRename(t *testing.T) {
 		if strings.Contains(o.SQL(), "RENAME TO") && o.Safety() != pipeline.Caution {
 			t.Errorf("expected CAUTION safety for ALTER STATISTICS RENAME TO, got %v", o.Safety())
 		}
+	}
+}
+
+// TestDiffStatisticsObjectRenamedFromCrossSchema is diffTable's
+// TestDiffRenameTableCrossSchema counterpart for StatisticsObject.
+func TestDiffStatisticsObjectRenamedFromCrossSchema(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("old_schema.st", &snapshot.SnapObject{
+		Kind: "statistics",
+		Opaque: &snapshot.SnapOpaque{
+			Kind: "statistics", Schema: "old_schema", Name: "st", StatisticsStructured: true,
+			StatisticsTable: "old_schema.orders", StatisticsKinds: []string{"ndistinct"}, StatisticsColumns: []string{"a", "b"},
+		},
+	})
+	old := "st"
+	oldSchema := "old_schema"
+	desired := []pipeline.IRObject{
+		&ir.StatisticsObject{
+			Schema: "new_schema", Name: "st", Table: "old_schema.orders", Kinds: []string{"ndistinct"}, Columns: []string{"a", "b"},
+			RenamedFrom: &old, RenamedFromSchema: &oldSchema,
+			Body: "CREATE STATISTICS new_schema.st (ndistinct) ON a, b FROM old_schema.orders",
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if containsSQL(ops, "DROP STATISTICS") {
+		t.Fatalf("cross-schema rename should match the existing statistics object, not drop+create, got: %v", sqlList(ops))
+	}
+	want := `ALTER STATISTICS "old_schema"."st" SET SCHEMA "new_schema";`
+	if !containsSQL(ops, want) {
+		t.Errorf("expected %q, got: %v", want, sqlList(ops))
 	}
 }
 

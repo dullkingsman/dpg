@@ -1907,17 +1907,24 @@ func diffStatisticsObject(o *ir.StatisticsObject, snap *snapshot.SnapOpaque) ([]
 	pos := o.SrcPos
 	ident := qualIdent(o.Schema, o.Name)
 
-	// RENAME TO applies regardless of whether the structured Table/Kinds/
-	// Columns comparison below is trustworthy — Name/Schema are basic
-	// identity fields, not part of that set. Uses snap's matched (old)
-	// name for the FROM side, same reasoning as diffType/diffCollation's
-	// identical rename handling. Not merged into the drop+create branch
-	// below — a simultaneous rename needs no separate ALTER there, since
-	// createOpaque already creates the object under its final (new) name.
+	// SET SCHEMA / RENAME TO apply regardless of whether the structured
+	// Table/Kinds/Columns comparison below is trustworthy — Name/Schema
+	// are basic identity fields, not part of that set. Same ordering as
+	// diffTable's identical mechanism: SET SCHEMA first (old_schema.old_name
+	// -> new schema), then RENAME TO (new_schema.old_name -> new_name). Not
+	// merged into the drop+create branch below — a simultaneous rename/move
+	// needs no separate ALTER there, since createOpaque already creates the
+	// object under its final (new) name/schema.
 	var renameOps []pipeline.DiffOp
+	if snap.Schema != o.Schema {
+		renameOps = append(renameOps, safeOp(
+			fmt.Sprintf("ALTER STATISTICS %s SET SCHEMA %s;", qualIdent(snap.Schema, snap.Name), quoteIdent(o.Schema)),
+			pos,
+		))
+	}
 	if snap.Name != o.Name {
 		renameOps = append(renameOps, cautionOp(
-			fmt.Sprintf("ALTER STATISTICS %s RENAME TO %s;", qualIdent(snap.Schema, snap.Name), quoteIdent(o.Name)),
+			fmt.Sprintf("ALTER STATISTICS %s RENAME TO %s;", qualIdent(o.Schema, snap.Name), quoteIdent(o.Name)),
 			pos,
 		))
 	}
@@ -2352,7 +2359,7 @@ func diffSubscription(o *ir.Subscription, snap *snapshot.SnapOpaque) ([]pipeline
 		// dropped name). Same reasoning and pattern as diffOpaqueIRHash's
 		// callers (diffTSDict et al.), applied inline since Subscription's
 		// body-hash comparison is bespoke, not routed through diffOpaqueIR.
-		hashBody := opaqueBodyForHash(o.Body, o.Name, snap.Name)
+		hashBody := opaqueBodyForHash(o.Body, "", o.Name, "", snap.Name)
 		newHash := hashText(hashBody)
 		if snap.BodyHash != "" && newHash != snap.BodyHash {
 			ops := dropObject(&snapshot.SnapObject{Kind: snap.Kind, Opaque: snap})
@@ -2477,12 +2484,16 @@ func diffAggregate(o *ir.Aggregate, snap *snapshot.SnapOpaque) ([]pipeline.DiffO
 	}
 
 	var ops []pipeline.DiffOp
-	// A rename (RFC audit item #11) needs its own targeted ALTER AGGREGATE
-	// ... RENAME TO — see diffProcedure's identical reasoning, including the
-	// snap.Schema (not o.Schema) old-signature fix.
-	if snap.Name != o.Name {
+	// SET SCHEMA / RENAME TO (RFC audit item #11) — see diffProcedure's
+	// identical reasoning, including the snap.Schema (not o.Schema) old-
+	// signature fix and the SET-SCHEMA-first ordering.
+	if snap.Schema != o.Schema {
 		oldSig := fmt.Sprintf("%s(%s)", qualIdent(snap.Schema, snap.Name), ir.ArgsKey(o.Args))
-		ops = append(ops, safeOp(fmt.Sprintf("ALTER AGGREGATE %s RENAME TO %s;", oldSig, quoteIdent(o.Name)), pos))
+		ops = append(ops, safeOp(fmt.Sprintf("ALTER AGGREGATE %s SET SCHEMA %s;", oldSig, quoteIdent(o.Schema)), pos))
+	}
+	if snap.Name != o.Name {
+		oldSig := fmt.Sprintf("%s(%s)", qualIdent(o.Schema, snap.Name), ir.ArgsKey(o.Args))
+		ops = append(ops, cautionOp(fmt.Sprintf("ALTER AGGREGATE %s RENAME TO %s;", oldSig, quoteIdent(o.Name)), pos))
 	}
 	if desiredTxt, snapTxt := effectiveComment(o.Comment, o.Deprecated), effectiveComment(snap.Comment, snap.Deprecated); !ptrEq(desiredTxt, snapTxt) {
 		if desiredTxt != nil {
@@ -4132,8 +4143,8 @@ func opClassMembersEqual(famSchema string, desired []pipeline.OpFamilyMember, sn
 // only per access method, which itself cannot change via a rename. alterKW
 // is "OPERATOR CLASS" or "OPERATOR FAMILY" (the "FAMILY" keyword belongs
 // there, not after RENAME TO).
-func renameOperatorIfUnchanged(ops []pipeline.DiffOp, alterKW, accessMethod string, snap *snapshot.SnapOpaque, desiredName string, pos pipeline.SourcePos) []pipeline.DiffOp {
-	if snap.Name == desiredName {
+func renameOperatorIfUnchanged(ops []pipeline.DiffOp, alterKW, accessMethod string, snap *snapshot.SnapOpaque, desiredSchema, desiredName string, pos pipeline.SourcePos) []pipeline.DiffOp {
+	if snap.Schema == desiredSchema && snap.Name == desiredName {
 		return ops
 	}
 	for _, op := range ops {
@@ -4141,10 +4152,21 @@ func renameOperatorIfUnchanged(ops []pipeline.DiffOp, alterKW, accessMethod stri
 			return ops
 		}
 	}
-	return append(ops, cautionOp(
-		fmt.Sprintf("ALTER %s %s USING %s RENAME TO %s;", alterKW, qualIdent(snap.Schema, snap.Name), accessMethod, quoteIdent(desiredName)),
-		pos,
-	))
+	// SET SCHEMA / RENAME TO, in that order — see diffTable's identical
+	// mechanism/reasoning.
+	if snap.Schema != desiredSchema {
+		ops = append(ops, safeOp(
+			fmt.Sprintf("ALTER %s %s USING %s SET SCHEMA %s;", alterKW, qualIdent(snap.Schema, snap.Name), accessMethod, quoteIdent(desiredSchema)),
+			pos,
+		))
+	}
+	if snap.Name != desiredName {
+		ops = append(ops, cautionOp(
+			fmt.Sprintf("ALTER %s %s USING %s RENAME TO %s;", alterKW, qualIdent(desiredSchema, snap.Name), accessMethod, quoteIdent(desiredName)),
+			pos,
+		))
+	}
+	return ops
 }
 
 func diffOperatorClass(o *ir.OperatorClass, snap *snapshot.SnapOpaque) ([]pipeline.DiffOp, error) {
@@ -4204,13 +4226,13 @@ func diffOperatorClass(o *ir.OperatorClass, snap *snapshot.SnapOpaque) ([]pipeli
 		// identical fix: Body embeds the class's own name, so hashing it
 		// unmodified against a snapshot hash computed under the old name
 		// would always misdetect a pure rename as a body change.
-		hashBody := opaqueBodyForHash(o.Body, o.Name, snap.Name)
+		hashBody := opaqueBodyForHash(o.Body, o.Schema, o.Name, snap.Schema, snap.Name)
 		ops, err = diffOpaqueIRHash(o.QualifiedName(), o.Body, hashBody, o.Reconstructed, o.Comment, snap, o.SrcPos)
 	}
 	if err != nil {
 		return nil, err
 	}
-	return renameOperatorIfUnchanged(ops, "OPERATOR CLASS", o.AccessMethod, snap, o.Name, o.SrcPos), nil
+	return renameOperatorIfUnchanged(ops, "OPERATOR CLASS", o.AccessMethod, snap, o.Schema, o.Name, o.SrcPos), nil
 }
 
 // diffOpFamilyMembers diffs an operator family's loose members (RFC §14.4)
@@ -4382,9 +4404,24 @@ func diffOpaqueIRHash(name, body, hashBody string, reconstructed bool, comment *
 // opaque kinds) may still misdetect, the same known, accepted limitation
 // already documented for Table/View's own cross-schema RENAMED FROM
 // (renames in place, doesn't move schema).
-func opaqueBodyForHash(body, desiredName, oldName string) string {
+func opaqueBodyForHash(body, desiredSchema, desiredName, oldSchema, oldName string) string {
+	// Body commonly embeds the object's own schema-qualified name (e.g.
+	// "CREATE TEXT SEARCH DICTIONARY new_schema.ispell (...)", or quoted
+	// as `"new_schema"."ispell"` depending on the kind's own compiler
+	// output style) — a cross-schema RENAMED FROM changes that schema
+	// text too, even when nothing about the object's real definition
+	// changed. Two independent bare-substring replacements (schema, then
+	// name), not a single concatenated "schema.name" match: a plain
+	// substring replacement is quoting-agnostic (it matches the token
+	// wherever it appears, quoted or not), which is exactly how the
+	// original name-only fix below already worked before schema moves
+	// existed — reusing that same mechanism instead of inventing a
+	// quote-aware qualified-name matcher.
+	if desiredSchema != "" && oldSchema != "" && desiredSchema != oldSchema {
+		body = strings.Replace(body, desiredSchema, oldSchema, 1)
+	}
 	if oldName != "" && oldName != desiredName {
-		return strings.Replace(body, desiredName, oldName, 1)
+		body = strings.Replace(body, desiredName, oldName, 1)
 	}
 	return body
 }
@@ -4415,8 +4452,8 @@ func dropCreateOpaque(name, body string, comment *string, snap *snapshot.SnapOpa
 // its other callers (Operator, OperatorClass, OperatorFamily) have no
 // rename concept in real PostgreSQL at all and shouldn't gain one by
 // extending the shared function's signature.
-func renameOpaqueIfUnchanged(ops []pipeline.DiffOp, alterKW string, snap *snapshot.SnapOpaque, desiredName string, pos pipeline.SourcePos) []pipeline.DiffOp {
-	if snap.Name == desiredName {
+func renameOpaqueIfUnchanged(ops []pipeline.DiffOp, alterKW string, snap *snapshot.SnapOpaque, desiredSchema, desiredName string, pos pipeline.SourcePos) []pipeline.DiffOp {
+	if snap.Schema == desiredSchema && snap.Name == desiredName {
 		return ops
 	}
 	for _, op := range ops {
@@ -4424,10 +4461,21 @@ func renameOpaqueIfUnchanged(ops []pipeline.DiffOp, alterKW string, snap *snapsh
 			return ops
 		}
 	}
-	return append(ops, cautionOp(
-		fmt.Sprintf("ALTER %s %s RENAME TO %s;", alterKW, qualIdent(snap.Schema, snap.Name), quoteIdent(desiredName)),
-		pos,
-	))
+	// SET SCHEMA / RENAME TO, in that order — see diffTable's identical
+	// mechanism/reasoning.
+	if snap.Schema != desiredSchema {
+		ops = append(ops, safeOp(
+			fmt.Sprintf("ALTER %s %s SET SCHEMA %s;", alterKW, qualIdent(snap.Schema, snap.Name), quoteIdent(desiredSchema)),
+			pos,
+		))
+	}
+	if snap.Name != desiredName {
+		ops = append(ops, cautionOp(
+			fmt.Sprintf("ALTER %s %s RENAME TO %s;", alterKW, qualIdent(desiredSchema, snap.Name), quoteIdent(desiredName)),
+			pos,
+		))
+	}
+	return ops
 }
 
 // diffTSDict is diffOpaqueIR's TSDict-specific wrapper: adds RENAME TO
@@ -4435,35 +4483,35 @@ func renameOpaqueIfUnchanged(ops []pipeline.DiffOp, alterKW string, snap *snapsh
 // renameOpaqueIfUnchanged's doc comment for why this lives in a per-kind
 // wrapper instead of the shared function.
 func diffTSDict(o *ir.TSDict, snap *snapshot.SnapOpaque) ([]pipeline.DiffOp, error) {
-	hashBody := opaqueBodyForHash(o.Body, o.Name, snap.Name)
+	hashBody := opaqueBodyForHash(o.Body, o.Schema, o.Name, snap.Schema, snap.Name)
 	ops, err := diffOpaqueIRHash(o.QualifiedName(), o.Body, hashBody, o.Reconstructed, o.Comment, snap, o.SrcPos)
 	if err != nil {
 		return nil, err
 	}
-	return renameOpaqueIfUnchanged(ops, "TEXT SEARCH DICTIONARY", snap, o.Name, o.SrcPos), nil
+	return renameOpaqueIfUnchanged(ops, "TEXT SEARCH DICTIONARY", snap, o.Schema, o.Name, o.SrcPos), nil
 }
 
 // diffTSParser is diffTSDict's TSParser-specific counterpart (RFC Section
 // 12.3). Real PostgreSQL has no OWNER concept for a parser at all, unlike
 // TSDict, so there is no analogous Owner gap to track here.
 func diffTSParser(o *ir.TSParser, snap *snapshot.SnapOpaque) ([]pipeline.DiffOp, error) {
-	hashBody := opaqueBodyForHash(o.Body, o.Name, snap.Name)
+	hashBody := opaqueBodyForHash(o.Body, o.Schema, o.Name, snap.Schema, snap.Name)
 	ops, err := diffOpaqueIRHash(o.QualifiedName(), o.Body, hashBody, o.Reconstructed, o.Comment, snap, o.SrcPos)
 	if err != nil {
 		return nil, err
 	}
-	return renameOpaqueIfUnchanged(ops, "TEXT SEARCH PARSER", snap, o.Name, o.SrcPos), nil
+	return renameOpaqueIfUnchanged(ops, "TEXT SEARCH PARSER", snap, o.Schema, o.Name, o.SrcPos), nil
 }
 
 // diffTSTemplate is diffTSDict's TSTemplate-specific counterpart (RFC
 // Section 12.4). Same no-OWNER-concept note as diffTSParser.
 func diffTSTemplate(o *ir.TSTemplate, snap *snapshot.SnapOpaque) ([]pipeline.DiffOp, error) {
-	hashBody := opaqueBodyForHash(o.Body, o.Name, snap.Name)
+	hashBody := opaqueBodyForHash(o.Body, o.Schema, o.Name, snap.Schema, snap.Name)
 	ops, err := diffOpaqueIRHash(o.QualifiedName(), o.Body, hashBody, o.Reconstructed, o.Comment, snap, o.SrcPos)
 	if err != nil {
 		return nil, err
 	}
-	return renameOpaqueIfUnchanged(ops, "TEXT SEARCH TEMPLATE", snap, o.Name, o.SrcPos), nil
+	return renameOpaqueIfUnchanged(ops, "TEXT SEARCH TEMPLATE", snap, o.Schema, o.Name, o.SrcPos), nil
 }
 
 // diffTSConfig is diffOpaqueIR's TSConfig-specific wrapper: MAPPING FOR
@@ -4513,7 +4561,7 @@ func diffOperatorFamily(o *ir.OperatorFamily, snap *snapshot.SnapOpaque) ([]pipe
 	// identical fix: Body embeds the family's own name, so hashing it
 	// unmodified against a snapshot hash computed under the old name
 	// would always misdetect a pure rename as a body change.
-	hashBody := opaqueBodyForHash(o.Body, o.Name, snap.Name)
+	hashBody := opaqueBodyForHash(o.Body, o.Schema, o.Name, snap.Schema, snap.Name)
 	ops, err := diffOpaqueIRHash(o.QualifiedName(), o.Body, hashBody, o.Reconstructed, o.Comment, snap, o.SrcPos)
 	if err != nil {
 		return nil, err
@@ -4537,7 +4585,7 @@ func diffOperatorFamily(o *ir.OperatorFamily, snap *snapshot.SnapOpaque) ([]pipe
 	// rename here too — a body change already recreates the family under
 	// its final (new) name via dropCreateOpaque, so no separate ALTER is
 	// needed even though this function appends more (safe) ops afterward.
-	return renameOperatorIfUnchanged(ops, "OPERATOR FAMILY", o.AccessMethod, snap, o.Name, o.SrcPos), nil
+	return renameOperatorIfUnchanged(ops, "OPERATOR FAMILY", o.AccessMethod, snap, o.Schema, o.Name, o.SrcPos), nil
 }
 
 func diffProcedure(o *ir.Procedure, snap *snapshot.SnapOpaque) ([]pipeline.DiffOp, error) {
@@ -4550,15 +4598,18 @@ func diffProcedure(o *ir.Procedure, snap *snapshot.SnapOpaque) ([]pipeline.DiffO
 	}
 
 	var ops []pipeline.DiffOp
-	// A rename (RFC audit item #10) needs its own targeted ALTER PROCEDURE
-	// ... RENAME TO — unlike Function, mirrored here but genuinely acted
-	// on: the old name + arg-types signature identifies the live object,
-	// same shape DROP PROCEDURE already uses elsewhere. The old signature
-	// uses snap.Schema (where the procedure actually currently lives), not
-	// o.Schema — see diffTable's identical reasoning.
-	if snap.Name != o.Name {
+	// SET SCHEMA / RENAME TO (RFC audit item #10) — same ordering as
+	// diffTable's identical mechanism: SET SCHEMA first (old_schema.old_sig
+	// -> new schema), then RENAME TO (new_schema.old_sig -> new_name). The
+	// old signature uses snap.Schema (where the procedure actually
+	// currently lives), not o.Schema — see diffTable's identical reasoning.
+	if snap.Schema != o.Schema {
 		oldSig := fmt.Sprintf("%s(%s)", qualIdent(snap.Schema, snap.Name), ir.ArgsKey(o.Args))
-		ops = append(ops, safeOp(fmt.Sprintf("ALTER PROCEDURE %s RENAME TO %s;", oldSig, quoteIdent(o.Name)), pos))
+		ops = append(ops, safeOp(fmt.Sprintf("ALTER PROCEDURE %s SET SCHEMA %s;", oldSig, quoteIdent(o.Schema)), pos))
+	}
+	if snap.Name != o.Name {
+		oldSig := fmt.Sprintf("%s(%s)", qualIdent(o.Schema, snap.Name), ir.ArgsKey(o.Args))
+		ops = append(ops, cautionOp(fmt.Sprintf("ALTER PROCEDURE %s RENAME TO %s;", oldSig, quoteIdent(o.Name)), pos))
 	}
 	if desiredTxt, snapTxt := effectiveComment(o.Comment, o.Deprecated), effectiveComment(snap.Comment, snap.Deprecated); !ptrEq(desiredTxt, snapTxt) {
 		if desiredTxt != nil {
@@ -5136,17 +5187,22 @@ func diffFunction(o *ir.Function, snap *snapshot.SnapFunction) []pipeline.DiffOp
 		return ops
 	}
 
-	// A rename needs its own targeted ALTER FUNCTION ... RENAME TO — mirrors
-	// diffProcedure/diffAggregate's identical fix (RFC audit items #10/#11).
+	// SET SCHEMA / RENAME TO — mirrors diffProcedure/diffAggregate's
+	// identical fix (RFC audit items #10/#11), same ordering as diffTable's
+	// identical mechanism: SET SCHEMA first (old_schema.old_sig -> new
+	// schema), then RENAME TO (new_schema.old_sig -> new_name).
 	// ir.Function.RenamedFrom was previously used for identity matching only:
 	// a rename was correctly matched (no DROP+CREATE) but the live function
-	// itself was never actually renamed, a silent no-op on the rename half.
-	// The old signature uses snap.Schema (where the function actually
-	// currently lives), not o.Schema — see diffTable's identical cross-
-	// schema reasoning.
-	if snap.Name != o.Name {
+	// itself was never actually renamed, a silent no-op on the rename half;
+	// SET SCHEMA was never emitted at all, so a cross-schema RENAMED FROM
+	// matched and renamed in place but never actually moved the function.
+	if snap.Schema != o.Schema {
 		oldSig := fmt.Sprintf("%s(%s)", qualIdent(snap.Schema, snap.Name), ir.ArgsKey(o.Args))
-		ops = append(ops, safeOp(fmt.Sprintf("ALTER FUNCTION %s RENAME TO %s;", oldSig, quoteIdent(o.Name)), pos))
+		ops = append(ops, safeOp(fmt.Sprintf("ALTER FUNCTION %s SET SCHEMA %s;", oldSig, quoteIdent(o.Schema)), pos))
+	}
+	if snap.Name != o.Name {
+		oldSig := fmt.Sprintf("%s(%s)", qualIdent(o.Schema, snap.Name), ir.ArgsKey(o.Args))
+		ops = append(ops, cautionOp(fmt.Sprintf("ALTER FUNCTION %s RENAME TO %s;", oldSig, quoteIdent(o.Name)), pos))
 	}
 
 	// Re-create if: desired has a hash and it differs from the snapshot (including
