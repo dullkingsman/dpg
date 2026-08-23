@@ -2228,6 +2228,39 @@ func (b *Builder) buildDefineStmt(ds *pg_query.DefineStmt, block pipeline.BlockA
 			// already set Body: rawBody identically.
 			t.Variant = "BASE"
 			t.Body = rawBody
+			for _, de := range ds.Definition {
+				elem := de.GetDefElem()
+				if elem == nil {
+					continue
+				}
+				var val *string
+				switch {
+				case elem.Arg == nil:
+					continue // bare flag (e.g. PASSEDBYVALUE) — not one of the 7 alterable properties
+				case elem.Arg.GetTypeName() != nil:
+					s := typeNameToRef(elem.Arg.GetTypeName()).String()
+					val = &s
+				default:
+					s := nodeToText(elem.Arg)
+					val = &s
+				}
+				switch strings.ToLower(elem.Defname) {
+				case "receive":
+					t.BaseReceive = val
+				case "send":
+					t.BaseSend = val
+				case "typmod_in":
+					t.BaseTypmodIn = val
+				case "typmod_out":
+					t.BaseTypmodOut = val
+				case "analyze":
+					t.BaseAnalyze = val
+				case "subscript":
+					t.BaseSubscript = val
+				case "storage":
+					t.BaseStorage = val
+				}
+			}
 		}
 		for _, g := range block.Grants {
 			t.Grants = append(t.Grants, blockGrantToIR(g))

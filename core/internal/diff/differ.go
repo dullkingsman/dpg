@@ -5404,19 +5404,82 @@ func diffType(o *ir.Type, snap *snapshot.SnapType, fullSnap *pipeline.Snapshot, 
 		return ops, nil
 	}
 
+	if o.Variant == "BASE" && snap.Variant == "BASE" && snap.BaseStructured {
+		// RFC §5.5: a BASE type's 7 in-place-alterable properties (real
+		// PostgreSQL's ALTER TYPE ... SET (...) supports exactly these) get
+		// a targeted, SAFE ALTER; everything else about a BASE type is
+		// immutable, so a change to any of it still requires DROP+CREATE —
+		// detected via BaseImmutableHash (Body with the 7 properties' text
+		// stripped out first, see BaseBodyHashInput), not the plain
+		// whole-Body hash, so an alterable-property-only change doesn't
+		// also trip this branch. snap.BaseStructured gates this whole path:
+		// a pre-existing snapshot saved before this feature existed has
+		// BaseImmutableHash=="" always, which would otherwise look
+		// identical to "no comparison possible yet" (Reconstructed) and
+		// silently skip the immutable-property check entirely for every
+		// such snapshot — falling back to the old whole-Body-hash-only
+		// branch below instead keeps that case's existing, correct
+		// behavior unchanged.
+		immutableHash := ""
+		if o.Body != "" && !o.Reconstructed {
+			sum := sha256.Sum256([]byte(strings.TrimSpace(snapshot.BaseBodyHashInput(o.Body))))
+			immutableHash = fmt.Sprintf("%x", sum)
+		}
+		if immutableHash != "" && snap.BaseImmutableHash != "" && immutableHash != snap.BaseImmutableHash {
+			ops = append(ops, destructiveOp(fmt.Sprintf("DROP TYPE IF EXISTS %s;", typeIdent), pos))
+			ops = append(ops, createType(o, vtypes)...)
+			return ops, nil
+		}
+		var setClauses []string
+		addBaseSet := func(key string, desired, snapVal *string) {
+			// Only diffed when the DESIRED side explicitly declares it —
+			// same "don't reset just because it's nil" convention as
+			// Owner/Cost/Rows elsewhere, needed because STORAGE always has
+			// a concrete catalog value even when never declared. Applied
+			// uniformly to all 7 for simplicity: this only ever fires on a
+			// genuine declared change, never attempts to model "unsetting"
+			// a previously-set property back to none.
+			if desired != nil && !ptrEq(desired, snapVal) {
+				setClauses = append(setClauses, fmt.Sprintf("%s = %s", key, *desired))
+			}
+		}
+		addBaseSet("RECEIVE", o.BaseReceive, snap.BaseReceive)
+		addBaseSet("SEND", o.BaseSend, snap.BaseSend)
+		addBaseSet("TYPMOD_IN", o.BaseTypmodIn, snap.BaseTypmodIn)
+		addBaseSet("TYPMOD_OUT", o.BaseTypmodOut, snap.BaseTypmodOut)
+		addBaseSet("ANALYZE", o.BaseAnalyze, snap.BaseAnalyze)
+		addBaseSet("SUBSCRIPT", o.BaseSubscript, snap.BaseSubscript)
+		addBaseSet("STORAGE", o.BaseStorage, snap.BaseStorage)
+		if len(setClauses) > 0 {
+			ops = append(ops, safeOp(fmt.Sprintf("ALTER TYPE %s SET (%s);", typeIdent, strings.Join(setClauses, ", ")), pos))
+		}
+		if !ptrEq(o.Comment, snap.Comment) {
+			if o.Comment != nil {
+				ops = append(ops, safeOp(fmt.Sprintf("COMMENT ON TYPE %s IS %s;", typeIdent, quoteLit(*o.Comment)), pos))
+			} else {
+				ops = append(ops, safeOp(fmt.Sprintf("COMMENT ON TYPE %s IS NULL;", typeIdent), pos))
+			}
+		}
+		ops = append(ops, diffTypeGrantOps(o, snap, typeIdent, pos)...)
+		ops = append(ops, diffSecurityLabelSet(snap.SecurityLabels, o.SecurityLabels, "TYPE "+typeIdent, pos)...)
+		return ops, nil
+	}
+
 	if (o.Variant == "RANGE" || o.Variant == "BASE") && snap.Variant == o.Variant {
 		// RFC §5.3/§5.5: any change to a RANGE type's options, or to a BASE
-		// type at all, requires DROP + CREATE (RANGE explicitly says CASCADE;
-		// BASE's RFC text doesn't, so none is added). Found live-testing a
-		// demo project: this whole branch was simply missing — diffType had
-		// no case for RANGE or BASE at all, so an already-applied one whose
-		// Body changed was a silent no-op forever, only the COMMENT (below)
-		// was ever diffed. Same body-hash-with-reconstructed-guard pattern as
-		// diffOpaqueIR (Publication/Collation/...): a reconstructed
-		// (introspected) body isn't byte-identical to hand-written source, so
-		// hashing it would report spurious drift — snap.BodyHash is "" for a
-		// reconstructed snapshot entry, and desiredHash is "" here for the
-		// same reason, both treated as "no comparison possible yet."
+		// type at all (pre-existing snapshot only — see the BaseStructured
+		// branch above for the current behavior), requires DROP + CREATE
+		// (RANGE explicitly says CASCADE; BASE's RFC text doesn't, so none
+		// is added). Found live-testing a demo project: this whole branch
+		// was simply missing — diffType had no case for RANGE or BASE at
+		// all, so an already-applied one whose Body changed was a silent
+		// no-op forever, only the COMMENT (below) was ever diffed. Same
+		// body-hash-with-reconstructed-guard pattern as diffOpaqueIR
+		// (Publication/Collation/...): a reconstructed (introspected) body
+		// isn't byte-identical to hand-written source, so hashing it would
+		// report spurious drift — snap.BodyHash is "" for a reconstructed
+		// snapshot entry, and desiredHash is "" here for the same reason,
+		// both treated as "no comparison possible yet."
 		desiredHash := ""
 		if o.Body != "" && !o.Reconstructed {
 			sum := sha256.Sum256([]byte(strings.TrimSpace(o.Body)))

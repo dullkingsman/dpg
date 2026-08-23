@@ -2261,6 +2261,22 @@ ORDER  BY n.nspname, t.typname`
 		}
 		t.Body = strings.Join(parts, ", ")
 		t.Reconstructed = true
+
+		// Populate the same 7 in-place-alterable properties (Section 5.5)
+		// the builder extracts from source, using identical value
+		// formatting (bare lowercase function name; STORAGE's PG-code-to-
+		// keyword mapping already matches typeNameToRef's rendering of a
+		// bare unqualified name) so the two sides compare equal for an
+		// unmodified object.
+		t.BaseReceive = recvFn
+		t.BaseSend = sendFn
+		t.BaseTypmodIn = modinFn
+		t.BaseTypmodOut = modoutFn
+		t.BaseAnalyze = anlFn
+		t.BaseSubscript = subFn
+		if s, ok := storageName[storage]; ok {
+			t.BaseStorage = &s
+		}
 	}
 	return rs.Err()
 }

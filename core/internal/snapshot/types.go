@@ -427,6 +427,29 @@ type SnapType struct {
 	Values         []string     `json:"values,omitempty"`          // ENUM only
 	CompositeAttrs []SnapColumn `json:"composite_attrs,omitempty"` // COMPOSITE only
 	BodyHash       string       `json:"body_hash,omitempty"`       // RANGE/BASE only; see sourceBodyHash
+	// BaseStructured/BaseImmutableHash/BaseReceive/BaseSend/BaseTypmodIn/
+	// BaseTypmodOut/BaseAnalyze/BaseSubscript/BaseStorage are BASE-only
+	// (Section 5.5): structured diffing inputs for the 7 properties real
+	// PostgreSQL's ALTER TYPE ... SET (...) can change in place, so a
+	// change to just one of these gets a targeted ALTER instead of an
+	// unconditional DROP+CREATE. BaseStructured is the same explicit-
+	// sentinel pattern as OptionsStructured/CollationStructured elsewhere
+	// in this file: false for any pre-existing snapshot saved before this
+	// feature existed, so the differ falls back to the old whole-Body-hash
+	// comparison for those rather than risking a spurious DROP+CREATE from
+	// BaseImmutableHash using a different hash formula than the original
+	// BodyHash. BaseImmutableHash hashes Body with these 7 properties'
+	// "KEY = value" text stripped out first, so a change to one of them
+	// alone doesn't also trip the immutable-property DESTRUCTIVE path.
+	BaseStructured    bool    `json:"base_structured,omitempty"`
+	BaseImmutableHash string  `json:"base_immutable_hash,omitempty"`
+	BaseReceive       *string `json:"base_receive,omitempty"`
+	BaseSend          *string `json:"base_send,omitempty"`
+	BaseTypmodIn      *string `json:"base_typmod_in,omitempty"`
+	BaseTypmodOut     *string `json:"base_typmod_out,omitempty"`
+	BaseAnalyze       *string `json:"base_analyze,omitempty"`
+	BaseSubscript     *string `json:"base_subscript,omitempty"`
+	BaseStorage       *string `json:"base_storage,omitempty"`
 	// DomainBaseType/DomainDefault/DomainNotNull/DomainConstraints are
 	// DOMAIN-only (RFC §5.4): structured diffing inputs, not just an opaque
 	// body hash, so property-level changes get their own targeted ALTER

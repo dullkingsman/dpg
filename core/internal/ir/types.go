@@ -622,8 +622,30 @@ type Type struct {
 	CompositeAttrs []*Column // COMPOSITE only: ordered list of attributes
 	Body           string    // raw Part1 for range/base (opaque); DOMAIN's full CREATE DOMAIN text, used only for a base-type change (DROP+CREATE)
 	Reconstructed  bool      // Body rebuilt from the catalog; see Tablespace.Reconstructed. RANGE/BASE only.
-	Comment        *string
-	Owner          *string
+	// BaseReceive/BaseSend/BaseTypmodIn/BaseTypmodOut/BaseAnalyze/
+	// BaseSubscript/BaseStorage are RFC Section 5.5's 7 in-place-alterable
+	// BASE type properties — real PostgreSQL's `ALTER TYPE ... SET (...)`
+	// supports exactly these, nothing else; every other CREATE TYPE
+	// property (INPUT/OUTPUT/INTERNALLENGTH/etc.) is immutable and any
+	// change to it still requires DROP+CREATE via the Body-hash comparison.
+	// nil means "not specified": for the six function-name properties this
+	// is a real, meaningfully-comparable state (PostgreSQL's own default is
+	// no such support function — an invalid OID, not some other concrete
+	// function), populated identically whether the object was source-
+	// declared or introspected. STORAGE is the one exception: PostgreSQL
+	// always has a concrete storage mode ('plain' by default) even when
+	// never declared, so — like Owner/Cost/Rows elsewhere in this
+	// codebase — it's only diffed when the DESIRED side explicitly
+	// declares it, never reset just because it's nil.
+	BaseReceive   *string
+	BaseSend      *string
+	BaseTypmodIn  *string
+	BaseTypmodOut *string
+	BaseAnalyze   *string
+	BaseSubscript *string
+	BaseStorage   *string
+	Comment       *string
+	Owner         *string
 	// RenamedFrom/RenamedFromSchema — see Table's identical doc comments.
 	// Applies uniformly across all 5 variants (Section 5.1-5.5), reusing the
 	// same generic cross-schema RENAME TO/SET SCHEMA mechanism as Table/

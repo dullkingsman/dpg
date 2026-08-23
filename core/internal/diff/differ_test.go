@@ -12680,6 +12680,114 @@ func TestDiffBaseTypeBodyChangedRecreatesNoCascade(t *testing.T) {
 	}
 }
 
+// TestDiffBaseTypeAlterablePropertyChangeEmitsSafeAlter is the regression
+// guard for RFC Section 5.5's 7 in-place-alterable BASE type properties:
+// previously ANY change (including these) forced an unconditional
+// DROP+CREATE. A STORAGE-only change (immutable properties INPUT/OUTPUT
+// unchanged) must instead emit a targeted, SAFE ALTER TYPE ... SET (...).
+func TestDiffBaseTypeAlterablePropertyChangeEmitsSafeAlter(t *testing.T) {
+	d := New()
+	body := "CREATE TYPE zz_base (INPUT = zz_in, OUTPUT = zz_out, STORAGE = plain)"
+	oldStorage := "plain"
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.zz_base", &snapshot.SnapObject{
+		Kind: "type",
+		Type: &snapshot.SnapType{
+			Schema: "public", Name: "zz_base", Variant: "BASE",
+			BaseStructured:    true,
+			BaseImmutableHash: hashText(snapshot.BaseBodyHashInput(body)),
+			BaseStorage:       &oldStorage,
+		},
+	})
+	newStorage := "extended"
+	desired := []pipeline.IRObject{
+		&ir.Type{
+			Schema: "public", Name: "zz_base", Variant: "BASE",
+			Body:        "CREATE TYPE zz_base (INPUT = zz_in, OUTPUT = zz_out, STORAGE = extended)",
+			BaseStorage: &newStorage,
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if containsSQL(ops, "DROP TYPE") {
+		t.Fatalf("a STORAGE-only change must not DROP+CREATE, got: %v", sqlList(ops))
+	}
+	want := `ALTER TYPE "public"."zz_base" SET (STORAGE = extended);`
+	if !containsSQL(ops, want) {
+		t.Errorf("expected %q, got: %v", want, sqlList(ops))
+	}
+	for _, o := range ops {
+		if strings.Contains(o.SQL(), "SET (") && o.Safety() != pipeline.Safe {
+			t.Errorf("expected SAFE for an alterable-property change, got %v", o.Safety())
+		}
+	}
+}
+
+// TestDiffBaseTypeImmutablePropertyChangeStillDestructive proves an
+// INPUT/OUTPUT change (immutable — no ALTER TYPE path exists in real
+// PostgreSQL) still requires DROP+CREATE even under the new structured
+// (BaseStructured) diffing path, not just the legacy whole-body-hash path.
+func TestDiffBaseTypeImmutablePropertyChangeStillDestructive(t *testing.T) {
+	d := New()
+	oldBody := "CREATE TYPE zz_base (INPUT = zz_in, OUTPUT = zz_out)"
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.zz_base", &snapshot.SnapObject{
+		Kind: "type",
+		Type: &snapshot.SnapType{
+			Schema: "public", Name: "zz_base", Variant: "BASE",
+			BaseStructured:    true,
+			BaseImmutableHash: hashText(snapshot.BaseBodyHashInput(oldBody)),
+		},
+	})
+	desired := []pipeline.IRObject{
+		&ir.Type{
+			Schema: "public", Name: "zz_base", Variant: "BASE",
+			Body: "CREATE TYPE zz_base (INPUT = zz_in2, OUTPUT = zz_out)",
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsSQL(ops, `DROP TYPE IF EXISTS "public"."zz_base";`) {
+		t.Errorf("expected DROP TYPE for an immutable-property change, got: %v", sqlList(ops))
+	}
+}
+
+// TestDiffBaseTypeUnchangedIsNoop proves the structured path doesn't
+// spuriously fire when nothing actually changed.
+func TestDiffBaseTypeUnchangedIsNoop(t *testing.T) {
+	d := New()
+	body := "CREATE TYPE zz_base (INPUT = zz_in, OUTPUT = zz_out, STORAGE = plain)"
+	storage := "plain"
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.zz_base", &snapshot.SnapObject{
+		Kind: "type",
+		Type: &snapshot.SnapType{
+			Schema: "public", Name: "zz_base", Variant: "BASE",
+			BaseStructured:    true,
+			BaseImmutableHash: hashText(snapshot.BaseBodyHashInput(body)),
+			BaseStorage:       &storage,
+		},
+	})
+	desired := []pipeline.IRObject{
+		&ir.Type{
+			Schema: "public", Name: "zz_base", Variant: "BASE",
+			Body:        body,
+			BaseStorage: &storage,
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ops) != 0 {
+		t.Errorf("expected no ops for an unchanged base type, got: %v", sqlList(ops))
+	}
+}
+
 func TestDiffRangeTypeBodyUnchangedIsNoop(t *testing.T) {
 	d := New()
 	body := "CREATE TYPE zz_range AS RANGE (subtype = numeric)"

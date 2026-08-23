@@ -3,6 +3,7 @@ package snapshot
 import (
 	"crypto/sha256"
 	"fmt"
+	"regexp"
 	"strings"
 
 	"github.com/dullkingsman/dpg/internal/ir"
@@ -131,6 +132,21 @@ func sourceBodyHash(body string, reconstructed bool) string {
 		return ""
 	}
 	return hashBodyStr(body)
+}
+
+// baseAlterablePropRe matches one "KEY = value" assignment for each of a
+// BASE type's 7 in-place-alterable properties (Section 5.5) inside its raw
+// CREATE TYPE options text — see BaseBodyHashInput.
+var baseAlterablePropRe = regexp.MustCompile(`(?i)\b(RECEIVE|SEND|TYPMOD_IN|TYPMOD_OUT|ANALYZE|SUBSCRIPT|STORAGE)\s*=\s*[^,()]+`)
+
+// BaseBodyHashInput strips the 7 in-place-alterable properties' "KEY =
+// value" text out of a BASE type's raw Body before hashing it, so a change
+// to only one of them (handled instead by a targeted ALTER TYPE ... SET
+// (...), see ir.Type.BaseReceive's doc comment) doesn't also trip the
+// immutable-property DROP+CREATE comparison. Purely a hash input — never
+// rendered as SQL — so leftover punctuation from the removal is harmless.
+func BaseBodyHashInput(body string) string {
+	return baseAlterablePropRe.ReplaceAllString(body, "")
 }
 
 // Populate converts objects into SnapObjects and stores them in snap.
@@ -750,6 +766,17 @@ func toSnapType(o *ir.Type) *SnapType {
 	}
 	if o.Variant == "RANGE" || o.Variant == "BASE" {
 		st.BodyHash = sourceBodyHash(o.Body, o.Reconstructed)
+	}
+	if o.Variant == "BASE" {
+		st.BaseStructured = true
+		st.BaseImmutableHash = sourceBodyHash(BaseBodyHashInput(o.Body), o.Reconstructed)
+		st.BaseReceive = o.BaseReceive
+		st.BaseSend = o.BaseSend
+		st.BaseTypmodIn = o.BaseTypmodIn
+		st.BaseTypmodOut = o.BaseTypmodOut
+		st.BaseAnalyze = o.BaseAnalyze
+		st.BaseSubscript = o.BaseSubscript
+		st.BaseStorage = o.BaseStorage
 	}
 	if o.Variant == "DOMAIN" {
 		st.DomainBaseType = o.DomainBaseType.String()
