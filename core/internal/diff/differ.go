@@ -2918,6 +2918,17 @@ func createTable(o *ir.Table, vtypes map[string]string) []pipeline.DiffOp {
 		// already exists).
 		ops = append(ops, createIndex(o.Schema, o.Name, idx, false)...)
 	}
+	// REPLICA IDENTITY/CLUSTER ON (Section 7.11): real PostgreSQL has no
+	// CREATE TABLE-native clause for either, only ALTER TABLE — even at
+	// initial creation. Emitted after the Indexes loop above so a
+	// CLUSTER ON (or REPLICA IDENTITY USING INDEX) referencing one of this
+	// table's own just-declared indexes finds it already created.
+	if replicaIdentityMode(o.ReplicaIdentity.Mode) != "DEFAULT" {
+		ops = append(ops, safeOp(fmt.Sprintf("ALTER TABLE %s REPLICA IDENTITY %s;", qualIdent(o.Schema, o.Name), replicaIdentityClause(o.ReplicaIdentity)), o.SrcPos))
+	}
+	if o.ClusterOn != nil {
+		ops = append(ops, safeOp(fmt.Sprintf("ALTER TABLE %s CLUSTER ON %s;", qualIdent(o.Schema, o.Name), quoteIdent(*o.ClusterOn)), o.SrcPos))
+	}
 	for _, pol := range o.Policies {
 		ops = append(ops, createPolicy(o.Schema, o.Name, pol)...)
 	}
@@ -5602,6 +5613,28 @@ func enumTypeMatch(colType, schema, name string) bool {
 		colType == qn+"[]" || colType == name+"[]"
 }
 
+// replicaIdentityMode normalizes an empty/omitted REPLICA IDENTITY mode
+// (both a fresh IR object's zero value and a pre-upgrade snapshot's zero
+// value) to PostgreSQL's own "DEFAULT" — see ir.Table.ReplicaIdentity's doc
+// comment for why an omitted directive is a real declared value, not
+// "unmanaged".
+func replicaIdentityMode(mode string) string {
+	if mode == "" {
+		return "DEFAULT"
+	}
+	return mode
+}
+
+// replicaIdentityClause renders the argument half of
+// ALTER TABLE ... REPLICA IDENTITY ...
+func replicaIdentityClause(ri ir.ReplicaIdentity) string {
+	mode := replicaIdentityMode(ri.Mode)
+	if mode == "INDEX" {
+		return "USING INDEX " + quoteIdent(ri.IndexName)
+	}
+	return mode
+}
+
 func diffTable(o *ir.Table, snap *snapshot.SnapTable, fullSnap *pipeline.Snapshot, vtypes map[string]string) ([]pipeline.DiffOp, error) {
 	var ops []pipeline.DiffOp
 	pos := o.SrcPos
@@ -5673,6 +5706,25 @@ func diffTable(o *ir.Table, snap *snapshot.SnapTable, fullSnap *pipeline.Snapsho
 		ops = append(ops, safeOp(fmt.Sprintf("ALTER TABLE %s FORCE ROW LEVEL SECURITY;", tbl), pos))
 	} else if !o.RLSForced && snap.RLSForced {
 		ops = append(ops, safeOp(fmt.Sprintf("ALTER TABLE %s NO FORCE ROW LEVEL SECURITY;", tbl), pos))
+	}
+
+	// REPLICA IDENTITY (Section 7.11) — always compared in full, like RLS
+	// above: omitting the directive means PostgreSQL's own DEFAULT, not
+	// "leave whatever's live alone". Metadata-only, no table rewrite.
+	desiredReplIdentMode := replicaIdentityMode(o.ReplicaIdentity.Mode)
+	snapReplIdentMode := replicaIdentityMode(snap.ReplicaIdentityMode)
+	if desiredReplIdentMode != snapReplIdentMode ||
+		(desiredReplIdentMode == "INDEX" && o.ReplicaIdentity.IndexName != snap.ReplicaIdentityIndex) {
+		ops = append(ops, safeOp(fmt.Sprintf("ALTER TABLE %s REPLICA IDENTITY %s;", tbl, replicaIdentityClause(o.ReplicaIdentity)), pos))
+	}
+
+	// CLUSTER ON (Section 7.11).
+	if !ptrEq(o.ClusterOn, snap.ClusterOn) {
+		if o.ClusterOn != nil {
+			ops = append(ops, safeOp(fmt.Sprintf("ALTER TABLE %s CLUSTER ON %s;", tbl, quoteIdent(*o.ClusterOn)), pos))
+		} else {
+			ops = append(ops, safeOp(fmt.Sprintf("ALTER TABLE %s SET WITHOUT CLUSTER;", tbl), pos))
+		}
 	}
 
 	colOps, renamedCols, droppedCols, err := diffColumns(tbl, o, snap, vtypes)

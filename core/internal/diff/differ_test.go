@@ -12326,6 +12326,223 @@ func TestDiffTableTablespaceUnchangedIsNoop(t *testing.T) {
 	}
 }
 
+// TestDiffTableReplicaIdentityChanged is the regression guard for Section
+// 7.11's REPLICA IDENTITY directive: previously zero code anywhere (ir/
+// diff/snapshot/introspect/dump), so a declared value had no effect at all.
+func TestDiffTableReplicaIdentityChanged(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.orders", &snapshot.SnapObject{
+		Kind: "table",
+		Table: &snapshot.SnapTable{
+			Schema:  "public",
+			Name:    "orders",
+			Columns: []snapshot.SnapColumn{{Name: "id", Type: "bigint"}},
+		},
+	})
+	desired := []pipeline.IRObject{
+		&ir.Table{
+			Schema:          "public",
+			Name:            "orders",
+			Columns:         []*ir.Column{{Name: "id", Type: ir.TypeRef{Name: "bigint"}}},
+			ReplicaIdentity: ir.ReplicaIdentity{Mode: "FULL"},
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := `ALTER TABLE "public"."orders" REPLICA IDENTITY FULL;`
+	if !containsSQL(ops, want) {
+		t.Errorf("expected %q, got: %v", want, sqlList(ops))
+	}
+	for _, o := range ops {
+		if strings.Contains(o.SQL(), "REPLICA IDENTITY") && o.Safety() != pipeline.Safe {
+			t.Errorf("expected SAFE for REPLICA IDENTITY change (metadata-only), got %v", o.Safety())
+		}
+	}
+}
+
+// TestDiffTableReplicaIdentityUsingIndex covers the USING INDEX form.
+func TestDiffTableReplicaIdentityUsingIndex(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.orders", &snapshot.SnapObject{
+		Kind: "table",
+		Table: &snapshot.SnapTable{
+			Schema:  "public",
+			Name:    "orders",
+			Columns: []snapshot.SnapColumn{{Name: "id", Type: "bigint"}},
+		},
+	})
+	desired := []pipeline.IRObject{
+		&ir.Table{
+			Schema:          "public",
+			Name:            "orders",
+			Columns:         []*ir.Column{{Name: "id", Type: ir.TypeRef{Name: "bigint"}}},
+			ReplicaIdentity: ir.ReplicaIdentity{Mode: "INDEX", IndexName: "orders_natural_key"},
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := `ALTER TABLE "public"."orders" REPLICA IDENTITY USING INDEX "orders_natural_key";`
+	if !containsSQL(ops, want) {
+		t.Errorf("expected %q, got: %v", want, sqlList(ops))
+	}
+}
+
+// TestDiffTableReplicaIdentityOmittedResetsToDefault proves omitting the
+// directive is a real declared value (PostgreSQL's own DEFAULT), not "leave
+// whatever's live alone" — matching RLSEnabled/RLSForced's identical
+// always-compared-in-full convention.
+func TestDiffTableReplicaIdentityOmittedResetsToDefault(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.orders", &snapshot.SnapObject{
+		Kind: "table",
+		Table: &snapshot.SnapTable{
+			Schema:              "public",
+			Name:                "orders",
+			Columns:             []snapshot.SnapColumn{{Name: "id", Type: "bigint"}},
+			ReplicaIdentityMode: "FULL",
+		},
+	})
+	desired := []pipeline.IRObject{
+		&ir.Table{
+			Schema:  "public",
+			Name:    "orders",
+			Columns: []*ir.Column{{Name: "id", Type: ir.TypeRef{Name: "bigint"}}},
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := `ALTER TABLE "public"."orders" REPLICA IDENTITY DEFAULT;`
+	if !containsSQL(ops, want) {
+		t.Errorf("expected %q, got: %v", want, sqlList(ops))
+	}
+}
+
+func TestDiffTableReplicaIdentityUnchangedIsNoop(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.orders", &snapshot.SnapObject{
+		Kind: "table",
+		Table: &snapshot.SnapTable{
+			Schema:              "public",
+			Name:                "orders",
+			Columns:             []snapshot.SnapColumn{{Name: "id", Type: "bigint"}},
+			ReplicaIdentityMode: "FULL",
+		},
+	})
+	desired := []pipeline.IRObject{
+		&ir.Table{
+			Schema:          "public",
+			Name:            "orders",
+			Columns:         []*ir.Column{{Name: "id", Type: ir.TypeRef{Name: "bigint"}}},
+			ReplicaIdentity: ir.ReplicaIdentity{Mode: "FULL"},
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if containsSQL(ops, "REPLICA IDENTITY") {
+		t.Errorf("expected no REPLICA IDENTITY op for unchanged value, got: %v", sqlList(ops))
+	}
+}
+
+// TestDiffTableClusterOnAddedAndRemoved is the regression guard for
+// Section 7.11's CLUSTER ON directive.
+func TestDiffTableClusterOnAddedAndRemoved(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.orders", &snapshot.SnapObject{
+		Kind: "table",
+		Table: &snapshot.SnapTable{
+			Schema:  "public",
+			Name:    "orders",
+			Columns: []snapshot.SnapColumn{{Name: "id", Type: "bigint"}},
+		},
+	})
+	desired := []pipeline.IRObject{
+		&ir.Table{
+			Schema:    "public",
+			Name:      "orders",
+			Columns:   []*ir.Column{{Name: "id", Type: ir.TypeRef{Name: "bigint"}}},
+			ClusterOn: strPtr("idx_orders_created_at"),
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := `ALTER TABLE "public"."orders" CLUSTER ON "idx_orders_created_at";`
+	if !containsSQL(ops, want) {
+		t.Errorf("expected %q, got: %v", want, sqlList(ops))
+	}
+
+	// Now removing it emits SET WITHOUT CLUSTER.
+	snap2 := &pipeline.Snapshot{}
+	_ = snap2.SetObject("public.orders", &snapshot.SnapObject{
+		Kind: "table",
+		Table: &snapshot.SnapTable{
+			Schema:    "public",
+			Name:      "orders",
+			Columns:   []snapshot.SnapColumn{{Name: "id", Type: "bigint"}},
+			ClusterOn: strPtr("idx_orders_created_at"),
+		},
+	})
+	desired2 := []pipeline.IRObject{
+		&ir.Table{
+			Schema:  "public",
+			Name:    "orders",
+			Columns: []*ir.Column{{Name: "id", Type: ir.TypeRef{Name: "bigint"}}},
+		},
+	}
+	ops2, err := d.Diff(desired2, snap2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want2 := `ALTER TABLE "public"."orders" SET WITHOUT CLUSTER;`
+	if !containsSQL(ops2, want2) {
+		t.Errorf("expected %q, got: %v", want2, sqlList(ops2))
+	}
+}
+
+// TestCreateTableReplicaIdentityAndClusterOn proves a brand-new table
+// (never in the snapshot) also emits the ALTER statements, since real
+// PostgreSQL has no CREATE TABLE-native clause for either directive —
+// they're ALTER-only even at initial creation.
+func TestCreateTableReplicaIdentityAndClusterOn(t *testing.T) {
+	d := New()
+	desired := []pipeline.IRObject{
+		&ir.Table{
+			Schema:          "public",
+			Name:            "orders",
+			Columns:         []*ir.Column{{Name: "id", Type: ir.TypeRef{Name: "bigint"}}},
+			ReplicaIdentity: ir.ReplicaIdentity{Mode: "FULL"},
+			ClusterOn:       strPtr("orders_pkey"),
+		},
+	}
+	ops, err := d.Diff(desired, &pipeline.Snapshot{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsSQL(ops, "CREATE TABLE") {
+		t.Fatalf("expected a CREATE TABLE op, got: %v", sqlList(ops))
+	}
+	if !containsSQL(ops, `ALTER TABLE "public"."orders" REPLICA IDENTITY FULL;`) {
+		t.Errorf("expected REPLICA IDENTITY on create, got: %v", sqlList(ops))
+	}
+	if !containsSQL(ops, `ALTER TABLE "public"."orders" CLUSTER ON "orders_pkey";`) {
+		t.Errorf("expected CLUSTER ON on create, got: %v", sqlList(ops))
+	}
+}
+
 func TestDiffCreateIndexEmitsTablespace(t *testing.T) {
 	d := New()
 	desired := []pipeline.IRObject{

@@ -456,6 +456,10 @@ func (b *blockParser) parseBlock(pos pipeline.SourcePos) (pipeline.BlockAST, err
 			err = b.parseEnable(&ast, dirPos)
 		case "FORCE":
 			err = b.parseForce(&ast, dirPos)
+		case "REPLICA":
+			ast.ReplicaIdentity, err = b.parseReplicaIdentity(dirPos)
+		case "CLUSTER":
+			ast.ClusterOn, err = b.parseClusterOn(dirPos)
 		case "INDICES":
 			var indices []pipeline.IndexDef
 			indices, err = b.parseIndices(dirPos)
@@ -813,6 +817,53 @@ func (b *blockParser) parseForce(ast *pipeline.BlockAST, pos pipeline.SourcePos)
 	}
 	ast.ForceRLS = true
 	return b.expectSemi()
+}
+
+// parseReplicaIdentity reads: IDENTITY (DEFAULT|FULL|NOTHING|USING INDEX name);
+func (b *blockParser) parseReplicaIdentity(pos pipeline.SourcePos) (*pipeline.ReplicaIdentityDir, error) {
+	if err := b.expect("IDENTITY"); err != nil {
+		return nil, err
+	}
+	b.skipWS()
+	w := strings.ToUpper(b.readWord())
+	dir := &pipeline.ReplicaIdentityDir{Pos: pos}
+	switch w {
+	case "DEFAULT", "FULL", "NOTHING":
+		dir.Mode = w
+	case "USING":
+		if err := b.expect("INDEX"); err != nil {
+			return nil, err
+		}
+		b.skipWS()
+		name := b.readWord()
+		if name == "" {
+			return nil, b.errorf("expected an index name after REPLICA IDENTITY USING INDEX")
+		}
+		dir.Mode = "INDEX"
+		dir.IndexName = name
+	default:
+		return nil, fmt.Errorf("%s: expected DEFAULT, FULL, NOTHING, or USING INDEX after REPLICA IDENTITY, got %q", pos, w)
+	}
+	if err := b.expectSemi(); err != nil {
+		return nil, err
+	}
+	return dir, nil
+}
+
+// parseClusterOn reads: ON index-name;
+func (b *blockParser) parseClusterOn(pos pipeline.SourcePos) (*pipeline.Identifier, error) {
+	if err := b.expect("ON"); err != nil {
+		return nil, err
+	}
+	b.skipWS()
+	id, err := b.readIdentifier()
+	if err != nil {
+		return nil, err
+	}
+	if err := b.expectSemi(); err != nil {
+		return nil, err
+	}
+	return &id, nil
 }
 
 // ── INDICES ───────────────────────────────────────────────────────────────────

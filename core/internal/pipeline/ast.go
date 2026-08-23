@@ -117,9 +117,9 @@ type TriggerDef struct {
 	NewTransitionName *string
 	Condition         *RawExpr
 	Function          Identifier
-	Args            []string
-	Comment         *StringLit
-	Pos             SourcePos
+	Args              []string
+	Comment           *StringLit
+	Pos               SourcePos
 }
 
 // ColumnBlock holds DPG-specific attributes for a single column.
@@ -374,4 +374,22 @@ type BlockAST struct {
 	// "CONSTRAINT name CHECK (expr);" shape as a table's.
 	DomainDefault *RawExpr
 	DomainNotNull bool
+	// ReplicaIdentity is Section 7.11's `REPLICA IDENTITY {DEFAULT|FULL|
+	// NOTHING|USING INDEX name}` block directive — real PostgreSQL has no
+	// CREATE TABLE-native clause for it, only ALTER TABLE, so like RLS it's
+	// declared as a block directive. nil means the directive was omitted,
+	// which PostgreSQL itself treats as DEFAULT.
+	ReplicaIdentity *ReplicaIdentityDir
+	// ClusterOn is Section 7.11's `CLUSTER ON index-name` block directive —
+	// same "ALTER-only, no CREATE-time clause" reasoning as ReplicaIdentity.
+	// nil means not declared; removing a previously-declared value emits
+	// ALTER TABLE ... SET WITHOUT CLUSTER.
+	ClusterOn *Identifier
+}
+
+// ReplicaIdentityDir is Section 7.11's REPLICA IDENTITY block directive.
+type ReplicaIdentityDir struct {
+	Mode      string // "DEFAULT", "FULL", "NOTHING", or "INDEX"
+	IndexName string // only set when Mode == "INDEX"
+	Pos       SourcePos
 }

@@ -101,6 +101,47 @@ func TestForceRLS(t *testing.T) {
 	}
 }
 
+func TestReplicaIdentityDefault(t *testing.T) {
+	ast := parse(t, `REPLICA IDENTITY DEFAULT;`)
+	if ast.ReplicaIdentity == nil || ast.ReplicaIdentity.Mode != "DEFAULT" {
+		t.Fatalf("expected ReplicaIdentity Mode DEFAULT, got %+v", ast.ReplicaIdentity)
+	}
+}
+
+func TestReplicaIdentityFull(t *testing.T) {
+	ast := parse(t, `REPLICA IDENTITY FULL;`)
+	if ast.ReplicaIdentity == nil || ast.ReplicaIdentity.Mode != "FULL" {
+		t.Fatalf("expected ReplicaIdentity Mode FULL, got %+v", ast.ReplicaIdentity)
+	}
+}
+
+func TestReplicaIdentityNothing(t *testing.T) {
+	ast := parse(t, `REPLICA IDENTITY NOTHING;`)
+	if ast.ReplicaIdentity == nil || ast.ReplicaIdentity.Mode != "NOTHING" {
+		t.Fatalf("expected ReplicaIdentity Mode NOTHING, got %+v", ast.ReplicaIdentity)
+	}
+}
+
+func TestReplicaIdentityUsingIndex(t *testing.T) {
+	ast := parse(t, `REPLICA IDENTITY USING INDEX idx_orders_id;`)
+	if ast.ReplicaIdentity == nil || ast.ReplicaIdentity.Mode != "INDEX" || ast.ReplicaIdentity.IndexName != "idx_orders_id" {
+		t.Fatalf("expected ReplicaIdentity Mode INDEX/idx_orders_id, got %+v", ast.ReplicaIdentity)
+	}
+}
+
+func TestReplicaIdentityInvalidMode(t *testing.T) {
+	if err := parseErr(t, `REPLICA IDENTITY BOGUS;`); err == nil {
+		t.Fatal("expected an error for an invalid REPLICA IDENTITY mode")
+	}
+}
+
+func TestClusterOn(t *testing.T) {
+	ast := parse(t, `CLUSTER ON idx_orders_created_at;`)
+	if ast.ClusterOn == nil || ast.ClusterOn.Name != "idx_orders_created_at" {
+		t.Fatalf("expected ClusterOn idx_orders_created_at, got %+v", ast.ClusterOn)
+	}
+}
+
 // ── INDICES ───────────────────────────────────────────────────────────────────
 
 func TestSimpleIndex(t *testing.T) {

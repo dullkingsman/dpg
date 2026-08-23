@@ -419,12 +419,21 @@ type Table struct {
 	SecurityLabels []pipeline.SecurityLabel
 	RLSEnabled     bool
 	RLSForced      bool
-	Inherits       []string
-	PartitionBy    *PartitionSpec
-	Partitions     []*Partition
-	StorageParams  map[string]string
-	Tablespace     *string
-	NameMaps       []pipeline.NameMapEntry
+	// ReplicaIdentity is Section 7.11's REPLICA IDENTITY directive, always
+	// compared in full — like RLSEnabled/RLSForced, omitting it means
+	// PostgreSQL's own DEFAULT, not "leave whatever's live alone". Zero
+	// value (Mode == "") is treated as "DEFAULT".
+	ReplicaIdentity ReplicaIdentity
+	// ClusterOn names the index a future manual CLUSTER would use (Section
+	// 7.11); nil means none declared — removing a previously-declared
+	// value emits ALTER TABLE ... SET WITHOUT CLUSTER.
+	ClusterOn     *string
+	Inherits      []string
+	PartitionBy   *PartitionSpec
+	Partitions    []*Partition
+	StorageParams map[string]string
+	Tablespace    *string
+	NameMaps      []pipeline.NameMapEntry
 	// LikeClauses holds unresolved `LIKE source_table [INCLUDING/EXCLUDING
 	// ...]` entries (Section 7.1) captured verbatim by buildTable. A
 	// Builder builds one object at a time with no visibility into any
@@ -461,6 +470,13 @@ type LikeClause struct {
 	// position instead of always appending to the end.
 	InsertAt int
 	Pos      pipeline.SourcePos
+}
+
+// ReplicaIdentity is Table.ReplicaIdentity's structured value — see its
+// doc comment.
+type ReplicaIdentity struct {
+	Mode      string // "" (== "DEFAULT"), "DEFAULT", "FULL", "NOTHING", or "INDEX"
+	IndexName string // only set when Mode == "INDEX"
 }
 
 // LIKE option bits — see LikeClause.Options' doc comment.
@@ -615,7 +631,7 @@ type Type struct {
 	RenamedFrom       *string
 	RenamedFromSchema *string
 	Deprecated        *string
-	MigrateRemove  *pipeline.MigrateRemoveBlock // ENUM only: MIGRATE REMOVE { } block
+	MigrateRemove     *pipeline.MigrateRemoveBlock // ENUM only: MIGRATE REMOVE { } block
 	// Grants/Revocations (RFC audit item #3) apply uniformly across all 5
 	// variants — real PostgreSQL's GRANT/REVOKE has no separate "ON DOMAIN"
 	// target; a domain is granted exactly like any other type, via

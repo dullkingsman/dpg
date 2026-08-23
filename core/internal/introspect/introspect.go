@@ -624,6 +624,29 @@ ORDER  BY e.extname`
 
 // ── tables ────────────────────────────────────────────────────────────────────
 
+// replicaIdentityFromCatalog maps pg_class.relreplident ('d'=default,
+// 'f'=full, 'n'=nothing, 'i'=index) plus the index name (only populated
+// server-side when relreplident == 'i') to ir.ReplicaIdentity. "DEFAULT" is
+// PostgreSQL's own default and left as the zero-value Mode, matching how a
+// source declaration that omits the directive builds the same zero value —
+// so an unmodified table never shows spurious drift after introspection.
+func replicaIdentityFromCatalog(replident string, indexName *string) ir.ReplicaIdentity {
+	switch replident {
+	case "f":
+		return ir.ReplicaIdentity{Mode: "FULL"}
+	case "n":
+		return ir.ReplicaIdentity{Mode: "NOTHING"}
+	case "i":
+		name := ""
+		if indexName != nil {
+			name = *indexName
+		}
+		return ir.ReplicaIdentity{Mode: "INDEX", IndexName: name}
+	default:
+		return ir.ReplicaIdentity{}
+	}
+}
+
 func introspectTables(ctx context.Context, conn pipeline.Querier) ([]pipeline.IRObject, error) {
 	const q = `
 SELECT c.relname, n.nspname, c.relpersistence::text, c.relkind::text,
@@ -631,7 +654,12 @@ SELECT c.relname, n.nspname, c.relpersistence::text, c.relkind::text,
        obj_description(c.oid, 'pg_class') AS comment,
        c.relrowsecurity, c.relforcerowsecurity,
        fs.srvname, ft.ftoptions,
-       ts.spcname AS tablespace
+       ts.spcname AS tablespace,
+       c.relreplident::text,
+       (SELECT ic.relname FROM pg_index pi JOIN pg_class ic ON ic.oid = pi.indexrelid
+          WHERE pi.indrelid = c.oid AND pi.indisreplident) AS replident_index,
+       (SELECT ic2.relname FROM pg_index pi2 JOIN pg_class ic2 ON ic2.oid = pi2.indexrelid
+          WHERE pi2.indrelid = c.oid AND pi2.indisclustered) AS cluster_index
 FROM   pg_class c
 JOIN   pg_namespace n ON n.oid = c.relnamespace
 JOIN   pg_roles r     ON r.oid = c.relowner
@@ -654,23 +682,25 @@ ORDER  BY n.nspname, c.relname`
 	tableIdx := map[string]*ir.Table{}
 
 	for rs.Next() {
-		var name, schema, persistence, relkind, owner string
-		var comment, server, tablespace *string
+		var name, schema, persistence, relkind, owner, replident string
+		var comment, server, tablespace, replidentIndex, clusterIndex *string
 		var rlsEnabled, rlsForced bool
 		var ftoptions []string
-		if err := rs.Scan(&name, &schema, &persistence, &relkind, &owner, &comment, &rlsEnabled, &rlsForced, &server, &ftoptions, &tablespace); err != nil {
+		if err := rs.Scan(&name, &schema, &persistence, &relkind, &owner, &comment, &rlsEnabled, &rlsForced, &server, &ftoptions, &tablespace, &replident, &replidentIndex, &clusterIndex); err != nil {
 			return nil, err
 		}
 		t := &ir.Table{
-			Schema:     schema,
-			Name:       name,
-			Unlogged:   persistence == "u",
-			Foreign:    relkind == "f",
-			Owner:      &owner,
-			Comment:    comment,
-			RLSEnabled: rlsEnabled,
-			RLSForced:  rlsForced,
-			Tablespace: tablespace,
+			Schema:          schema,
+			Name:            name,
+			Unlogged:        persistence == "u",
+			Foreign:         relkind == "f",
+			Owner:           &owner,
+			Comment:         comment,
+			RLSEnabled:      rlsEnabled,
+			RLSForced:       rlsForced,
+			Tablespace:      tablespace,
+			ReplicaIdentity: replicaIdentityFromCatalog(replident, replidentIndex),
+			ClusterOn:       clusterIndex,
 		}
 		if t.Foreign {
 			t.ForeignServer = server

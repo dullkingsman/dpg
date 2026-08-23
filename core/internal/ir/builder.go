@@ -913,6 +913,13 @@ func mergeTableBlock(tbl *Table, block pipeline.BlockAST) error {
 	tbl.DropCascade = block.DropCascade
 	tbl.RLSEnabled = block.EnableRLS
 	tbl.RLSForced = block.ForceRLS
+	if block.ReplicaIdentity != nil {
+		tbl.ReplicaIdentity = ReplicaIdentity{Mode: block.ReplicaIdentity.Mode, IndexName: block.ReplicaIdentity.IndexName}
+	}
+	if block.ClusterOn != nil {
+		name := block.ClusterOn.Name
+		tbl.ClusterOn = &name
+	}
 	tbl.NameMaps = block.NameMaps
 
 	// Indexes

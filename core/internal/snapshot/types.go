@@ -246,24 +246,29 @@ type SnapTable struct {
 	// RenamedFromSchema is the schema the RENAMED FROM name lived in, when the
 	// directive was schema-qualified (a rename combined with a SET SCHEMA
 	// move) — see ir.Table.RenamedFromSchema's identical doc comment.
-	RenamedFromSchema *string             `json:"renamed_from_schema,omitempty"`
-	Deprecated        *string             `json:"deprecated,omitempty"`
-	Protected         bool                `json:"protected,omitempty"`
-	DropCascade       bool                `json:"drop_cascade,omitempty"`
-	RLSEnabled        bool                `json:"rls_enabled,omitempty"`
-	RLSForced         bool                `json:"rls_forced,omitempty"`
-	Inherits          []string            `json:"inherits,omitempty"`
-	PartitionBy       string              `json:"partition_by,omitempty"` // e.g. "RANGE (created_at)"
-	Partitions        []SnapPartition     `json:"partitions,omitempty"`
-	Columns           []SnapColumn        `json:"columns,omitempty"`
-	Constraints       []SnapConstraint    `json:"constraints,omitempty"`
-	Indexes           []SnapIndex         `json:"indexes,omitempty"`
-	Policies          []SnapPolicy        `json:"policies,omitempty"`
-	Triggers          []SnapTrigger       `json:"triggers,omitempty"`
-	Grants            []SnapGrant         `json:"grants,omitempty"`
-	Revocations       []SnapGrant         `json:"revocations,omitempty"`
-	SecurityLabels    []SnapSecurityLabel `json:"security_labels,omitempty"`
-	NameMaps          []SnapNameMapEntry  `json:"name_maps,omitempty"`
+	RenamedFromSchema *string `json:"renamed_from_schema,omitempty"`
+	Deprecated        *string `json:"deprecated,omitempty"`
+	Protected         bool    `json:"protected,omitempty"`
+	DropCascade       bool    `json:"drop_cascade,omitempty"`
+	RLSEnabled        bool    `json:"rls_enabled,omitempty"`
+	RLSForced         bool    `json:"rls_forced,omitempty"`
+	// ReplicaIdentityMode/ReplicaIdentityIndex mirror ir.ReplicaIdentity —
+	// see Table.ReplicaIdentity's doc comment. Empty mode means "DEFAULT".
+	ReplicaIdentityMode  string              `json:"replica_identity_mode,omitempty"`
+	ReplicaIdentityIndex string              `json:"replica_identity_index,omitempty"`
+	ClusterOn            *string             `json:"cluster_on,omitempty"`
+	Inherits             []string            `json:"inherits,omitempty"`
+	PartitionBy          string              `json:"partition_by,omitempty"` // e.g. "RANGE (created_at)"
+	Partitions           []SnapPartition     `json:"partitions,omitempty"`
+	Columns              []SnapColumn        `json:"columns,omitempty"`
+	Constraints          []SnapConstraint    `json:"constraints,omitempty"`
+	Indexes              []SnapIndex         `json:"indexes,omitempty"`
+	Policies             []SnapPolicy        `json:"policies,omitempty"`
+	Triggers             []SnapTrigger       `json:"triggers,omitempty"`
+	Grants               []SnapGrant         `json:"grants,omitempty"`
+	Revocations          []SnapGrant         `json:"revocations,omitempty"`
+	SecurityLabels       []SnapSecurityLabel `json:"security_labels,omitempty"`
+	NameMaps             []SnapNameMapEntry  `json:"name_maps,omitempty"`
 }
 
 // SnapPartition is one partition entry attached to a partitioned table.
