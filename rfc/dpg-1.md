@@ -1485,8 +1485,10 @@ SCHEMA public {
 
    Base types implement a custom storage type using C-defined input and
    output functions.  The body is the PostgreSQL `CREATE TYPE` options
-   list.  Diffing is by text hash only (`SAFE` for additions;
-   `DESTRUCTIVE` for any change or removal).
+   list.  New base types are `SAFE`; removal is `DESTRUCTIVE`.  A
+   property *change* is diffed per-key rather than as a single text
+   hash (see below), since real PostgreSQL's `ALTER TYPE ... SET (...)`
+   can update a specific subset of properties in place.
 
    **PG equivalent:** `CREATE TYPE name (INPUT = func, OUTPUT = func, ...)` — or, forward-declared, bare `CREATE TYPE name;`
 
@@ -1534,6 +1536,24 @@ SCHEMA public {
     );
 }
 ```
+
+   **Property-change diffing:** Real PostgreSQL's `ALTER TYPE name SET
+   (...)` can update exactly seven support-function/storage properties
+   in place, without a rebuild: `RECEIVE`, `SEND`, `TYPMOD_IN`,
+   `TYPMOD_OUT`, `ANALYZE`, `SUBSCRIPT` (each settable to a function
+   name or `NONE`), and `STORAGE` (a storage mode, not a function —
+   note that changing it only affects columns created *after* the
+   change, not existing ones, a PostgreSQL-level caveat, not a DPG one).
+   Every other property (`INPUT`, `OUTPUT`, `INTERNALLENGTH`,
+   `ALIGNMENT`, `PASSEDBYVALUE`, `CATEGORY`, `PREFERRED`, `DEFAULT`,
+   `ELEMENT`, `DELIMITER`, `COLLATABLE`, `LIKE`) is fixed at creation
+   with no `ALTER TYPE` equivalent at all.
+
+   | Change | DDL emitted | Safety |
+   |--------|-------------|--------|
+   | Only `RECEIVE`/`SEND`/`TYPMOD_IN`/`TYPMOD_OUT`/`ANALYZE`/`SUBSCRIPT`/`STORAGE` differ | `ALTER TYPE name SET (key = value \| NONE, ...)` | `SAFE` |
+   | Any other property differs (alone or alongside the above) | `DROP TYPE CASCADE` + `CREATE TYPE` | `DESTRUCTIVE` |
+   | Type removed | `DROP TYPE name [CASCADE]` | `DESTRUCTIVE` |
 
    `OWNER`/`RENAMED FROM` follow the standard rules (§5.1): `ALTER TYPE
    name OWNER TO role` (`SAFE`); `ALTER TYPE old RENAME TO new`
@@ -1747,8 +1767,16 @@ EXTENSION pg_trgm CASCADE;
    |--------|-------------|--------|
    | New extension | `CREATE EXTENSION IF NOT EXISTS name [SCHEMA ...] [VERSION ...] [CASCADE]` | `SAFE` |
    | VERSION change | `ALTER EXTENSION name UPDATE [TO version]` | `CAUTION` |
+   | SCHEMA change | `ALTER EXTENSION name SET SCHEMA new_schema` | `SAFE` |
    | Extension removed | `DROP EXTENSION name [CASCADE]` | `DESTRUCTIVE` |
-   | SCHEMA change | Drop + recreate | `DESTRUCTIVE` |
+
+   `SCHEMA` changes use `ALTER EXTENSION ... SET SCHEMA` rather than
+   drop-and-recreate — real PostgreSQL supports moving any *relocatable*
+   extension this way without dropping it (most extensions are
+   relocatable; a handful, e.g. ones with hardcoded schema-qualified
+   references in their own SQL objects, are not — PostgreSQL itself
+   rejects the statement for those, left to its own error per the
+   passthrough-validation principle used throughout this document).
 
 ---
 
@@ -2544,8 +2572,20 @@ permissiveness = "PERMISSIVE" / "RESTRICTIVE"
    | `FORCE ROW LEVEL SECURITY` removed, `ENABLE` still present | `ALTER TABLE t NO FORCE ROW LEVEL SECURITY` | `SAFE` |
    | Both removed | `ALTER TABLE t DISABLE ROW LEVEL SECURITY` | `SAFE` |
    | New policy | `CREATE POLICY name ON t FOR ... TO ... USING (...) WITH CHECK (...)` | `SAFE` |
-   | Policy changed | `DROP POLICY name ON t; CREATE POLICY ...` | `SAFE` |
+   | Only `TO`/`USING`/`WITH CHECK` differ (`FOR`/`AS` unchanged) | `ALTER POLICY name ON t [TO ...] [USING (...)] [WITH CHECK (...)]` | `SAFE` |
+   | `FOR command` or `AS PERMISSIVE/RESTRICTIVE` differs | `DROP POLICY name ON t; CREATE POLICY ...` | `SAFE` |
    | Policy removed | `DROP POLICY name ON t` | `SAFE` |
+
+   **`ALTER POLICY` vs. drop-and-recreate:** Real PostgreSQL's `ALTER
+   POLICY` can change `TO`/`USING`/`WITH CHECK` in place, atomically —
+   `FOR command` and `AS PERMISSIVE/RESTRICTIVE` are fixed at creation
+   with no `ALTER POLICY` equivalent, forcing drop-and-recreate for
+   those two fields specifically. Preferring `ALTER POLICY` whenever
+   possible matters beyond avoiding an extra statement: a pure
+   `USING`/`WITH CHECK`/`TO`-role change is exactly the kind of edit
+   `DROP POLICY; CREATE POLICY` turns into a real (if brief) window
+   with zero active policy for that command — `ALTER POLICY` closes
+   that window entirely.
 
    Example:
 
@@ -2859,6 +2899,24 @@ FOREIGN TABLE remote_events (
     GRANTS { SELECT TO app_readonly; }
 }
 ```
+
+   **Diffing semantics:** A foreign table reuses the same `TABLE`
+   diffing machinery as a regular table (§21) — columns, owner,
+   comment, grants/revocations, security labels, rename — with two
+   foreign-specific rules:
+
+   | Change | DDL emitted | Safety |
+   |--------|-------------|--------|
+   | `OPTIONS` changed | `ALTER FOREIGN TABLE t OPTIONS (ADD/SET/DROP key 'value', ...)` | `SAFE` |
+   | `SERVER` changed | `DROP FOREIGN TABLE t; CREATE FOREIGN TABLE t ... SERVER new_server ...` | `DESTRUCTIVE` |
+
+   `SERVER` cannot be changed via `ALTER FOREIGN TABLE` — real
+   PostgreSQL has no such clause — so a `SERVER` change always requires
+   the full drop-and-recreate path, unlike `OPTIONS`, which real
+   PostgreSQL supports altering in place.  Column add/drop/type-change
+   follow §21's `TABLE` rules unchanged (a foreign table's columns
+   describe the remote shape, not local storage, but the diffing model
+   itself does not distinguish the two).
 
 ### 7.13. Partitioned Tables
 
@@ -4197,11 +4255,21 @@ SCHEMA public {
    `ALTER TEXT SEARCH DICTIONARY ... OWNER TO`/`RENAME TO`/`SET SCHEMA`
    for Dictionary but has no `OWNER` concept at all for Parser/Template.
 
-   Any change to a text search dictionary's options requires
-   `DROP TEXT SEARCH DICTIONARY` followed by recreation —
-   classified as `DESTRUCTIVE` if the dictionary is in use. `OWNER`/
-   `RENAMED FROM` changes are `SAFE`/`CAUTION` respectively, same rules
-   as every other kind (§5.1).
+   **Diffing semantics:**
+
+   | Change | DDL emitted | Safety |
+   |--------|-------------|--------|
+   | Option (non-`TEMPLATE`) added/changed/removed | `ALTER TEXT SEARCH DICTIONARY name (key [= value], ...)` | `SAFE` |
+   | `TEMPLATE` changed | `DROP TEXT SEARCH DICTIONARY` + recreate | `DESTRUCTIVE` |
+   | Owner changed | `ALTER TEXT SEARCH DICTIONARY name OWNER TO role` | `SAFE` |
+   | Renamed (`RENAMED FROM`) | `ALTER TEXT SEARCH DICTIONARY old RENAME TO new` | `CAUTION` |
+   | Dictionary removed | `DROP TEXT SEARCH DICTIONARY name` | `DESTRUCTIVE` (if in use) |
+
+   `TEMPLATE` is fixed at creation, same as a base type's core
+   properties (§5.5) — real PostgreSQL's `ALTER TEXT SEARCH DICTIONARY`
+   can change any other option in place (add, change, or remove —
+   `DROP` an option by naming it with no value) without a rebuild; only
+   a `TEMPLATE` change forces drop-and-recreate.
 
 ### 12.3. Text Search Parsers
 
@@ -4295,8 +4363,16 @@ pub-table         = schema-table-name
 ; grammar changes here, the same passthrough pattern Subscription's
 ; WITH options (§13.2) already uses.
 
-pub-block = *( ( comment-dir / grants-block ) ";" )
+pub-block = *( ( comment-dir / owner-dir / renamed-from-dir
+               / grants-block ) ";" )
 ```
+
+   `owner-dir`/`renamed-from-dir` follow the standard rules (§7.6):
+   `ALTER PUBLICATION name OWNER TO role` (`SAFE`); `ALTER PUBLICATION
+   old RENAME TO new` (`CAUTION`) — Publication is database-level, not
+   schema-scoped (like Role and Event Trigger, §11.1/§14.1), so the
+   cross-schema `SET SCHEMA` half of the generic extension never
+   applies here.
 
    Examples:
 
@@ -4322,6 +4398,8 @@ PUBLICATION filtered_orders
    | New publication | `CREATE PUBLICATION ...` | `SAFE` |
    | Table list changed | `ALTER PUBLICATION name SET TABLE ...` | `SAFE` |
    | Options changed | `ALTER PUBLICATION name SET (...)` | `SAFE` |
+   | Owner changed | `ALTER PUBLICATION name OWNER TO role` | `SAFE` |
+   | Renamed (`RENAMED FROM`) | `ALTER PUBLICATION old RENAME TO new` | `CAUTION` |
    | Publication removed | `DROP PUBLICATION name` | `DESTRUCTIVE` |
 
 ### 13.2. Subscriptions
@@ -4505,7 +4583,7 @@ EVENT TRIGGER audit_ddl
 ### 14.2. Collations
 
    **PG equivalent:**
-   `CREATE COLLATION [IF NOT EXISTS] name { (LOCALE = locale | LC_COLLATE = lc, LC_CTYPE = lc | PROVIDER = provider [, DETERMINISTIC = bool]) | FROM existing_collation }`
+   `CREATE COLLATION [IF NOT EXISTS] name { (LOCALE = locale | LC_COLLATE = lc, LC_CTYPE = lc | PROVIDER = provider [, DETERMINISTIC = bool] [, RULES = rules]) | FROM existing_collation }`
 
 ```sql
 SCHEMA public {
@@ -4518,20 +4596,68 @@ SCHEMA public {
     -- FROM copies an existing collation's definition under a new name
     -- (e.g. a differently-cased alias of a system-provided collation).
     COLLATION case_insensitive_alias FROM case_insensitive;
+
+    -- RULES (PostgreSQL 16+, ICU provider only): custom tailoring rules
+    -- layered on top of the base locale.
+    COLLATION custom_digits_first (
+        PROVIDER = icu,
+        LOCALE   = 'en-u-kn-true',
+        RULES    = '&0 < a-z'
+    )
+    {
+        OWNER "search_admin";
+        COMMENT 'Numeric-aware sort with a custom tailoring rule';
+    }
 }
 ```
 
    Since Collation is an `opaque-object-decl` kind (Part 1 passthrough,
-   Appendix A), the `FROM existing_collation` form requires no DPG-side
-   grammar of its own — it is real PostgreSQL `CREATE COLLATION` syntax,
-   handed to `pg_query` verbatim like every other property form above.
+   Appendix A), both `RULES = rules` and `FROM existing_collation`
+   require no DPG-side grammar of their own — real PostgreSQL `CREATE
+   COLLATION` syntax, handed to `pg_query` verbatim like every other
+   property form above.
 
-   **Diffing semantics:** Any property change requires `DROP COLLATION`
-   + `CREATE COLLATION` — classified as `DESTRUCTIVE` (dependent objects
-   must be dropped and recreated). This applies identically to the
-   `FROM existing_collation` form: since the body is diffed as opaque
-   text (§14's `opaque-object-decl` note), changing which collation a
-   `FROM` clause points at is itself a property change.
+   Collation MAY carry an optional `{ }` block (`comment-dir`/
+   `owner-dir`/`renamed-from-dir`/`refresh-version-dir`) — previously
+   entirely absent, silently sweeping an owner change into the generic
+   "any property change → DROP+CREATE" path even though real PostgreSQL
+   supports `OWNER TO`/`RENAME TO`/`SET SCHEMA` for Collation without a
+   rebuild.
+
+```abnf
+; Collation-only: unlike RESTART (Sequence, §10), a bare presence
+; keyword with no argument — REFRESH VERSION has nothing to parametrise,
+; it just re-reads the OS/ICU library's *current* collation version and
+; records it, the same non-persistent-target-value shape as RESTART.
+refresh-version-dir = "REFRESH VERSION"
+```
+
+   **`REFRESH VERSION`** (PostgreSQL 15+): updates the catalog's
+   recorded collation version to match the operating system's/ICU's
+   *current* version, acknowledging an OS/library upgrade that may have
+   silently changed sort order — real PostgreSQL's mitigation for a
+   genuine data-corruption risk (an index built under the old collation
+   version can silently misbehave after the OS collation library
+   changes underneath it). Like `RESTART` (§10), this describes an
+   imperative action, not comparable target state: its mere presence in
+   source unconditionally emits `ALTER COLLATION name REFRESH VERSION`
+   on every `plan`/`apply` for as long as it remains declared — Safety
+   `MANUAL`, with the compiler recommending removal from source once
+   applied, the same usage pattern as `RESTART`.
+
+   **Diffing semantics:**
+
+   | Change | DDL emitted | Safety |
+   |--------|-------------|--------|
+   | Owner changed | `ALTER COLLATION name OWNER TO role` | `SAFE` |
+   | Renamed (`RENAMED FROM`) | `ALTER COLLATION old RENAME TO new` | `CAUTION`; schema-qualified additionally emits `ALTER COLLATION old_schema.name SET SCHEMA new_schema` (`SAFE`) |
+   | `REFRESH VERSION` present in source | `ALTER COLLATION name REFRESH VERSION` (re-emitted every apply while present, see above) | `MANUAL` |
+   | Any other property change (`LOCALE`/`PROVIDER`/`RULES`/`FROM` target/etc.) | `DROP COLLATION` + `CREATE COLLATION` | `DESTRUCTIVE` (dependent objects must be dropped and recreated) |
+
+   The `DESTRUCTIVE` row applies identically to the `FROM
+   existing_collation` form: since the body is diffed as opaque text
+   (§14's `opaque-object-decl` note), changing which collation a `FROM`
+   clause points at is itself a property change.
 
 ### 14.3. Operators
 
@@ -4723,7 +4849,7 @@ tablespace-decl = "TABLESPACE" WSP identifier
 
 role-spec = identifier / "CURRENT_ROLE" / "CURRENT_USER" / "SESSION_USER"
 
-tablespace-block = *( comment-dir ";" )
+tablespace-block = *( ( comment-dir / renamed-from-dir ) ";" )
 ```
 
    `OWNER` is inline in Part 1, matching real PostgreSQL's own
@@ -4732,10 +4858,15 @@ tablespace-block = *( comment-dir ";" )
    place in the native `CREATE` statement and is therefore a block
    directive instead.  `WITH (tablespace_option = value, ...)` (e.g.
    `seq_page_cost`, `random_page_cost`) follows the same trailing
-   position real PostgreSQL uses, after `LOCATION`. The full `ALTER
-   TABLESPACE` surface (`RENAME TO`, `OWNER TO`, `SET`/`RESET` options)
-   remains a separate, still-open gap — this section documents
-   `CREATE`-time grammar only.
+   position real PostgreSQL uses, after `LOCATION`.  A change to the
+   declared inline `OWNER` post-creation emits `ALTER TABLESPACE name
+   OWNER TO role`, and `renamed-from-dir` in the `{ }` block emits
+   `ALTER TABLESPACE old RENAME TO new` — Tablespace is cluster-level,
+   not schema-scoped, so the generic extension's cross-schema `SET
+   SCHEMA` half never applies (same as Publication/Server/Role above).
+   `WITH (...)` option changes remain the one still-open gap — this
+   document does not yet specify a non-destructive `SET`/`RESET` path
+   for them.
 
 ```sql
 -- production/cluster/tablespaces.dpg
@@ -4745,15 +4876,21 @@ TABLESPACE fast_ssd LOCATION '/mnt/nvme/pg_data'
 TABLESPACE archive  LOCATION '/mnt/hdd/pg_archive';
 ```
 
-   **Diffing semantics:** `LOCATION` cannot be changed after creation.
-   Any location change requires `DROP TABLESPACE` + `CREATE TABLESPACE`
-   (`DESTRUCTIVE`).  Dropping a non-empty tablespace fails at the
-   PostgreSQL level; the compiler classifies it as `DESTRUCTIVE` and
-   additionally emits a warning comment noting that it will fail if
-   any objects reside in the tablespace. `WITH (...)` option changes,
-   independent of `LOCATION`, are grouped with the still-open `ALTER
-   TABLESPACE` gap noted above — this document does not yet specify a
-   non-destructive diffing path for them.
+   **Diffing semantics:**
+
+   | Change | DDL emitted | Safety |
+   |--------|-------------|--------|
+   | Owner changed | `ALTER TABLESPACE name OWNER TO role` | `SAFE` |
+   | Renamed (`RENAMED FROM`) | `ALTER TABLESPACE old RENAME TO new` | `CAUTION` |
+   | `WITH (...)` option changed | Not yet specified — grouped with the still-open gap above | — |
+   | `LOCATION` changed | `DROP TABLESPACE` + `CREATE TABLESPACE` | `DESTRUCTIVE` |
+   | Tablespace removed | `DROP TABLESPACE name` | `DESTRUCTIVE` |
+
+   `LOCATION` cannot be changed after creation — any location change
+   requires the full drop-and-recreate path.  Dropping a non-empty
+   tablespace fails at the PostgreSQL level; the compiler classifies it
+   as `DESTRUCTIVE` and additionally emits a warning comment noting
+   that it will fail if any objects reside in the tablespace.
 
 ### 14.8. Foreign Data Wrappers
 
@@ -4782,8 +4919,18 @@ FOREIGN DATA WRAPPER myfdw
 ```sql
 SERVER analytics_warehouse
     FOREIGN DATA WRAPPER postgres_fdw
-    OPTIONS (host 'warehouse.internal', dbname 'analytics', port '5432');
+    OPTIONS (host 'warehouse.internal', dbname 'analytics', port '5432')
+{
+    OWNER "fdw_admin";
+    COMMENT 'Read replica warehouse connection';
+}
 ```
+
+   `SERVER` MAY carry an optional `{ }` block (`comment-dir`/
+   `owner-dir`/`renamed-from-dir`) — same standard rules as every other
+   kind (§7.6). Server is database-level, not schema-scoped, so the
+   cross-schema `SET SCHEMA` half of the generic extension never applies
+   here (same as Publication above).
 
    **Diffing semantics:**
 
@@ -4791,6 +4938,9 @@ SERVER analytics_warehouse
    |--------|-------------|--------|
    | New server | `CREATE SERVER ...` | `SAFE` |
    | OPTIONS changed | `ALTER SERVER name OPTIONS (SET key 'value', ...)` | `SAFE` |
+   | `VERSION` changed only, `OPTIONS`/FDW unchanged | `ALTER SERVER name VERSION 'new_version'` | `SAFE` |
+   | Owner changed | `ALTER SERVER name OWNER TO role` | `SAFE` |
+   | Renamed (`RENAMED FROM`) | `ALTER SERVER old RENAME TO new` | `CAUTION` |
    | FDW changed | Drop + recreate | `DESTRUCTIVE` |
    | Server removed | `DROP SERVER name [CASCADE]` | `DESTRUCTIVE` |
 
@@ -6268,7 +6418,8 @@ serial_sequence_declared      = "off"
    | RLS disabled | `rls_enabled` changed | `ALTER TABLE t DISABLE ROW LEVEL SECURITY` | `SAFE` |
    | RLS force removed (enable still set, §7.8) | `rls_forced` false in desired, `rls_enabled` still true | `ALTER TABLE t NO FORCE ROW LEVEL SECURITY` | `SAFE` |
    | Policy added | Name absent in snapshot | `CREATE POLICY name ON t ...` | `SAFE` |
-   | Policy changed | Any field differs | Drop + recreate | `SAFE` |
+   | Policy `TO`/`USING`/`WITH CHECK` changed only (§7.8) | `FOR`/`AS` unchanged | `ALTER POLICY name ON t ...` | `SAFE` |
+   | Policy `FOR`/`AS` changed | Either field differs | Drop + recreate | `SAFE` |
    | Policy dropped | Name absent in desired | `DROP POLICY name ON t` | `SAFE` |
    | Trigger added | Name absent in snapshot | `CREATE TRIGGER name ...` | `SAFE` |
    | Trigger changed | Any field differs | Drop + recreate | `SAFE` |
@@ -6577,6 +6728,19 @@ serial_sequence_declared      = "off"
    installing that extension, which DPG already manages. Not planned
    for any future version.
 
+   **`ALTER EXTENSION ADD`/`DROP member_object`:**
+   Out of scope. This reassigns which specific catalog objects (a
+   function, a type, an operator, etc.) an extension's own internal
+   membership list claims — normally only relevant when packaging a new
+   extension version or working around a broken/partial installation,
+   both extension-authoring concerns rather than something an
+   application schema project hand-manages. §6.2 already manages
+   installing, updating, and removing an extension as a whole; picking
+   apart its internal member list is a tier below that scope, the same
+   distinction that excludes `CREATE ACCESS METHOD`/`CREATE LANGUAGE`/
+   `CREATE TRANSFORM` above. Not planned for any future version unless
+   a concrete use case outside extension-authoring emerges.
+
 ---
 
 ## 24. Security Considerations
@@ -6720,7 +6884,7 @@ serial_sequence_declared      = "off"
    | Composite types | Declared, Diffed | Attribute `COLLATE`; `OWNER`, `RENAMED FROM`/`SET SCHEMA` |
    | Range types | Declared, Diffed | Any option change = DESTRUCTIVE; `OWNER`, `RENAMED FROM`/`SET SCHEMA`; multirange companion auto-created, never separately declared |
    | Domain types | Declared, Diffed | `COLLATE`; `NOT VALID`/`VALIDATE CONSTRAINT`/`RENAME CONSTRAINT` lifecycle; `OWNER`, `RENAMED FROM`/`SET SCHEMA` |
-   | Base (shell) types | Declared, Passthrough | Bare forward-declaration shell + automatic cycle-breaking for self-referential support functions (§5.5); `OWNER`, `RENAMED FROM`/`SET SCHEMA` |
+   | Base (shell) types | Declared, Passthrough | Bare forward-declaration shell + automatic cycle-breaking for self-referential support functions (§5.5); `OWNER`, `RENAMED FROM`/`SET SCHEMA`; support-function/storage property changes use non-destructive `ALTER TYPE ... SET (...)` where real PostgreSQL allows it |
    | Virtual types | Declared, No SQL | DPG-native; snapshot only |
    | Views | Declared, Diffed | Column list change = DESTRUCTIVE; `RENAMED FROM` and cross-schema `SET SCHEMA` supported (§7.6, §8.1) |
    | Materialized views | Declared, Diffed | Query change = DESTRUCTIVE; `RENAMED FROM`/`SET SCHEMA` supported (§8.2) |
@@ -6729,12 +6893,12 @@ serial_sequence_declared      = "off"
    | Procedures | Declared, Passthrough body | Same additions as Functions above (`[NO] DEPENDS ON EXTENSION`, `OWNER`, `REVOCATIONS`, `RENAMED FROM`/`SET SCHEMA`) |
    | Aggregates | Declared, Diffed | Full `agg-options` set (§9.4) diffed; any option change = DESTRUCTIVE; `RENAME TO`/`OWNER TO`/`SET SCHEMA` are the only non-destructive ALTER operations, matching real PostgreSQL's `ALTER AGGREGATE` surface |
    | Window functions | Declared, Passthrough body | |
-   | Row Level Security | Declared, Diffed | |
+   | Row Level Security | Declared, Diffed | `TO`/`USING`/`WITH CHECK`-only policy changes use non-destructive `ALTER POLICY`, avoiding a zero-active-policy window (§7.8) |
    | Triggers | Declared, Diffed | |
    | Event triggers | Declared, Passthrough | Reconstructed from catalog; hash-diffed. Enable-state (`DISABLED`/`ENABLE REPLICA`/`ENABLE ALWAYS`), `OWNER`, `RENAMED FROM` diffed structurally, not part of the hash (§14.1) |
    | Sequences | Declared, Diffed | `UNLOGGED`, `OWNED BY NONE`, `REVOCATIONS`, `RESTART [WITH n]` (§10) |
    | Schemas | Declared, Diffed | |
-   | Extensions | Declared, Diffed | |
+   | Extensions | Declared, Diffed | `SCHEMA` change uses non-destructive `ALTER EXTENSION ... SET SCHEMA` for relocatable extensions (§6.2) |
    | Roles | Declared, Diffed | Cluster-level; `PASSWORD` (§11.1) never live-introspected (superuser-only in PG), diffed offline via a hash of the declared text. `RENAMED FROM`/`RENAME TO` and `SET`/`RESET` session-config-parameter grammar now supported (§11.1); membership `WITH ADMIN`/`INHERIT`/`SET` options (PG16+) also supported |
    | Table-level grants | Declared, Diffed | Additive model; `MAINTAIN` privilege (PG17) and `GRANTED BY role` (§7.10) also supported |
    | Parameter Privileges (§11.6) | Declared, Diffed | Cluster-level; `GRANT {SET\|ALTER SYSTEM} ON PARAMETER`, additive model like Table-level grants |
@@ -6742,16 +6906,16 @@ serial_sequence_declared      = "off"
    | Explicit revocations | Declared, Diffed | |
    | Default Privileges | Declared, Diffed | |
    | Security Labels (§14.11) | Declared, Diffed | Keyed by provider; every kind PostgreSQL's own `SECURITY LABEL` grammar supports and DPG models |
-   | Tablespaces | Declared, Passthrough | Cluster-level; reconstructed from catalog, hash-diffed. `CREATE`-time `WITH (...)` storage params declared (§14.7); `ALTER TABLESPACE` surface (`RENAME TO`/`OWNER TO`/`SET`/`RESET`) still a separate, open gap |
+   | Tablespaces | Declared, Passthrough | Cluster-level; reconstructed from catalog, hash-diffed. `CREATE`-time `WITH (...)` storage params, `OWNER TO`, `RENAME TO` all supported (§14.7); `SET`/`RESET` on `WITH (...)` options is still a separate, open gap |
    | Foreign Data Wrappers | Declared, Passthrough | Cluster-level; reconstructed from catalog, hash-diffed |
-   | Foreign Servers | Declared, Passthrough | Reconstructed from catalog; hash-diffed |
+   | Foreign Servers | Declared, Passthrough | Reconstructed from catalog; hash-diffed. `OWNER`, `RENAMED FROM`, bare `VERSION`-only change also supported (§14.9) |
    | User Mappings | Declared, Passthrough | Reconstructed from catalog; hash-diffed. `OPTIONS` may hold a `{{secret-uri}}` reference (§14.10, §D.5), resolved only immediately before `CREATE USER MAPPING` executes |
-   | Foreign Tables | Declared, Diffed | `SERVER`/`OPTIONS` after `)`; the implementation diffs `SERVER` change, `OPTIONS` change, and column add/drop correctly, but this section has no dedicated ALTER-semantics prose documenting that behavior — a reader of the spec text alone cannot yet derive it |
+   | Foreign Tables | Declared, Diffed | `SERVER`/`OPTIONS` after `)`; §7.12 now documents the ALTER-semantics table directly (`OPTIONS` change is `SAFE` in place, `SERVER` change is `DESTRUCTIVE` drop+recreate, column add/drop follows regular `TABLE` rules) |
    | Partitioned Tables | Declared, Diffed | |
    | Sub-partitioning | Declared, Diffed | |
-   | Publications | Declared, Passthrough | Reconstructed from catalog; hash-diffed |
+   | Publications | Declared, Passthrough | Reconstructed from catalog; hash-diffed. `OWNER`, `RENAMED FROM` also supported (§13.1) |
    | Subscriptions | Declared, Passthrough | Reconstructed from the catalog; hash-diffed. `CONNECTION` alone is never introspected (`subconninfo` has no PUBLIC grant, and even a privileged read can't recover the original `{{secret-uri}}`) — reconstructed as a fixed placeholder instead, excluded from the drift comparison like every other reconstructed body (§13.2). `CONNECTION` may hold a `{{secret-uri}}` reference in source (§13.2, §D.5), resolved only immediately before `CREATE SUBSCRIPTION` executes |
-   | Collations | Declared, Passthrough | Reconstructed from catalog, hash-diffed; any change = DESTRUCTIVE. `FROM existing_collation` form supported (§14.2) via the same passthrough |
+   | Collations | Declared, Passthrough | Reconstructed from catalog, hash-diffed; property changes (`LOCALE`/`PROVIDER`/`RULES`/`FROM` target) = DESTRUCTIVE. `FROM existing_collation` and `RULES` (PG16+) forms, `OWNER`/`RENAMED FROM`/`SET SCHEMA`, and `REFRESH VERSION` (PG15+) also supported (§14.2) |
    | Operators | Declared, Passthrough | Reconstructed from catalog, hash-diffed; any change = DESTRUCTIVE |
    | Operator Classes | Declared, Passthrough | Reconstructed from catalog, hash-diffed; any `AS` member-list change = DESTRUCTIVE (PostgreSQL has no incremental `ALTER OPERATOR CLASS`) |
    | Operator Families | Declared, Passthrough + Diffed | Header (name/access method) reconstructed from catalog, hash-diffed; loose members (§14.4, `ALTER OPERATOR FAMILY ... ADD`) are structured and diffed incrementally per member, live-path included — not gated on `Reconstructed` the way the bare header hash is |
@@ -6775,6 +6939,7 @@ serial_sequence_declared      = "off"
    | `CREATE CONVERSION` | Out of scope | No realistic use case under UTF-8 dominance; see §23 |
    | `CREATE [PROCEDURAL] LANGUAGE` | Out of scope | Covered by extension install (`CREATE EXTENSION`); see §23 |
    | `CREATE TRANSFORM` | Out of scope | Always bundled with a specific extension pairing; see §23 |
+   | `ALTER EXTENSION ADD`/`DROP member_object` | Out of scope | Extension-authoring concern, a tier below application-schema scope; see §23 |
    | Minimum PG version targeting | Deferred | See §23; planned v1.1 |
 
 ---
