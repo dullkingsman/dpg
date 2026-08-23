@@ -364,6 +364,7 @@ func toSnapObject(obj pipeline.IRObject) *SnapObject {
 	case *ir.TSDict:
 		return &SnapObject{Kind: "ts_dict", Opaque: &SnapOpaque{
 			Kind: "ts_dict", Schema: o.Schema, Name: o.Name, BodyHash: sourceBodyHash(o.Body, o.Reconstructed), Comment: o.Comment,
+			TSDictOwner: o.Owner,
 		}}
 	case *ir.TSParser:
 		return &SnapObject{Kind: "ts_parser", Opaque: &SnapOpaque{

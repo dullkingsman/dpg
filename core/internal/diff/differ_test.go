@@ -11109,6 +11109,36 @@ func TestDiffTSDictRenamedFromEmitsAlterRename(t *testing.T) {
 	}
 }
 
+// TestDiffTSDictOwnerChanged is the regression guard for Section 12.2's
+// OWNER TO capability: previously ir.TSDict had no Owner field at all.
+func TestDiffTSDictOwnerChanged(t *testing.T) {
+	d := New()
+	body := "CREATE TEXT SEARCH DICTIONARY public.ispell (TEMPLATE = ispell)"
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.ispell", &snapshot.SnapObject{
+		Kind: "ts_dict",
+		Opaque: &snapshot.SnapOpaque{
+			Kind: "ts_dict", Schema: "public", Name: "ispell",
+			BodyHash: hashText(body),
+		},
+	})
+	owner := "search_admin"
+	desired := []pipeline.IRObject{
+		&ir.TSDict{Schema: "public", Name: "ispell", Body: body, Owner: &owner},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := `ALTER TEXT SEARCH DICTIONARY "public"."ispell" OWNER TO "search_admin";`
+	if !containsSQL(ops, want) {
+		t.Errorf("expected %q, got: %v", want, sqlList(ops))
+	}
+	if containsSQL(ops, "DROP TEXT SEARCH DICTIONARY") {
+		t.Errorf("owner-only change should not DROP+CREATE, got: %v", sqlList(ops))
+	}
+}
+
 // TestDiffTSDictRenamedFromAndBodyChanged confirms a simultaneous rename +
 // TEMPLATE/option change still requires DROP+CREATE, with no redundant
 // separate rename — createOpaque already creates under the final (new)

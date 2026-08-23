@@ -1415,11 +1415,13 @@ func introspectTSDicts(ctx context.Context, conn pipeline.Querier) ([]pipeline.I
 SELECT n.nspname, dict.dictname,
        tn.nspname AS tmpl_schema, t.tmplname AS tmpl_name,
        dict.dictinitoption,
-       obj_description(dict.oid, 'pg_ts_dict') AS comment
+       obj_description(dict.oid, 'pg_ts_dict') AS comment,
+       r.rolname AS owner
 FROM   pg_ts_dict dict
 JOIN   pg_namespace n  ON n.oid = dict.dictnamespace
 JOIN   pg_ts_template t ON t.oid = dict.dicttemplate
 JOIN   pg_namespace tn ON tn.oid = t.tmplnamespace
+JOIN   pg_roles r      ON r.oid = dict.dictowner
 WHERE  dict.oid >= $1
 AND    n.nspname NOT IN ('pg_catalog', 'information_schema', 'pg_toast')
 AND    ` + notExtensionOwned("pg_ts_dict", "dict.oid") + `
@@ -1433,9 +1435,9 @@ ORDER  BY n.nspname, dict.dictname`
 
 	var out []pipeline.IRObject
 	for rs.Next() {
-		var schema, name, tmplSchema, tmplName string
+		var schema, name, tmplSchema, tmplName, owner string
 		var initOption, comment *string
-		if err := rs.Scan(&schema, &name, &tmplSchema, &tmplName, &initOption, &comment); err != nil {
+		if err := rs.Scan(&schema, &name, &tmplSchema, &tmplName, &initOption, &comment, &owner); err != nil {
 			return nil, err
 		}
 		parts := []string{"TEMPLATE = " + qualIdentQ(tmplSchema, tmplName)}
@@ -1446,7 +1448,7 @@ ORDER  BY n.nspname, dict.dictname`
 		out = append(out, &ir.TSDict{
 			Schema: schema, Name: name,
 			TemplateSchema: tmplSchema, TemplateName: tmplName,
-			Body: canonicalDDL(body), Comment: comment, Reconstructed: true,
+			Body: canonicalDDL(body), Comment: comment, Owner: &owner, Reconstructed: true,
 		})
 	}
 	return out, rs.Err()

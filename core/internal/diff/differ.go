@@ -1248,6 +1248,9 @@ func createObject(obj pipeline.IRObject, vtypes map[string]string) ([]pipeline.D
 		return ops, nil
 	case *ir.TSDict:
 		ops, err := createOpaque(o.QualifiedName(), o.Body, "TEXT SEARCH DICTIONARY", o.Schema, o.SrcPos)
+		if err == nil && o.Owner != nil && len(ops) > 0 {
+			ops = append(wrapCreateWithOwner(ops[0], o.Owner, o.SrcPos), ops[1:]...)
+		}
 		return appendCommentOp(ops, err, "ts_dict", o.Schema, o.Name, "", "", o.Comment, o.SrcPos)
 	case *ir.TSParser:
 		ops, err := createOpaque(o.QualifiedName(), o.Body, "TEXT SEARCH PARSER", o.Schema, o.SrcPos)
@@ -4521,6 +4524,23 @@ func diffTSDict(o *ir.TSDict, snap *snapshot.SnapOpaque) ([]pipeline.DiffOp, err
 	ops, err := diffOpaqueIRHash(o.QualifiedName(), o.Body, hashBody, o.Reconstructed, o.Comment, snap, o.SrcPos)
 	if err != nil {
 		return nil, err
+	}
+	// OWNER TO (Section 12.2) — real PostgreSQL has no OWNER concept for a
+	// TS parser/template (see diffTSParser's identical note), only for a
+	// dictionary. Skipped when a body/definition change already recreates
+	// it under the final desired Owner via createOpaque (no such op exists
+	// today — createOpaque doesn't apply Owner at all — so this only
+	// fires on the no-recreate path in practice, same guard style as
+	// renameOpaqueIfUnchanged's Destructive scan).
+	destructive := false
+	for _, op := range ops {
+		if op.Safety() == pipeline.Destructive {
+			destructive = true
+			break
+		}
+	}
+	if !destructive && !ptrEq(o.Owner, snap.TSDictOwner) && o.Owner != nil {
+		ops = append(ops, safeOp(fmt.Sprintf("ALTER TEXT SEARCH DICTIONARY %s OWNER TO %s;", qualIdent(snap.Schema, snap.Name), quoteIdent(*o.Owner)), o.SrcPos))
 	}
 	return renameOpaqueIfUnchanged(ops, "TEXT SEARCH DICTIONARY", snap, o.Schema, o.Name, o.SrcPos), nil
 }

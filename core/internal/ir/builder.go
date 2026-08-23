@@ -2449,6 +2449,9 @@ func (b *Builder) buildDefineStmt(ds *pg_query.DefineStmt, block pipeline.BlockA
 			// field for whether it's actually wired, not just declared.
 			td.Comment = &block.Comment.Value
 		}
+		if block.Owner != nil {
+			td.Owner = &block.Owner.Name
+		}
 		if block.RenamedFrom != nil {
 			td.RenamedFrom = &block.RenamedFrom.Name
 			td.RenamedFromSchema = renamedFromSchema(block.RenamedFrom)

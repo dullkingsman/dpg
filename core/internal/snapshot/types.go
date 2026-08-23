@@ -73,6 +73,12 @@ type SnapOpaque struct {
 	// EventTriggerOwner is Section 14.1's ALTER EVENT TRIGGER ... OWNER TO
 	// diffing input — same shape as PublicationOwner above.
 	EventTriggerOwner *string `json:"event_trigger_owner,omitempty"`
+	// TSDictOwner is Section 12.2's ALTER TEXT SEARCH DICTIONARY ... OWNER
+	// TO diffing input — same shape as PublicationOwner/EventTriggerOwner
+	// above. TSParser/TSTemplate have no OWNER concept in real PostgreSQL
+	// (confirmed via \h ALTER TEXT SEARCH PARSER/TEMPLATE), so neither gets
+	// an equivalent field.
+	TSDictOwner *string `json:"ts_dict_owner,omitempty"`
 	// OptionsStructured/FDWHandler/FDWValidator/FDWOptions/ServerFDWName/
 	// ServerType/ServerVersion/ServerOptions/UserMappingOptions are RFC
 	// §14.8/§14.9/§14.10's structured diffing inputs for fdw/server/

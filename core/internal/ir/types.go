@@ -1400,10 +1400,11 @@ type TSDict struct {
 	TemplateName   string
 	Body           string
 	Comment        *string
+	Owner          *string
 	Reconstructed  bool // Body rebuilt from the catalog; see Tablespace.Reconstructed
 	// RenamedFrom/RenamedFromSchema — see Table's identical doc comments;
 	// real PostgreSQL supports ALTER TEXT SEARCH DICTIONARY ... RENAME TO/
-	// SET SCHEMA (Owner is a separate, still-open gap, out of scope here).
+	// SET SCHEMA/OWNER TO, all three now modeled.
 	RenamedFrom       *string
 	RenamedFromSchema *string
 	SrcPos            pipeline.SourcePos

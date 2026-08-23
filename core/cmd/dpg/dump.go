@@ -1294,7 +1294,7 @@ func renderObjectDPG(b *strings.Builder, obj pipeline.IRObject, fmtOpts format.O
 	case *ir.TSConfig:
 		renderTSConfigBody(b, ind, fmtOpts, o)
 	case *ir.TSDict:
-		renderOpaqueBody(b, ind, fmtOpts, o.Body, o.Comment)
+		renderTSDictBody(b, ind, fmtOpts, o)
 	case *ir.TSParser:
 		renderOpaqueBody(b, ind, fmtOpts, o.Body, o.Comment)
 	case *ir.TSTemplate:
@@ -1689,6 +1689,36 @@ func renderEventTriggerBody(b *strings.Builder, ind string, fmtOpts format.Optio
 		fmt.Fprintf(b, "%s%s %s;\n", ind, kw("COMMENT"), sqlStringLit(*o.Comment))
 	}
 	writeSecurityLabels(b, ind, fmtOpts, o.SecurityLabels)
+	b.WriteString("}\n")
+}
+
+// renderTSDictBody is renderOpaqueBody's TSDict-specific variant: TSDict's
+// OWNER (Section 12.2) has no counterpart in renderOpaqueBody's other
+// callers (TSParser/TSTemplate, which real PostgreSQL has no OWNER concept
+// for at all) — same reasoning as renderPublicationBody/
+// renderEventTriggerBody.
+func renderTSDictBody(b *strings.Builder, ind string, fmtOpts format.Options, o *ir.TSDict) {
+	kw := fmtOpts.Keyword
+	body := strings.TrimSpace(o.Body)
+	const createPrefix = "CREATE "
+	if len(body) >= len(createPrefix) && strings.EqualFold(body[:len(createPrefix)], createPrefix) {
+		body = strings.TrimSpace(body[len(createPrefix):])
+	}
+	if body == "" {
+		return
+	}
+	fmt.Fprintf(b, "\n%s", body)
+	if o.Owner == nil && o.Comment == nil {
+		b.WriteString(";\n")
+		return
+	}
+	b.WriteString(" {\n")
+	if o.Owner != nil {
+		fmt.Fprintf(b, "%s%s %s;\n", ind, kw("OWNER"), quoteIdentIfNeeded(*o.Owner))
+	}
+	if o.Comment != nil {
+		fmt.Fprintf(b, "%s%s %s;\n", ind, kw("COMMENT"), sqlStringLit(*o.Comment))
+	}
 	b.WriteString("}\n")
 }
 
