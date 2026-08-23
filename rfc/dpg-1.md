@@ -347,7 +347,7 @@ Author's Address .................................................. 158
    construct requiring PostgreSQL 15+ is documented as such at its own
    point of use; nothing below PostgreSQL 14 is a supported target.
    This is distinct from the per-project, user-configurable
-   `MIN_PG_VERSION` gating feature (§23) — that's a future compiler
+   `MIN_PG_VERSION` gating feature (Section 23) — that's a future compiler
    feature for warning a *user* about their own project's version
    floor; this is the floor for what *this specification itself*
    documents at all.
@@ -563,8 +563,8 @@ directory = ".dpg/migrations"
    The compiler MUST reject any key in `dpg.toml` that is not listed
    above with error DPG-E001 (unknown configuration key).
 
-   `[fmt]` controls `dpg fmt` (§18.7).  `[migrations]` controls where
-   `dpg apply` (§18.2) archives applied SQL, one file per successful
+   `[fmt]` controls `dpg fmt` (Section 18.7).  `[migrations]` controls where
+   `dpg apply` (Section 18.2) archives applied SQL, one file per successful
    apply, at `<directory>/<cluster>/<database>/<timestamp>_<short-hash>.sql`;
    this directory SHOULD be committed to version control.
 
@@ -588,7 +588,7 @@ cluster_objects_dir = "cluster"   # default
 url = "postgresql://user@host:5432/postgres"
 
 # Secrets-provider URI resolved at connection time. Supported schemes
-# (see §D.5): env:<VAR>, vault:<mount>/<path>#<field>, aws-sm:<secret-id>,
+# (see Appendix D.5): env:<VAR>, vault:<mount>/<path>#<field>, aws-sm:<secret-id>,
 # gcp-sm:<project>/<secret-id>, azure-kv:<vault-name>/<secret-name>.
 # Mutually exclusive with `url`. OPTIONAL.
 # link = "env:PRIMARY_DB_URL"
@@ -607,7 +607,7 @@ snapshot_on_apply = true
    omitted or empty the compiler MUST abort with error DPG-E032
    (cluster name required).  `name` MUST also be unique across every
    cluster directory in the project; a repeated `name` MUST abort with
-   error DPG-E034 (duplicate cluster name) — see §3.6.
+   error DPG-E034 (duplicate cluster name) — see Section 3.6.
 
 ### 3.4. Database dpg.toml
 
@@ -630,7 +630,7 @@ default_schema = "public"
    cluster (uniqueness is per-cluster, not project-wide — the same
    database name MAY recur under a different cluster); a repeated
    `name` within one cluster MUST abort with error DPG-E035
-   (duplicate database name) — see §3.6.
+   (duplicate database name) — see Section 3.6.
 
 ### 3.5. Cluster-Level Objects Directory
 
@@ -675,15 +675,15 @@ default_schema = "public"
        Section 15.3).
 
    **Name validation.** Step 2.a MUST validate that the cluster's
-   declared `name` (§3.3) is non-empty (error DPG-E032 if not) and
+   declared `name` (Section 3.3) is non-empty (error DPG-E032 if not) and
    unique across every cluster directory discovered under the project
    root (error DPG-E034 if not, naming both directories).  Step 2.b.i
-   MUST validate that the database's declared `name` (§3.4) is
+   MUST validate that the database's declared `name` (Section 3.4) is
    non-empty (error DPG-E033 if not) and unique among every database
    directory within that same cluster (error DPG-E035 if not, naming
    both directories) — database name uniqueness is scoped per-cluster
    only, not project-wide.  These checks exist because `--cluster`/
-   `--database` selection (§D.2.2), the snapshot store, the migrations
+   `--database` selection (Appendix D.2.2), the snapshot store, the migrations
    archive, and `dpg dump`'s default output path all key off the
    declared `name`, not the directory: an unvalidated empty or
    duplicate name causes silent misbehavior — an unreachable second
@@ -858,13 +858,13 @@ terminator = paren-close SP* [ with-clause / tablespace-clause /
    The semicolon is mandatory after the closing delimiter.  An optional
    `{ }` block MUST follow immediately after, with no intervening
    whitespace beyond optional newlines. A `BEGIN ATOMIC ... END` body
-   (§9.1, PG14+ standard-SQL form) follows the same rule with `END;`
+   (Section 9.1, PG14+ standard-SQL form) follows the same rule with `END;`
    in place of `$$;`.
 
    **Rule T3.** All other declarations — views, ENUM types, sequences,
    roles, publications, subscriptions, extensions, schemas without
    nested objects, domains, and a bare forward-declared base (shell)
-   type (`TYPE name;`, no option list — §5.5) — terminate their Part 1
+   type (`TYPE name;`, no option list — Section 5.5) — terminate their Part 1
    with `;`.  An optional `{ }` block follows immediately after `;`.
 
    **Rule T4.** A declaration with a `{ }` block but no Part 1
@@ -1151,14 +1151,14 @@ INDEX idx_status (status) WHERE (status = 'active');
    `owner-dir`/`renamed-from-dir` in `enum-block` follow the same rules
    as every other object kind: `OWNER "..."` emits `ALTER TYPE name
    OWNER TO role` (`SAFE`); `RENAMED FROM old` emits `ALTER TYPE old
-   RENAME TO new` (`CAUTION`), and — per §7.6's generic cross-schema
+   RENAME TO new` (`CAUTION`), and — per Section 7.6's generic cross-schema
    extension to `renamed-from-dir` — a schema-qualified old name also
    emits `ALTER TYPE old_schema.name SET SCHEMA new_schema` (`SAFE`).
-   This closes the same gap for ENUM that §7.6/§7.11 already closed for
+   This closes the same gap for ENUM that Sections 7.6/7.11 already closed for
    Table/View/Sequence: real PostgreSQL's `ALTER TYPE` supports
    `RENAME TO`/`OWNER TO`/`SET SCHEMA` for every `CREATE TYPE` variant
-   (ENUM, Composite, Range, Domain, Base) identically — see §5.2's,
-   §5.3's, and §5.5's own `{ }` blocks below for the same three
+   (ENUM, Composite, Range, Domain, Base) identically — see Section 5.2's,
+   Section 5.3's, and Section 5.5's own `{ }` blocks below for the same three
    directives applied consistently.
 
    **PG equivalent:** `CREATE TYPE name AS ENUM ('v1', 'v2', ...)`
@@ -1220,7 +1220,7 @@ ALTER TYPE <schema>.<name> ADD VALUE '<new_value>';
    block at all unless the type itself was created in that same
    transaction; from 12 onward it can, as long as the new value isn't
    *referenced* until after commit) — but this restriction is moot for
-   every server DPG supports: §1.4's documented PostgreSQL version
+   every server DPG supports: Section 1.4's documented PostgreSQL version
    floor is 14, already past the version-12 cutoff, so the compiler
    requires no server-version detection here and always emits it inside
    the normal transactional migration.  DPG's own migrations never
@@ -1242,7 +1242,7 @@ ALTER TYPE <schema>.<name> ADD VALUE '<new_value>';
    `SAFE` (a catalog-only rename with no transactional restriction in
    any supported PostgreSQL version, same as `ADD VALUE` above).
    Follows the same three-state resolution algorithm as column/table
-   `RENAMED FROM` (§7.6) — a value already present under its new name is
+   `RENAMED FROM` (Section 7.6) — a value already present under its new name is
    a no-op; neither name present is a stale-directive error (DPG-E021).
    Without this, an enum value rename is unexpressable except as a
    destructive remove-and-add pair.
@@ -1317,7 +1317,7 @@ composite-directive = comment-dir / owner-dir / renamed-from-dir
                      / attribute-block
 
 ; COLUMN-equivalent sub-block for attribute renames — same shape as
-; §7.4's column-block, reused here per that section's own cross-
+; Section 7.4's column-block, reused here per that section's own cross-
 ; reference rather than inventing a parallel "ATTRIBUTE { }" name.
 attribute-block = "COLUMN" WSP identifier WSP "{" "RENAMED FROM" WSP identifier ";" "}"
 ```
@@ -1350,10 +1350,10 @@ SCHEMA public {
    -   Dropping an attribute: `ALTER TYPE <name> DROP ATTRIBUTE <col>` — `DESTRUCTIVE`.
    -   Changing an attribute type or `COLLATE`: `ALTER TYPE <name> ALTER ATTRIBUTE <col> TYPE <new> [COLLATE collation]` — `DESTRUCTIVE`.
    -   Renaming an attribute: `COLUMN new_name { RENAMED FROM old_name; }` inside the `{ }` block —
-       the same `RENAMED FROM` mechanism as table columns (§7.6) — emits
+       the same `RENAMED FROM` mechanism as table columns (Section 7.6) — emits
        `ALTER TYPE <name> RENAME ATTRIBUTE old_name TO new_name` — `SAFE`.
    -   Owner changed: `ALTER TYPE <name> OWNER TO role` — `SAFE`.
-   -   Renamed (`RENAMED FROM` on the type itself, §5.1's cross-reference): `ALTER TYPE old RENAME TO new` — `CAUTION`; schema-qualified additionally emits `ALTER TYPE old_schema.name SET SCHEMA new_schema` — `SAFE`.
+   -   Renamed (`RENAMED FROM` on the type itself, Section 5.1's cross-reference): `ALTER TYPE old RENAME TO new` — `CAUTION`; schema-qualified additionally emits `ALTER TYPE old_schema.name SET SCHEMA new_schema` — `SAFE`.
 
 ### 5.3. Range Types
 
@@ -1385,7 +1385,7 @@ SCHEMA public {
    **Diffing semantics:** Any change to a range type's options requires
    `DROP TYPE CASCADE` followed by `CREATE TYPE`.  This is classified
    as `DESTRUCTIVE`.  `OWNER`/`RENAMED FROM` follow the standard rules
-   (§5.1): `ALTER TYPE name OWNER TO role` (`SAFE`); `ALTER TYPE old
+   (Section 5.1): `ALTER TYPE name OWNER TO role` (`SAFE`); `ALTER TYPE old
    RENAME TO new` (`CAUTION`), plus `SET SCHEMA` when schema-qualified
    (`SAFE`).
 
@@ -1432,7 +1432,7 @@ domain-block = *( ( comment-dir / owner-dir / renamed-from-dir
 ```
 
    The `{ }` block holds only what has no place in native `CREATE
-   DOMAIN` syntax: `COMMENT`, `OWNER`, `RENAMED FROM` (§7.6's generic
+   DOMAIN` syntax: `COMMENT`, `OWNER`, `RENAMED FROM` (Section 7.6's generic
    cross-schema `SET SCHEMA` extension applies here identically),
    `GRANTS`, `REVOCATIONS` — the same directive set Tenet 5 already
    sanctions for every other object kind.
@@ -1453,13 +1453,13 @@ domain-block = *( ( comment-dir / owner-dir / renamed-from-dir
    constraints is silently omitted from that statement (there is
    nothing yet to skip validating) — this mirrors the "no separate
    opt-in step needed at creation" logic table constraints already
-   follow, without needing table's placement restriction (§7.3), since
+   follow, without needing table's placement restriction (Section 7.3), since
    Domain has no `( )`-list-vs-`{ }`-block distinction to enforce here.
 
    **`VALIDATE CONSTRAINT`:** When `NOT VALID` is removed from an
    existing constraint in source, the compiler emits `ALTER DOMAIN
    <name> VALIDATE CONSTRAINT <name>` — `CAUTION` — the same two-step
-   lifecycle as table constraints (§7.3).
+   lifecycle as table constraints (Section 7.3).
 
    **`RENAMED FROM` on a constraint** emits `ALTER DOMAIN <name> RENAME
    CONSTRAINT old TO new` — `SAFE` — instead of the drop-and-recreate a
@@ -1514,7 +1514,7 @@ base-type-block = *( ( comment-dir / owner-dir / renamed-from-dir ) ";" )
    PostgreSQL's "shell type," a placeholder with only a name and an
    owner.  This is the first half of the standard workflow for a
    self-referential base type: the type's own `INPUT`/`OUTPUT`
-   functions (§9, `LANGUAGE C`) must declare an argument or return type
+   functions (Section 9, `LANGUAGE C`) must declare an argument or return type
    of `mytype` before `mytype` itself has a full definition, which is
    impossible unless the shell already exists.
 
@@ -1522,11 +1522,11 @@ base-type-block = *( ( comment-dir / owner-dir / renamed-from-dir ) ";" )
    (e.g. `TYPE mytype (INPUT = mytype_in, OUTPUT = mytype_out, ...)`) is
    new and its `INPUT`/`OUTPUT`/etc. functions are *also* new and
    themselves reference `mytype` in their own argument or return type
-   (§9, e.g. `FUNCTION mytype_in(cstring) RETURNS mytype ...`), the
-   dependency graph (§22) detects the resulting circular reference the
+   (Section 9, e.g. `FUNCTION mytype_in(cstring) RETURNS mytype ...`), the
+   dependency graph (Section 22) detects the resulting circular reference the
    same way it already detects circular `DEFERRABLE` foreign keys
-   (§22.2) — a distinct cycle *kind*, broken by a distinct mechanism
-   specific to this case rather than §22.2's FK-specific algorithm: the
+   (Section 22.2) — a distinct cycle *kind*, broken by a distinct mechanism
+   specific to this case rather than Section 22.2's FK-specific algorithm: the
    compiler emits the bare shell `CREATE TYPE mytype;` first, then the
    `CREATE FUNCTION` statements that reference it, then the full
    `CREATE TYPE mytype (INPUT = ..., OUTPUT = ..., ...)` — which real
@@ -1563,7 +1563,7 @@ SCHEMA public {
    | Any other property differs (alone or alongside the above) | `DROP TYPE CASCADE` + `CREATE TYPE` | `DESTRUCTIVE` |
    | Type removed | `DROP TYPE name [CASCADE]` | `DESTRUCTIVE` |
 
-   `OWNER`/`RENAMED FROM` follow the standard rules (§5.1): `ALTER TYPE
+   `OWNER`/`RENAMED FROM` follow the standard rules (Section 5.1): `ALTER TYPE
    name OWNER TO role` (`SAFE`); `ALTER TYPE old RENAME TO new`
    (`CAUTION`), plus `SET SCHEMA` when schema-qualified (`SAFE`).
 
@@ -1735,7 +1735,7 @@ SCHEMA reporting {
    `public`'s live privileges differ from what a project first
    introspected against 15+ would show, through no DPG action of its
    own. DPG does not special-case this — a declared `GRANTS { CREATE TO
-   PUBLIC; }` on `public` (§7.10-style grants, applied to the schema)
+   PUBLIC; }` on `public` (Sections 7.10-style grants, applied to the schema)
    reproduces the pre-15 default explicitly and portably regardless of
    server version, the same way any other declared grant does.
 
@@ -1828,7 +1828,7 @@ column-list = column-item *( "," WSP column-item )
 column-item = column-def / table-constraint / like-clause / period-clause
 
 ; PostgreSQL 18+ temporal PRIMARY KEY/UNIQUE/FOREIGN KEY support
-; (WITHOUT OVERLAPS/PERIOD, §7.3) name a generated validity range via
+; (WITHOUT OVERLAPS/PERIOD, Section 7.3) name a generated validity range via
 ; this column-list entry instead of referencing a physical range column
 ; directly.
 period-clause = "PERIOD FOR" WSP identifier WSP
@@ -1846,7 +1846,7 @@ like-attribute = "COMMENTS" / "COMPRESSION" / "CONSTRAINTS" / "DEFAULTS"
                / "STORAGE" / "ALL"
 
 ; CREATE TABLE ... OF type_name — "Form 2" typed tables, backing a
-; previously-declared composite type (§5.2) instead of an independent
+; previously-declared composite type (Section 5.2) instead of an independent
 ; column list. The optional parenthesized list may only narrow
 ; constraints on the type's existing attributes (WITH OPTIONS) or add
 ; table-level constraints — it cannot add new columns, matching real
@@ -1910,16 +1910,16 @@ TABLE order_items_archive (
 ```
 
    **`OF type_name` (typed tables):** Backs the table's row type with a
-   previously-declared composite type (§5.2) instead of an independent
+   previously-declared composite type (Section 5.2) instead of an independent
    column list.  `WITH OPTIONS` narrows a constraint (`NOT NULL`,
    `DEFAULT`, etc.) on one of the type's existing attributes — real
    PostgreSQL rejects any attempt to introduce a *new* column this way,
    and DPG does not attempt to detect that error itself; it is left to
    PostgreSQL's own parser (per the passthrough principle already
    applied to every other clause-combination rule in this document, see
-   e.g. §7.9's `REFERENCING` note).  Adding, changing, or removing the
+   e.g. Section 7.9's `REFERENCING` note).  Adding, changing, or removing the
    `OF type_name` association after creation is an `ALTER`-side
-   operation — see §7.11's `OF type_name`/`NOT OF` entry.
+   operation — see Section 7.11's `OF type_name`/`NOT OF` entry.
 
 ```sql
 TYPE address AS (street TEXT, city TEXT, zip TEXT) {}
@@ -1936,7 +1936,7 @@ TABLE shipping_address OF address (
    among the other `table-clause` alternatives, matching real
    PostgreSQL's clause ordering after the column list / `OF type_name`
    and before `WITH (...)`/`TABLESPACE`.  Changing `USING` post-creation
-   is a separate, ALTER-side concern — see §21's `SET ACCESS METHOD` row.
+   is a separate, ALTER-side concern — see Section 21's `SET ACCESS METHOD` row.
 
 ### 7.2. Column Definitions
 
@@ -1987,7 +1987,7 @@ enforced-clause = "ENFORCED" / "NOT ENFORCED"
 
    **`VIRTUAL` generated columns** (PostgreSQL 18+): computed on read
    rather than stored — the alternative to the existing `STORED` form.
-   Diffed as a normal generated-column expression (§7.4's diffing
+   Diffed as a normal generated-column expression (Section 7.4's diffing
    table) — the `STORED`/`VIRTUAL` keyword itself is part of the
    generated-column identity the differ compares, so switching between
    them is a change like any other, going through the same `ADD
@@ -1997,7 +1997,7 @@ enforced-clause = "ENFORCED" / "NOT ENFORCED"
    inherited by child tables (`INHERITS`/partitions).  `NO INHERIT`
    scopes it to this table only — the same modifier `CHECK` constraints
    already had (`no-inherit`), now also expressible on `NOT NULL`,
-   inline (here) or as a named table-level constraint (§7.3's new
+   inline (here) or as a named table-level constraint (Section 7.3's new
    `NOT NULL` `table-constraint-body` form, below).
 
    **`ENFORCED`/`NOT ENFORCED`** (PostgreSQL 18+, `CHECK`/`FOREIGN KEY`
@@ -2184,11 +2184,11 @@ table-constraint-body
    exists with no `DEFERRABLE` FK, the compiler emits error DPG-E017
    with the full dependency cycle listed.
 
-   **`RENAMED FROM` on a constraint** (like index `RENAMED FROM`, §7.7)
+   **`RENAMED FROM` on a constraint** (like index `RENAMED FROM`, Section 7.7)
    emits `ALTER TABLE t RENAME CONSTRAINT old TO new` — `SAFE`,
    metadata-only — instead of the drop-and-recreate that a name-only
    difference would otherwise trigger under name-based constraint
-   identity (§7.3's opening paragraph).  MUST appear in the `{ }`
+   identity (Section 7.3's opening paragraph).  MUST appear in the `{ }`
    block, the same placement restriction as `NOT VALID`, since it is
    itself a lifecycle directive rather than a `CREATE TABLE`-native
    clause.
@@ -2220,11 +2220,11 @@ table-constraint-body
    name NOT NULL col_name [NO INHERIT] [NOT VALID]` is now addable via
    `ALTER TABLE ... ADD CONSTRAINT` the same way `CHECK` already is,
    including a `NOT VALID`/`VALIDATE CONSTRAINT` lifecycle identical to
-   §7.3's existing one — retroactively marking an *existing* `NOT NULL`
+   Section 7.3's existing one — retroactively marking an *existing* `NOT NULL`
    column's constraint `NOT VALID` (skipping the immediate full-table
    scan) was not possible before PostgreSQL 18 at all.  This is
    additive to the inline column-level `NOT NULL [NO INHERIT]` form
-   (§7.2) real PostgreSQL has supported since 18 as well — both forms
+   (Section 7.2) real PostgreSQL has supported since 18 as well — both forms
    describe the same underlying named constraint; DPG does not require
    either one specifically.
 
@@ -2238,7 +2238,7 @@ table-constraint-body
    referenced row's *own* validity period. `PERIOD FOR name (start_col,
    end_col)` — declared directly in the column list alongside ordinary
    columns via `period-clause`, a new `column-item` alternative added
-   in §7.1 — names the generated range spanning two existing columns
+   in Section 7.1 — names the generated range spanning two existing columns
    that `WITHOUT OVERLAPS`/`PERIOD` then reference by that name instead
    of a physical column:
 
@@ -2259,7 +2259,7 @@ TABLE room_bookings (
    exclusion; identity columns were disallowed entirely). Neither
    restriction was ever encoded in this document's own grammar — `
    table-constraint-body`'s `EXCLUDE` alternative and `col-constraint`'s
-   `GENERATED ... AS IDENTITY` alternatives (§7.2) already applied
+   `GENERATED ... AS IDENTITY` alternatives (Section 7.2) already applied
    unconditionally to any table, partitioned or not — so both older
    restrictions and PostgreSQL 17's lifting of them are handled
    entirely by PostgreSQL's own version-aware parser at apply time,
@@ -2374,7 +2374,7 @@ col-block-directive
 
    **Generated-column expression changes:** No separate directive is
    needed — the `GENERATED ALWAYS AS ( expr ) STORED` clause is already
-   part of `column-def` (§7.2).  The differ recognises three distinct
+   part of `column-def` (Section 7.2).  The differ recognises three distinct
    transitions on it and emits the matching targeted `ALTER`, instead
    of falling through to the generic "column type changed" row:
 
@@ -2386,7 +2386,7 @@ col-block-directive
 
    **Identity-column changes:** Likewise driven entirely by `column-def`'s
    already-declarative `GENERATED ALWAYS/BY DEFAULT AS IDENTITY
-   [identity-opts]` (§7.2) — no new grammar, only new diffing rules,
+   [identity-opts]` (Section 7.2) — no new grammar, only new diffing rules,
    distinguished from a generic column-type change:
 
    | Change | DDL emitted | Safety |
@@ -2481,7 +2481,7 @@ TABLE users (
    **Cross-schema moves (`SET SCHEMA`):** For every schema-scoped object
    kind whose `RENAMED FROM` uses the generic `renamed-from-dir`
    production (Appendix A) — Table, View, Materialized View, Sequence,
-   and the kinds covered in §9/§14 that reuse the same directive —
+   and the kinds covered in Sections 9/14 that reuse the same directive —
    `identifier` there is in fact `qual-name` (`[schema.]name`), so the
    old name MAY be schema-qualified.  When the resolved old name's
    schema differs from the object's current declared schema, the
@@ -2538,7 +2538,7 @@ index-col   = ( col-name / "(" expr ")" )
    index name, in that fixed order — mirroring real PostgreSQL's own
    `CREATE UNIQUE INDEX CONCURRENTLY name ON ONLY table USING method (columns)`
    exactly (only the implicit `INDEX`/`ON table` are dropped, since DPG's
-   `INDICES { }` block already establishes both). In **Mode B** (§4.8),
+   `INDICES { }` block already establishes both). In **Mode B** (Section 4.8),
    which does carry the literal `INDEX` keyword, the same order applies
    with `INDEX` inserted where PostgreSQL puts it:
    `[ "UNIQUE" WSP ] "INDEX" WSP [ "CONCURRENTLY" WSP ] [ "ONLY" WSP ] index-name ...`.
@@ -2546,10 +2546,10 @@ index-col   = ( col-name / "(" expr ")" )
    **`ONLY`** suppresses recursion into a partitioned table's own
    partitions — the index is created solely on the parent, matching real
    PostgreSQL's `CREATE INDEX ... ON ONLY table` exactly.  Meaningful only
-   when the enclosing table has a `PARTITION BY` clause (§7.13); DPG
+   when the enclosing table has a `PARTITION BY` clause (Section 7.13); DPG
    performs no validation of this and leaves the combination to
    PostgreSQL's own parser, per the passthrough principle already applied
-   to other clause-combination rules in this document (e.g. §7.9's
+   to other clause-combination rules in this document (e.g. Section 7.9's
    `REFERENCING` note).
 
    **Index opclass parameters:** `index-col`'s trailing `identifier
@@ -2571,8 +2571,8 @@ INDICES {
    no validation of this combination itself, leaving it to PostgreSQL's
    parser (same passthrough principle as `ONLY` above).  This clause was
    already implemented identically at the inline `PRIMARY
-   KEY`/`UNIQUE` constraint level (`conflict-clause`, §7.2) and at the
-   table-constraint level (`table-constraint-body`, §7.3); this closes
+   KEY`/`UNIQUE` constraint level (`conflict-clause`, Section 7.2) and at the
+   table-constraint level (`table-constraint-body`, Section 7.3); this closes
    the one remaining position — the standalone `index-decl` — where the
    grammar previously didn't document what the implementation already
    does.
@@ -2616,7 +2616,7 @@ INDICES {
    definitions are a compiler error (DPG-E005).
 
    **Index renaming:** `RENAMED FROM old_name` follows the same
-   algorithm as Table/Schema renaming (§7.6/§7.11) — a metadata-only
+   algorithm as Table/Schema renaming (Sections 7.6/7.11) — a metadata-only
    `ALTER INDEX old_name RENAME TO new_name` is emitted instead of the
    usual drop-and-recreate path, and a rename combined with any other
    structural change still falls back to drop + recreate (the rename
@@ -2677,7 +2677,7 @@ TABLE users ( email TEXT, status user_status, ... )
     }
 }
 
--- Mode B (§4.8): the literal INDEX keyword carries UNIQUE/CONCURRENTLY in
+-- Mode B (Section 4.8): the literal INDEX keyword carries UNIQUE/CONCURRENTLY in
 -- the exact same order PostgreSQL's own CREATE UNIQUE INDEX CONCURRENTLY
 -- statement does.
 UNIQUE INDEX idx_unique_slug (slug);
@@ -2791,7 +2791,7 @@ referencing-clause = "REFERENCING"
 ; Real PostgreSQL has no such clause on CREATE TRIGGER itself — a new
 ; trigger is always ENABLED, and the other three states are ALTER-only.
 ; DPG models the state declaratively anyway (same reasoning as RLS's
-; enable-dir/force-dir, §7.8), so a source file's trigger declaration is
+; enable-dir/force-dir, Section 7.8), so a source file's trigger declaration is
 ; a complete description of desired state without a separate directive
 ; block. Omitting this clause means ENABLED — real PostgreSQL's default.
 trigger-enable-state = "DISABLED" / "ENABLE REPLICA" / "ENABLE ALWAYS"
@@ -2804,17 +2804,17 @@ trigger-enable-state = "DISABLED" / "ENABLE REPLICA" / "ENABLE ALWAYS"
    | New trigger | `CREATE [CONSTRAINT] TRIGGER name ... ON t ...` | `SAFE` |
    | Trigger changed | `DROP TRIGGER name ON t; CREATE TRIGGER ...` | `SAFE` |
    | Enable state changed only (`trigger-enable-state`) | `ALTER TABLE t ENABLE/DISABLE TRIGGER name` or `ALTER TABLE t ENABLE REPLICA/ALWAYS TRIGGER name` | `SAFE` |
-   | `[NO] DEPENDS ON EXTENSION` changed (`depends-on-extension-dir`, §9.1) | `ALTER TRIGGER name ON t [NO] DEPENDS ON EXTENSION ext` | `SAFE` |
+   | `[NO] DEPENDS ON EXTENSION` changed (`depends-on-extension-dir`, Section 9.1) | `ALTER TRIGGER name ON t [NO] DEPENDS ON EXTENSION ext` | `SAFE` |
    | Trigger removed | `DROP TRIGGER name ON t` | `SAFE` |
 
    Trigger identity is `(schema, table, trigger_name)`.  `depends-on-
    extension-dir` reuses the same production Function/Procedure already
-   define (§9.1) — real PostgreSQL's `ALTER TRIGGER ... DEPENDS ON
+   define (Section 9.1) — real PostgreSQL's `ALTER TRIGGER ... DEPENDS ON
    EXTENSION` has identical grammar to the function form, just a
    different target object.
 
    **`RULE` has no DPG equivalent** — PostgreSQL's `CREATE RULE` is out
-   of scope entirely (§23), so the `ENABLE`/`DISABLE RULE` half of real
+   of scope entirely (Section 23), so the `ENABLE`/`DISABLE RULE` half of real
    PostgreSQL's enable-state model has nothing to attach to and is not
    addressed by this section.
 
@@ -2822,7 +2822,7 @@ trigger-enable-state = "DISABLED" / "ENABLE REPLICA" / "ENABLE ALWAYS"
    clause-combination validation of its own for `REFERENCING` — every
    other trigger clause is likewise passed through verbatim and left
    entirely to PostgreSQL's own parser/executor to accept or reject
-   (see §7.9's grammar above: `WHEN` placement, a `CONSTRAINT`
+   (see Section 7.9's grammar above: `WHEN` placement, a `CONSTRAINT`
    trigger's clause set, and every other combination rule receive no
    DPG-level check either). The following are PostgreSQL's own real
    constraints on `REFERENCING`, confirmed live against PostgreSQL 17,
@@ -2902,7 +2902,7 @@ privilege      = "SELECT" / "INSERT" / "UPDATE" / "DELETE" /
    without granting broader privileges — real PostgreSQL's own
    `privilege` production accepts it only for tables/matviews/indexes;
    `USAGE`/`EXECUTE`-only object kinds reusing this same shared
-   `privilege` production (§11.2) would have it rejected by
+   `privilege` production (Section 11.2) would have it rejected by
    PostgreSQL's own parser, the same passthrough-validation principle
    already applied throughout this document.
 
@@ -2944,12 +2944,12 @@ comment-dir      = "COMMENT" WSP SQUOTE text SQUOTE
 
    **Attaching a downstream naming convention:** a `NAME MAP`/`NAME
    MAPS` directive can also appear in this block, independently of
-   `RENAMED FROM` — see §D.10 (Name Maps) for the full feature (ten
+   `RENAMED FROM` — see Appendix D.10 (Name Maps) for the full feature (ten
    rule keywords, `[namemaps]` `dpg.toml` config, block-layer
    directives, and snapshot representation).
 
    **`REPLICA IDENTITY`/`CLUSTER ON`** are declared the same way as RLS
-   (§7.8) — as block directives even though real PostgreSQL has no
+   (Section 7.8) — as block directives even though real PostgreSQL has no
    `CREATE TABLE`-native clause for either, only an `ALTER TABLE`
    statement:
 
@@ -2962,7 +2962,7 @@ cluster-dir           = "CLUSTER ON" WSP index-name
 
    **`REPLICA IDENTITY`** controls how much of an updated/deleted row
    PostgreSQL's logical replication can capture — directly gates what a
-   Publication (§13.1) can actually replicate for `UPDATE`/`DELETE`.
+   Publication (Section 13.1) can actually replicate for `UPDATE`/`DELETE`.
    Omitting the directive means `DEFAULT` (the primary key only),
    PostgreSQL's own default; `USING INDEX` requires a `UNIQUE` index on
    `NOT NULL` columns, left to PostgreSQL's own parser to enforce.
@@ -2970,7 +2970,7 @@ cluster-dir           = "CLUSTER ON" WSP index-name
    (metadata-only, no rewrite).
 
    **`CLUSTER ON`** records which index a future manual `CLUSTER`
-   (§23 — the `CLUSTER` command itself remains a runtime operation, out
+   (Section 23 — the `CLUSTER` command itself remains a runtime operation, out
    of scope) would use; declaring it does not itself cluster the table.
    Removing a previously-declared `CLUSTER ON` emits `ALTER TABLE t SET
    WITHOUT CLUSTER` — `SAFE`.  PostgreSQL 17's new `CLUSTER
@@ -2987,20 +2987,20 @@ TABLE orders ( ... )
 ```
 
    **`OF type_name`/`NOT OF` (post-creation):** A table gaining, losing,
-   or switching its `OF type_name` association (§7.1) after creation is
+   or switching its `OF type_name` association (Section 7.1) after creation is
    an `ALTER`-only transition, distinct from the CREATE-time Form 2
-   already covered in §7.1: `ALTER TABLE t OF type_name` (gained or
+   already covered in Section 7.1: `ALTER TABLE t OF type_name` (gained or
    switched to a different type) / `ALTER TABLE t NOT OF` (removed) —
    `CAUTION` (PostgreSQL validates every column against the type's
    attributes at execution time).
 
    **`SET ACCESS METHOD` (post-creation):** A change to a table's
-   already-declared `USING method` clause (§7.1) after creation emits
+   already-declared `USING method` clause (Section 7.1) after creation emits
    `ALTER TABLE t SET ACCESS METHOD method` — `CAUTION` (rewrites the
    table's storage using the new method).
 
    **`INHERIT`/`NO INHERIT` (post-creation):** A change to a table's
-   `INHERITS (...)` list (§7.1) after creation — a parent added or
+   `INHERITS (...)` list (Section 7.1) after creation — a parent added or
    removed — emits `ALTER TABLE child INHERIT parent` /
    `ALTER TABLE child NO INHERIT parent` per added/removed parent,
    rather than requiring the whole table to be recreated — `SAFE`
@@ -3046,7 +3046,7 @@ FOREIGN TABLE remote_events (
 ```
 
    **Diffing semantics:** A foreign table reuses the same `TABLE`
-   diffing machinery as a regular table (§21) — columns, owner,
+   diffing machinery as a regular table (Section 21) — columns, owner,
    comment, grants/revocations, security labels, rename — with two
    foreign-specific rules:
 
@@ -3059,7 +3059,7 @@ FOREIGN TABLE remote_events (
    PostgreSQL has no such clause — so a `SERVER` change always requires
    the full drop-and-recreate path, unlike `OPTIONS`, which real
    PostgreSQL supports altering in place.  Column add/drop/type-change
-   follow §21's `TABLE` rules unchanged (a foreign table's columns
+   follow Section 21's `TABLE` rules unchanged (a foreign table's columns
    describe the remote shape, not local storage, but the diffing model
    itself does not distinguish the two).
 
@@ -3067,13 +3067,13 @@ FOREIGN TABLE remote_events (
    **`NOT NULL` on foreign table columns** (PostgreSQL 18+) were both
    previously rejected by PostgreSQL. Neither restriction was ever
    encoded in this document's grammar — `trigger-decl`'s `event`
-   alternatives (§7.9, including `TRUNCATE`) and `col-constraint`'s
-   `NOT NULL` (§7.2) already applied unconditionally to `TRIGGERS { }`/
+   alternatives (Section 7.9, including `TRUNCATE`) and `col-constraint`'s
+   `NOT NULL` (Section 7.2) already applied unconditionally to `TRIGGERS { }`/
    column lists on any table, foreign or not — so both versions'
    restrictions and their later lifting are handled entirely by
    PostgreSQL's own version-aware parser, with no DPG grammar change
    needed either direction, same as the partitioned-table `EXCLUDE`/
-   identity-column confirmations above (§7.3).
+   identity-column confirmations above (Section 7.3).
 
 ### 7.13. Partitioned Tables
 
@@ -3228,7 +3228,7 @@ detached-from-dir = "DETACHED FROM" WSP table-ref [ WSP "CONCURRENTLY" ] ";"
    attachable concerns.
 
    **Temporary views** are session-scoped for the same reason temporary
-   tables are (§7.12) and are excluded on the same terms: DPG MUST NOT
+   tables are (Section 7.12) and are excluded on the same terms: DPG MUST NOT
    manage them, and a `TEMPORARY VIEW` (or `TEMP VIEW`) keyword anywhere
    in a `.dpg` file is a compiler error (DPG-E023).
 
@@ -3298,7 +3298,7 @@ SCHEMA public {
    | Owner changed | `ALTER VIEW name OWNER TO role` | `SAFE` |
    | Comment changed | `COMMENT ON VIEW name IS '...'` | `SAFE` |
    | View renamed (`RENAMED FROM`) | `ALTER VIEW old RENAME TO new` | `CAUTION` |
-   | View moved to another schema (`RENAMED FROM` schema-qualified, §7.6) | `ALTER VIEW old_schema.name SET SCHEMA new_schema` | `SAFE` |
+   | View moved to another schema (`RENAMED FROM` schema-qualified, Section 7.6) | `ALTER VIEW old_schema.name SET SCHEMA new_schema` | `SAFE` |
    | View removed | `DROP VIEW name [CASCADE]` | `DESTRUCTIVE` |
 
    **Output column list comparison:** The compiler compares the columns
@@ -3363,7 +3363,7 @@ SCHEMA analytics {
    materialized view requires `DROP MATERIALIZED VIEW` followed by
    `CREATE MATERIALIZED VIEW` — classified as `DESTRUCTIVE`.
    `REFRESH MATERIALIZED VIEW` is a runtime operation and is out of
-   scope for DPG (Section 23).  `RENAMED FROM` (§7.6) and `OWNER`/
+   scope for DPG (Section 23).  `RENAMED FROM` (Section 7.6) and `OWNER`/
    `COMMENT` changes follow the same rules as regular views: renaming
    emits `ALTER MATERIALIZED VIEW old RENAME TO new` (`CAUTION`); a
    schema-qualified `RENAMED FROM` emits `ALTER MATERIALIZED VIEW
@@ -3424,7 +3424,7 @@ func-body     = WSP "AS" WSP dollar-string
 
 ; One or more semicolon-terminated SQL statements, real PostgreSQL's
 ; own BEGIN ATOMIC body — each statement diffed the same as a
-; LANGUAGE SQL body (§9.5's SQL canonicalisation applies here too).
+; LANGUAGE SQL body (Section 9.5's SQL canonicalisation applies here too).
 sql-stmt-list = 1*( <SQL statement> ";" )
 
 return-clause  = "RETURNS" WSP return-type
@@ -3475,9 +3475,9 @@ depends-on-extension-dir = [ "NO" WSP ] "DEPENDS ON EXTENSION" WSP identifier
    server by its C name.  Both use `func-body`'s string-literal form
    instead of a dollar-quoted body — no procedural code of DPG's own to
    store, so it is diffed the same way any other function attribute
-   change is (§9.5's generic "signature/attribute changed" path), not
+   change is (Section 9.5's generic "signature/attribute changed" path), not
    via body-hash. This closes the same gap `TYPE ... (INPUT = ...)`
-   base types (§5.5) depend on: their `INPUT`/`OUTPUT`/etc. support
+   base types (Section 5.5) depend on: their `INPUT`/`OUTPUT`/etc. support
    functions are routinely `LANGUAGE C` functions using exactly this
    form.
 
@@ -3488,7 +3488,7 @@ depends-on-extension-dir = [ "NO" WSP ] "DEPENDS ON EXTENSION" WSP identifier
    standard itself defines, directly relevant to Tenet 3 (Standard SQL
    vs. PostgreSQL-specific): a source file may choose either without
    DPG preferring one.  Diffed identically to a dollar-quoted
-   `LANGUAGE SQL` body (§9.5's SQL canonicalisation applies verbatim,
+   `LANGUAGE SQL` body (Section 9.5's SQL canonicalisation applies verbatim,
    since the body content is ordinary SQL statements either way).
 
    **`TRANSFORM FOR TYPE type_name [, FOR TYPE type_name ...]`:**
@@ -3496,8 +3496,8 @@ depends-on-extension-dir = [ "NO" WSP ] "DEPENDS ON EXTENSION" WSP identifier
    named type(s) — e.g. a PL/Python function accepting/returning
    `hstore` via `hstore_plpython`'s transform.  This *references* an
    already-installed transform; it does not declare one — `CREATE
-   TRANSFORM` itself remains correctly out of scope (§23), the same
-   distinction access-method `USING` (§7.1) draws against `CREATE
+   TRANSFORM` itself remains correctly out of scope (Section 23), the same
+   distinction access-method `USING` (Section 7.1) draws against `CREATE
    ACCESS METHOD`.
 
    **`[NO] DEPENDS ON EXTENSION extension_name`** (Function/Procedure
@@ -3511,17 +3511,17 @@ depends-on-extension-dir = [ "NO" WSP ] "DEPENDS ON EXTENSION" WSP identifier
    (`SAFE`).
 
    **`OWNER`/`RENAMED FROM`** (`func-block`) follow the standard rules
-   (§7.6): `ALTER FUNCTION name(...) OWNER TO role` (`SAFE`); `ALTER
+   (Section 7.6): `ALTER FUNCTION name(...) OWNER TO role` (`SAFE`); `ALTER
    FUNCTION old(...) RENAME TO new` (`CAUTION`), plus `SET SCHEMA` when
    schema-qualified (`SAFE`) — the same generic `renamed-from-dir`
-   extension §7.6 introduced. **Significant for Aggregate specifically**
-   (§9.4, which reuses `func-block`): real PostgreSQL's `ALTER
+   extension Section 7.6 introduced. **Significant for Aggregate specifically**
+   (Section 9.4, which reuses `func-block`): real PostgreSQL's `ALTER
    AGGREGATE` supports *only* `RENAME TO`/`OWNER TO`/`SET SCHEMA` —
    every other change requires drop and recreate — so this closes a
    full third of Aggregate's entire incremental-`ALTER` surface, not
    just Function/Procedure's.
 
-   **`REVOCATIONS { }`** (`func-block`, §11.3's `revoke-entry` grammar)
+   **`REVOCATIONS { }`** (`func-block`, Section 11.3's `revoke-entry` grammar)
    was already implemented in `core/` but had no grammar slot in this
    document — `func-directive` previously listed only `grants-block`,
    silently discarding any declared Function/Procedure/Aggregate
@@ -3712,7 +3712,7 @@ SCHEMA public {
        (input_types) RENAME TO new_name` — `CAUTION`; schema-qualified
        additionally emits `ALTER AGGREGATE ... SET SCHEMA new_schema`
        (`SAFE`), the same `renamed-from-dir` extension as every other
-       kind (§7.6).
+       kind (Section 7.6).
    -   Owner changed (`owner-dir`, `func-block`): `ALTER AGGREGATE name
        (input_types) OWNER TO role` — `SAFE`.
    -   `SET SCHEMA` — covered by the schema-qualified rename above; not
@@ -3736,7 +3736,7 @@ SCHEMA public {
        object kinds (Tablespace, FDW, Collation, etc. — see Section 25).
        On any parse failure (a body the parser rejects for any reason),
        the compiler falls back to the plain normalisation below rather
-       than erroring.  A `BEGIN ATOMIC ... END` body (§9.1) is
+       than erroring.  A `BEGIN ATOMIC ... END` body (Section 9.1) is
        canonicalised identically — each statement between `BEGIN ATOMIC`
        and `END` is ordinary SQL, parsed/re-deparsed/hashed the same way
        a dollar-quoted `LANGUAGE SQL` body is; the two forms are
@@ -3862,11 +3862,11 @@ sequence-block  = *( ( owner-dir / comment-dir / grants-block
                       / revocations-block ) ";" )
 ```
 
-   **`UNLOGGED`:** Like `UNLOGGED TABLE` (§7.12), trades crash-safety
+   **`UNLOGGED`:** Like `UNLOGGED TABLE` (Section 7.12), trades crash-safety
    (the sequence's current value is not WAL-logged) for reduced write
    overhead — a genuinely different tradeoff axis from the temp-table
-   session-scoping exclusion (§7.12), and available on any PostgreSQL
-   version this document targets (§1.4).  Toggling it after creation
+   session-scoping exclusion (Section 7.12), and available on any PostgreSQL
+   version this document targets (Section 1.4).  Toggling it after creation
    follows the same `ALTER SEQUENCE name SET LOGGED/UNLOGGED` path as
    tables, `CAUTION`.
 
@@ -3890,8 +3890,8 @@ sequence-block  = *( ( owner-dir / comment-dir / grants-block
    been applied, the same one-shot-then-remove usage pattern real
    PostgreSQL's own documentation recommends for `RESTART` itself.
 
-   Sequences gain a `REVOCATIONS { }` block (§11.3's `revoke-entry`
-   grammar) identical in shape to Table's (§7.10) — previously absent
+   Sequences gain a `REVOCATIONS { }` block (Section 11.3's `revoke-entry`
+   grammar) identical in shape to Table's (Section 7.10) — previously absent
    from `sequence-block` even though `GRANTS { }` was already present,
    which silently discarded any declared sequence revocation with no
    error and no DDL emitted.
@@ -4006,7 +4006,7 @@ config-value = string-literal / integer / boolean / identifier
 
    `password-literal` is an ordinary string, optionally containing one or
    more `{{<secret-uri>}}` placeholders — the exact same mechanism as
-   SUBSCRIPTION `CONNECTION` (§13.2, §D.5): each placeholder is resolved
+   SUBSCRIPTION `CONNECTION` (Section 13.2, Appendix D.5): each placeholder is resolved
    independently at apply time via `pipeline.ResolveTemplate` and
    substituted in place (the whole value, or just a fragment); a literal
    with no `{{...}}` at all never touches the resolver. Resolution happens
@@ -4018,7 +4018,7 @@ config-value = string-literal / integer / boolean / identifier
    and `forbid_hardcoded_passwords` is enabled (default: `true`). This
    supersedes an earlier draft of this rule, which named `env:VAR_NAME`
    specifically — the check is scheme-agnostic now that five backends
-   exist (§D.5), not tied to one.
+   exist (Appendix D.5), not tied to one.
 
    **Password drift detection:** the snapshot stores a hash of the
    *declared* `PASSWORD` text (the literal or `{{...}}` reference exactly
@@ -4083,7 +4083,7 @@ ROLE app_admin
 
    **`RENAMED FROM` on a role** is schema-agnostic — roles are cluster-
    level, not schema-scoped, so `renamed-from-dir`'s schema-qualification
-   extension (§7.6) never applies here; only the bare `RENAME TO` form
+   extension (Section 7.6) never applies here; only the bare `RENAME TO` form
    is meaningful.  This closes a gap that could otherwise be genuinely
    **impossible** to work around: PostgreSQL refuses to `DROP ROLE` a
    role that still owns any object, so the drop-and-recreate fallback
@@ -4104,7 +4104,7 @@ ROLE app_admin
    later membership change has no `ALTER ROLE` equivalent, so it's diffed
    as `GRANT`/`REVOKE` (PostgreSQL's own mechanism for changing membership
    after creation), matching how DPG already diffs object-level privilege
-   grants (§11.2) rather than inventing new DDL shape for this.
+   grants (Section 11.2) rather than inventing new DDL shape for this.
 
 ### 11.2. Grants — The Additive Model
 
@@ -4146,7 +4146,7 @@ ROLE app_admin
    mistake surfaces only as a PostgreSQL parse/grammar error at `apply`
    time, the same passthrough-to-PostgreSQL's-own-parser principle used
    throughout this document for clause-combination validation generally
-   (e.g. §7.9's `REFERENCING` note).  Stated here explicitly per
+   (e.g. Section 7.9's `REFERENCING` note).  Stated here explicitly per
    Tenet 3, rather than left as a silent gap.
 
 ### 11.3. Revocations
@@ -4156,7 +4156,7 @@ ROLE app_admin
 
    `REVOKE` on an already-absent privilege is a no-op in PostgreSQL —
    it succeeds without error, unlike a grant declaration's removal
-   (§11.2), which is the additive model's deliberate no-op.  PostgreSQL's
+   (Section 11.2), which is the additive model's deliberate no-op.  PostgreSQL's
    `REVOKE` grammar has no `IF EXISTS` clause at all, so the compiler
    emits plain `REVOKE ... FROM role`; there is no guard to add or omit.
 
@@ -4226,11 +4226,11 @@ ALTER DEFAULT PRIVILEGES FOR ROLE app_admin IN SCHEMA public
 
 ### 11.5. Owner Impersonation at Object Creation
 
-   PostgreSQL attributes default-privilege eligibility (§11.4) to
+   PostgreSQL attributes default-privilege eligibility (Section 11.4) to
    whichever role actually *executed* the `CREATE` statement — checked
    against `pg_default_acl` via `current_user`/`current_role` — not to
    an object's final `OWNER`.  A declared `OWNER` (`owner-dir`; see
-   §7.11 for Table's copy of this directive — every object kind that
+   Section 7.11 for Table's copy of this directive — every object kind that
    supports `OWNER` defines its own local copy of the same grammar
    rather than sharing one central production) that is applied only
    *after* creation, via a trailing `ALTER ... OWNER TO`, therefore
@@ -4249,7 +4249,7 @@ ALTER DEFAULT PRIVILEGES FOR ROLE app_admin IN SCHEMA public
 
    **Execution model.** Each such object's `CREATE` statement (and, for
    an object whose `CREATE` MUST run outside a transaction — e.g.
-   `TABLESPACE`, §14.7 — the standalone statement) is wrapped as:
+   `TABLESPACE`, Section 14.7 — the standalone statement) is wrapped as:
 
 ```sql
 SET ROLE app_admin;
@@ -4264,7 +4264,7 @@ RESET ROLE;
    privilege-checking `current_user` changes for the wrapped statement.
 
    Once an object exists, reassigning its owner continues to use
-   `ALTER ... OWNER TO` exactly as before (§11.1, and per-object-kind
+   `ALTER ... OWNER TO` exactly as before (Section 11.1, and per-object-kind
    diffing sections) — an existing object's ownership change does not
    affect default-privilege attribution for objects already created, so
    it needs no `SET ROLE` wrapping.
@@ -4285,7 +4285,7 @@ RESET ROLE;
    individual GUC configuration parameters, letting an admin delegate
    the ability to change a specific setting without granting broader
    (superuser-adjacent) rights. This is a separate concern from `ALTER
-   SYSTEM` the *command* remaining out of scope (§23): DPG never emits
+   SYSTEM` the *command* remaining out of scope (Section 23): DPG never emits
    `ALTER SYSTEM` itself, but the *privilege* to run it on a named
    parameter is an ordinary grantable object like any other, and this
    document's own reasoning for excluding `ALTER SYSTEM` (a cluster-
@@ -4336,7 +4336,7 @@ PARAMETER PRIVILEGES {
    app_admin`.
 
    **Diffing semantics:** Same additive model as Table-level grants
-   (§11.2) — a declared grant emits `GRANT`; removing the declaration
+   (Section 11.2) — a declared grant emits `GRANT`; removing the declaration
    emits nothing (an explicit `REVOCATIONS { }` entry is required to
    actually `REVOKE`). Safety `SAFE` for both directions — this is
    metadata governing who *may* run a command, not an object with data
@@ -4438,10 +4438,10 @@ SCHEMA public {
 }
 ```
 
-   Unlike Text Search Parser/Template (§12.3/§12.4), a Dictionary MAY
+   Unlike Text Search Parser/Template (Sections 12.3/12.4), a Dictionary MAY
    carry an optional `{ }` block (`owner-dir`/`comment-dir`/
    `renamed-from-dir`, the same generic cross-schema `SET SCHEMA`
-   extension as every other kind, §7.6) — real PostgreSQL supports
+   extension as every other kind, Section 7.6) — real PostgreSQL supports
    `ALTER TEXT SEARCH DICTIONARY ... OWNER TO`/`RENAME TO`/`SET SCHEMA`
    for Dictionary but has no `OWNER` concept at all for Parser/Template.
 
@@ -4456,7 +4456,7 @@ SCHEMA public {
    | Dictionary removed | `DROP TEXT SEARCH DICTIONARY name` | `DESTRUCTIVE` (if in use) |
 
    `TEMPLATE` is fixed at creation, same as a base type's core
-   properties (§5.5) — real PostgreSQL's `ALTER TEXT SEARCH DICTIONARY`
+   properties (Section 5.5) — real PostgreSQL's `ALTER TEXT SEARCH DICTIONARY`
    can change any other option in place (add, change, or remove —
    `DROP` an option by naming it with no value) without a rebuild; only
    a `TEMPLATE` change forces drop-and-recreate.
@@ -4487,7 +4487,7 @@ SCHEMA public {
    Real PostgreSQL has no `OWNER` concept for Parser at all — the `{ }`
    block accepts only `comment-dir`/`renamed-from-dir`.  `SET SCHEMA` is
    unrelated to ownership and still applies via a schema-qualified
-   `RENAMED FROM` (§7.6) — real PostgreSQL supports moving a Parser
+   `RENAMED FROM` (Section 7.6) — real PostgreSQL supports moving a Parser
    between schemas despite it having no owner-based ACL surface at all.
 
    Any change to a parser requires drop + recreate (`DESTRUCTIVE`).
@@ -4551,16 +4551,16 @@ pub-table         = schema-table-name
 ; PostgreSQL version's additions such as PG18's
 ; publish_generated_columns are automatically expressible with zero
 ; grammar changes here, the same passthrough pattern Subscription's
-; WITH options (§13.2) already uses.
+; WITH options (Section 13.2) already uses.
 
 pub-block = *( ( comment-dir / owner-dir / renamed-from-dir
                / grants-block ) ";" )
 ```
 
-   `owner-dir`/`renamed-from-dir` follow the standard rules (§7.6):
+   `owner-dir`/`renamed-from-dir` follow the standard rules (Section 7.6):
    `ALTER PUBLICATION name OWNER TO role` (`SAFE`); `ALTER PUBLICATION
    old RENAME TO new` (`CAUTION`) — Publication is database-level, not
-   schema-scoped (like Role and Event Trigger, §11.1/§14.1), so the
+   schema-scoped (like Role and Event Trigger, Sections 11.1/14.1), so the
    cross-schema `SET SCHEMA` half of the generic extension never
    applies here.
 
@@ -4598,7 +4598,7 @@ PUBLICATION filtered_orders
    opaque body (byte-for-byte source text, not per-field) — the same tier
    as Tablespace/FDW/Server/Publication/etc. `CONNECTION` is the one part
    of that body DPG treats specially, to support a secret reference
-   instead of a literal credential (see below and §D.5); `COMMENT` (in the
+   instead of a literal credential (see below and Appendix D.5); `COMMENT` (in the
    `{ }` block) is diffed and applied like every other Comment-bearing
    object.
 
@@ -4607,7 +4607,7 @@ PUBLICATION filtered_orders
    to PUBLIC (PostgreSQL revokes it from a normal caller outright), and
    even a privileged caller who *can* read it has no way to recover
    whatever `{{secret-uri}}` the original `CONNECTION` clause held, if
-   any — the same inherent limitation User Mapping `OPTIONS` (§14.10, §24)
+   any — the same inherent limitation User Mapping `OPTIONS` (Section 14.10, Section 24)
    has on recovering its original reference, though User Mapping's
    redaction works field-by-field rather than by omitting a whole column,
    since `OPTIONS` also carries non-sensitive keys `dump` must still
@@ -4619,7 +4619,7 @@ PUBLICATION filtered_orders
    be dialed); a `dump`'d Subscription must have its `CONNECTION`
    hand-edited back to a real value before it does anything. Because the
    reconstructed body's `BodyHash` is never stored (same as every other
-   reconstructed opaque kind, §25), this placeholder never causes a
+   reconstructed opaque kind, Section 25), this placeholder never causes a
    spurious `DROP SUBSCRIPTION` + `CREATE SUBSCRIPTION` loop on
    `verify`/`plan --live` — introspecting at all is what makes an
    already-applied Subscription visible as existing, rather than
@@ -4654,9 +4654,9 @@ subscription-decl = "SUBSCRIPTION" WSP identifier
    unaffected: a `{{...}}` reference is compared as literal text, same as
    any other body change) and never written anywhere after that: the
    snapshot, an archived migration file, and any error message all show the
-   placeholder/reference form, not the resolved value. See §D.5 for the
+   placeholder/reference form, not the resolved value. See Appendix D.5 for the
    underlying `SecretResolver`/`ResolveTemplate` mechanism, shared with
-   Role `PASSWORD` (§11.1) and User Mapping `OPTIONS` (§14.10, §24).
+   Role `PASSWORD` (Section 11.1) and User Mapping `OPTIONS` (Section 14.10, Section 24).
 
    Examples:
 
@@ -4683,7 +4683,7 @@ SUBSCRIPTION replica_billing
    The Part 1 body (`CONNECTION`, `PUBLICATION`, `WITH` options) is diffed
    as an opaque whole: any change is a full `DROP SUBSCRIPTION` +
    `CREATE SUBSCRIPTION`, not a targeted `ALTER SUBSCRIPTION`, matching
-   every other opaque-tier object kind (§25). `COMMENT` is diffed
+   every other opaque-tier object kind (Section 25). `COMMENT` is diffed
    separately at the field level — a comment-only edit emits a plain
    `COMMENT ON SUBSCRIPTION`, not a drop-and-recreate, so it never
    interrupts an already-syncing subscription.
@@ -4728,7 +4728,7 @@ event-trigger-decl = "EVENT TRIGGER" WSP identifier
 event-type = "login" / "ddl_command_start" / "ddl_command_end" /
              "table_rewrite" / "sql_drop"
 
-; trigger-enable-state (DISABLED/ENABLE REPLICA/ENABLE ALWAYS, §7.9) is
+; trigger-enable-state (DISABLED/ENABLE REPLICA/ENABLE ALWAYS, Section 7.9) is
 ; reused verbatim — real PostgreSQL's ALTER EVENT TRIGGER enable-state
 ; grammar is identical to ALTER TABLE ... ENABLE/DISABLE TRIGGER's,
 ; just against a different target object (no table name, since event
@@ -4785,9 +4785,9 @@ EVENT TRIGGER audit_ddl
    | Event trigger dropped | `DROP EVENT TRIGGER name` | `SAFE` |
 
    Event triggers are database-level, not schema-scoped — `renamed-
-   from-dir`'s generic cross-schema `SET SCHEMA` extension (§7.6) never
+   from-dir`'s generic cross-schema `SET SCHEMA` extension (Section 7.6) never
    applies here, since there is no schema to move between; only the
-   bare (unqualified) rename form is meaningful, same as Role (§11.1).
+   bare (unqualified) rename form is meaningful, same as Role (Section 11.1).
 
 ### 14.2. Collations
 
@@ -4834,7 +4834,7 @@ SCHEMA public {
    rebuild.
 
 ```abnf
-; Collation-only: unlike RESTART (Sequence, §10), a bare presence
+; Collation-only: unlike RESTART (Sequence, Section 10), a bare presence
 ; keyword with no argument — REFRESH VERSION has nothing to parametrise,
 ; it just re-reads the OS/ICU library's *current* collation version and
 ; records it, the same non-persistent-target-value shape as RESTART.
@@ -4847,7 +4847,7 @@ refresh-version-dir = "REFRESH VERSION"
    silently changed sort order — real PostgreSQL's mitigation for a
    genuine data-corruption risk (an index built under the old collation
    version can silently misbehave after the OS collation library
-   changes underneath it). Like `RESTART` (§10), this describes an
+   changes underneath it). Like `RESTART` (Section 10), this describes an
    imperative action, not comparable target state: its mere presence in
    source unconditionally emits `ALTER COLLATION name REFRESH VERSION`
    on every `plan`/`apply` for as long as it remains declared — Safety
@@ -4865,7 +4865,7 @@ refresh-version-dir = "REFRESH VERSION"
 
    The `DESTRUCTIVE` row applies identically to the `FROM
    existing_collation` form: since the body is diffed as opaque text
-   (§14's `opaque-object-decl` note), changing which collation a `FROM`
+   (Section 14's `opaque-object-decl` note), changing which collation a `FROM`
    clause points at is itself a property change.
 
 ### 14.3. Operators
@@ -5150,7 +5150,7 @@ SERVER analytics_warehouse
 
    `SERVER` MAY carry an optional `{ }` block (`comment-dir`/
    `owner-dir`/`renamed-from-dir`) — same standard rules as every other
-   kind (§7.6). Server is database-level, not schema-scoped, so the
+   kind (Section 7.6). Server is database-level, not schema-scoped, so the
    cross-schema `SET SCHEMA` half of the generic extension never applies
    here (same as Publication above).
 
@@ -5183,8 +5183,8 @@ USER MAPPING FOR app_service
 ```
 
    Any `OPTIONS` value MAY hold one or more `{{<secret-uri>}}` placeholders
-   (§D.5) — the same mechanism as SUBSCRIPTION `CONNECTION` (§13.2) and
-   Role `PASSWORD` (§11.1), and, like both of those, the only thing that
+   (Appendix D.5) — the same mechanism as SUBSCRIPTION `CONNECTION` (Section 13.2) and
+   Role `PASSWORD` (Section 11.1), and, like both of those, the only thing that
    ever triggers resolution: a literal option value with no `{{...}}` at
    all never touches the resolver. Unlike `CONNECTION`/`PASSWORD`, DPG
    doesn't isolate one specific option key to resolve — `OPTIONS` keys are
@@ -5196,13 +5196,13 @@ USER MAPPING FOR app_service
    message all show the placeholder/reference form, not the resolved
    value. This supersedes an earlier draft of this section, which required
    `env:VAR_NAME` specifically — scheme-agnostic now that five backends
-   exist (§D.5), matching the same correction already made to Role
+   exist (Appendix D.5), matching the same correction already made to Role
    `PASSWORD`'s hardcoded-password rule.
 
    Hardcoded passwords (an `OPTIONS` `password` value with no `{{...}}`
    placeholder at all) are rejected by the linter when
    `forbid_hardcoded_passwords` is enabled (default `true`) — implemented
-   as `hardcoded-fdw-password` in the reference linter (§19.1's own table
+   as `hardcoded-fdw-password` in the reference linter (Section 19.1's own table
    still names several rules with this document's snake_case rather than
    the actual kebab-case rule identifiers in code; see Appendix D.3 for
    the corrected, authoritative rule ID table).
@@ -5210,10 +5210,10 @@ USER MAPPING FOR app_service
    **Diffing semantics:** any change to the mapping is a full
    `DROP USER MAPPING` + `CREATE USER MAPPING`, not a targeted
    `ALTER USER MAPPING`, matching every other opaque-tier object kind
-   (§25) — this corrects an earlier draft of this table, which described a
+   (Section 25) — this corrects an earlier draft of this table, which described a
    targeted `ALTER` that was never actually implemented (User Mappings
    have always been diffed via the generic opaque body-hash mechanism, the
-   same one Subscription used before its own §13.2 secret-reference work).
+   same one Subscription used before its own Section 13.2 secret-reference work).
 
    | Change | DDL emitted | Safety |
    |--------|-------------|--------|
@@ -5269,9 +5269,9 @@ COLUMN ssn {
    (`ON DOMAIN`) and every other Type variant (`ON TYPE`), Schemas,
    Sequences, Roles, Tablespaces, Publications, Subscriptions, and
    Event Triggers. `DATABASE` and `LARGE OBJECT` are excluded — DPG
-   doesn't model either as an object kind at all (§23); `[PROCEDURAL]
+   doesn't model either as an object kind at all (Section 23); `[PROCEDURAL]
    LANGUAGE` is excluded because DPG doesn't support raw `CREATE
-   LANGUAGE` either (§23) — every real language install goes through
+   LANGUAGE` either (Section 23) — every real language install goes through
    `CREATE EXTENSION`, which already has its own `COMMENT`/`SECURITY
    LABEL` coverage as an ordinary opaque-tier kind.
 
@@ -5334,7 +5334,7 @@ Phase 10: Emission (Emitter)
    fully-resolved object list; its diagnostics are advisory by default
    (warnings) on all three commands that run it, with `--strict` (on
    `dpg validate`/`dpg apply` only — `dpg plan` has no `--strict` flag,
-   see §15.10) promoting them to hard errors.
+   see Section 15.10) promoting them to hard errors.
 
 ### 15.2. Phase 1 — File Discovery
 
@@ -5681,7 +5681,7 @@ Phase 10: Emission (Emitter)
    | `"sequence"` | `sequence` | SEQUENCE |
    | `"role"` | `role` | ROLE |
    | `"virtual_type"` | `virtual_type` | VIRTUAL TYPE |
-   | `"procedure"`, `"aggregate"`, `"tablespace"`, `"fdw"`, `"server"`, `"user_mapping"`, `"publication"`, `"subscription"`, `"event_trigger"`, `"collation"`, `"operator"`, `"operator_class"`, `"operator_family"`, `"cast"`, `"statistics"`, `"ts_config"`, `"ts_dict"`, `"ts_parser"`, `"ts_template"` | `opaque` | All passthrough objects (§16.3.1) |
+   | `"procedure"`, `"aggregate"`, `"tablespace"`, `"fdw"`, `"server"`, `"user_mapping"`, `"publication"`, `"subscription"`, `"event_trigger"`, `"collation"`, `"operator"`, `"operator_class"`, `"operator_family"`, `"cast"`, `"statistics"`, `"ts_config"`, `"ts_dict"`, `"ts_parser"`, `"ts_template"` | `opaque` | All passthrough objects (Section 16.3.1) |
 
    **SnapTable:**
 
@@ -5798,7 +5798,7 @@ Phase 10: Emission (Emitter)
    ARE present as flat string fields, unlike an earlier draft of this
    record claimed — both are populated once present in source.
    `old_transition_name`/`new_transition_name` hold the `REFERENCING
-   OLD TABLE AS ...`/`NEW TABLE AS ...` names (§7.9); empty string
+   OLD TABLE AS ...`/`NEW TABLE AS ...` names (Section 7.9); empty string
    means that side of `REFERENCING` wasn't present, the same
    empty-means-unspecified convention `condition` itself already uses.
 
@@ -5885,7 +5885,7 @@ Phase 10: Emission (Emitter)
    hash causes the compiler to emit `DROP ... CASCADE` + `CREATE ...`
    for the object (Safety class per Section 17.2 for each type).
 
-   See §D.1.8/§D.1.9 for the complete `SnapSchema`, `SnapExtension`,
+   See Appendix D.1.8/D.1.9 for the complete `SnapSchema`, `SnapExtension`,
    `SnapType`, `SnapSequence`, `SnapRole`, and cluster-level snapshot
    file records — not repeated here since they follow the same shape
    conventions established above.
@@ -6031,7 +6031,7 @@ CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_users_email ON public.users (email);
    | `DROP MATERIALIZED VIEW CASCADE` | `DESTRUCTIVE` |
    | `CREATE FUNCTION` / `CREATE OR REPLACE FUNCTION` | `SAFE` |
    | `DROP FUNCTION CASCADE` | `DESTRUCTIVE` |
-   | `ALTER TYPE ... ADD VALUE` | `SAFE` (§1.4's version floor of 14 is past PostgreSQL 12's transaction-block restriction) |
+   | `ALTER TYPE ... ADD VALUE` | `SAFE` (Section 1.4's version floor of 14 is past PostgreSQL 12's transaction-block restriction) |
    | `DROP TYPE CASCADE` | `DESTRUCTIVE` |
    | `CREATE POLICY` | `SAFE` |
    | `DROP POLICY` | `SAFE` |
@@ -6057,8 +6057,8 @@ CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_users_email ON public.users (email);
        transaction.
 
    `ALTER TYPE ... ADD VALUE` is deliberately NOT in this list — see
-   §5.1.1: it requires non-transactional execution only on PostgreSQL
-   versions below 12, already excluded by §1.4's version floor.
+   Section 5.1.1: it requires non-transactional execution only on PostgreSQL
+   versions below 12, already excluded by Section 1.4's version floor.
 
    All other ops are transactional.
 
@@ -6156,9 +6156,9 @@ Options:
 
    `dpg plan` always shows the full computed migration, including any
    `DESTRUCTIVE` operations — there is no `--allow-destructive` or
-   `--no-color` flag on `plan`; those only gate `dpg apply` (§18.2),
+   `--no-color` flag on `plan`; those only gate `dpg apply` (Section 18.2),
    since `plan` never executes anything.  `dpg plan` runs the linter
-   (Phase 8, §15.10) but has no `--strict` flag either — its lint
+   (Phase 8, Section 15.10) but has no `--strict` flag either — its lint
    diagnostics are always advisory-only, never blocking; use
    `dpg validate --strict` or `dpg apply --strict` to promote them to
    errors.
@@ -6409,7 +6409,7 @@ Options:
 
    Each diagnostic object has `rule`, `message`, `file`, `line`, `col`.
    `rule` uses hyphen-separated IDs (e.g., `"hardcoded-password"`), per
-   §D.3.
+   Appendix D.3.
 
 ### 18.7. dpg fmt
 
@@ -6425,7 +6425,7 @@ Options:
              Does not modify files.
 ```
 
-   Configured via the root `dpg.toml` `[fmt]` section (§3.2); the
+   Configured via the root `dpg.toml` `[fmt]` section (Section 3.2); the
    TOML keys are `indent` (default 4) and `keyword_case` (`"upper"` or
    `"lower"`, default `"upper"`).
 
@@ -6443,7 +6443,7 @@ Options:
    `dpg fmt` deliberately does NOT touch identifier casing — unlike
    keyword casing, identifiers are never rewritten, in either
    direction.  This is intentional, not a gap: DPG's macro
-   preprocessor (§4.7) spreads identifiers across files verbatim, and
+   preprocessor (Section 4.7) spreads identifiers across files verbatim, and
    PostgreSQL identifiers are case-sensitive once quoted, so a
    formatter that normalized casing could silently change which
    objects a macro-expanded reference resolves to.  A case mismatch
@@ -6564,7 +6564,7 @@ serial_sequence_declared      = "off"
    | `pg_namespace` | Schemas |
    | `pg_extension` | Installed extensions |
    | `pg_publication` | Publications |
-   | `pg_subscription` | Subscriptions (all attributes except `subconninfo`, §13.2) |
+   | `pg_subscription` | Subscriptions (all attributes except `subconninfo`, Section 13.2) |
    | `pg_foreign_table` | Foreign tables |
    | `pg_foreign_server` | Foreign servers |
    | `pg_user_mapping` | User mappings |
@@ -6628,42 +6628,42 @@ serial_sequence_declared      = "off"
    | Column comment | `comment` differs | `COMMENT ON COLUMN t.c IS '...'` | `SAFE` |
    | Constraint added | Name absent in snapshot | `ALTER TABLE t ADD CONSTRAINT name ...` | `CAUTION` |
    | Constraint dropped | Name absent in desired | `ALTER TABLE t DROP CONSTRAINT name` | `DESTRUCTIVE` |
-   | Constraint renamed only (`RENAMED FROM`, §7.3) | `renamed_from` set, body unchanged | `ALTER TABLE t RENAME CONSTRAINT old TO new` | `SAFE` |
-   | Constraint deferrability-only change (FK, §7.3) | Only `DEFERRABLE`/`INITIALLY ...` differs | `ALTER TABLE t ALTER CONSTRAINT name ...` | `SAFE` |
-   | `NOT NULL` constraint inheritability-only change (PG18, §7.3) | Only `NO INHERIT` differs | `ALTER TABLE t ALTER CONSTRAINT name [NO] INHERIT` | `SAFE` |
+   | Constraint renamed only (`RENAMED FROM`, Section 7.3) | `renamed_from` set, body unchanged | `ALTER TABLE t RENAME CONSTRAINT old TO new` | `SAFE` |
+   | Constraint deferrability-only change (FK, Section 7.3) | Only `DEFERRABLE`/`INITIALLY ...` differs | `ALTER TABLE t ALTER CONSTRAINT name ...` | `SAFE` |
+   | `NOT NULL` constraint inheritability-only change (PG18, Section 7.3) | Only `NO INHERIT` differs | `ALTER TABLE t ALTER CONSTRAINT name [NO] INHERIT` | `SAFE` |
    | Constraint changed | Body text differs | Drop + re-add | `DESTRUCTIVE` |
    | NOT VALID removed | `not_valid` false in desired | `ALTER TABLE t VALIDATE CONSTRAINT name` | `CAUTION` |
-   | Generated-column expression added/changed/dropped (§7.4) | `GENERATED ... AS (expr)` differs | `ADD GENERATED`/`SET EXPRESSION`/`DROP EXPRESSION` (§7.4 table) | `SAFE`/`CAUTION` |
-   | Identity clause added/changed/dropped (§7.4) | `identity-opts` differ | `ADD GENERATED AS IDENTITY`/`SET GENERATED`/`SET <option>`/`DROP IDENTITY` (§7.4 table) | `SAFE`/`CAUTION` |
+   | Generated-column expression added/changed/dropped (Section 7.4) | `GENERATED ... AS (expr)` differs | `ADD GENERATED`/`SET EXPRESSION`/`DROP EXPRESSION` (Section 7.4 table) | `SAFE`/`CAUTION` |
+   | Identity clause added/changed/dropped (Section 7.4) | `identity-opts` differ | `ADD GENERATED AS IDENTITY`/`SET GENERATED`/`SET <option>`/`DROP IDENTITY` (Section 7.4 table) | `SAFE`/`CAUTION` |
    | Index added (existing table) | Name absent in snapshot | `CREATE [UNIQUE] INDEX [CONCURRENTLY] ...` | `MANUAL` or `CAUTION` |
    | Index dropped | Name absent in desired | `DROP INDEX [CONCURRENTLY] name` | `CAUTION` |
-   | Index renamed only (`RENAMED FROM`, §7.7) | Name changed, nothing else differs | `ALTER INDEX old RENAME TO new` | `SAFE` |
+   | Index renamed only (`RENAMED FROM`, Section 7.7) | Name changed, nothing else differs | `ALTER INDEX old RENAME TO new` | `SAFE` |
    | Index changed | Any other field differs | Drop + recreate | `CAUTION`/`MANUAL` |
    | RLS enabled | `rls_enabled` changed | `ALTER TABLE t ENABLE ROW LEVEL SECURITY` | `SAFE` |
    | RLS disabled | `rls_enabled` changed | `ALTER TABLE t DISABLE ROW LEVEL SECURITY` | `SAFE` |
-   | RLS force removed (enable still set, §7.8) | `rls_forced` false in desired, `rls_enabled` still true | `ALTER TABLE t NO FORCE ROW LEVEL SECURITY` | `SAFE` |
+   | RLS force removed (enable still set, Section 7.8) | `rls_forced` false in desired, `rls_enabled` still true | `ALTER TABLE t NO FORCE ROW LEVEL SECURITY` | `SAFE` |
    | Policy added | Name absent in snapshot | `CREATE POLICY name ON t ...` | `SAFE` |
-   | Policy `TO`/`USING`/`WITH CHECK` changed only (§7.8) | `FOR`/`AS` unchanged | `ALTER POLICY name ON t ...` | `SAFE` |
+   | Policy `TO`/`USING`/`WITH CHECK` changed only (Section 7.8) | `FOR`/`AS` unchanged | `ALTER POLICY name ON t ...` | `SAFE` |
    | Policy `FOR`/`AS` changed | Either field differs | Drop + recreate | `SAFE` |
    | Policy dropped | Name absent in desired | `DROP POLICY name ON t` | `SAFE` |
    | Trigger added | Name absent in snapshot | `CREATE TRIGGER name ...` | `SAFE` |
    | Trigger changed | Any field differs | Drop + recreate | `SAFE` |
-   | Trigger enable state changed only (§7.9) | `trigger-enable-state` differs, rest unchanged | `ALTER TABLE t ENABLE/DISABLE TRIGGER name` (or `ENABLE REPLICA/ALWAYS TRIGGER`) | `SAFE` |
+   | Trigger enable state changed only (Section 7.9) | `trigger-enable-state` differs, rest unchanged | `ALTER TABLE t ENABLE/DISABLE TRIGGER name` (or `ENABLE REPLICA/ALWAYS TRIGGER`) | `SAFE` |
    | Trigger dropped | Name absent in desired | `DROP TRIGGER name ON t` | `SAFE` |
    | Grant added | Not in snapshot grant list | `GRANT privs ON TABLE t TO role` | `SAFE` |
    | Owner changed | `owner` differs | `ALTER TABLE t OWNER TO role` | `SAFE` |
    | Comment changed | `comment` differs | `COMMENT ON TABLE t IS '...'` | `SAFE` |
    | Table renamed | `renamed_from` set | `ALTER TABLE old RENAME TO new` | `CAUTION` |
-   | Table moved to another schema (`RENAMED FROM` schema-qualified, §7.6) | Schema component of `renamed_from` differs | `ALTER TABLE old_schema.name SET SCHEMA new_schema` | `SAFE` |
-   | Tablespace changed | `tablespace` (§7.1's `TABLESPACE` clause) differs | `ALTER TABLE t SET TABLESPACE ts` | `CAUTION` |
-   | Access method changed | `USING` method (§7.1) differs | `ALTER TABLE t SET ACCESS METHOD method` | `CAUTION` |
-   | Storage parameters changed | `WITH (...)` (§7.1) params differ | `ALTER TABLE t SET (...)` / `ALTER TABLE t RESET (...)` | `SAFE` |
-   | Parent added/removed | `INHERITS (...)` (§7.1) list differs | `ALTER TABLE child INHERIT parent` / `ALTER TABLE child NO INHERIT parent` | `SAFE` |
-   | Typed-table association added/switched/removed | `OF type_name` (§7.1) differs | `ALTER TABLE t OF type_name` / `ALTER TABLE t NOT OF` | `CAUTION` |
-   | `REPLICA IDENTITY` changed | `replica-identity-dir` (§7.11) differs | `ALTER TABLE t REPLICA IDENTITY ...` | `SAFE` |
-   | `CLUSTER ON` changed/removed | `cluster-dir` (§7.11) differs | `ALTER TABLE t CLUSTER ON index` / `ALTER TABLE t SET WITHOUT CLUSTER` | `SAFE` |
-   | `LOGGED`/`UNLOGGED` toggled (§7.12) | `UNLOGGED` prefix differs | `ALTER TABLE t SET LOGGED` / `ALTER TABLE t SET UNLOGGED` | `CAUTION` |
-   | Partition attached/detached (§7.13) | `ATTACHED FROM`/`DETACHED FROM` present | `ALTER TABLE parent ATTACH/DETACH PARTITION ...` | `CAUTION`/`MANUAL` |
+   | Table moved to another schema (`RENAMED FROM` schema-qualified, Section 7.6) | Schema component of `renamed_from` differs | `ALTER TABLE old_schema.name SET SCHEMA new_schema` | `SAFE` |
+   | Tablespace changed | `tablespace` (Section 7.1's `TABLESPACE` clause) differs | `ALTER TABLE t SET TABLESPACE ts` | `CAUTION` |
+   | Access method changed | `USING` method (Section 7.1) differs | `ALTER TABLE t SET ACCESS METHOD method` | `CAUTION` |
+   | Storage parameters changed | `WITH (...)` (Section 7.1) params differ | `ALTER TABLE t SET (...)` / `ALTER TABLE t RESET (...)` | `SAFE` |
+   | Parent added/removed | `INHERITS (...)` (Section 7.1) list differs | `ALTER TABLE child INHERIT parent` / `ALTER TABLE child NO INHERIT parent` | `SAFE` |
+   | Typed-table association added/switched/removed | `OF type_name` (Section 7.1) differs | `ALTER TABLE t OF type_name` / `ALTER TABLE t NOT OF` | `CAUTION` |
+   | `REPLICA IDENTITY` changed | `replica-identity-dir` (Section 7.11) differs | `ALTER TABLE t REPLICA IDENTITY ...` | `SAFE` |
+   | `CLUSTER ON` changed/removed | `cluster-dir` (Section 7.11) differs | `ALTER TABLE t CLUSTER ON index` / `ALTER TABLE t SET WITHOUT CLUSTER` | `SAFE` |
+   | `LOGGED`/`UNLOGGED` toggled (Section 7.12) | `UNLOGGED` prefix differs | `ALTER TABLE t SET LOGGED` / `ALTER TABLE t SET UNLOGGED` | `CAUTION` |
+   | Partition attached/detached (Section 7.13) | `ATTACHED FROM`/`DETACHED FROM` present | `ALTER TABLE parent ATTACH/DETACH PARTITION ...` | `CAUTION`/`MANUAL` |
    | Table dropped | Absent in desired, not PROTECTED | `DROP TABLE t [CASCADE]` | `DESTRUCTIVE` |
 
    **FUNCTION / PROCEDURE:**
@@ -6674,7 +6674,7 @@ serial_sequence_declared      = "off"
    | Body hash changed | `body_hash` differs | `CREATE OR REPLACE FUNCTION ...` | `SAFE` |
    | Attribute changed (volatility, strict, security, leakproof, parallel, cost, rows, set options) | Field differs | `CREATE OR REPLACE FUNCTION ...` | `SAFE` |
    | Argument list or return type changed | Type key differs | `DROP FUNCTION CASCADE; CREATE FUNCTION` | `DESTRUCTIVE` |
-   | `[NO] DEPENDS ON EXTENSION` changed (Function/Procedure, §9.1/§9.2) | Extension-dependency set differs | `ALTER FUNCTION ... [NO] DEPENDS ON EXTENSION ext` | `SAFE` |
+   | `[NO] DEPENDS ON EXTENSION` changed (Function/Procedure, Sections 9.1/9.2) | Extension-dependency set differs | `ALTER FUNCTION ... [NO] DEPENDS ON EXTENSION ext` | `SAFE` |
    | Grant added | Not in snapshot | `GRANT EXECUTE ON FUNCTION ...` | `SAFE` |
    | Revocation added | Not in snapshot | `REVOKE EXECUTE ON FUNCTION ... FROM role` | `SAFE` |
    | Owner changed | `owner` differs | `ALTER FUNCTION ... OWNER TO role` | `SAFE` |
@@ -6684,8 +6684,8 @@ serial_sequence_declared      = "off"
    | Function dropped | Absent in desired | `DROP FUNCTION name(...) [CASCADE]` | `DESTRUCTIVE` |
 
    Aggregate reuses this same table for its three metadata-only
-   operations (rename/owner/schema-move, §9.4); every other Aggregate
-   field change is `DESTRUCTIVE` per §9.4's own table, unlike Function/
+   operations (rename/owner/schema-move, Section 9.4); every other Aggregate
+   field change is `DESTRUCTIVE` per Section 9.4's own table, unlike Function/
    Procedure's mostly-`SAFE` attribute set above.
 
    **VIEW:**
@@ -6695,7 +6695,7 @@ serial_sequence_declared      = "off"
    | New view | `CREATE VIEW ...` | `SAFE` |
    | Query changed, same column list | `CREATE OR REPLACE VIEW ...` | `SAFE` |
    | Column list changed | `DROP VIEW CASCADE; CREATE VIEW` | `DESTRUCTIVE` |
-   | View/Matview renamed (`RENAMED FROM`, §8.1/§8.2) | `ALTER [MATERIALIZED] VIEW old RENAME TO new` | `CAUTION` |
+   | View/Matview renamed (`RENAMED FROM`, Sections 8.1/8.2) | `ALTER [MATERIALIZED] VIEW old RENAME TO new` | `CAUTION` |
    | View/Matview moved to another schema (`RENAMED FROM` schema-qualified) | `ALTER [MATERIALIZED] VIEW old_schema.name SET SCHEMA new_schema` | `SAFE` |
    | View dropped | `DROP VIEW CASCADE` | `DESTRUCTIVE` |
 
@@ -6704,8 +6704,8 @@ serial_sequence_declared      = "off"
    | Change | DDL | Safety |
    |--------|-----|--------|
    | New value | `ALTER TYPE name ADD VALUE 'v' [BEFORE/AFTER 'existing']` | `SAFE` |
-   | Value renamed (`RENAMED FROM`, §5.1.1) | `ALTER TYPE name RENAME VALUE 'old' TO 'new'` | `SAFE` |
-   | Value removed (guarded) | MIGRATE REMOVE procedure (§5.1.2) | `DESTRUCTIVE` |
+   | Value renamed (`RENAMED FROM`, Section 5.1.1) | `ALTER TYPE name RENAME VALUE 'old' TO 'new'` | `SAFE` |
+   | Value removed (guarded) | MIGRATE REMOVE procedure (Section 5.1.2) | `DESTRUCTIVE` |
    | Value removed (unguarded) | Error DPG-E014 (or with `--allow-destructive`) | `DESTRUCTIVE` |
    | Comment changed | `COMMENT ON TYPE name IS '...'` | `SAFE` |
    | Owner changed | `ALTER TYPE name OWNER TO role` | `SAFE` |
@@ -6713,9 +6713,9 @@ serial_sequence_declared      = "off"
    | Moved to another schema (`RENAMED FROM` schema-qualified) | `ALTER TYPE old_schema.name SET SCHEMA new_schema` | `SAFE` |
 
    Composite, Range, Domain, and Base types follow the same
-   Owner/Renamed/Moved-to-another-schema rows as ENUM above (§5.1's
+   Owner/Renamed/Moved-to-another-schema rows as ENUM above (Section 5.1's
    cross-reference) — not repeated per kind here; each kind's own
-   section (§5.2-§5.5) documents any additional kind-specific rows
+   section (Sections 5.2-5.5) documents any additional kind-specific rows
    (Composite attribute rename, Domain constraint `NOT VALID`/rename,
    etc.).
 
@@ -6726,8 +6726,8 @@ serial_sequence_declared      = "off"
    | New sequence | `CREATE SEQUENCE ...` | `SAFE` |
    | Numeric parameters changed | `ALTER SEQUENCE name [INCREMENT BY n] [MINVALUE n] ...` | `SAFE` |
    | `OWNED BY` changed (incl. to/from `NONE`) | `ALTER SEQUENCE name OWNED BY {table.col\|NONE}` | `SAFE` |
-   | `RESTART [WITH n]` present in source (§10) | `ALTER SEQUENCE name RESTART [WITH n]` (re-emitted every apply while present) | `MANUAL` |
-   | `UNLOGGED` toggled (§10) | `ALTER SEQUENCE name SET LOGGED/UNLOGGED` | `CAUTION` |
+   | `RESTART [WITH n]` present in source (Section 10) | `ALTER SEQUENCE name RESTART [WITH n]` (re-emitted every apply while present) | `MANUAL` |
+   | `UNLOGGED` toggled (Section 10) | `ALTER SEQUENCE name SET LOGGED/UNLOGGED` | `CAUTION` |
    | `AS type` changed | Drop + recreate | `DESTRUCTIVE` |
    | Sequence dropped | `DROP SEQUENCE name` | `DESTRUCTIVE` |
 
@@ -6737,10 +6737,10 @@ serial_sequence_declared      = "off"
    |--------|-----|--------|
    | New role | `CREATE ROLE name WITH ...` | `SAFE` |
    | Any option changed | `ALTER ROLE name WITH [options]` | `SAFE` |
-   | Membership added/changed (`WITH ADMIN`/`INHERIT`/`SET`, §11.1) | `GRANT role TO member [WITH ...]` | `SAFE` |
+   | Membership added/changed (`WITH ADMIN`/`INHERIT`/`SET`, Section 11.1) | `GRANT role TO member [WITH ...]` | `SAFE` |
    | Membership removed | `REVOKE role FROM member` | `CAUTION` |
-   | `SET`/`RESET` config param changed (§11.1) | `ALTER ROLE name [IN DATABASE db] SET/RESET ...` | `SAFE` |
-   | Renamed (`RENAMED FROM`, §11.1) | `ALTER ROLE old RENAME TO new` | `CAUTION` |
+   | `SET`/`RESET` config param changed (Section 11.1) | `ALTER ROLE name [IN DATABASE db] SET/RESET ...` | `SAFE` |
+   | Renamed (`RENAMED FROM`, Section 11.1) | `ALTER ROLE old RENAME TO new` | `CAUTION` |
    | Role dropped | `DROP ROLE name` | `DESTRUCTIVE` |
 
    **EVENT TRIGGER:**
@@ -6749,7 +6749,7 @@ serial_sequence_declared      = "off"
    |--------|-----|--------|
    | New event trigger | `CREATE EVENT TRIGGER ...` | `SAFE` |
    | Event/tags/function changed | `DROP EVENT TRIGGER` + `CREATE EVENT TRIGGER` | `SAFE` |
-   | Enable state changed only (§14.1) | `ALTER EVENT TRIGGER name ENABLE/DISABLE [REPLICA/ALWAYS]` | `SAFE` |
+   | Enable state changed only (Section 14.1) | `ALTER EVENT TRIGGER name ENABLE/DISABLE [REPLICA/ALWAYS]` | `SAFE` |
    | Owner changed | `ALTER EVENT TRIGGER name OWNER TO role` | `SAFE` |
    | Renamed (`RENAMED FROM`) | `ALTER EVENT TRIGGER old RENAME TO new` | `CAUTION` |
    | Event trigger dropped | `DROP EVENT TRIGGER name` | `SAFE` |
@@ -6804,7 +6804,7 @@ serial_sequence_declared      = "off"
        validate dynamic SQL either.  A `LANGUAGE plpgsql`
        function/procedure body is deliberately **not** analysed for
        table references, even though it is analysed for embedded SQL
-       when computing its body hash (§16.3) — see the note below this
+       when computing its body hash (Section 16.3) — see the note below this
        list for why.  A function/procedure body in any other language
        is not analysed for table references.
 
@@ -6819,7 +6819,7 @@ serial_sequence_declared      = "off"
        pattern: a validation or audit trigger function whose body
        queries the very table the trigger is attached to.  That shape
        combines with edge source 6 (table→trigger-function) into a
-       2-node cycle with no `FOREIGN KEY` anywhere in it, which §22.2's
+       2-node cycle with no `FOREIGN KEY` anywhere in it, which Section 22.2's
        cycle-breaker cannot resolve (step 2a's `DEFERRABLE` check has
        nothing to examine, since the cycle contains no FK edge at
        all).  Exempting `plpgsql` here mirrors the reasoning already
@@ -6890,7 +6890,7 @@ serial_sequence_declared      = "off"
    **Database management (`CREATE DATABASE` / `ALTER DATABASE` /
    `DROP DATABASE`):**
    Permanently out of scope, not merely deferred. DPG's project model
-   treats a database directory (§3.4) as proof the database already
+   treats a database directory (Section 3.4) as proof the database already
    exists — the directory's presence is what makes a database
    discoverable and in scope for diffing, not a declaration that DPG
    should create it. Making DPG create-and-manage databases as objects
@@ -6905,7 +6905,7 @@ serial_sequence_declared      = "off"
    in spirit to `VACUUM` than to a declared object — there is no
    steady-state "desired" form of either to diff against, which is
    exactly the same reason `ALTER` is structurally excluded from DPG's
-   no-verb object model (§4). Not planned for any future version.
+   no-verb object model (Section 4). Not planned for any future version.
 
    **`ALTER SYSTEM`:**
    Out of scope. It writes a GUC override to `postgresql.auto.conf`, a
@@ -6959,7 +6959,7 @@ serial_sequence_declared      = "off"
    membership list claims — normally only relevant when packaging a new
    extension version or working around a broken/partial installation,
    both extension-authoring concerns rather than something an
-   application schema project hand-manages. §6.2 already manages
+   application schema project hand-manages. Section 6.2 already manages
    installing, updating, and removing an extension as a whole; picking
    apart its internal member list is a tier below that scope, the same
    distinction that excludes `CREATE ACCESS METHOD`/`CREATE LANGUAGE`/
@@ -6975,24 +6975,24 @@ serial_sequence_declared      = "off"
 
    -   Connection strings in `dpg.toml`: if `link = "env:VAR"` is used,
        the resolved value is never written to disk (via
-       `pipeline.SecretResolver`/`ChainResolver`, §D.5).  If `url =` is
+       `pipeline.SecretResolver`/`ChainResolver`, Appendix D.5).  If `url =` is
        used, the connection string may contain embedded credentials and
        SHOULD NOT be committed to a public repository; this is the operator's
        responsibility.
-   -   Subscription `CONNECTION` strings (§13.2): MAY hold one or more
+   -   Subscription `CONNECTION` strings (Section 13.2): MAY hold one or more
        `{{secret-uri}}` placeholders embedded in an otherwise-literal
        conninfo (or the whole value), resolved via `pipeline.ResolveTemplate`
-       (§D.5) immediately before `CREATE SUBSCRIPTION` executes — never
+       (Appendix D.5) immediately before `CREATE SUBSCRIPTION` executes — never
        during `plan`/`diff`, never written to the snapshot, an archived
        migration file, or any error message. A `CONNECTION` value with no
        `{{...}}` at all is opaque literal text, same as before this
        existed — the same operator responsibility as `url =` above.
-   -   Role `PASSWORD` (§11.1): same `{{secret-uri}}` mechanism as
+   -   Role `PASSWORD` (Section 11.1): same `{{secret-uri}}` mechanism as
        Subscription `CONNECTION` above. The snapshot stores a hash of the
        declared text (never the resolved value), enabling rotation
        detection — not just a boolean `has_password`, an earlier, less
-       capable design this section once specified (see §11.1's own note).
-   -   User Mapping `OPTIONS` (§14.10): same `{{secret-uri}}` mechanism,
+       capable design this section once specified (see Section 11.1's own note).
+   -   User Mapping `OPTIONS` (Section 14.10): same `{{secret-uri}}` mechanism,
        applied to the entire opaque statement text rather than one
        isolated field — `OPTIONS` keys are foreign-data-wrapper-specific,
        not fixed by DPG, so there's no single clause to target the way
@@ -7009,7 +7009,7 @@ serial_sequence_declared      = "off"
    the live catalog, not source, so the concern above (a resolved value
    escaping into a persisted file) applies there too. Subscription
    `CONNECTION` is handled fully: `pg_subscription.subconninfo` is never
-   selected at all (§13.2), so a resolved credential can never reach a
+   selected at all (Section 13.2), so a resolved credential can never reach a
    dumped `.dpg` file this way. User Mapping `OPTIONS` is handled the
    same way it can be, given a structural difference from Subscription:
    PostgreSQL redacts `pg_user_mappings.umoptions` to `NULL` for a
@@ -7083,7 +7083,7 @@ serial_sequence_declared      = "off"
    | Tables (unlogged) | Declared, Diffed | `UNLOGGED` prefix; toggling post-creation uses `SET LOGGED`/`SET UNLOGGED`, not drop+recreate |
    | Tables (temporary) | Out of scope | Session-scoped |
    | Columns — all built-in types | Declared, Diffed | In `()` list |
-   | Columns — generated (`ALWAYS AS ... STORED`/`VIRTUAL`) | Declared, Diffed | In `()` list; `VIRTUAL` is PG18+ (§7.2) |
+   | Columns — generated (`ALWAYS AS ... STORED`/`VIRTUAL`) | Declared, Diffed | In `()` list; `VIRTUAL` is PG18+ (Section 7.2) |
    | Columns — identity (`AS IDENTITY`) | Declared, Diffed | In `()` list |
    | Column `COMPRESSION` | Declared, Diffed | `COLUMN c { COMPRESSION m; }` |
    | Column `STORAGE` | Declared, Diffed | `COLUMN c { STORAGE s; }` |
@@ -7094,82 +7094,82 @@ serial_sequence_declared      = "off"
    | Column renames | Declared, Diffed | `COLUMN new { RENAMED FROM old; }` |
    | Column-level grants | Declared, Diffed | `COLUMN c { GRANTS { ... } }` |
    | Column-level revocations | Declared, Diffed | `COLUMN c { REVOCATIONS { ... } }` |
-   | Inline constraints (PK, UNIQUE, CHECK, FK, `NOT NULL`) | Declared, Diffed | Single-column emitted inline; table-level named `NOT NULL` is PG18+ (§7.3) |
+   | Inline constraints (PK, UNIQUE, CHECK, FK, `NOT NULL`) | Declared, Diffed | Single-column emitted inline; table-level named `NOT NULL` is PG18+ (Section 7.3) |
    | Named constraints in `()` list | Declared, Diffed | Emitted inline for single-column |
    | Constraints in `{}` block | Declared, Diffed | `NOT VALID` required here |
-   | `EXCLUSION` constraints | Declared, Diffed | In `()` or `{}` block; on partitioned tables since PG17 (§7.3, passthrough) |
-   | `NOT VALID` / `VALIDATE CONSTRAINT` | Declared, Diffed | Multi-migration lifecycle; extended to `NOT NULL` constraints in PG18 (§7.3) |
-   | `ENFORCED`/`NOT ENFORCED` (`CHECK`/`FOREIGN KEY`) | Declared, Diffed | PG18+ (§7.2/§7.3) |
-   | Temporal keys (`WITHOUT OVERLAPS`/`PERIOD FOR`) | Declared, Diffed | PG18+; implemented as an exclusion constraint under the hood (§7.3) |
-   | FK `ON DELETE`/`ON UPDATE SET NULL`/`SET DEFAULT (col-list)` | Declared, Diffed | PG15+, column-scoped variant of the existing bare form (§7.2) |
+   | `EXCLUSION` constraints | Declared, Diffed | In `()` or `{}` block; on partitioned tables since PG17 (Section 7.3, passthrough) |
+   | `NOT VALID` / `VALIDATE CONSTRAINT` | Declared, Diffed | Multi-migration lifecycle; extended to `NOT NULL` constraints in PG18 (Section 7.3) |
+   | `ENFORCED`/`NOT ENFORCED` (`CHECK`/`FOREIGN KEY`) | Declared, Diffed | PG18+ (Sections 7.2/7.3) |
+   | Temporal keys (`WITHOUT OVERLAPS`/`PERIOD FOR`) | Declared, Diffed | PG18+; implemented as an exclusion constraint under the hood (Section 7.3) |
+   | FK `ON DELETE`/`ON UPDATE SET NULL`/`SET DEFAULT (col-list)` | Declared, Diffed | PG15+, column-scoped variant of the existing bare form (Section 7.2) |
    | Indexes — all access methods | Declared, Diffed | btree, hash, gin, gist, brin, spgist, bloom |
    | Indexes — partial | Declared, Diffed | `WHERE` predicate as text |
    | Indexes — expression | Declared, Diffed | Expression as text |
    | Indexes — covering (`INCLUDE`) | Declared, Diffed | Drop + recreate on change |
    | Indexes — concurrent creation | Declared, Manual | `CREATE INDEX CONCURRENTLY` |
-   | Indexes — `ON ONLY`, opclass parameters, `NULLS [NOT] DISTINCT`, rename | Declared, Diffed | `ONLY` suppresses partition recursion; rename is metadata-only (§7.7) |
+   | Indexes — `ON ONLY`, opclass parameters, `NULLS [NOT] DISTINCT`, rename | Declared, Diffed | `ONLY` suppresses partition recursion; rename is metadata-only (Section 7.7) |
    | ENUM types | Declared, Diffed | `MIGRATE REMOVE` for value removal; `BEFORE`/`AFTER` positional `ADD VALUE`, `RENAME VALUE`, `OWNER`, `RENAMED FROM`/`SET SCHEMA` |
    | Composite types | Declared, Diffed | Attribute `COLLATE`; `OWNER`, `RENAMED FROM`/`SET SCHEMA` |
    | Range types | Declared, Diffed | Any option change = DESTRUCTIVE; `OWNER`, `RENAMED FROM`/`SET SCHEMA`; multirange companion auto-created, never separately declared |
    | Domain types | Declared, Diffed | `COLLATE`; `NOT VALID`/`VALIDATE CONSTRAINT`/`RENAME CONSTRAINT` lifecycle; `OWNER`, `RENAMED FROM`/`SET SCHEMA` |
-   | Base (shell) types | Declared, Passthrough | Bare forward-declaration shell + automatic cycle-breaking for self-referential support functions (§5.5); `OWNER`, `RENAMED FROM`/`SET SCHEMA`; support-function/storage property changes use non-destructive `ALTER TYPE ... SET (...)` where real PostgreSQL allows it |
+   | Base (shell) types | Declared, Passthrough | Bare forward-declaration shell + automatic cycle-breaking for self-referential support functions (Section 5.5); `OWNER`, `RENAMED FROM`/`SET SCHEMA`; support-function/storage property changes use non-destructive `ALTER TYPE ... SET (...)` where real PostgreSQL allows it |
    | Virtual types | Declared, No SQL | DPG-native; snapshot only |
-   | Views | Declared, Diffed | Column list change = DESTRUCTIVE; `RENAMED FROM` and cross-schema `SET SCHEMA` supported (§7.6, §8.1) |
-   | Materialized views | Declared, Diffed | Query change = DESTRUCTIVE; `RENAMED FROM`/`SET SCHEMA` supported (§8.2) |
+   | Views | Declared, Diffed | Column list change = DESTRUCTIVE; `RENAMED FROM` and cross-schema `SET SCHEMA` supported (Section 7.6, Section 8.1) |
+   | Materialized views | Declared, Diffed | Query change = DESTRUCTIVE; `RENAMED FROM`/`SET SCHEMA` supported (Section 8.2) |
    | Recursive views | Declared, Diffed | |
    | Functions — all languages | Declared, Passthrough body | Body hash-diffed; `LEAKPROOF`, `TRANSFORM FOR TYPE`, C/`internal` `AS` forms, PG14+ `BEGIN ATOMIC`, `[NO] DEPENDS ON EXTENSION`, `OWNER`, `REVOCATIONS`, `RENAMED FROM`/`SET SCHEMA` |
    | Procedures | Declared, Passthrough body | Same additions as Functions above (`[NO] DEPENDS ON EXTENSION`, `OWNER`, `REVOCATIONS`, `RENAMED FROM`/`SET SCHEMA`) |
-   | Aggregates | Declared, Diffed | Full `agg-options` set (§9.4) diffed; any option change = DESTRUCTIVE; `RENAME TO`/`OWNER TO`/`SET SCHEMA` are the only non-destructive ALTER operations, matching real PostgreSQL's `ALTER AGGREGATE` surface |
+   | Aggregates | Declared, Diffed | Full `agg-options` set (Section 9.4) diffed; any option change = DESTRUCTIVE; `RENAME TO`/`OWNER TO`/`SET SCHEMA` are the only non-destructive ALTER operations, matching real PostgreSQL's `ALTER AGGREGATE` surface |
    | Window functions | Declared, Passthrough body | |
-   | Row Level Security | Declared, Diffed | `TO`/`USING`/`WITH CHECK`-only policy changes use non-destructive `ALTER POLICY`, avoiding a zero-active-policy window (§7.8) |
+   | Row Level Security | Declared, Diffed | `TO`/`USING`/`WITH CHECK`-only policy changes use non-destructive `ALTER POLICY`, avoiding a zero-active-policy window (Section 7.8) |
    | Triggers | Declared, Diffed | |
-   | Event triggers | Declared, Passthrough | Reconstructed from catalog; hash-diffed. Enable-state (`DISABLED`/`ENABLE REPLICA`/`ENABLE ALWAYS`), `OWNER`, `RENAMED FROM` diffed structurally, not part of the hash. `login` event (PG17+) also supported (§14.1) |
-   | Sequences | Declared, Diffed | `UNLOGGED`, `OWNED BY NONE`, `REVOCATIONS`, `RESTART [WITH n]` (§10) |
+   | Event triggers | Declared, Passthrough | Reconstructed from catalog; hash-diffed. Enable-state (`DISABLED`/`ENABLE REPLICA`/`ENABLE ALWAYS`), `OWNER`, `RENAMED FROM` diffed structurally, not part of the hash. `login` event (PG17+) also supported (Section 14.1) |
+   | Sequences | Declared, Diffed | `UNLOGGED`, `OWNED BY NONE`, `REVOCATIONS`, `RESTART [WITH n]` (Section 10) |
    | Schemas | Declared, Diffed | |
-   | Extensions | Declared, Diffed | `SCHEMA` change uses non-destructive `ALTER EXTENSION ... SET SCHEMA` for relocatable extensions (§6.2) |
-   | Roles | Declared, Diffed | Cluster-level; `PASSWORD` (§11.1) never live-introspected (superuser-only in PG), diffed offline via a hash of the declared text. `RENAMED FROM`/`RENAME TO` and `SET`/`RESET` session-config-parameter grammar now supported (§11.1); membership `WITH ADMIN`/`INHERIT`/`SET` options (PG16+) also supported |
-   | Table-level grants | Declared, Diffed | Additive model; `MAINTAIN` privilege (PG17) and `GRANTED BY role` (§7.10) also supported |
-   | Parameter Privileges (§11.6) | Declared, Diffed | Cluster-level; `GRANT {SET\|ALTER SYSTEM} ON PARAMETER`, additive model like Table-level grants |
+   | Extensions | Declared, Diffed | `SCHEMA` change uses non-destructive `ALTER EXTENSION ... SET SCHEMA` for relocatable extensions (Section 6.2) |
+   | Roles | Declared, Diffed | Cluster-level; `PASSWORD` (Section 11.1) never live-introspected (superuser-only in PG), diffed offline via a hash of the declared text. `RENAMED FROM`/`RENAME TO` and `SET`/`RESET` session-config-parameter grammar now supported (Section 11.1); membership `WITH ADMIN`/`INHERIT`/`SET` options (PG16+) also supported |
+   | Table-level grants | Declared, Diffed | Additive model; `MAINTAIN` privilege (PG17) and `GRANTED BY role` (Section 7.10) also supported |
+   | Parameter Privileges (Section 11.6) | Declared, Diffed | Cluster-level; `GRANT {SET\|ALTER SYSTEM} ON PARAMETER`, additive model like Table-level grants |
    | Column-level grants | Declared, Diffed | Additive model |
    | Explicit revocations | Declared, Diffed | |
    | Default Privileges | Declared, Diffed | |
-   | Security Labels (§14.11) | Declared, Diffed | Keyed by provider; every kind PostgreSQL's own `SECURITY LABEL` grammar supports and DPG models |
-   | Tablespaces | Declared, Passthrough | Cluster-level; reconstructed from catalog, hash-diffed. `CREATE`-time `WITH (...)` storage params, `OWNER TO`, `RENAME TO` all supported (§14.7); `SET`/`RESET` on `WITH (...)` options is still a separate, open gap |
+   | Security Labels (Section 14.11) | Declared, Diffed | Keyed by provider; every kind PostgreSQL's own `SECURITY LABEL` grammar supports and DPG models |
+   | Tablespaces | Declared, Passthrough | Cluster-level; reconstructed from catalog, hash-diffed. `CREATE`-time `WITH (...)` storage params, `OWNER TO`, `RENAME TO` all supported (Section 14.7); `SET`/`RESET` on `WITH (...)` options is still a separate, open gap |
    | Foreign Data Wrappers | Declared, Passthrough | Cluster-level; reconstructed from catalog, hash-diffed |
-   | Foreign Servers | Declared, Passthrough | Reconstructed from catalog; hash-diffed. `OWNER`, `RENAMED FROM`, bare `VERSION`-only change also supported (§14.9) |
-   | User Mappings | Declared, Passthrough | Reconstructed from catalog; hash-diffed. `OPTIONS` may hold a `{{secret-uri}}` reference (§14.10, §D.5), resolved only immediately before `CREATE USER MAPPING` executes |
-   | Foreign Tables | Declared, Diffed | `SERVER`/`OPTIONS` after `)`; §7.12 now documents the ALTER-semantics table directly (`OPTIONS` change is `SAFE` in place, `SERVER` change is `DESTRUCTIVE` drop+recreate, column add/drop follows regular `TABLE` rules) |
+   | Foreign Servers | Declared, Passthrough | Reconstructed from catalog; hash-diffed. `OWNER`, `RENAMED FROM`, bare `VERSION`-only change also supported (Section 14.9) |
+   | User Mappings | Declared, Passthrough | Reconstructed from catalog; hash-diffed. `OPTIONS` may hold a `{{secret-uri}}` reference (Section 14.10, Appendix D.5), resolved only immediately before `CREATE USER MAPPING` executes |
+   | Foreign Tables | Declared, Diffed | `SERVER`/`OPTIONS` after `)`; Section 7.12 now documents the ALTER-semantics table directly (`OPTIONS` change is `SAFE` in place, `SERVER` change is `DESTRUCTIVE` drop+recreate, column add/drop follows regular `TABLE` rules) |
    | Partitioned Tables | Declared, Diffed | |
    | Sub-partitioning | Declared, Diffed | |
-   | Publications | Declared, Passthrough | Reconstructed from catalog; hash-diffed. `OWNER`, `RENAMED FROM` also supported (§13.1) |
-   | Subscriptions | Declared, Passthrough | Reconstructed from the catalog; hash-diffed. `CONNECTION` alone is never introspected (`subconninfo` has no PUBLIC grant, and even a privileged read can't recover the original `{{secret-uri}}`) — reconstructed as a fixed placeholder instead, excluded from the drift comparison like every other reconstructed body (§13.2). `CONNECTION` may hold a `{{secret-uri}}` reference in source (§13.2, §D.5), resolved only immediately before `CREATE SUBSCRIPTION` executes |
-   | Collations | Declared, Passthrough | Reconstructed from catalog, hash-diffed; property changes (`LOCALE`/`PROVIDER`/`RULES`/`FROM` target) = DESTRUCTIVE. `FROM existing_collation` and `RULES` (PG16+) forms, `OWNER`/`RENAMED FROM`/`SET SCHEMA`, and `REFRESH VERSION` (PG15+) also supported (§14.2) |
+   | Publications | Declared, Passthrough | Reconstructed from catalog; hash-diffed. `OWNER`, `RENAMED FROM` also supported (Section 13.1) |
+   | Subscriptions | Declared, Passthrough | Reconstructed from the catalog; hash-diffed. `CONNECTION` alone is never introspected (`subconninfo` has no PUBLIC grant, and even a privileged read can't recover the original `{{secret-uri}}`) — reconstructed as a fixed placeholder instead, excluded from the drift comparison like every other reconstructed body (Section 13.2). `CONNECTION` may hold a `{{secret-uri}}` reference in source (Section 13.2, Appendix D.5), resolved only immediately before `CREATE SUBSCRIPTION` executes |
+   | Collations | Declared, Passthrough | Reconstructed from catalog, hash-diffed; property changes (`LOCALE`/`PROVIDER`/`RULES`/`FROM` target) = DESTRUCTIVE. `FROM existing_collation` and `RULES` (PG16+) forms, `OWNER`/`RENAMED FROM`/`SET SCHEMA`, and `REFRESH VERSION` (PG15+) also supported (Section 14.2) |
    | Operators | Declared, Passthrough | Reconstructed from catalog, hash-diffed; any change = DESTRUCTIVE |
    | Operator Classes | Declared, Passthrough | Reconstructed from catalog, hash-diffed; any `AS` member-list change = DESTRUCTIVE (PostgreSQL has no incremental `ALTER OPERATOR CLASS`) |
-   | Operator Families | Declared, Passthrough + Diffed | Header (name/access method) reconstructed from catalog, hash-diffed; loose members (§14.4, `ALTER OPERATOR FAMILY ... ADD`) are structured and diffed incrementally per member, live-path included — not gated on `Reconstructed` the way the bare header hash is |
+   | Operator Families | Declared, Passthrough + Diffed | Header (name/access method) reconstructed from catalog, hash-diffed; loose members (Section 14.4, `ALTER OPERATOR FAMILY ... ADD`) are structured and diffed incrementally per member, live-path included — not gated on `Reconstructed` the way the bare header hash is |
    | Casts | Declared, Passthrough | Reconstructed from catalog, hash-diffed; any change = DESTRUCTIVE |
    | Extended Statistics Objects | Declared, Passthrough | Reconstructed from catalog; hash-diffed |
-   | Text Search Configurations | Declared, Passthrough | Reconstructed from catalog; hash-diffed. `OWNER`, `ALTER MAPPING REPLACE` (bulk and per-token-type) also supported (§12.1) |
-   | Text Search Dictionaries | Declared, Passthrough | Reconstructed from catalog; hash-diffed. `OWNER`/`COMMENT`/`RENAMED FROM` block now supported (§12.2) |
-   | Text Search Parsers | Declared, Passthrough | Reconstructed from catalog; hash-diffed. `COMMENT`/`RENAMED FROM` block now supported, no `OWNER` (real PostgreSQL has none for this kind, §12.3) |
-   | Text Search Templates | Declared, Passthrough | Reconstructed from catalog; hash-diffed. `COMMENT`/`RENAMED FROM` block now supported, no `OWNER` (§12.4) |
+   | Text Search Configurations | Declared, Passthrough | Reconstructed from catalog; hash-diffed. `OWNER`, `ALTER MAPPING REPLACE` (bulk and per-token-type) also supported (Section 12.1) |
+   | Text Search Dictionaries | Declared, Passthrough | Reconstructed from catalog; hash-diffed. `OWNER`/`COMMENT`/`RENAMED FROM` block now supported (Section 12.2) |
+   | Text Search Parsers | Declared, Passthrough | Reconstructed from catalog; hash-diffed. `COMMENT`/`RENAMED FROM` block now supported, no `OWNER` (real PostgreSQL has none for this kind, Section 12.3) |
+   | Text Search Templates | Declared, Passthrough | Reconstructed from catalog; hash-diffed. `COMMENT`/`RENAMED FROM` block now supported, no `OWNER` (Section 12.4) |
    | Macro preprocessor | Declared, No SQL | Compile-time text expansion |
    | Cross-file macro sharing | Declared, No SQL | Macros defined in any file in the compilation scope are available to all others |
    | Rules (REWRITE) | Out of scope | Legacy |
    | `IMPORT FOREIGN SCHEMA` | Out of scope | Runtime discovery |
    | `REFRESH MATERIALIZED VIEW` | Out of scope | Runtime DML |
    | Temporary tables | Out of scope | Session-scoped |
-   | Temporary views | Out of scope | Session-scoped, same reasoning as temporary tables (§8.1) |
+   | Temporary views | Out of scope | Session-scoped, same reasoning as temporary tables (Section 8.1) |
    | Inline data seeding | Out of scope | DPG is a schema tool; data management is outside its scope |
-   | Database management (`CREATE`/`ALTER`/`DROP DATABASE`) | Out of scope | Cluster-provisioning, not schema management; see §23 — permanent, not deferred |
-   | `REASSIGN OWNED BY` / `DROP OWNED BY` | Out of scope | One-shot maintenance command, not a declarable object; see §23 |
-   | `ALTER SYSTEM` | Out of scope | Cluster-wide GUC configuration, not schema state; see §23 |
-   | `CREATE ACCESS METHOD` | Out of scope | Covered by extension install (`CREATE EXTENSION`); see §23 |
-   | `CREATE CONVERSION` | Out of scope | No realistic use case under UTF-8 dominance; see §23 |
-   | `CREATE [PROCEDURAL] LANGUAGE` | Out of scope | Covered by extension install (`CREATE EXTENSION`); see §23 |
-   | `CREATE TRANSFORM` | Out of scope | Always bundled with a specific extension pairing; see §23 |
-   | `ALTER EXTENSION ADD`/`DROP member_object` | Out of scope | Extension-authoring concern, a tier below application-schema scope; see §23 |
-   | Minimum PG version targeting | Deferred | See §23; planned v1.1 |
+   | Database management (`CREATE`/`ALTER`/`DROP DATABASE`) | Out of scope | Cluster-provisioning, not schema management; see Section 23 — permanent, not deferred |
+   | `REASSIGN OWNED BY` / `DROP OWNED BY` | Out of scope | One-shot maintenance command, not a declarable object; see Section 23 |
+   | `ALTER SYSTEM` | Out of scope | Cluster-wide GUC configuration, not schema state; see Section 23 |
+   | `CREATE ACCESS METHOD` | Out of scope | Covered by extension install (`CREATE EXTENSION`); see Section 23 |
+   | `CREATE CONVERSION` | Out of scope | No realistic use case under UTF-8 dominance; see Section 23 |
+   | `CREATE [PROCEDURAL] LANGUAGE` | Out of scope | Covered by extension install (`CREATE EXTENSION`); see Section 23 |
+   | `CREATE TRANSFORM` | Out of scope | Always bundled with a specific extension pairing; see Section 23 |
+   | `ALTER EXTENSION ADD`/`DROP member_object` | Out of scope | Extension-authoring concern, a tier below application-schema scope; see Section 23 |
+   | Minimum PG version targeting | Deferred | See Section 23; planned v1.1 |
 
 ---
 
@@ -7204,13 +7204,13 @@ top-level-decl = schema-decl
                / opaque-object-decl
                / nested-object
 
-; security-label-decl (§14.11) is NOT a top-level declaration — it is a
+; security-label-decl (Section 14.11) is NOT a top-level declaration — it is a
 ; { } block directive nested inside another object's own block (Table,
 ; Column, Function, Publication, etc.), the same position comment-dir/
 ; grants-block occupy.
 
 ; Schema-scoped object kinds — legal directly at top level (relying on
-; directory-inferred schema, §3.6) or nested inside schema-block.
+; directory-inferred schema, Section 3.6) or nested inside schema-block.
 nested-object = table-decl
               / view-decl
               / matview-decl
@@ -7227,14 +7227,14 @@ nested-object = table-decl
               / tsconfig-decl
 
 ; server-decl / user-mapping-decl have no dedicated ABNF block in their
-; own sections (§14.9/§14.10) any more than the opaque kinds below do —
+; own sections (Sections 14.9/14.10) any more than the opaque kinds below do —
 ; named here distinctly only because they're referenced from other
 ; productions (server-clause, terminator) that DO need a name to point
 ; at, unlike the opaque-object-decl kinds, which nothing else references.
 server-decl       = "SERVER" WSP identifier <PG CREATE SERVER syntax, Part 1 passthrough>
 user-mapping-decl = "USER MAPPING FOR" WSP role-spec <PG CREATE USER MAPPING syntax, Part 1 passthrough>
 
-; base-type-decl is BASE type's own production name (§5.5) — named here
+; base-type-decl is BASE type's own production name (Section 5.5) — named here
 ; since it's referenced from nested-object above; its option list
 ; (INPUT, OUTPUT, INTERNALLENGTH, ALIGNMENT, etc.) is the same
 ; comma-separated key=value shape as storage-params, reused here rather
@@ -7243,14 +7243,14 @@ base-type-decl = "TYPE" WSP schema-name WSP "(" storage-params ")" ";"
 
 ; opaque-object-decl covers every remaining kind whose Part 1 body is
 ; handed to pg_query as literal, unmodified native PostgreSQL DDL
-; (Tenet 2/5's passthrough pattern — the same kind list §16.3.1's
+; (Tenet 2/5's passthrough pattern — the same kind list Section 16.3.1's
 ; SnapOpaque table already enumerates for the snapshot side): Procedure
 ; (body only — its declaration head is function-decl's own grammar,
-; §9.3), Foreign Data Wrapper, Collation, Operator, Operator Class,
+; Section 9.3), Foreign Data Wrapper, Collation, Operator, Operator Class,
 ; Operator Family, Cast, Extended Statistics Object, and three of the
 ; four Text Search object kinds (Dictionary, Parser, Template — Text
 ; Search Configuration is the exception, with real structured grammar
-; of its own: tsconfig-decl, §12.1).  None of these has (or needs) a
+; of its own: tsconfig-decl, Section 12.1).  None of these has (or needs) a
 ; DPG-specific ABNF production for its Part 1 body beyond its own
 ; section's worked "PG equivalent" line — inventing one would violate
 ; Tenet 2 by giving PostgreSQL's own syntax a second, redundant DPG-
@@ -7259,7 +7259,7 @@ base-type-decl = "TYPE" WSP schema-name WSP "(" storage-params ")" ";"
 ; renamed-from-dir), same as every non-opaque kind — that block is DPG
 ; grammar for concepts with no place in the native CREATE statement, not
 ; a second name for the passthrough body, so it doesn't violate the
-; same rule (Text Search Dictionary/Parser/Template, §12.2-§12.4).
+; same rule (Text Search Dictionary/Parser/Template, Sections 12.2-12.4).
 opaque-object-decl = <the object kind's own native CREATE statement,
                        verbatim, per its section's "PG equivalent" line>
 
@@ -7282,7 +7282,7 @@ safe-char   = <any Unicode character except DQUOTE>
 ; Common directives
 owner-dir        = "OWNER" WSP DQUOTE identifier DQUOTE
 comment-dir      = "COMMENT" WSP string-literal
-; qual-name (not bare identifier) since §7.6 extends this production to
+; qual-name (not bare identifier) since Section 7.6 extends this production to
 ; cross-schema moves: a schema-qualified old name whose schema differs
 ; from the object's current one additionally triggers ALTER ... SET
 ; SCHEMA alongside RENAME TO.
@@ -7317,16 +7317,16 @@ pub-options    = storage-params
 sub-options    = storage-params
 
 ; Inline index parameters — real PostgreSQL's index_parameters clause,
-; usable both on a standalone CREATE INDEX (index-decl, §7.7) and
+; usable both on a standalone CREATE INDEX (index-decl, Section 7.7) and
 ; inline on a PRIMARY KEY/UNIQUE column or table constraint (col-
-; constraint/table-constraint-body, §7.2), which is what conflict-clause
+; constraint/table-constraint-body, Section 7.2), which is what conflict-clause
 ; exists to name for the latter, narrower position (no WHERE predicate
 ; or CONCURRENTLY there — those are CREATE-INDEX-only).
 conflict-clause = [ WSP "INCLUDE" WSP "(" col-list ")" ]
                   [ WSP "WITH" WSP "(" storage-params ")" ]
                   [ WSP "USING INDEX TABLESPACE" WSP identifier ]
 
-; EXCLUDE constraint element list (§7.2) — mirrors real PostgreSQL's
+; EXCLUDE constraint element list (Section 7.2) — mirrors real PostgreSQL's
 ; exclude_element WITH operator repeating group exactly.
 excl-list    = excl-element *( "," WSP excl-element )
 excl-element = ( identifier / "(" expr ")" )
@@ -7336,9 +7336,9 @@ excl-element = ( identifier / "(" expr ")" )
                WSP "WITH" WSP operator-symbol
 operator-symbol = <a PostgreSQL operator name/symbol, e.g. "=", "&&">
 
-; CONSTRAINT TRIGGER deferrability (§7.9) — identical real-PostgreSQL
+; CONSTRAINT TRIGGER deferrability (Section 7.9) — identical real-PostgreSQL
 ; shape to the table-constraint deferrable clause defined inline at
-; §7.2, named here since §7.9 references it by name.
+; Section 7.2, named here since Section 7.9 references it by name.
 deferrable-clause = "NOT DEFERRABLE"
                   / "DEFERRABLE" [ WSP ( "INITIALLY DEFERRED"
                                        / "INITIALLY IMMEDIATE" ) ]
@@ -7350,16 +7350,16 @@ deferrable-clause = "NOT DEFERRABLE"
 ; whatever parenthesization its own context requires.
 func-ref = qual-name
 
-; Text Search Configuration MAPPING FOR ... WITH ... (§12.1)
+; Text Search Configuration MAPPING FOR ... WITH ... (Section 12.1)
 token-type-list = identifier *( "," WSP identifier )
 dict-list       = qual-name *( "," WSP qual-name )
 
-; Event Trigger WHEN TAG IN (...) (§14.1) — command tag string list
+; Event Trigger WHEN TAG IN (...) (Section 14.1) — command tag string list
 tag-list = string-literal *( "," WSP string-literal )
 
-; Table-level trailing TABLESPACE clause (§4.5's terminator rule) —
+; Table-level trailing TABLESPACE clause (Section 4.5's terminator rule) —
 ; same shape already used inline for table-clause's own TABLESPACE
-; alternative (§7.1); named here since §4.5 references it by name.
+; alternative (Section 7.1); named here since Section 4.5 references it by name.
 tablespace-clause = "TABLESPACE" WSP identifier
 
 ; Grants
@@ -7377,9 +7377,9 @@ privilege = "SELECT" / "INSERT" / "UPDATE" / "DELETE" / "TRUNCATE" /
             "REFERENCES" / "TRIGGER" / "USAGE" / "EXECUTE" / "CREATE" /
             "CONNECT" / "TEMPORARY" / "MAINTAIN" / "ALL" / "ALL PRIVILEGES"
 role-list  = identifier *( "," WSP identifier )
-; role-spec is defined locally at its first use (§14.7, Tablespace
+; role-spec is defined locally at its first use (Section 14.7, Tablespace
 ; OWNER) and reused verbatim by GRANTED BY above and by Role membership
-; WITH clauses (§11.1) — not redefined per site.
+; WITH clauses (Section 11.1) — not redefined per site.
 role-spec  = identifier / "CURRENT_ROLE" / "CURRENT_USER" / "SESSION_USER"
 
 ; Macro preprocessor
@@ -7638,11 +7638,11 @@ SCHEMA public {
    | DPG-E029 | `database_not_found` | `--database` value does not match any database. |
    | DPG-E030 | `invalid_namemap_rule` | Unknown rule keyword in `[namemaps]` config or `NAME MAP` block directive. |
    | DPG-E031 | `duplicate_namemap_tool` | Same tool key specified more than once at the same block level (warning only; last entry wins). |
-   | DPG-E032 | `cluster_name_required` | Cluster `dpg.toml` is missing a `[cluster] name` (§3.3). |
-   | DPG-E033 | `database_name_required` | Database `dpg.toml` is missing a `[database] name` (§3.4). |
-   | DPG-E034 | `duplicate_cluster_name` | Two cluster directories declare the same `name` (§3.6). |
-   | DPG-E035 | `duplicate_database_name` | Two database directories within the same cluster declare the same `name` (§3.6). |
-   | DPG-E036 | `owner_role_not_a_member` | Connecting role is not a member of one or more declared `OWNER` roles (§11.5). |
+   | DPG-E032 | `cluster_name_required` | Cluster `dpg.toml` is missing a `[cluster] name` (Section 3.3). |
+   | DPG-E033 | `database_name_required` | Database `dpg.toml` is missing a `[database] name` (Section 3.4). |
+   | DPG-E034 | `duplicate_cluster_name` | Two cluster directories declare the same `name` (Section 3.6). |
+   | DPG-E035 | `duplicate_database_name` | Two database directories within the same cluster declare the same `name` (Section 3.6). |
+   | DPG-E036 | `owner_role_not_a_member` | Connecting role is not a member of one or more declared `OWNER` roles (Section 11.5). |
 
 ---
 
@@ -7653,18 +7653,18 @@ SCHEMA public {
    document was written.  These entries have the same normative weight
    as the sections they amend.
 
-### D.1. Snapshot Format — Actual Wire Schema (amends §16)
+### D.1. Snapshot Format — Actual Wire Schema (amends Section 16)
 
 #### D.1.1. Corrections Integrated
 
-   Earlier drafts of §16.3 showed a flat per-object record with
+   Earlier drafts of Section 16.3 showed a flat per-object record with
    several field names/shapes that didn't match the reference
    implementation (originally corrected here across seven subsections,
    D.1.1–D.1.7: the `SnapObject` discriminated-union wrapper, the
    `SnapOpaque` passthrough shape, and corrected `SnapColumn`/
    `SnapConstraint`/`SnapIndex`/`SnapTrigger`/`SnapGrant` field names).
-   Those corrections are now integrated directly into §16.3 and
-   §16.3.1, which are the single normative source for the per-object
+   Those corrections are now integrated directly into Section 16.3 and
+   Section 16.3.1, which are the single normative source for the per-object
    snapshot schema — this entry is kept only as a historical pointer.
 #### D.1.8. SnapSchema, SnapExtension, SnapType, SnapSequence, SnapRole
 
@@ -7761,14 +7761,14 @@ SCHEMA public {
 
 ---
 
-### D.2. dpg plan Corrections Integrated; Target Auto-Selection Rules (amends §18, §3.6)
+### D.2. dpg plan Corrections Integrated; Target Auto-Selection Rules (amends Section 18, Section 3.6)
 
 #### D.2.1. dpg plan / dpg validate / --env — Corrections Integrated
 
    The `dpg plan` flag corrections (`--format text|json`, not `sql`;
    the `--watch` flag), the identical `dpg validate --format`
    correction, and the `--env` flag / `.env`-loading algorithm are now
-   integrated directly into §18 (the global options intro) and §18.1 —
+   integrated directly into Section 18 (the global options intro) and Section 18.1 —
    those are the single normative source; this entry is kept only as a
    historical pointer.
 
@@ -7805,15 +7805,15 @@ SCHEMA public {
 #### D.2.3. dpg plan --format json — Output Schema Integrated
 
    The `--format json` output schema is now documented directly in
-   §18.1, which is the single normative source; this entry is kept
+   Section 18.1, which is the single normative source; this entry is kept
    only as a historical pointer.
 
 ---
 
-### D.3. Linter Rule ID Corrections (amends §19)
+### D.3. Linter Rule ID Corrections (amends Section 19)
 
    The actual built-in linter rule identifiers use hyphens, NOT
-   underscores. §19.1's table also predates two rule identifiers being
+   underscores. Section 19.1's table also predates two rule identifiers being
    split apart and two others being renamed (both corrected below) — the
    corrected, complete rule ID table, matching `internal/linter/linter.go`
    exactly as of this writing:
@@ -7821,16 +7821,16 @@ SCHEMA public {
    | Rule ID (actual) | Description | Default Level |
    |---|---|---|
    | `hardcoded-password` | A table column's `DEFAULT` contains a hardcoded string, for a column whose name contains `password`, `passwd`, `pwd`, `secret`, or `passphrase` (case-insensitive). | Error |
-   | `hardcoded-role-password` | A `ROLE`'s `PASSWORD` is a literal value with no `{{secret-uri}}` placeholder. A separate rule from `hardcoded-password` above — different check, different object kind — despite §19.1's table conflating both under one `hardcoded_password` entry. | Error |
+   | `hardcoded-role-password` | A `ROLE`'s `PASSWORD` is a literal value with no `{{secret-uri}}` placeholder. A separate rule from `hardcoded-password` above — different check, different object kind — despite Section 19.1's table conflating both under one `hardcoded_password` entry. | Error |
    | `hardcoded-fdw-password` | A `USER MAPPING`'s `OPTIONS (password '...')` is a literal value with no `{{secret-uri}}` placeholder. | Error |
    | `deprecated` | Object or column is marked `DEPRECATED`. Applied to tables, columns, views, functions. A different check from `deprecated-reference` below (that object/column being deprecated, vs. something else referencing it) — see the note below. | Warning |
-   | `missing-column-comment` | Column lacks a `COMMENT` when `require_column_comments = true`. Renamed from `require-column-comments` (§19.1 named this `missing_column_comment`; the actual code now matches that wording, kebab-cased). | Warning |
-   | `column-count-exceeded` | Table exceeds `max_columns_per_table` columns. Renamed from `max-columns` (§19.1 named this `column_count_exceeded`; the actual code now matches that wording, kebab-cased). | Error |
+   | `missing-column-comment` | Column lacks a `COMMENT` when `require_column_comments = true`. Renamed from `require-column-comments` (Section 19.1 named this `missing_column_comment`; the actual code now matches that wording, kebab-cased). | Warning |
+   | `column-count-exceeded` | Table exceeds `max_columns_per_table` columns. Renamed from `max-columns` (Section 19.1 named this `column_count_exceeded`; the actual code now matches that wording, kebab-cased). | Error |
    | `security-definer-search-path` | `SECURITY DEFINER` function body does not reference `search_path`. | Warning |
-   | `serial-sequence-declared` | A hand-declared `SEQUENCE` collides with the name PostgreSQL auto-manages for a `GENERATED ... AS IDENTITY` column's sequence, or for a `SERIAL`/`BIGSERIAL`/`SMALLSERIAL` column's owned sequence (`<table>_<column>_seq` in both cases) in the same desired state. Renamed from §19.1's `serial_sequence_declared`; originally scoped to `IDENTITY` only, extended to cover `SERIAL` once `ir.Column.Serial` was added — see the note below and Appendix D.11. | Warning |
-   | `unnecessary-revocation` | A `REVOCATIONS` entry names a (role, privilege) pair with no matching `GRANTS` entry in the *same object's own declaration*. Renamed from §19.1's `unnecessary_revocation`; narrower in scope than that entry's wording — see the note below. | Warning |
-   | `deprecated-reference` | A non-deprecated `FOREIGN KEY` references a deprecated table/column, or a non-deprecated column/function-parameter/function-return-type references a deprecated custom `TYPE`. Renamed from §19.1's `deprecated_reference`; deliberately narrower in scope than that entry's wording — see the note below. | Warning |
-   | `scalar-merge-conflict` | Two files declare the same object and provide different values for the same scalar property (e.g. two files each set `TABLE t`'s `OWNER` to a different role). Renamed from §19.1's `scalar_merge_conflict`; the winning (alphabetically-last-file) value is applied regardless — this rule only adds visibility, per §3.7. See the note below for exact per-kind scope. | Warning |
+   | `serial-sequence-declared` | A hand-declared `SEQUENCE` collides with the name PostgreSQL auto-manages for a `GENERATED ... AS IDENTITY` column's sequence, or for a `SERIAL`/`BIGSERIAL`/`SMALLSERIAL` column's owned sequence (`<table>_<column>_seq` in both cases) in the same desired state. Renamed from Section 19.1's `serial_sequence_declared`; originally scoped to `IDENTITY` only, extended to cover `SERIAL` once `ir.Column.Serial` was added — see the note below and Appendix D.11. | Warning |
+   | `unnecessary-revocation` | A `REVOCATIONS` entry names a (role, privilege) pair with no matching `GRANTS` entry in the *same object's own declaration*. Renamed from Section 19.1's `unnecessary_revocation`; narrower in scope than that entry's wording — see the note below. | Warning |
+   | `deprecated-reference` | A non-deprecated `FOREIGN KEY` references a deprecated table/column, or a non-deprecated column/function-parameter/function-return-type references a deprecated custom `TYPE`. Renamed from Section 19.1's `deprecated_reference`; deliberately narrower in scope than that entry's wording — see the note below. | Warning |
+   | `scalar-merge-conflict` | Two files declare the same object and provide different values for the same scalar property (e.g. two files each set `TABLE t`'s `OWNER` to a different role). Renamed from Section 19.1's `scalar_merge_conflict`; the winning (alphabetically-last-file) value is applied regardless — this rule only adds visibility, per Section 3.7. See the note below for exact per-kind scope. | Warning |
 
    **Implementation note on `hardcoded-password` vs. `hardcoded-role-password`:**
    the column rule checks a table column's `DEFAULT` expression: if the
@@ -7841,7 +7841,7 @@ SCHEMA public {
    unrelated: it checks `ROLE ... PASSWORD` directly (a structured field,
    not a text-pattern match) for the absence of any `{{...}}` placeholder.
 
-   **Note on the remaining §19.1 rules' actual implementation status:**
+   **Note on the remaining Section 19.1 rules' actual implementation status:**
    three of them — `stale_renamed_from` (DPG-E021), `unguarded_enum_removal`
    (DPG-E014), and `protected_drop_attempt` (DPG-E022) — are fully
    implemented and tested, but not as `Linter.Lint`-interface rules: each
@@ -7853,7 +7853,7 @@ SCHEMA public {
    `unguarded_enum_removal` both fundamentally need a desired-vs-snapshot
    comparison to detect what they detect (a stale rename target, a
    removed enum value), which the differ already does every run and the
-   linter — see §19.1's own `Linter.Lint(objects []IRObject, cfg
+   linter — see Section 19.1's own `Linter.Lint(objects []IRObject, cfg
    LinterConfig)` signature — does not have access to at all today.
    (A prior revision of this note incorrectly stated these two had no
    implementation anywhere; corrected after re-reading `differ.go`
@@ -7928,7 +7928,7 @@ SCHEMA public {
    false-positive-warning problem this rule design otherwise avoids.
 
    The `[linter.rules]` per-rule severity-override mechanism described in
-   §19.2 is now implemented, following the existing `--strict` promotion
+   Section 19.2 is now implemented, following the existing `--strict` promotion
    pattern (`LintDiagnostic.IsError`) for `"error"`, and a post-filter
    step for `"off"`.
 
@@ -7956,14 +7956,14 @@ SCHEMA public {
    which file most recently supplied the property's current value, and
    emits a diagnostic whenever a later file supplies a genuinely different
    value for the same property — while still always applying last-file-wins
-   regardless (§3.7: "the winning value is used regardless"). Tracking is
+   regardless (Section 3.7: "the winning value is used regardless"). Tracking is
    by *last setter*, not merely "compare to the immediately preceding
    file": if file A sets a property, file B reconfirms the same value, and
    file C then disagrees, the diagnostic correctly attributes the conflict
    to file B (the file that actually owns the current value), not file A.
 
    Scope, mirroring exactly which fields each `mergeX` function already
-   treats as a last-file-wins scalar (§3.7's own examples — owner,
+   treats as a last-file-wins scalar (Section 3.7's own examples — owner,
    comment, tablespace, RLS flags, `PROTECTED`, `DEPRECATED`,
    `DROP CASCADE`, `RENAMED FROM`, drop behaviour — plus the equivalent
    settable properties for kinds not in that list): `TABLE`, `VIEW`,
@@ -7977,7 +7977,7 @@ SCHEMA public {
    opaque blob, so two files setting different, non-colliding keys never
    conflict. Set-valued properties (indexes, constraints, grants,
    `ROLE`'s `IN ROLE`/`ROLE`/`ADMIN` membership lists, etc.) are unaffected
-   — they already use §3.7's union semantics, not last-wins, so there is
+   — they already use Section 3.7's union semantics, not last-wins, so there is
    nothing to conflict-check.
 
    **NOT covered** — the opaque/reconstruction-tier object kinds
@@ -7992,7 +7992,7 @@ SCHEMA public {
 
 ---
 
-### D.4. Pipeline Registry Key Constants (amends §15)
+### D.4. Pipeline Registry Key Constants (amends Section 15)
 
    The `pipeline.Registry` component system uses the following string
    keys to register and resolve pipeline components:
@@ -8024,7 +8024,7 @@ SCHEMA public {
 
 ---
 
-### D.5. SecretResolver Protocol Specification (amends §3.3)
+### D.5. SecretResolver Protocol Specification (amends Section 3.3)
 
    The `pipeline.SecretResolver` interface resolves a URI string to a
    plaintext secret value at connection time.  The interface is:
@@ -8063,7 +8063,7 @@ type SecretResolver interface {
 
    Example: `link = "env:PRODUCTION_DB_URL"` → resolves `PRODUCTION_DB_URL`
    from the process environment (which may have been populated from the
-   `.env` file per §18's global `--env` option).
+   `.env` file per Section 18's global `--env` option).
 
    **`vault:<mount>/<path>#<field>`** (`internal/secrets/vault.Resolver`)
 
@@ -8108,7 +8108,7 @@ type SecretResolver interface {
    The five schemes above resolve a URI that occupies an *entire* field
    (`link` in `dpg.toml`). Some fields are themselves a larger literal that
    only a *part* of should come from a secret — a SUBSCRIPTION `CONNECTION`
-   conninfo string being the first case (§13.2): most of it (host, dbname,
+   conninfo string being the first case (Section 13.2): most of it (host, dbname,
    user) is not sensitive, and forcing the whole value into a secret
    (duplicating the non-sensitive parts into the backend, or requiring a
    backend-side template) is worse than just resolving the one sensitive
@@ -8118,8 +8118,8 @@ type SecretResolver interface {
    leaving everything else untouched; `s` with no `{{...}}` at all never
    touches the resolver, so a plain literal has zero behavioral change and
    zero performance cost. This is a general mechanism, not
-   SUBSCRIPTION-specific — also used by Role `PASSWORD` (§11.1) and User
-   Mapping `OPTIONS` (§14.10).
+   SUBSCRIPTION-specific — also used by Role `PASSWORD` (Section 11.1) and User
+   Mapping `OPTIONS` (Section 14.10).
    `{{...}}` is deliberately the *only* trigger for resolution in such a
    field: unlike `link`, a real literal in one of these fields may itself
    contain a `:` (a conninfo string can be a `postgresql://user:pass@host/db`
@@ -8129,7 +8129,7 @@ type SecretResolver interface {
 
 ---
 
-### D.6. Source Revision Detection (amends §16.2)
+### D.6. Source Revision Detection (amends Section 16.2)
 
    The `source_revision` field in the snapshot and migration header is
    populated by reading `.git/HEAD` directly (no `git` binary required).
@@ -8164,24 +8164,24 @@ type SecretResolver interface {
 
 ---
 
-### D.8. Root dpg.toml — [fmt]/[migrations] Integrated (amends §3.2)
+### D.8. Root dpg.toml — [fmt]/[migrations] Integrated (amends Section 3.2)
 
    `[fmt]` and `[migrations]` were originally documented only here,
-   omitted from §3.2's own example. Both are now integrated directly
-   into §3.2, which is the single normative source for the root
+   omitted from Section 3.2's own example. Both are now integrated directly
+   into Section 3.2, which is the single normative source for the root
    `dpg.toml` schema; this entry is kept only as a historical pointer.
 
 ---
 
-### D.9. CLI Command Corrections (amends §18)
+### D.9. CLI Command Corrections (amends Section 18)
 
 #### D.9.1. dpg validate, dpg portability, dpg init, dpg fmt — corrections integrated
 
-   Earlier drafts of §18.6, §18.7, §18.8, and §18.9 documented flag
+   Earlier drafts of Section 18.6, Section 18.7, Section 18.8, and Section 18.9 documented flag
    sets, defaults, and behavior that didn't match the reference
    implementation.  Those corrections (originally recorded here as
-   D.9.1–D.9.4) have since been integrated directly into §18.6, §18.7,
-   §18.8, and §18.9 themselves — those sections are now the single
+   D.9.1–D.9.4) have since been integrated directly into Section 18.6, Section 18.7,
+   Section 18.8, and Section 18.9 themselves — those sections are now the single
    normative source for each command's interface, and this entry is
    kept only as a historical pointer so a reader following an old
    cross-reference to "D.9.x" lands somewhere useful.  See Appendix E,
@@ -8279,7 +8279,7 @@ sqlc = "LOWER_SNAKE_CASE"
 sqlc = "LOWER_SNAKE_CASE"
 ```
 
-   Rules MUST be one of the ten keywords listed in §D.10.1.  Unknown
+   Rules MUST be one of the ten keywords listed in Appendix D.10.1.  Unknown
    keywords MUST cause a validation error (DPG-E030).  Literal names
    are NOT supported in `dpg.toml`; only rule keywords are accepted.
 
@@ -8403,13 +8403,13 @@ ENUM user_status ('active', 'inactive', 'banned') {
 
 ---
 
-### D.11. SERIAL / BIGSERIAL / SMALLSERIAL Column Sugar (amends §7.2)
+### D.11. SERIAL / BIGSERIAL / SMALLSERIAL Column Sugar (amends Section 7.2)
 
-   §7.2's `col-constraint` ABNF and surrounding prose describe
+   Section 7.2's `col-constraint` ABNF and surrounding prose describe
    `GENERATED ALWAYS/BY DEFAULT AS IDENTITY` in detail but say nothing
    about PostgreSQL's older `SERIAL`/`BIGSERIAL`/`SMALLSERIAL`
    pseudo-types, which are syntactically just an ordinary `type-ref`
-   (§Appendix A) and so were always accepted by the parser. Until this
+   (Appendix A) and so were always accepted by the parser. Until this
    revision, DPG gave them no distinct treatment anywhere past parsing:
    a column declared `SERIAL` passed through the compiler as a literal
    type named `"serial"` — not a real PostgreSQL catalog type — with no
@@ -8443,7 +8443,7 @@ ENUM user_status ('active', 'inactive', 'banned') {
    **`SERIAL` implies `NOT NULL`:** real PostgreSQL makes every
    `SERIAL`-family column `NOT NULL` unconditionally, independent of
    whether it is also `PRIMARY KEY` — the same shape as the existing
-   PRIMARY-KEY-implies-NOT-NULL rule in §7.2. The compiler MUST set
+   PRIMARY-KEY-implies-NOT-NULL rule in Section 7.2. The compiler MUST set
    `Column.NotNull = true` for any `SERIAL`-family column regardless of
    other constraints present in source.
 
@@ -8510,29 +8510,29 @@ ENUM user_status ('active', 'inactive', 'banned') {
    | Revision | Date | Description |
    |----------|------|-------------|
    | E.1 | 2026-05-13 | Initial publication. Formal IETF-style RFC superseding the informal design document `rfc/v0.8.0.md`. All sections written from scratch with normative RFC 2119 language, ABNF grammars, and exhaustive per-object specifications. |
-   | E.2 | 2026-05-13 | Appendix D added. Corrections to §16 (snapshot wire format: `SnapObject` discriminated union, `SnapOpaque`, corrected field names), §18 (`--format text` default, `--watch` flag, `.env` loading protocol, `planJSON` schema, target auto-selection), §19 (linter rule IDs use hyphens). Pipeline Registry key constants table and SecretResolver protocol specification added. Source revision detection algorithm formalised. |
-   | E.3 | 2026-05-13 | §D.8–§D.9 added. Root `dpg.toml` `[fmt]` and `[migrations]` sections documented. CLI corrections: `dpg validate` JSON schema, `dpg portability` flag set, `dpg init` default cluster name (`"production"`), `dpg fmt` TOML key names. ToC updated to include Appendix D subsections. |
-   | E.4 | 2026-05-17 | §D.10 added. Name Maps feature specified: ten rule keywords, `[namemaps]` TOML config at all three levels (global + per-object-type rules), inline `NAME MAP` and `NAME MAPS` block directives, literal target name support via double-quoted identifiers, resolution order (block > database > cluster > root), snapshot `name_maps` array field on all object types, error codes DPG-E030 and DPG-E031. |
-   | E.5 | 2026-08-16 | §D.11 added. `SERIAL`/`BIGSERIAL`/`SMALLSERIAL` column sugar specified as a first-class IR concept (`Column.Serial`, sibling marker to `Column.Type`): normalization table, `SERIAL`-implies-`NOT NULL` rule, literal-keyword emission with suppressed `NOT NULL`/`DEFAULT`, `pg_depend`-based introspection detection mirroring identity columns, non-reapplicable dump output fixed, `SnapColumn.serial` field, and a legacy-snapshot self-healing comparison for pre-existing snapshots that stored the literal `"serial"` type name. §D.3's `serial-sequence-declared` entry updated: now also triggers on `Column.Serial`, not `Column.Identity` only. |
-   | E.6 | 2026-08-17 | §23 and §25 updated with four scope decisions that had previously been made and recorded only in project working notes, not in this document: `CREATE ACCESS METHOD`, `CREATE CONVERSION`, `CREATE [PROCEDURAL] LANGUAGE`, and `CREATE TRANSFORM` are all formally out of scope (covered either by the extension-install path DPG already manages, or by having no realistic hand-declared use case). Brings this document in line with the two sibling decisions (`CREATE DATABASE`, `REASSIGN OWNED BY`/`DROP OWNED BY`) it already documented. |
-   | E.7 | 2026-08-17 | §3.3, §3.4, and §3.6 updated: cluster and database `name` were already documented as REQUIRED but the reference implementation never enforced it. §3.6's Discovery Algorithm now normatively requires validating that both names are non-empty and, per §3.3/§3.4's new constraint clauses, unique — cluster names project-wide, database names per-cluster only (the same database name legitimately recurring under a different cluster remains valid). Four new error codes added to §D.7: DPG-E032/E033 (empty name), DPG-E034/E035 (duplicate name). Also fixed a related implementation bug found alongside this: `dpg dump`'s default (no `-o`) output path was reconstructed from declared names rather than the already-resolved real directory, silently writing into a disconnected sibling directory whenever a project's directory name and declared name diverged — no RFC section previously specified this path should prefer the resolved directory, so no corresponding text amendment was needed beyond the behavior fix itself. |
-   | E.8 | 2026-08-19 | §11.5 added. `ALTER DEFAULT PRIVILEGES FOR ROLE` (§11.4) never actually applied to anything DPG created, because PostgreSQL attributes default-privilege eligibility to whichever role executed `CREATE`, and DPG always created objects as its connecting role, reassigning ownership only afterward via `ALTER ... OWNER TO`. The compiler now creates every object with a declared `OWNER` (`owner-dir`; see §7.11 for Table's copy — every object kind defines its own) directly as that role via `SET ROLE`/`RESET ROLE`, matching real PostgreSQL creator semantics; a new pre-flight membership check (`pg_has_role`) runs before any DDL executes and aborts with error DPG-E036 (added to Appendix C) if the connecting role is not a member of a declared `OWNER`. |
-   | E.9 | 2026-08-19 | §22.1 updated. Edge source 3 (a view's query referencing table/view B) was documented as real query analysis but the reference implementation actually used a blunt "every view depends on every table in the object set" approximation — corrected to describe the real static analysis now backing it. New edge source 9 added: a `LANGUAGE sql`/`plpgsql` function or procedure body's static table/view references now create real dependency edges too (function/procedure bodies were previously opaque to the dependency graph entirely, for every language); dynamic SQL is documented as an accepted blind spot, matching real PostgreSQL's own inability to validate it either. |
-   | E.10 | 2026-08-19 | §7.9 updated. `REFERENCING OLD TABLE AS ... NEW TABLE AS ...` was already specified in this section's ABNF grammar and worked example, but the reference implementation had no handling for it at all — a hard parse error, not a silent no-op. Now implemented end-to-end (parser, IR, differ, snapshot, introspection, dump). New informative-only prose added documenting PostgreSQL's real constraints on `REFERENCING` (`AFTER`-only, no `CONSTRAINT` triggers, no views/foreign tables/`TRUNCATE`), confirmed live against PostgreSQL 17 — consistent with DPG's existing stance of performing zero trigger clause-combination validation of its own. |
-   | E.11 | 2026-08-23 | §22.1 edge source 9 corrected. E.9 extended edge source 9 to `LANGUAGE plpgsql` bodies as well as `sql`, but combined with the pre-existing edge source 6 (table→trigger-function) this could construct a 2-node table/function cycle with zero FK edges in it — a shape §22.2's `DEFERRABLE`-only cycle-breaker has no mechanism to resolve — for an entirely ordinary pattern: a validation/audit trigger function whose body queries its own table. Edge source 9 is now `LANGUAGE sql`-only, matching the reference implementation's pre-existing (and correct) function-calls-function edge, which already exempted `plpgsql` for the identical reason: PostgreSQL compiles `plpgsql` lazily and never resolves embedded SQL against the catalog at `CREATE FUNCTION` time, so the edge was never actually required for a successful `apply`. Confirmed live against PostgreSQL 17: the reference implementation reproduced the cycle before this fix and applies cleanly after it. |
-   | E.12 | 2026-08-23 | Appendix F added: the full Standard SQL / PostgreSQL-specific classification Tenet 3 (§1.4) promises but never previously published anywhere in normative text — closes the gap the reference `dpg portability` command's own design has relied on informally since initial publication. §1.4 also gained an explicit PostgreSQL version target (floor 14, no ceiling, rolling) — previously only implied by front-matter metadata, never stated in body text. §5.4 (Domain Types) rewritten: `DEFAULT`/`CONSTRAINT ... CHECK`/`NOT NULL` moved from the `{ }` block into native Part 1 `CREATE DOMAIN` syntax, correcting a Tenet-5 self-violation identified by the RFC completeness audit's finding #1 (this is a breaking syntax change for any existing `.dpg` source declaring a Domain with these clauses — reference implementation update tracked separately, not part of this revision). |
-   | E.13 | 2026-08-23 | §7/§21/§25 updated: new grammar for Tables/Views/Indexes/Sequences closing the RFC-completeness audit's largest cluster — `LIKE`, typed tables (`OF type_name`), `USING` access method, index `ONLY`/opclass parameters/`NULLS [NOT] DISTINCT`/rename, `ATTACH`/`DETACH PARTITION [CONCURRENTLY]` via new `ATTACHED FROM`/`DETACHED FROM` directives, `REPLICA IDENTITY`, `CLUSTER ON`, trigger enable-state, constraint rename and deferrability-only `ALTER CONSTRAINT`, generated-column/identity-column ALTER paths, Sequence `UNLOGGED`/`OWNED BY NONE`/`RESTART`/`REVOCATIONS`. Introduced the generic cross-schema `SET SCHEMA` mechanism (`renamed-from-dir`: `identifier` → `qual-name`, additive) reused by every later revision below. Folded in Table `LOGGED`/`UNLOGGED` DESTRUCTIVE→safe-`ALTER` swap (§7.12). |
-   | E.14 | 2026-08-23 | §5/§9/§21/§25 updated: new grammar for Types/Domains/Functions/Procedures/Aggregates. ENUM positional `ADD VALUE`/`RENAME VALUE`; Composite attribute `COLLATE` and a `{ }` block it previously entirely lacked; Range/Base type `{ }` blocks (owner/rename) added likewise; Domain `COLLATE`/`NOT VALID`/`VALIDATE CONSTRAINT`/`RENAME CONSTRAINT`; Base type bare forward-declaration shell plus automatic shell-then-redefine cycle-breaking for self-referential support functions; Function/Procedure `LEAKPROOF`, `TRANSFORM FOR TYPE`, C/`internal` `AS` body forms, PG14+ `BEGIN ATOMIC`, `[NO] DEPENDS ON EXTENSION`, `OWNER`, `REVOCATIONS`; Aggregate `agg-options` formally defined (previously referenced but never enumerated) with `RENAME TO`/`OWNER TO`/`SET SCHEMA` as its only non-destructive `ALTER` operations, matching real PostgreSQL's actual `ALTER AGGREGATE` surface. |
-   | E.15 | 2026-08-23 | §7/§11/§14/§21/§25 updated: new Access Control grammar. Table `MAINTAIN` privilege (PG17) and `GRANTED BY role`; Trigger `[NO] DEPENDS ON EXTENSION`; Role `WITH ADMIN`/`INHERIT`/`SET` membership modifiers (PG16+), `SET`/`RESET [IN DATABASE]` session config, `RENAMED FROM` (closing a rename gap that could be genuinely impossible to work around via drop-and-recreate, since PostgreSQL refuses to drop a role that owns objects); Event Trigger gained a `{ }` block for the first time (enable-state, `OWNER`, `RENAME TO`). New §11.6 Parameter Privileges: `GRANT {SET\|ALTER SYSTEM} ON PARAMETER`, explicitly distinguished from the `ALTER SYSTEM` command itself remaining out of scope (§23). |
-   | E.16 | 2026-08-23 | §6/§7/§12/§13/§14/§21/§25 updated. Full-Text Search: TS Configuration `OWNER`/`ALTER MAPPING REPLACE`; TS Dictionary/Parser/Template gained `{ }` blocks for the first time. Namespace/Storage/FDW/Replication: Publication `OWNER`/`RENAMED FROM`; Foreign Server gained a `{ }` block plus bare `VERSION`-only change; Tablespace `RENAMED FROM` and post-creation `OWNER` diffing; Collation gained a `{ }` block, PG16+ `RULES`, and `REFRESH VERSION` (PG15+); Foreign Table's previously entirely-missing diffing table added (verified directly against `internal/diff/differ.go`: `SERVER` change is `DESTRUCTIVE`, real PostgreSQL has no `ALTER FOREIGN TABLE` clause for it); `ALTER EXTENSION ADD`/`DROP member_object` added as an explicit non-goal. Also closed the last 4 of 5 Phase-5 DESTRUCTIVE→safe-`ALTER` swaps identified in the 2026-08-18 audit: Extension `SET SCHEMA`, Base type property changes (`ALTER TYPE ... SET (...)`, diffing model changed from a single opaque hash to per-key comparison), TS Dictionary option changes, and RLS Policy `TO`/`USING`/`WITH CHECK`-only changes via `ALTER POLICY` (closing a real safety gap: drop-and-recreate previously opened a window with zero active policy for that command). |
-   | E.17 | 2026-08-23 | §5-§7/§11/§14/§21/§25 updated: newer-PostgreSQL-version grammar (PG15-18), closing the RFC-completeness audit's last cluster. Generated-column `VIRTUAL` (PG18); `NOT NULL ... NO INHERIT`; `ENFORCED`/`NOT ENFORCED` on `CHECK`/`FOREIGN KEY` (PG18); `WITHOUT OVERLAPS`/`PERIOD` temporal keys (PG18, SQL:2011) with a new `PERIOD FOR` column-item production; table-level named `NOT NULL` constraint with its own `NOT VALID`/`VALIDATE CONSTRAINT`/`[NO] INHERIT` lifecycle (PG18); FK `ON DELETE`/`ON UPDATE SET NULL`/`SET DEFAULT (col-list)` (PG15); `SET STATISTICS DEFAULT` (PG17); Event Trigger `login` event (PG17, verified against PostgreSQL's own documentation). Confirmed (not gaps, no grammar change) that `EXCLUDE`/identity columns on partitioned tables (PG17), foreign-table `TRUNCATE` triggers (PG16) and `NOT NULL` (PG18), and `ALTER GROUP` role-membership syntax were all already covered by existing generic grammar. `DROP CONSTRAINT ... ONLY` on partitioned tables (PG18) documented as a known, narrow open gap rather than force-fitting unusable grammar. Fixed a factual error in §5.1.1: `ALTER TYPE ADD VALUE`'s transaction-block restriction was lifted in PostgreSQL 12, not 16 as previously stated (verified against PostgreSQL 12.0's release notes) — `core/`'s implementation has the identical error, not corrected as part of this (spec-only) revision. |
-   | E.18 | 2026-08-23 | Closed the RFC-completeness audit's final mop-up items and a structural defect: §11.2 documents GRANT's untyped, cross-object-kind-shared privilege list as an accepted offline validation limitation (every real privilege word is expressible; nothing is unexpressable, but DPG performs no offline "wrong privilege for this object kind" check); §14.6 confirms Extended Statistics on an expression (not just plain columns, PG14+) passes through cleanly as `opaque-object-decl` Part 1 text; §8.1/§25 note temporary views are excluded on the same terms as temporary tables (§7.12). Also: this document's own physical section order was corrected to match its Table of Contents — Normative References/Informative References/Author's Address, previously sandwiched between Appendix C and Appendix D, now correctly follow Appendix F as the final sections (standard IETF convention), matching how every other RFC-style document in this family is laid out. |
+   | E.2 | 2026-05-13 | Appendix D added. Corrections to Section 16 (snapshot wire format: `SnapObject` discriminated union, `SnapOpaque`, corrected field names), Section 18 (`--format text` default, `--watch` flag, `.env` loading protocol, `planJSON` schema, target auto-selection), Section 19 (linter rule IDs use hyphens). Pipeline Registry key constants table and SecretResolver protocol specification added. Source revision detection algorithm formalised. |
+   | E.3 | 2026-05-13 | Appendix D.8–Appendix D.9 added. Root `dpg.toml` `[fmt]` and `[migrations]` sections documented. CLI corrections: `dpg validate` JSON schema, `dpg portability` flag set, `dpg init` default cluster name (`"production"`), `dpg fmt` TOML key names. ToC updated to include Appendix D subsections. |
+   | E.4 | 2026-05-17 | Appendix D.10 added. Name Maps feature specified: ten rule keywords, `[namemaps]` TOML config at all three levels (global + per-object-type rules), inline `NAME MAP` and `NAME MAPS` block directives, literal target name support via double-quoted identifiers, resolution order (block > database > cluster > root), snapshot `name_maps` array field on all object types, error codes DPG-E030 and DPG-E031. |
+   | E.5 | 2026-08-16 | Appendix D.11 added. `SERIAL`/`BIGSERIAL`/`SMALLSERIAL` column sugar specified as a first-class IR concept (`Column.Serial`, sibling marker to `Column.Type`): normalization table, `SERIAL`-implies-`NOT NULL` rule, literal-keyword emission with suppressed `NOT NULL`/`DEFAULT`, `pg_depend`-based introspection detection mirroring identity columns, non-reapplicable dump output fixed, `SnapColumn.serial` field, and a legacy-snapshot self-healing comparison for pre-existing snapshots that stored the literal `"serial"` type name. Appendix D.3's `serial-sequence-declared` entry updated: now also triggers on `Column.Serial`, not `Column.Identity` only. |
+   | E.6 | 2026-08-17 | Section 23 and Section 25 updated with four scope decisions that had previously been made and recorded only in project working notes, not in this document: `CREATE ACCESS METHOD`, `CREATE CONVERSION`, `CREATE [PROCEDURAL] LANGUAGE`, and `CREATE TRANSFORM` are all formally out of scope (covered either by the extension-install path DPG already manages, or by having no realistic hand-declared use case). Brings this document in line with the two sibling decisions (`CREATE DATABASE`, `REASSIGN OWNED BY`/`DROP OWNED BY`) it already documented. |
+   | E.7 | 2026-08-17 | Section 3.3, Section 3.4, and Section 3.6 updated: cluster and database `name` were already documented as REQUIRED but the reference implementation never enforced it. Section 3.6's Discovery Algorithm now normatively requires validating that both names are non-empty and, per Sections 3.3/3.4's new constraint clauses, unique — cluster names project-wide, database names per-cluster only (the same database name legitimately recurring under a different cluster remains valid). Four new error codes added to Appendix D.7: DPG-E032/E033 (empty name), DPG-E034/E035 (duplicate name). Also fixed a related implementation bug found alongside this: `dpg dump`'s default (no `-o`) output path was reconstructed from declared names rather than the already-resolved real directory, silently writing into a disconnected sibling directory whenever a project's directory name and declared name diverged — no RFC section previously specified this path should prefer the resolved directory, so no corresponding text amendment was needed beyond the behavior fix itself. |
+   | E.8 | 2026-08-19 | Section 11.5 added. `ALTER DEFAULT PRIVILEGES FOR ROLE` (Section 11.4) never actually applied to anything DPG created, because PostgreSQL attributes default-privilege eligibility to whichever role executed `CREATE`, and DPG always created objects as its connecting role, reassigning ownership only afterward via `ALTER ... OWNER TO`. The compiler now creates every object with a declared `OWNER` (`owner-dir`; see Section 7.11 for Table's copy — every object kind defines its own) directly as that role via `SET ROLE`/`RESET ROLE`, matching real PostgreSQL creator semantics; a new pre-flight membership check (`pg_has_role`) runs before any DDL executes and aborts with error DPG-E036 (added to Appendix C) if the connecting role is not a member of a declared `OWNER`. |
+   | E.9 | 2026-08-19 | Section 22.1 updated. Edge source 3 (a view's query referencing table/view B) was documented as real query analysis but the reference implementation actually used a blunt "every view depends on every table in the object set" approximation — corrected to describe the real static analysis now backing it. New edge source 9 added: a `LANGUAGE sql`/`plpgsql` function or procedure body's static table/view references now create real dependency edges too (function/procedure bodies were previously opaque to the dependency graph entirely, for every language); dynamic SQL is documented as an accepted blind spot, matching real PostgreSQL's own inability to validate it either. |
+   | E.10 | 2026-08-19 | Section 7.9 updated. `REFERENCING OLD TABLE AS ... NEW TABLE AS ...` was already specified in this section's ABNF grammar and worked example, but the reference implementation had no handling for it at all — a hard parse error, not a silent no-op. Now implemented end-to-end (parser, IR, differ, snapshot, introspection, dump). New informative-only prose added documenting PostgreSQL's real constraints on `REFERENCING` (`AFTER`-only, no `CONSTRAINT` triggers, no views/foreign tables/`TRUNCATE`), confirmed live against PostgreSQL 17 — consistent with DPG's existing stance of performing zero trigger clause-combination validation of its own. |
+   | E.11 | 2026-08-23 | Section 22.1 edge source 9 corrected. E.9 extended edge source 9 to `LANGUAGE plpgsql` bodies as well as `sql`, but combined with the pre-existing edge source 6 (table→trigger-function) this could construct a 2-node table/function cycle with zero FK edges in it — a shape Section 22.2's `DEFERRABLE`-only cycle-breaker has no mechanism to resolve — for an entirely ordinary pattern: a validation/audit trigger function whose body queries its own table. Edge source 9 is now `LANGUAGE sql`-only, matching the reference implementation's pre-existing (and correct) function-calls-function edge, which already exempted `plpgsql` for the identical reason: PostgreSQL compiles `plpgsql` lazily and never resolves embedded SQL against the catalog at `CREATE FUNCTION` time, so the edge was never actually required for a successful `apply`. Confirmed live against PostgreSQL 17: the reference implementation reproduced the cycle before this fix and applies cleanly after it. |
+   | E.12 | 2026-08-23 | Appendix F added: the full Standard SQL / PostgreSQL-specific classification Tenet 3 (Section 1.4) promises but never previously published anywhere in normative text — closes the gap the reference `dpg portability` command's own design has relied on informally since initial publication. Section 1.4 also gained an explicit PostgreSQL version target (floor 14, no ceiling, rolling) — previously only implied by front-matter metadata, never stated in body text. Section 5.4 (Domain Types) rewritten: `DEFAULT`/`CONSTRAINT ... CHECK`/`NOT NULL` moved from the `{ }` block into native Part 1 `CREATE DOMAIN` syntax, correcting a Tenet-5 self-violation identified by the RFC completeness audit's finding #1 (this is a breaking syntax change for any existing `.dpg` source declaring a Domain with these clauses — reference implementation update tracked separately, not part of this revision). |
+   | E.13 | 2026-08-23 | Sections 7/21/25 updated: new grammar for Tables/Views/Indexes/Sequences closing the RFC-completeness audit's largest cluster — `LIKE`, typed tables (`OF type_name`), `USING` access method, index `ONLY`/opclass parameters/`NULLS [NOT] DISTINCT`/rename, `ATTACH`/`DETACH PARTITION [CONCURRENTLY]` via new `ATTACHED FROM`/`DETACHED FROM` directives, `REPLICA IDENTITY`, `CLUSTER ON`, trigger enable-state, constraint rename and deferrability-only `ALTER CONSTRAINT`, generated-column/identity-column ALTER paths, Sequence `UNLOGGED`/`OWNED BY NONE`/`RESTART`/`REVOCATIONS`. Introduced the generic cross-schema `SET SCHEMA` mechanism (`renamed-from-dir`: `identifier` → `qual-name`, additive) reused by every later revision below. Folded in Table `LOGGED`/`UNLOGGED` DESTRUCTIVE→safe-`ALTER` swap (Section 7.12). |
+   | E.14 | 2026-08-23 | Sections 5/9/21/25 updated: new grammar for Types/Domains/Functions/Procedures/Aggregates. ENUM positional `ADD VALUE`/`RENAME VALUE`; Composite attribute `COLLATE` and a `{ }` block it previously entirely lacked; Range/Base type `{ }` blocks (owner/rename) added likewise; Domain `COLLATE`/`NOT VALID`/`VALIDATE CONSTRAINT`/`RENAME CONSTRAINT`; Base type bare forward-declaration shell plus automatic shell-then-redefine cycle-breaking for self-referential support functions; Function/Procedure `LEAKPROOF`, `TRANSFORM FOR TYPE`, C/`internal` `AS` body forms, PG14+ `BEGIN ATOMIC`, `[NO] DEPENDS ON EXTENSION`, `OWNER`, `REVOCATIONS`; Aggregate `agg-options` formally defined (previously referenced but never enumerated) with `RENAME TO`/`OWNER TO`/`SET SCHEMA` as its only non-destructive `ALTER` operations, matching real PostgreSQL's actual `ALTER AGGREGATE` surface. |
+   | E.15 | 2026-08-23 | Sections 7/11/14/21/25 updated: new Access Control grammar. Table `MAINTAIN` privilege (PG17) and `GRANTED BY role`; Trigger `[NO] DEPENDS ON EXTENSION`; Role `WITH ADMIN`/`INHERIT`/`SET` membership modifiers (PG16+), `SET`/`RESET [IN DATABASE]` session config, `RENAMED FROM` (closing a rename gap that could be genuinely impossible to work around via drop-and-recreate, since PostgreSQL refuses to drop a role that owns objects); Event Trigger gained a `{ }` block for the first time (enable-state, `OWNER`, `RENAME TO`). New Section 11.6 Parameter Privileges: `GRANT {SET\|ALTER SYSTEM} ON PARAMETER`, explicitly distinguished from the `ALTER SYSTEM` command itself remaining out of scope (Section 23). |
+   | E.16 | 2026-08-23 | Sections 6/7/12/13/14/21/25 updated. Full-Text Search: TS Configuration `OWNER`/`ALTER MAPPING REPLACE`; TS Dictionary/Parser/Template gained `{ }` blocks for the first time. Namespace/Storage/FDW/Replication: Publication `OWNER`/`RENAMED FROM`; Foreign Server gained a `{ }` block plus bare `VERSION`-only change; Tablespace `RENAMED FROM` and post-creation `OWNER` diffing; Collation gained a `{ }` block, PG16+ `RULES`, and `REFRESH VERSION` (PG15+); Foreign Table's previously entirely-missing diffing table added (verified directly against `internal/diff/differ.go`: `SERVER` change is `DESTRUCTIVE`, real PostgreSQL has no `ALTER FOREIGN TABLE` clause for it); `ALTER EXTENSION ADD`/`DROP member_object` added as an explicit non-goal. Also closed the last 4 of 5 Phase-5 DESTRUCTIVE→safe-`ALTER` swaps identified in the 2026-08-18 audit: Extension `SET SCHEMA`, Base type property changes (`ALTER TYPE ... SET (...)`, diffing model changed from a single opaque hash to per-key comparison), TS Dictionary option changes, and RLS Policy `TO`/`USING`/`WITH CHECK`-only changes via `ALTER POLICY` (closing a real safety gap: drop-and-recreate previously opened a window with zero active policy for that command). |
+   | E.17 | 2026-08-23 | Sections 5-7/11/14/21/25 updated: newer-PostgreSQL-version grammar (PG15-18), closing the RFC-completeness audit's last cluster. Generated-column `VIRTUAL` (PG18); `NOT NULL ... NO INHERIT`; `ENFORCED`/`NOT ENFORCED` on `CHECK`/`FOREIGN KEY` (PG18); `WITHOUT OVERLAPS`/`PERIOD` temporal keys (PG18, SQL:2011) with a new `PERIOD FOR` column-item production; table-level named `NOT NULL` constraint with its own `NOT VALID`/`VALIDATE CONSTRAINT`/`[NO] INHERIT` lifecycle (PG18); FK `ON DELETE`/`ON UPDATE SET NULL`/`SET DEFAULT (col-list)` (PG15); `SET STATISTICS DEFAULT` (PG17); Event Trigger `login` event (PG17, verified against PostgreSQL's own documentation). Confirmed (not gaps, no grammar change) that `EXCLUDE`/identity columns on partitioned tables (PG17), foreign-table `TRUNCATE` triggers (PG16) and `NOT NULL` (PG18), and `ALTER GROUP` role-membership syntax were all already covered by existing generic grammar. `DROP CONSTRAINT ... ONLY` on partitioned tables (PG18) documented as a known, narrow open gap rather than force-fitting unusable grammar. Fixed a factual error in Section 5.1.1: `ALTER TYPE ADD VALUE`'s transaction-block restriction was lifted in PostgreSQL 12, not 16 as previously stated (verified against PostgreSQL 12.0's release notes) — `core/`'s implementation has the identical error, not corrected as part of this (spec-only) revision. |
+   | E.18 | 2026-08-23 | Closed the RFC-completeness audit's final mop-up items and a structural defect: Section 11.2 documents GRANT's untyped, cross-object-kind-shared privilege list as an accepted offline validation limitation (every real privilege word is expressible; nothing is unexpressable, but DPG performs no offline "wrong privilege for this object kind" check); Section 14.6 confirms Extended Statistics on an expression (not just plain columns, PG14+) passes through cleanly as `opaque-object-decl` Part 1 text; Sections 8.1/25 note temporary views are excluded on the same terms as temporary tables (Section 7.12). Also: this document's own physical section order was corrected to match its Table of Contents — Normative References/Informative References/Author's Address, previously sandwiched between Appendix C and Appendix D, now correctly follow Appendix F as the final sections (standard IETF convention), matching how every other RFC-style document in this family is laid out. |
 
 ---
 
 ## Appendix F. Standard SQL / PostgreSQL-Specific Classification
 
-   This appendix satisfies Tenet 3 (§1.4): for every construct this
+   This appendix satisfies Tenet 3 (Section 1.4): for every construct this
    specification documents, whether it is ISO/IEC 9075 (Standard SQL)
    or PostgreSQL-specific — the classification `dpg portability`
    reports to users.  Three classifications are used:
@@ -8545,8 +8545,8 @@ ENUM user_status ('active', 'inactive', 'banned') {
        equivalent, or a PostgreSQL-only spelling of a concept another
        vendor would express differently.
    -   **N/A** — not a real PostgreSQL DDL construct at all: DPG-native
-       syntax that generates no SQL of its own (RFC §23's "No SQL"
-       classification in §25's coverage matrix), or a DPG lifecycle/
+       syntax that generates no SQL of its own (RFC Section 23's "No SQL"
+       classification in Section 25's coverage matrix), or a DPG lifecycle/
        tooling directive (`RENAMED FROM`, `PROTECTED`, `DEPRECATED`,
        `MIGRATE REMOVE`, Name Maps, macros).  Tenet 3's Standard/
        PGSpecific dichotomy doesn't apply to these; `dpg portability`
@@ -8558,74 +8558,74 @@ ENUM user_status ('active', 'inactive', 'banned') {
 
    | Section | Construct | Classification | Notes |
    |---|---|---|---|
-   | §4.1-4.6 | Basic lexical rules (identifiers, comments, dollar-quoting, statement terminators) | N/A | DPG source-file syntax, not PostgreSQL DDL. |
-   | §5.1 | `CREATE TYPE ... AS ENUM` | PGSpecific | ISO SQL has no enumerated type; closest standard analogue is a `CHECK` constraint or `DOMAIN`. |
-   | §5.2 | `CREATE TYPE ... AS (...)` (composite) | PGSpecific | Structured/row types exist in SQL:1999+ but with different syntax and semantics (`CREATE TYPE ... AS (...)` the PostgreSQL way is not the standard's `CREATE TYPE` for UDTs). |
-   | §5.3 | `CREATE TYPE ... AS RANGE` | PGSpecific | No standard range type. |
-   | §5.4 | `CREATE DOMAIN` core (name, base type) | Standard | SQL:1999+ `CREATE DOMAIN`. |
-   | §5.4 | Domain `DEFAULT`/`CONSTRAINT ... CHECK`/`NOT NULL` | Standard | Same standard `CREATE DOMAIN` clauses. |
-   | §5.4 | Domain `COLLATE` | PGSpecific | PostgreSQL-specific collation attachment syntax (the standard has collations, but not this clause shape). |
-   | §5.5 | `CREATE TYPE (...)` (base/shell type) | PGSpecific | C-level storage type definition; no standard equivalent. |
-   | §5.6 | `VIRTUAL TYPE` | N/A | DPG-native, generates no SQL. |
-   | §6 | `CREATE EXTENSION` | PGSpecific | PostgreSQL's own extension-packaging mechanism. |
-   | §7.1-7.2 | `CREATE TABLE` core (columns, types, `PRIMARY KEY`/`UNIQUE`/`CHECK`/`FOREIGN KEY`) | Standard | Core relational DDL. |
-   | §7.1 | `WITH (storage_params)` | PGSpecific | PostgreSQL storage parameters. |
-   | §7.1 | `TABLESPACE` | PGSpecific | No standard tablespace concept. |
-   | §7.1 | `INHERITS` | PGSpecific | PostgreSQL table inheritance; not in the standard. |
-   | §7.1 | `UNLOGGED` | PGSpecific | PostgreSQL crash-safety trade-off, no standard equivalent. |
-   | §7.2 | Generated columns (`GENERATED ALWAYS AS ... STORED`) | Standard | SQL:2003 generated columns (PostgreSQL only implements the `STORED` variant; `VIRTUAL` is PostgreSQL 18+ and also standard). |
-   | §7.2 | Identity columns (`GENERATED ... AS IDENTITY`) | Standard | SQL:2003 identity columns. |
-   | §7.2 | `SERIAL`/`BIGSERIAL`/`SMALLSERIAL` | PGSpecific | Pre-standard PostgreSQL sequence sugar; `IDENTITY` is the standard-conformant replacement. |
-   | §7.2 | Column `COMPRESSION`/`STORAGE` | PGSpecific | PostgreSQL TOAST-related storage tuning. |
-   | §7.2 | `EXCLUDE` constraints | PGSpecific | No standard exclusion-constraint concept. |
-   | §7.2 | `NOT VALID`/`VALIDATE CONSTRAINT` | PGSpecific | PostgreSQL's incremental constraint-validation lifecycle. |
-   | §7.7 | `CREATE INDEX` core | Mixed | Indexes exist informally across all vendors but are not in ISO/IEC 9075 at all — classified PGSpecific as a whole (see next row), since "index" is not a standard DDL concept, only a near-universal vendor extension. |
-   | §7.7 | `CREATE INDEX` (all forms: access methods, partial, expression, covering, opclass) | PGSpecific | No SQL-standard `CREATE INDEX` statement exists; every vendor's index DDL is proprietary. |
-   | §7.8 | `ROW LEVEL SECURITY`/`CREATE POLICY` | PGSpecific | No standard row-security mechanism. |
-   | §7.9 | `CREATE TRIGGER` core (`BEFORE`/`AFTER`, events, `FOR EACH ROW`) | Standard | SQL:1999+ triggers. |
-   | §7.9 | `REFERENCING OLD/NEW TABLE` (transition tables) | Standard | SQL:1999+ triggers include transition tables. |
-   | §7.9 | `WHEN (condition)`, `EXECUTE FUNCTION` | PGSpecific | PostgreSQL trigger-function-calling model differs from the standard's inline trigger action. |
-   | §7.11 | `RENAMED FROM`, `PROTECTED`, `DEPRECATED`, `DROP CASCADE` (directives) | N/A | DPG-native lifecycle metadata. |
-   | §7.11 | `OWNER` | PGSpecific | PostgreSQL's object-ownership model (`ALTER ... OWNER TO`) has no standard equivalent (the standard ties privileges to the creating authorization identifier with no separate transferable "owner"). |
-   | §7.12 | `UNLOGGED TABLE` | PGSpecific | See §7.1 row. |
-   | §7.12 | `CREATE FOREIGN TABLE` | Standard | SQL/MED (ISO/IEC 9075-9) standardizes foreign tables; PostgreSQL's FDW mechanism implements it. |
-   | §7.13 | `PARTITION BY`/`PARTITION OF` | Standard | SQL:2016 adds declarative partitioning as a standard concept, though exact grammar varies by vendor; PostgreSQL's own syntax is a PG-specific dialect of a standardized concept — classified Mixed in spirit, PGSpecific in literal grammar. |
-   | §8 | `CREATE VIEW` | Standard | Core SQL. |
-   | §8 | `CREATE MATERIALIZED VIEW` | PGSpecific | Materialized views are a common vendor extension, not in ISO/IEC 9075. |
-   | §8 | `RECURSIVE VIEW`/`WITH RECURSIVE` | Standard | SQL:1999+ recursive query support. |
-   | §9.1-9.2 | `CREATE FUNCTION` core (name, args, `RETURNS`, `LANGUAGE`) | Standard | SQL/PSM (ISO/IEC 9075-4) standardizes stored routines; PostgreSQL's concrete grammar and `LANGUAGE` mechanism are its own dialect of the standardized concept. |
-   | §9.1 | `LANGUAGE sql`/`plpgsql` dollar-quoted bodies | PGSpecific | Dollar-quoting itself, and `plpgsql`, are PostgreSQL-specific; SQL/PSM's own procedural language differs. |
-   | §9.1 | PG14+ `sql_body`/`BEGIN ATOMIC` form | Standard | The ISO-standard-conformant alternative to dollar-quoting for `LANGUAGE sql` functions. |
-   | §9.2 | `VOLATILE`/`STABLE`/`IMMUTABLE`, `PARALLEL SAFE`/etc., `COST`/`ROWS`, `SUPPORT` | PGSpecific | Query-planner hints with no standard equivalent. |
-   | §9.2 | `SECURITY DEFINER`/`SECURITY INVOKER` | Standard | SQL/PSM standardizes routine security characteristics (exact keyword differs by vendor, but the concept is standard). |
-   | §9.3 | `CREATE PROCEDURE` | Standard | SQL/PSM standardizes procedures distinct from functions. |
-   | §9.4 | `CREATE AGGREGATE` | PGSpecific | User-defined aggregates with this declaration shape (`SFUNC`/`STYPE`/etc.) are PostgreSQL-specific; the standard has no equivalent `CREATE AGGREGATE`. |
-   | §10 | `CREATE SEQUENCE` | Standard | SQL:2003+ standardizes sequences (`AS`/`INCREMENT`/`MINVALUE`/`MAXVALUE`/`START`/`CACHE`/`CYCLE` are all standard clauses). |
-   | §10 | `OWNED BY` | PGSpecific | PostgreSQL's sequence-to-column ownership link has no standard equivalent. |
-   | §11.1 | `CREATE ROLE`/`CREATE USER` core (`LOGIN`, `PASSWORD`) | Standard | SQL standardizes authorization identifiers, though PostgreSQL's unified role model (merging users and groups) is its own design. |
-   | §11.1 | `SUPERUSER`/`CREATEDB`/`CREATEROLE`/`REPLICATION`/`BYPASSRLS`/`CONNECTION LIMIT` | PGSpecific | PostgreSQL-specific role attributes. |
-   | §11.2 | `GRANT`/`REVOKE` core | Standard | Core SQL privilege model. |
-   | §11.2 | `MAINTAIN` privilege (PG17) | PGSpecific | PostgreSQL-specific privilege covering VACUUM/ANALYZE/CLUSTER/REINDEX. |
-   | §11.3 | Role membership (`GRANT role TO role`, `WITH ADMIN OPTION`/`WITH INHERIT`/`WITH SET`) | Mixed | Standard SQL has roles and role grants; `WITH ADMIN OPTION` is standard, `WITH INHERIT`/`WITH SET` (PG16+) are PostgreSQL-specific refinements of role-attribute inheritance. |
-   | §11.4 | `ALTER DEFAULT PRIVILEGES` | PGSpecific | No standard mechanism for privilege templates applied to not-yet-created objects. |
-   | §11.5 | Owner impersonation (`SET ROLE`/`RESET ROLE`) | Standard | SQL standardizes `SET ROLE`; PostgreSQL's specific creator-attribution semantics this section documents are PostgreSQL's own catalog behavior. |
-   | §12.1 | `CREATE TEXT SEARCH CONFIGURATION`/`MAPPING FOR ... WITH ...` | PGSpecific | PostgreSQL full-text search is entirely proprietary. |
-   | §12.2-12.4 | Text Search Dictionary/Parser/Template | PGSpecific | Same as above. |
-   | §13.1 | `CREATE PUBLICATION` | PGSpecific | PostgreSQL's own logical-replication publish/subscribe model. |
-   | §13.2 | `CREATE SUBSCRIPTION` | PGSpecific | Same. |
-   | §14.1 | `CREATE EVENT TRIGGER` | PGSpecific | No standard DDL-event trigger mechanism. |
-   | §14.2 | `CREATE COLLATION` | Standard | SQL:2003+ standardizes collations; PostgreSQL's ICU/libc provider mechanism is its own extension of the standard concept. |
-   | §14.3 | `CREATE CAST` | Standard | SQL standardizes user-defined casts (`CREATE CAST`), though PostgreSQL's `WITH FUNCTION`/`WITHOUT FUNCTION`/`WITH INOUT` grammar has PostgreSQL-specific shorthand forms. |
-   | §14.4 | `CREATE OPERATOR`/`OPERATOR CLASS`/`OPERATOR FAMILY` | PGSpecific | User-defined operators and index access-method integration are PostgreSQL-specific; the standard has no equivalent. |
-   | §14.5 | (Cast — see §14.3) | — | Cross-reference; see §14.3 row. |
-   | §14.6 | `CREATE STATISTICS` (extended statistics objects) | PGSpecific | PostgreSQL planner-statistics extension. |
-   | §14.7 | `CREATE TABLESPACE` | PGSpecific | No standard physical-storage-location concept. |
-   | §14.8 | `CREATE FOREIGN DATA WRAPPER` | Standard | SQL/MED standardizes the FDW concept (`CREATE FOREIGN DATA WRAPPER`), though HANDLER/VALIDATOR functions are PostgreSQL's own extension mechanism. |
-   | §14.9 | `CREATE SERVER` | Standard | SQL/MED standardizes foreign servers. |
-   | §14.10 | `CREATE USER MAPPING` | Standard | SQL/MED standardizes user mappings for foreign servers. |
-   | §14.11 | `SECURITY LABEL` | PGSpecific | PostgreSQL's MAC/label-security integration point (SELinux/sepgsql etc.); no standard equivalent. |
-   | §15-21 | Compilation pipeline, snapshot format, CLI, linter, safety classification, diffing semantics | N/A | DPG tooling, not PostgreSQL DDL. |
-   | §22 | Dependency graph / topological sort | N/A | DPG compiler internals. |
+   | Sections 4.1-4.6 | Basic lexical rules (identifiers, comments, dollar-quoting, statement terminators) | N/A | DPG source-file syntax, not PostgreSQL DDL. |
+   | Section 5.1 | `CREATE TYPE ... AS ENUM` | PGSpecific | ISO SQL has no enumerated type; closest standard analogue is a `CHECK` constraint or `DOMAIN`. |
+   | Section 5.2 | `CREATE TYPE ... AS (...)` (composite) | PGSpecific | Structured/row types exist in SQL:1999+ but with different syntax and semantics (`CREATE TYPE ... AS (...)` the PostgreSQL way is not the standard's `CREATE TYPE` for UDTs). |
+   | Section 5.3 | `CREATE TYPE ... AS RANGE` | PGSpecific | No standard range type. |
+   | Section 5.4 | `CREATE DOMAIN` core (name, base type) | Standard | SQL:1999+ `CREATE DOMAIN`. |
+   | Section 5.4 | Domain `DEFAULT`/`CONSTRAINT ... CHECK`/`NOT NULL` | Standard | Same standard `CREATE DOMAIN` clauses. |
+   | Section 5.4 | Domain `COLLATE` | PGSpecific | PostgreSQL-specific collation attachment syntax (the standard has collations, but not this clause shape). |
+   | Section 5.5 | `CREATE TYPE (...)` (base/shell type) | PGSpecific | C-level storage type definition; no standard equivalent. |
+   | Section 5.6 | `VIRTUAL TYPE` | N/A | DPG-native, generates no SQL. |
+   | Section 6 | `CREATE EXTENSION` | PGSpecific | PostgreSQL's own extension-packaging mechanism. |
+   | Sections 7.1-7.2 | `CREATE TABLE` core (columns, types, `PRIMARY KEY`/`UNIQUE`/`CHECK`/`FOREIGN KEY`) | Standard | Core relational DDL. |
+   | Section 7.1 | `WITH (storage_params)` | PGSpecific | PostgreSQL storage parameters. |
+   | Section 7.1 | `TABLESPACE` | PGSpecific | No standard tablespace concept. |
+   | Section 7.1 | `INHERITS` | PGSpecific | PostgreSQL table inheritance; not in the standard. |
+   | Section 7.1 | `UNLOGGED` | PGSpecific | PostgreSQL crash-safety trade-off, no standard equivalent. |
+   | Section 7.2 | Generated columns (`GENERATED ALWAYS AS ... STORED`) | Standard | SQL:2003 generated columns (PostgreSQL only implements the `STORED` variant; `VIRTUAL` is PostgreSQL 18+ and also standard). |
+   | Section 7.2 | Identity columns (`GENERATED ... AS IDENTITY`) | Standard | SQL:2003 identity columns. |
+   | Section 7.2 | `SERIAL`/`BIGSERIAL`/`SMALLSERIAL` | PGSpecific | Pre-standard PostgreSQL sequence sugar; `IDENTITY` is the standard-conformant replacement. |
+   | Section 7.2 | Column `COMPRESSION`/`STORAGE` | PGSpecific | PostgreSQL TOAST-related storage tuning. |
+   | Section 7.2 | `EXCLUDE` constraints | PGSpecific | No standard exclusion-constraint concept. |
+   | Section 7.2 | `NOT VALID`/`VALIDATE CONSTRAINT` | PGSpecific | PostgreSQL's incremental constraint-validation lifecycle. |
+   | Section 7.7 | `CREATE INDEX` core | Mixed | Indexes exist informally across all vendors but are not in ISO/IEC 9075 at all — classified PGSpecific as a whole (see next row), since "index" is not a standard DDL concept, only a near-universal vendor extension. |
+   | Section 7.7 | `CREATE INDEX` (all forms: access methods, partial, expression, covering, opclass) | PGSpecific | No SQL-standard `CREATE INDEX` statement exists; every vendor's index DDL is proprietary. |
+   | Section 7.8 | `ROW LEVEL SECURITY`/`CREATE POLICY` | PGSpecific | No standard row-security mechanism. |
+   | Section 7.9 | `CREATE TRIGGER` core (`BEFORE`/`AFTER`, events, `FOR EACH ROW`) | Standard | SQL:1999+ triggers. |
+   | Section 7.9 | `REFERENCING OLD/NEW TABLE` (transition tables) | Standard | SQL:1999+ triggers include transition tables. |
+   | Section 7.9 | `WHEN (condition)`, `EXECUTE FUNCTION` | PGSpecific | PostgreSQL trigger-function-calling model differs from the standard's inline trigger action. |
+   | Section 7.11 | `RENAMED FROM`, `PROTECTED`, `DEPRECATED`, `DROP CASCADE` (directives) | N/A | DPG-native lifecycle metadata. |
+   | Section 7.11 | `OWNER` | PGSpecific | PostgreSQL's object-ownership model (`ALTER ... OWNER TO`) has no standard equivalent (the standard ties privileges to the creating authorization identifier with no separate transferable "owner"). |
+   | Section 7.12 | `UNLOGGED TABLE` | PGSpecific | See Section 7.1 row. |
+   | Section 7.12 | `CREATE FOREIGN TABLE` | Standard | SQL/MED (ISO/IEC 9075-9) standardizes foreign tables; PostgreSQL's FDW mechanism implements it. |
+   | Section 7.13 | `PARTITION BY`/`PARTITION OF` | Standard | SQL:2016 adds declarative partitioning as a standard concept, though exact grammar varies by vendor; PostgreSQL's own syntax is a PG-specific dialect of a standardized concept — classified Mixed in spirit, PGSpecific in literal grammar. |
+   | Section 8 | `CREATE VIEW` | Standard | Core SQL. |
+   | Section 8 | `CREATE MATERIALIZED VIEW` | PGSpecific | Materialized views are a common vendor extension, not in ISO/IEC 9075. |
+   | Section 8 | `RECURSIVE VIEW`/`WITH RECURSIVE` | Standard | SQL:1999+ recursive query support. |
+   | Sections 9.1-9.2 | `CREATE FUNCTION` core (name, args, `RETURNS`, `LANGUAGE`) | Standard | SQL/PSM (ISO/IEC 9075-4) standardizes stored routines; PostgreSQL's concrete grammar and `LANGUAGE` mechanism are its own dialect of the standardized concept. |
+   | Section 9.1 | `LANGUAGE sql`/`plpgsql` dollar-quoted bodies | PGSpecific | Dollar-quoting itself, and `plpgsql`, are PostgreSQL-specific; SQL/PSM's own procedural language differs. |
+   | Section 9.1 | PG14+ `sql_body`/`BEGIN ATOMIC` form | Standard | The ISO-standard-conformant alternative to dollar-quoting for `LANGUAGE sql` functions. |
+   | Section 9.2 | `VOLATILE`/`STABLE`/`IMMUTABLE`, `PARALLEL SAFE`/etc., `COST`/`ROWS`, `SUPPORT` | PGSpecific | Query-planner hints with no standard equivalent. |
+   | Section 9.2 | `SECURITY DEFINER`/`SECURITY INVOKER` | Standard | SQL/PSM standardizes routine security characteristics (exact keyword differs by vendor, but the concept is standard). |
+   | Section 9.3 | `CREATE PROCEDURE` | Standard | SQL/PSM standardizes procedures distinct from functions. |
+   | Section 9.4 | `CREATE AGGREGATE` | PGSpecific | User-defined aggregates with this declaration shape (`SFUNC`/`STYPE`/etc.) are PostgreSQL-specific; the standard has no equivalent `CREATE AGGREGATE`. |
+   | Section 10 | `CREATE SEQUENCE` | Standard | SQL:2003+ standardizes sequences (`AS`/`INCREMENT`/`MINVALUE`/`MAXVALUE`/`START`/`CACHE`/`CYCLE` are all standard clauses). |
+   | Section 10 | `OWNED BY` | PGSpecific | PostgreSQL's sequence-to-column ownership link has no standard equivalent. |
+   | Section 11.1 | `CREATE ROLE`/`CREATE USER` core (`LOGIN`, `PASSWORD`) | Standard | SQL standardizes authorization identifiers, though PostgreSQL's unified role model (merging users and groups) is its own design. |
+   | Section 11.1 | `SUPERUSER`/`CREATEDB`/`CREATEROLE`/`REPLICATION`/`BYPASSRLS`/`CONNECTION LIMIT` | PGSpecific | PostgreSQL-specific role attributes. |
+   | Section 11.2 | `GRANT`/`REVOKE` core | Standard | Core SQL privilege model. |
+   | Section 11.2 | `MAINTAIN` privilege (PG17) | PGSpecific | PostgreSQL-specific privilege covering VACUUM/ANALYZE/CLUSTER/REINDEX. |
+   | Section 11.3 | Role membership (`GRANT role TO role`, `WITH ADMIN OPTION`/`WITH INHERIT`/`WITH SET`) | Mixed | Standard SQL has roles and role grants; `WITH ADMIN OPTION` is standard, `WITH INHERIT`/`WITH SET` (PG16+) are PostgreSQL-specific refinements of role-attribute inheritance. |
+   | Section 11.4 | `ALTER DEFAULT PRIVILEGES` | PGSpecific | No standard mechanism for privilege templates applied to not-yet-created objects. |
+   | Section 11.5 | Owner impersonation (`SET ROLE`/`RESET ROLE`) | Standard | SQL standardizes `SET ROLE`; PostgreSQL's specific creator-attribution semantics this section documents are PostgreSQL's own catalog behavior. |
+   | Section 12.1 | `CREATE TEXT SEARCH CONFIGURATION`/`MAPPING FOR ... WITH ...` | PGSpecific | PostgreSQL full-text search is entirely proprietary. |
+   | Sections 12.2-12.4 | Text Search Dictionary/Parser/Template | PGSpecific | Same as above. |
+   | Section 13.1 | `CREATE PUBLICATION` | PGSpecific | PostgreSQL's own logical-replication publish/subscribe model. |
+   | Section 13.2 | `CREATE SUBSCRIPTION` | PGSpecific | Same. |
+   | Section 14.1 | `CREATE EVENT TRIGGER` | PGSpecific | No standard DDL-event trigger mechanism. |
+   | Section 14.2 | `CREATE COLLATION` | Standard | SQL:2003+ standardizes collations; PostgreSQL's ICU/libc provider mechanism is its own extension of the standard concept. |
+   | Section 14.3 | `CREATE CAST` | Standard | SQL standardizes user-defined casts (`CREATE CAST`), though PostgreSQL's `WITH FUNCTION`/`WITHOUT FUNCTION`/`WITH INOUT` grammar has PostgreSQL-specific shorthand forms. |
+   | Section 14.4 | `CREATE OPERATOR`/`OPERATOR CLASS`/`OPERATOR FAMILY` | PGSpecific | User-defined operators and index access-method integration are PostgreSQL-specific; the standard has no equivalent. |
+   | Section 14.5 | (Cast — see Section 14.3) | — | Cross-reference; see Section 14.3 row. |
+   | Section 14.6 | `CREATE STATISTICS` (extended statistics objects) | PGSpecific | PostgreSQL planner-statistics extension. |
+   | Section 14.7 | `CREATE TABLESPACE` | PGSpecific | No standard physical-storage-location concept. |
+   | Section 14.8 | `CREATE FOREIGN DATA WRAPPER` | Standard | SQL/MED standardizes the FDW concept (`CREATE FOREIGN DATA WRAPPER`), though HANDLER/VALIDATOR functions are PostgreSQL's own extension mechanism. |
+   | Section 14.9 | `CREATE SERVER` | Standard | SQL/MED standardizes foreign servers. |
+   | Section 14.10 | `CREATE USER MAPPING` | Standard | SQL/MED standardizes user mappings for foreign servers. |
+   | Section 14.11 | `SECURITY LABEL` | PGSpecific | PostgreSQL's MAC/label-security integration point (SELinux/sepgsql etc.); no standard equivalent. |
+   | Sections 15-21 | Compilation pipeline, snapshot format, CLI, linter, safety classification, diffing semantics | N/A | DPG tooling, not PostgreSQL DDL. |
+   | Section 22 | Dependency graph / topological sort | N/A | DPG compiler internals. |
    | Throughout | `COMMENT ON ...` | Standard | SQL:1999+ standardizes `COMMENT ON`, though PostgreSQL supports it on a broader set of object kinds than the standard requires. |
    | Throughout | `{ }` block itself, Name Maps, macros | N/A | DPG-native source syntax; generates no SQL directly. |
 
