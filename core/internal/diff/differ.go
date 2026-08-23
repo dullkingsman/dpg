@@ -316,7 +316,7 @@ func renamedFromKey(obj pipeline.IRObject) string {
 	switch o := obj.(type) {
 	case *ir.Table:
 		if o.RenamedFrom != nil {
-			return qualKey(o.Schema, *o.RenamedFrom)
+			return qualKey(oldSchema(o.Schema, o.RenamedFromSchema), *o.RenamedFrom)
 		}
 	case *ir.Schema:
 		if o.RenamedFrom != nil {
@@ -324,11 +324,16 @@ func renamedFromKey(obj pipeline.IRObject) string {
 		}
 	case *ir.View:
 		if o.RenamedFrom != nil {
-			return qualKey(o.Schema, *o.RenamedFrom)
+			return qualKey(oldSchema(o.Schema, o.RenamedFromSchema), *o.RenamedFrom)
 		}
 	case *ir.Function:
 		if o.RenamedFrom != nil {
-			return qualKey(o.Schema, *o.RenamedFrom)
+			// Includes the arg-types signature, like ir.Procedure/ir.Aggregate
+			// below: ir.Function.QualifiedName() (the actual snapshot key)
+			// always does, including for a zero-arg function ("schema.name()"),
+			// so omitting it here never matched the stored key at all — the
+			// same shape bug RFC audit item #10 already fixed for Procedure.
+			return fmt.Sprintf("%s(%s)", qualKey(oldSchema(o.Schema, o.RenamedFromSchema), *o.RenamedFrom), ir.ArgsKey(o.Args))
 		}
 	case *ir.Procedure:
 		if o.RenamedFrom != nil {
@@ -338,16 +343,28 @@ func renamedFromKey(obj pipeline.IRObject) string {
 			// omitting it here would never match the stored key at all (RFC
 			// audit item #10, confirmed live: RENAMED FROM was rejected as
 			// stale on every real procedure rename attempt).
-			return fmt.Sprintf("%s(%s)", qualKey(o.Schema, *o.RenamedFrom), ir.ArgsKey(o.Args))
+			return fmt.Sprintf("%s(%s)", qualKey(oldSchema(o.Schema, o.RenamedFromSchema), *o.RenamedFrom), ir.ArgsKey(o.Args))
 		}
 	case *ir.Aggregate:
 		if o.RenamedFrom != nil {
 			// See ir.Procedure's identical reasoning just above (RFC audit
 			// item #11).
-			return fmt.Sprintf("%s(%s)", qualKey(o.Schema, *o.RenamedFrom), ir.ArgsKey(o.Args))
+			return fmt.Sprintf("%s(%s)", qualKey(oldSchema(o.Schema, o.RenamedFromSchema), *o.RenamedFrom), ir.ArgsKey(o.Args))
 		}
 	}
 	return ""
+}
+
+// oldSchema resolves the schema a RENAMED FROM name lived in: the explicit
+// RenamedFromSchema when the directive is schema-qualified (a rename
+// combined with a cross-schema move), or the object's own (new) schema
+// otherwise — the pre-existing, same-schema-only assumption every RENAMED
+// FROM directive relied on before RenamedFromSchema existed.
+func oldSchema(currentSchema string, renamedFromSchema *string) string {
+	if renamedFromSchema != nil {
+		return *renamedFromSchema
+	}
+	return currentSchema
 }
 
 func qualKey(schema, name string) string {
@@ -2231,9 +2248,10 @@ func diffAggregate(o *ir.Aggregate, snap *snapshot.SnapOpaque) ([]pipeline.DiffO
 
 	var ops []pipeline.DiffOp
 	// A rename (RFC audit item #11) needs its own targeted ALTER AGGREGATE
-	// ... RENAME TO — see diffProcedure's identical reasoning.
+	// ... RENAME TO — see diffProcedure's identical reasoning, including the
+	// snap.Schema (not o.Schema) old-signature fix.
 	if snap.Name != o.Name {
-		oldSig := fmt.Sprintf("%s(%s)", qualIdent(o.Schema, snap.Name), ir.ArgsKey(o.Args))
+		oldSig := fmt.Sprintf("%s(%s)", qualIdent(snap.Schema, snap.Name), ir.ArgsKey(o.Args))
 		ops = append(ops, safeOp(fmt.Sprintf("ALTER AGGREGATE %s RENAME TO %s;", oldSig, quoteIdent(o.Name)), pos))
 	}
 	if desiredTxt, snapTxt := effectiveComment(o.Comment, o.Deprecated), effectiveComment(snap.Comment, snap.Deprecated); !ptrEq(desiredTxt, snapTxt) {
@@ -4101,9 +4119,11 @@ func diffProcedure(o *ir.Procedure, snap *snapshot.SnapOpaque) ([]pipeline.DiffO
 	// A rename (RFC audit item #10) needs its own targeted ALTER PROCEDURE
 	// ... RENAME TO — unlike Function, mirrored here but genuinely acted
 	// on: the old name + arg-types signature identifies the live object,
-	// same shape DROP PROCEDURE already uses elsewhere.
+	// same shape DROP PROCEDURE already uses elsewhere. The old signature
+	// uses snap.Schema (where the procedure actually currently lives), not
+	// o.Schema — see diffTable's identical reasoning.
 	if snap.Name != o.Name {
-		oldSig := fmt.Sprintf("%s(%s)", qualIdent(o.Schema, snap.Name), ir.ArgsKey(o.Args))
+		oldSig := fmt.Sprintf("%s(%s)", qualIdent(snap.Schema, snap.Name), ir.ArgsKey(o.Args))
 		ops = append(ops, safeOp(fmt.Sprintf("ALTER PROCEDURE %s RENAME TO %s;", oldSig, quoteIdent(o.Name)), pos))
 	}
 	if desiredTxt, snapTxt := effectiveComment(o.Comment, o.Deprecated), effectiveComment(snap.Comment, snap.Deprecated); !ptrEq(desiredTxt, snapTxt) {
@@ -4562,9 +4582,11 @@ func diffView(o *ir.View, snap *snapshot.SnapView) []pipeline.DiffOp {
 		viewKind = "MATERIALIZED VIEW"
 	}
 
+	// See diffTable's identical reasoning: the FROM side must use snap.Schema
+	// (where the view actually currently lives), not o.Schema.
 	if snap.Name != o.Name {
 		ops = append(ops, safeOp(
-			fmt.Sprintf("ALTER VIEW %s RENAME TO %s;", qualIdent(o.Schema, snap.Name), quoteIdent(o.Name)),
+			fmt.Sprintf("ALTER VIEW %s RENAME TO %s;", qualIdent(snap.Schema, snap.Name), quoteIdent(o.Name)),
 			pos,
 		))
 	}
@@ -4651,6 +4673,19 @@ func diffFunction(o *ir.Function, snap *snapshot.SnapFunction) []pipeline.DiffOp
 		ops = append(ops, destructiveOp(fmt.Sprintf("DROP FUNCTION IF EXISTS %s;", sig), pos))
 		ops = append(ops, createFunction(o)...)
 		return ops
+	}
+
+	// A rename needs its own targeted ALTER FUNCTION ... RENAME TO — mirrors
+	// diffProcedure/diffAggregate's identical fix (RFC audit items #10/#11).
+	// ir.Function.RenamedFrom was previously used for identity matching only:
+	// a rename was correctly matched (no DROP+CREATE) but the live function
+	// itself was never actually renamed, a silent no-op on the rename half.
+	// The old signature uses snap.Schema (where the function actually
+	// currently lives), not o.Schema — see diffTable's identical cross-
+	// schema reasoning.
+	if snap.Name != o.Name {
+		oldSig := fmt.Sprintf("%s(%s)", qualIdent(snap.Schema, snap.Name), ir.ArgsKey(o.Args))
+		ops = append(ops, safeOp(fmt.Sprintf("ALTER FUNCTION %s RENAME TO %s;", oldSig, quoteIdent(o.Name)), pos))
 	}
 
 	// Re-create if: desired has a hash and it differs from the snapshot (including
@@ -5048,10 +5083,15 @@ func diffTable(o *ir.Table, snap *snapshot.SnapTable, fullSnap *pipeline.Snapsho
 	pos := o.SrcPos
 	tbl := qualIdent(o.Schema, o.Name)
 
-	// Rename: snap stores the old name.
+	// Rename: snap stores the old name and schema — RENAME TO only renames
+	// (it cannot move schemas), so the FROM side must reference the table by
+	// where it actually currently lives (snap.Schema), not o.Schema (the
+	// desired/new schema, which can now differ from snap.Schema on a cross-
+	// schema RENAMED FROM — a real SET SCHEMA move is a separate, not-yet-
+	// implemented ALTER TABLE ... SET SCHEMA op).
 	if snap.Name != o.Name {
 		ops = append(ops, safeOp(
-			fmt.Sprintf("ALTER TABLE %s RENAME TO %s;", qualIdent(o.Schema, snap.Name), quoteIdent(o.Name)),
+			fmt.Sprintf("ALTER TABLE %s RENAME TO %s;", qualIdent(snap.Schema, snap.Name), quoteIdent(o.Name)),
 			pos,
 		))
 	}

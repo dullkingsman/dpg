@@ -276,9 +276,9 @@ type Trigger struct {
 	NewTransitionName *string
 	Condition         *string
 	Function          string // qualified function name
-	Args            []string
-	Comment         *string
-	Pos             pipeline.SourcePos
+	Args              []string
+	Comment           *string
+	Pos               pipeline.SourcePos
 }
 
 // Grant is a single GRANT directive.
@@ -376,15 +376,20 @@ func (e *Extension) irObject()               {}
 
 // Table is a CREATE TABLE / UNLOGGED TABLE / FOREIGN TABLE declaration.
 type Table struct {
-	Schema        string
-	Name          string
-	RenamedFrom   *string
-	Protected     bool
-	Deprecated    *string
-	DropCascade   bool
-	Unlogged      bool
-	Foreign       bool
-	ForeignServer *string
+	Schema      string
+	Name        string
+	RenamedFrom *string
+	// RenamedFromSchema is the schema the RENAMED FROM name lived in, when the
+	// directive is schema-qualified (a rename combined with a SET SCHEMA
+	// move). Nil means RenamedFrom is unqualified — the old name lived in
+	// this same Schema, matching the pre-cross-schema-rename behavior.
+	RenamedFromSchema *string
+	Protected         bool
+	Deprecated        *string
+	DropCascade       bool
+	Unlogged          bool
+	Foreign           bool
+	ForeignServer     *string
 	// ForeignOptions is FOREIGN TABLE's OPTIONS (...) clause — ordered like
 	// Index.With, since it renders back into deterministic DPG source and
 	// SQL text the same way.
@@ -416,18 +421,20 @@ func (t *Table) irObject()               {}
 
 // View is a CREATE [MATERIALIZED|RECURSIVE] VIEW declaration.
 type View struct {
-	Schema       string
-	Name         string
-	RenamedFrom  *string
-	Materialized bool
-	Recursive    bool
-	Query        string // raw query text (opaque)
-	Owner        *string
-	Comment      *string
-	Deprecated   *string
-	Grants       []Grant
-	Revocations  []Revocation
-	WithNoData   bool // MATERIALIZED VIEW ... WITH NO DATA
+	Schema      string
+	Name        string
+	RenamedFrom *string
+	// RenamedFromSchema — see Table.RenamedFromSchema's identical doc comment.
+	RenamedFromSchema *string
+	Materialized      bool
+	Recursive         bool
+	Query             string // raw query text (opaque)
+	Owner             *string
+	Comment           *string
+	Deprecated        *string
+	Grants            []Grant
+	Revocations       []Revocation
+	WithNoData        bool // MATERIALIZED VIEW ... WITH NO DATA
 	// Indexes is only meaningful when Materialized is true — real PostgreSQL
 	// does not support indexes on a plain or recursive view, only on a
 	// materialized view (or a table). RFC §8.2's matview-block grammar is
@@ -444,20 +451,22 @@ func (v *View) irObject()               {}
 
 // Function is a CREATE FUNCTION declaration.
 type Function struct {
-	Schema         string
-	Name           string
-	Args           []FuncArg
-	ReturnType     TypeRef
-	Attrs          FuncAttrs
-	BodyHash       string // SHA-256 of normalised body
-	Comment        *string
-	Deprecated     *string
-	RenamedFrom    *string
-	Grants         []Grant
-	Revocations    []Revocation
-	SecurityLabels []pipeline.SecurityLabel
-	NameMaps       []pipeline.NameMapEntry
-	SrcPos         pipeline.SourcePos
+	Schema      string
+	Name        string
+	Args        []FuncArg
+	ReturnType  TypeRef
+	Attrs       FuncAttrs
+	BodyHash    string // SHA-256 of normalised body
+	Comment     *string
+	Deprecated  *string
+	RenamedFrom *string
+	// RenamedFromSchema — see Table.RenamedFromSchema's identical doc comment.
+	RenamedFromSchema *string
+	Grants            []Grant
+	Revocations       []Revocation
+	SecurityLabels    []pipeline.SecurityLabel
+	NameMaps          []pipeline.NameMapEntry
+	SrcPos            pipeline.SourcePos
 }
 
 func (f *Function) QualifiedName() string {
@@ -480,13 +489,15 @@ type Procedure struct {
 	// despite sharing the grammar, so DEPRECATED was silently discarded and
 	// a rename was treated as an unrelated DROP+CREATE instead of
 	// ALTER PROCEDURE ... RENAME TO.
-	Deprecated     *string
-	RenamedFrom    *string
-	Grants         []Grant
-	Revocations    []Revocation
-	SecurityLabels []pipeline.SecurityLabel
-	NameMaps       []pipeline.NameMapEntry
-	SrcPos         pipeline.SourcePos
+	Deprecated  *string
+	RenamedFrom *string
+	// RenamedFromSchema — see Table.RenamedFromSchema's identical doc comment.
+	RenamedFromSchema *string
+	Grants            []Grant
+	Revocations       []Revocation
+	SecurityLabels    []pipeline.SecurityLabel
+	NameMaps          []pipeline.NameMapEntry
+	SrcPos            pipeline.SourcePos
 }
 
 func (p *Procedure) QualifiedName() string {
@@ -508,13 +519,15 @@ type Aggregate struct {
 	Comment *string
 	// Deprecated/RenamedFrom — see Procedure's identical fields' doc
 	// comment (RFC audit items #9/#11).
-	Deprecated     *string
-	RenamedFrom    *string
-	Grants         []Grant
-	Revocations    []Revocation
-	SecurityLabels []pipeline.SecurityLabel
-	NameMaps       []pipeline.NameMapEntry
-	SrcPos         pipeline.SourcePos
+	Deprecated  *string
+	RenamedFrom *string
+	// RenamedFromSchema — see Table.RenamedFromSchema's identical doc comment.
+	RenamedFromSchema *string
+	Grants            []Grant
+	Revocations       []Revocation
+	SecurityLabels    []pipeline.SecurityLabel
+	NameMaps          []pipeline.NameMapEntry
+	SrcPos            pipeline.SourcePos
 }
 
 func (a *Aggregate) QualifiedName() string {

@@ -443,6 +443,47 @@ func TestDiffRenameTable(t *testing.T) {
 	}
 }
 
+// TestDiffRenameTableCrossSchema exercises a RENAMED FROM directive that also
+// moves schemas (RENAMED FROM old_schema.old_name). Before RenamedFromSchema
+// existed, renamedFromKey assumed the old name lived in the object's own
+// (new) schema, so this case never matched the snapshot entry at all —
+// producing a DROP of the orphaned old table plus a CREATE of a "new" one,
+// instead of recognizing it as the same table.
+func TestDiffRenameTableCrossSchema(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("old_schema.users", &snapshot.SnapObject{
+		Kind: "table",
+		Table: &snapshot.SnapTable{
+			Schema: "old_schema",
+			Name:   "users",
+		},
+	})
+
+	old := "users"
+	oldSchema := "old_schema"
+	desired := []pipeline.IRObject{
+		&ir.Table{
+			Schema:            "new_schema",
+			Name:              "accounts",
+			RenamedFrom:       &old,
+			RenamedFromSchema: &oldSchema,
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if containsSQL(ops, "DROP TABLE") || containsSQL(ops, "CREATE TABLE") {
+		t.Fatalf("cross-schema rename should match the existing table, not DROP+CREATE, got: %v", sqlList(ops))
+	}
+	// The RENAME TO's FROM side must reference the table by where it actually
+	// lives today (old_schema) — RENAME TO cannot itself move schemas.
+	if !containsSQL(ops, `ALTER TABLE "old_schema"."users" RENAME TO "accounts";`) {
+		t.Errorf("expected RENAME TO referencing the table's actual (old) schema, got: %v", sqlList(ops))
+	}
+}
+
 func TestDiffNoChanges(t *testing.T) {
 	d := New()
 	snap := &pipeline.Snapshot{}
@@ -10409,6 +10450,85 @@ func TestDiffCreateProcedureEmitsDeprecatedComment(t *testing.T) {
 	}
 }
 
+// TestDiffFunctionRenamedFromEmitsAlterRename guards against a previously
+// entirely-untested gap: ir.Function.RenamedFrom was consumed by
+// renamedFromKey for identity matching (so a rename was correctly matched,
+// not DROP+CREATE'd) but diffFunction itself had no rename branch at all —
+// the live function was never actually renamed, a silent no-op unlike its
+// diffProcedure/diffAggregate siblings (RFC audit items #10/#11).
+func TestDiffFunctionRenamedFromEmitsAlterRename(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.calc_total_old(integer)", &snapshot.SnapObject{
+		Kind: "function",
+		Function: &snapshot.SnapFunction{
+			Schema: "public", Name: "calc_total_old", Args: "integer",
+			ReturnType: "integer", Language: "plpgsql", Volatility: "VOLATILE",
+			BodyHash: "samehash",
+		},
+	})
+	old := "calc_total_old"
+	desired := []pipeline.IRObject{
+		&ir.Function{
+			Schema: "public", Name: "calc_total",
+			Args:        []ir.FuncArg{{Type: ir.TypeRef{Name: "integer"}}},
+			ReturnType:  ir.TypeRef{Name: "integer"},
+			Attrs:       ir.FuncAttrs{Language: "plpgsql", Volatility: "VOLATILE", Body: "BEGIN NULL; END;"},
+			BodyHash:    "samehash",
+			RenamedFrom: &old,
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsSQL(ops, `ALTER FUNCTION "public"."calc_total_old"(integer) RENAME TO "calc_total";`) {
+		t.Errorf("expected ALTER FUNCTION ... RENAME TO, got: %v", sqlList(ops))
+	}
+	if containsSQL(ops, "DROP FUNCTION") {
+		t.Errorf("rename should not DROP+CREATE, got: %v", sqlList(ops))
+	}
+}
+
+// TestDiffFunctionRenamedFromCrossSchema is
+// TestDiffFunctionRenamedFromEmitsAlterRename's cross-schema counterpart —
+// see TestDiffRenameTableCrossSchema's identical reasoning.
+func TestDiffFunctionRenamedFromCrossSchema(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("old_schema.calc_total(integer)", &snapshot.SnapObject{
+		Kind: "function",
+		Function: &snapshot.SnapFunction{
+			Schema: "old_schema", Name: "calc_total", Args: "integer",
+			ReturnType: "integer", Language: "plpgsql", Volatility: "VOLATILE",
+			BodyHash: "samehash",
+		},
+	})
+	old := "calc_total"
+	oldSchema := "old_schema"
+	desired := []pipeline.IRObject{
+		&ir.Function{
+			Schema: "new_schema", Name: "calc_total_v2",
+			Args:              []ir.FuncArg{{Type: ir.TypeRef{Name: "integer"}}},
+			ReturnType:        ir.TypeRef{Name: "integer"},
+			Attrs:             ir.FuncAttrs{Language: "plpgsql", Volatility: "VOLATILE", Body: "BEGIN NULL; END;"},
+			BodyHash:          "samehash",
+			RenamedFrom:       &old,
+			RenamedFromSchema: &oldSchema,
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if containsSQL(ops, "DROP FUNCTION") {
+		t.Errorf("cross-schema rename should match the existing function, not DROP+CREATE, got: %v", sqlList(ops))
+	}
+	if !containsSQL(ops, `ALTER FUNCTION "old_schema"."calc_total"(integer) RENAME TO "calc_total_v2";`) {
+		t.Errorf("expected ALTER FUNCTION referencing the function's actual (old) schema, got: %v", sqlList(ops))
+	}
+}
+
 // TestDiffProcedureRenamedFromEmitsAlterRename guards RFC audit item #10: a
 // procedure rename was treated as an unrelated DROP+CREATE instead of
 // ALTER PROCEDURE ... RENAME TO.
@@ -10442,6 +10562,45 @@ func TestDiffProcedureRenamedFromEmitsAlterRename(t *testing.T) {
 	}
 	if containsSQL(ops, "DROP PROCEDURE") {
 		t.Errorf("rename should not DROP+CREATE, got: %v", sqlList(ops))
+	}
+}
+
+// TestDiffProcedureRenamedFromCrossSchema is TestDiffRenameTableCrossSchema's
+// Procedure counterpart — also confirms the arg-types signature is still
+// built from the old (matched) schema, not the desired one, since a
+// procedure's identity key includes "(args)".
+func TestDiffProcedureRenamedFromCrossSchema(t *testing.T) {
+	d := New()
+	body := "BEGIN NULL; END;"
+	hash := ir.HashBody(body)
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("old_schema.recalc_totals_old(integer)", &snapshot.SnapObject{
+		Kind: "procedure",
+		Opaque: &snapshot.SnapOpaque{
+			Kind: "procedure", Schema: "old_schema", Name: "recalc_totals_old", Args: "integer", BodyHash: hash,
+		},
+	})
+	old := "recalc_totals_old"
+	oldSchema := "old_schema"
+	desired := []pipeline.IRObject{
+		&ir.Procedure{
+			Schema: "new_schema", Name: "recalc_totals",
+			Args:              []ir.FuncArg{{Type: ir.TypeRef{Name: "integer"}}},
+			Attrs:             ir.FuncAttrs{Language: "plpgsql", Body: body},
+			BodyHash:          hash,
+			RenamedFrom:       &old,
+			RenamedFromSchema: &oldSchema,
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if containsSQL(ops, "DROP PROCEDURE") {
+		t.Errorf("cross-schema rename should match the existing procedure, not DROP+CREATE, got: %v", sqlList(ops))
+	}
+	if !containsSQL(ops, `ALTER PROCEDURE "old_schema"."recalc_totals_old"(integer) RENAME TO "recalc_totals";`) {
+		t.Errorf("expected ALTER PROCEDURE referencing the procedure's actual (old) schema, got: %v", sqlList(ops))
 	}
 }
 

@@ -862,6 +862,18 @@ func buildAggregateOptions(definition []*pg_query.Node) []pipeline.StorageParam 
 	return params
 }
 
+// renamedFromSchema returns a pointer to id.Schema when a RENAMED FROM
+// directive is schema-qualified (a rename combined with a cross-schema move),
+// or nil for an unqualified name — mirrors RenamedFrom's own *string-or-nil
+// convention so the two fields stay in sync at every call site.
+func renamedFromSchema(id *pipeline.Identifier) *string {
+	if id == nil || id.Schema == "" {
+		return nil
+	}
+	s := id.Schema
+	return &s
+}
+
 func mergeTableBlock(tbl *Table, block pipeline.BlockAST) error {
 	if block.MigrateRemove != nil {
 		return pipeline.Errorf(block.MigrateRemove.Pos,
@@ -875,6 +887,7 @@ func mergeTableBlock(tbl *Table, block pipeline.BlockAST) error {
 	}
 	if block.RenamedFrom != nil {
 		tbl.RenamedFrom = &block.RenamedFrom.Name
+		tbl.RenamedFromSchema = renamedFromSchema(block.RenamedFrom)
 	}
 	tbl.Protected = block.Protected
 	if block.Deprecated != nil {
@@ -1106,6 +1119,7 @@ func (b *Builder) buildView(vs *pg_query.ViewStmt, block pipeline.BlockAST, pos 
 	}
 	if block.RenamedFrom != nil {
 		v.RenamedFrom = &block.RenamedFrom.Name
+		v.RenamedFromSchema = renamedFromSchema(block.RenamedFrom)
 	}
 	if block.Deprecated != nil {
 		v.Deprecated = &block.Deprecated.Value
@@ -1162,6 +1176,7 @@ func (b *Builder) buildMaterializedView(cta *pg_query.CreateTableAsStmt, block p
 	}
 	if block.RenamedFrom != nil {
 		v.RenamedFrom = &block.RenamedFrom.Name
+		v.RenamedFromSchema = renamedFromSchema(block.RenamedFrom)
 	}
 	if block.Deprecated != nil {
 		v.Deprecated = &block.Deprecated.Value
@@ -1210,6 +1225,7 @@ func (b *Builder) buildFunction(cfs *pg_query.CreateFunctionStmt, pg pipeline.PG
 	}
 	if block.RenamedFrom != nil {
 		fn.RenamedFrom = &block.RenamedFrom.Name
+		fn.RenamedFromSchema = renamedFromSchema(block.RenamedFrom)
 	}
 	if block.Deprecated != nil {
 		fn.Deprecated = &block.Deprecated.Value
@@ -1242,6 +1258,7 @@ func (b *Builder) buildProcedure(cfs *pg_query.CreateFunctionStmt, pg pipeline.P
 	}
 	if block.RenamedFrom != nil {
 		proc.RenamedFrom = &block.RenamedFrom.Name
+		proc.RenamedFromSchema = renamedFromSchema(block.RenamedFrom)
 	}
 	if block.Deprecated != nil {
 		proc.Deprecated = &block.Deprecated.Value
@@ -2198,6 +2215,7 @@ func (b *Builder) buildDefineStmt(ds *pg_query.DefineStmt, block pipeline.BlockA
 		}
 		if block.RenamedFrom != nil {
 			agg.RenamedFrom = &block.RenamedFrom.Name
+			agg.RenamedFromSchema = renamedFromSchema(block.RenamedFrom)
 		}
 		if block.Deprecated != nil {
 			agg.Deprecated = &block.Deprecated.Value

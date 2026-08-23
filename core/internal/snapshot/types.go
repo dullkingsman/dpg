@@ -41,8 +41,8 @@ type SnapOpaque struct {
 	// "lefttype, righttype" (see ir.OperandsKey) used for DROP OPERATOR's
 	// mandatory operand-type clause, in the same string-goes-straight-into-
 	// the-parens shape.
-	Args        string      `json:"args,omitempty"`
-	Using       string      `json:"using,omitempty"` // index access method (operator_class/operator_family)
+	Args     string  `json:"args,omitempty"`
+	Using    string  `json:"using,omitempty"` // index access method (operator_class/operator_family)
 	BodyHash string  `json:"body_hash,omitempty"`
 	Comment  *string `json:"comment,omitempty"`
 	// Deprecated mirrors SnapFunction.Deprecated (RFC audit items #8/#9) —
@@ -233,33 +233,37 @@ type SnapExtension struct {
 }
 
 type SnapTable struct {
-	Schema         string              `json:"schema"`
-	Name           string              `json:"name"`
-	Unlogged       bool                `json:"unlogged,omitempty"`
-	Foreign        bool                `json:"foreign,omitempty"`
-	ForeignServer  *string             `json:"foreign_server,omitempty"`
-	ForeignOptions string              `json:"foreign_options,omitempty"` // comma-separated key=value options
-	Owner          *string             `json:"owner,omitempty"`
-	Tablespace     *string             `json:"tablespace,omitempty"`
-	Comment        *string             `json:"comment,omitempty"`
-	RenamedFrom    *string             `json:"renamed_from,omitempty"`
-	Deprecated     *string             `json:"deprecated,omitempty"`
-	Protected      bool                `json:"protected,omitempty"`
-	DropCascade    bool                `json:"drop_cascade,omitempty"`
-	RLSEnabled     bool                `json:"rls_enabled,omitempty"`
-	RLSForced      bool                `json:"rls_forced,omitempty"`
-	Inherits       []string            `json:"inherits,omitempty"`
-	PartitionBy    string              `json:"partition_by,omitempty"` // e.g. "RANGE (created_at)"
-	Partitions     []SnapPartition     `json:"partitions,omitempty"`
-	Columns        []SnapColumn        `json:"columns,omitempty"`
-	Constraints    []SnapConstraint    `json:"constraints,omitempty"`
-	Indexes        []SnapIndex         `json:"indexes,omitempty"`
-	Policies       []SnapPolicy        `json:"policies,omitempty"`
-	Triggers       []SnapTrigger       `json:"triggers,omitempty"`
-	Grants         []SnapGrant         `json:"grants,omitempty"`
-	Revocations    []SnapGrant         `json:"revocations,omitempty"`
-	SecurityLabels []SnapSecurityLabel `json:"security_labels,omitempty"`
-	NameMaps       []SnapNameMapEntry  `json:"name_maps,omitempty"`
+	Schema         string  `json:"schema"`
+	Name           string  `json:"name"`
+	Unlogged       bool    `json:"unlogged,omitempty"`
+	Foreign        bool    `json:"foreign,omitempty"`
+	ForeignServer  *string `json:"foreign_server,omitempty"`
+	ForeignOptions string  `json:"foreign_options,omitempty"` // comma-separated key=value options
+	Owner          *string `json:"owner,omitempty"`
+	Tablespace     *string `json:"tablespace,omitempty"`
+	Comment        *string `json:"comment,omitempty"`
+	RenamedFrom    *string `json:"renamed_from,omitempty"`
+	// RenamedFromSchema is the schema the RENAMED FROM name lived in, when the
+	// directive was schema-qualified (a rename combined with a SET SCHEMA
+	// move) — see ir.Table.RenamedFromSchema's identical doc comment.
+	RenamedFromSchema *string             `json:"renamed_from_schema,omitempty"`
+	Deprecated        *string             `json:"deprecated,omitempty"`
+	Protected         bool                `json:"protected,omitempty"`
+	DropCascade       bool                `json:"drop_cascade,omitempty"`
+	RLSEnabled        bool                `json:"rls_enabled,omitempty"`
+	RLSForced         bool                `json:"rls_forced,omitempty"`
+	Inherits          []string            `json:"inherits,omitempty"`
+	PartitionBy       string              `json:"partition_by,omitempty"` // e.g. "RANGE (created_at)"
+	Partitions        []SnapPartition     `json:"partitions,omitempty"`
+	Columns           []SnapColumn        `json:"columns,omitempty"`
+	Constraints       []SnapConstraint    `json:"constraints,omitempty"`
+	Indexes           []SnapIndex         `json:"indexes,omitempty"`
+	Policies          []SnapPolicy        `json:"policies,omitempty"`
+	Triggers          []SnapTrigger       `json:"triggers,omitempty"`
+	Grants            []SnapGrant         `json:"grants,omitempty"`
+	Revocations       []SnapGrant         `json:"revocations,omitempty"`
+	SecurityLabels    []SnapSecurityLabel `json:"security_labels,omitempty"`
+	NameMaps          []SnapNameMapEntry  `json:"name_maps,omitempty"`
 }
 
 // SnapPartition is one partition entry attached to a partitioned table.
@@ -435,20 +439,20 @@ type SnapType struct {
 }
 
 type SnapSequence struct {
-	Schema         string              `json:"schema"`
-	Name           string              `json:"name"`
-	Owner          *string             `json:"owner,omitempty"`
-	Comment        *string             `json:"comment,omitempty"`
-	Grants         []SnapGrant         `json:"grants,omitempty"`
-	Revocations    []SnapGrant         `json:"revocations,omitempty"`
-	IncrementBy    *int64              `json:"increment_by,omitempty"`
-	MinValue       *int64              `json:"min_value,omitempty"`
-	MaxValue       *int64              `json:"max_value,omitempty"`
-	NoMinValue     bool                `json:"no_min_value,omitempty"`
-	NoMaxValue     bool                `json:"no_max_value,omitempty"`
-	StartValue     *int64              `json:"start_value,omitempty"`
-	Cache          *int64              `json:"cache,omitempty"`
-	Cycle          bool                `json:"cycle,omitempty"`
+	Schema      string      `json:"schema"`
+	Name        string      `json:"name"`
+	Owner       *string     `json:"owner,omitempty"`
+	Comment     *string     `json:"comment,omitempty"`
+	Grants      []SnapGrant `json:"grants,omitempty"`
+	Revocations []SnapGrant `json:"revocations,omitempty"`
+	IncrementBy *int64      `json:"increment_by,omitempty"`
+	MinValue    *int64      `json:"min_value,omitempty"`
+	MaxValue    *int64      `json:"max_value,omitempty"`
+	NoMinValue  bool        `json:"no_min_value,omitempty"`
+	NoMaxValue  bool        `json:"no_max_value,omitempty"`
+	StartValue  *int64      `json:"start_value,omitempty"`
+	Cache       *int64      `json:"cache,omitempty"`
+	Cycle       bool        `json:"cycle,omitempty"`
 	// AsType/OwnedBy are RFC audit item #14's structured diffing inputs —
 	// see ir.Sequence.AsType/OwnedBy's doc comments. AsType is "" when
 	// never declared (a real sequence's resolved type is never empty, so
