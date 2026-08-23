@@ -2959,6 +2959,20 @@ func createTable(o *ir.Table, vtypes map[string]string) []pipeline.DiffOp {
 	}
 	ops = append(ops, createSecurityLabelOps(o.SecurityLabels, tableObjType+" "+tblIdent, o.SrcPos)...)
 	for _, col := range o.Columns {
+		// SET STATISTICS has no inline CREATE TABLE column-definition form
+		// (unlike STORAGE/COMPRESSION, which render inline elsewhere) —
+		// real PostgreSQL only offers it via ALTER COLUMN, even at initial
+		// creation. Previously missing entirely: a column declaring a
+		// custom target on a brand-new table silently never got it live,
+		// while the snapshot (populated from the desired IR, not a live
+		// re-introspection) recorded the value anyway — permanently
+		// masking the drift on every subsequent plan.
+		if col.Statistics != nil {
+			ops = append(ops, safeOp(
+				fmt.Sprintf("ALTER TABLE %s ALTER COLUMN %s SET STATISTICS %d;", tblIdent, quoteIdent(col.Name), *col.Statistics),
+				col.SrcPos,
+			))
+		}
 		for _, g := range col.Grants {
 			ops = append(ops, colGrantOp(g, tblIdent, col.Name, col.SrcPos))
 		}

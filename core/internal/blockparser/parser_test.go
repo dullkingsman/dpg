@@ -402,6 +402,26 @@ func TestColumnStatistics(t *testing.T) {
 	}
 }
 
+// TestColumnStatisticsDefault is the regression guard for RFC audit item
+// #112: parseStatisticsValue only accepted an integer, so
+// "STATISTICS DEFAULT;" (real PostgreSQL's own ALTER ... SET STATISTICS
+// DEFAULT spelling) was a hard parse error — the only way to reset a
+// customized target back to default was deleting the directive entirely.
+func TestColumnStatisticsDefault(t *testing.T) {
+	src := `COLUMN status { STATISTICS DEFAULT; }`
+	ast := parse(t, src)
+	col := ast.Columns[0]
+	if col.Statistics != nil {
+		t.Errorf("Statistics: expected nil for DEFAULT, got %v", *col.Statistics)
+	}
+}
+
+func TestColumnStatisticsInvalidErrors(t *testing.T) {
+	if err := parseErr(t, `COLUMN status { STATISTICS bogus; }`); err == nil {
+		t.Fatal("expected an error for a non-integer, non-DEFAULT STATISTICS value")
+	}
+}
+
 func TestColumnRenamedFrom(t *testing.T) {
 	src := `COLUMN email_address { RENAMED FROM email; }`
 	ast := parse(t, src)

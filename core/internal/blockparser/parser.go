@@ -1249,7 +1249,7 @@ func (b *blockParser) fillColumnBlock(col *pipeline.ColumnBlock) error {
 			if e2 != nil {
 				err = e2
 			} else {
-				col.Statistics = &n
+				col.Statistics = n
 			}
 		case "COMPRESSION":
 			col.Compression, err = b.parseIdentDirective(dirPos)
@@ -1336,23 +1336,38 @@ func (b *blockParser) fillColumnBlock(col *pipeline.ColumnBlock) error {
 	return nil
 }
 
-func (b *blockParser) parseStatisticsValue(pos pipeline.SourcePos) (int, error) {
+// parseStatisticsValue reads either an integer target or the literal
+// keyword DEFAULT (RFC audit item #112 — real PostgreSQL's own
+// ALTER ... SET STATISTICS DEFAULT resets the target to
+// default_statistics_target, the same end state nil already produces
+// here: the differ/emit path already treats a nil Statistics as "emit
+// SET STATISTICS -1", so DEFAULT is just an explicit spelling of that,
+// letting a user reset a customized target back to default without
+// having to delete the directive line entirely).
+func (b *blockParser) parseStatisticsValue(pos pipeline.SourcePos) (*int, error) {
 	b.skipWS()
+	if strings.ToUpper(b.peekWord()) == "DEFAULT" {
+		b.readWord()
+		if err := b.expectSemi(); err != nil {
+			return nil, err
+		}
+		return nil, nil
+	}
 	var buf []byte
 	for !b.eof() && isDigit(b.peek()) {
 		buf = append(buf, b.advance())
 	}
 	if len(buf) == 0 {
-		return 0, fmt.Errorf("%s: expected integer after STATISTICS", pos)
+		return nil, fmt.Errorf("%s: expected an integer or DEFAULT after STATISTICS", pos)
 	}
 	n, err := strconv.Atoi(string(buf))
 	if err != nil {
-		return 0, fmt.Errorf("%s: invalid STATISTICS value: %w", pos, err)
+		return nil, fmt.Errorf("%s: invalid STATISTICS value: %w", pos, err)
 	}
 	if err := b.expectSemi(); err != nil {
-		return 0, err
+		return nil, err
 	}
-	return n, nil
+	return &n, nil
 }
 
 // ── CONSTRAINT ────────────────────────────────────────────────────────────────
