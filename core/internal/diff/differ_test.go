@@ -13334,6 +13334,67 @@ func TestDiffDomainConstraintAddedIsCaution(t *testing.T) {
 	}
 }
 
+// TestDiffDomainConstraintAddedNotValidAppendsClause is the regression
+// guard for RFC Section 5.4's NOT VALID lifecycle: Constraint.NotValid
+// already existed from the table-level feature, but diffType's domain ADD
+// CONSTRAINT branch never read it, so a domain constraint declared NOT
+// VALID silently validated against every existing column value anyway.
+func TestDiffDomainConstraintAddedNotValidAppendsClause(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.d", &snapshot.SnapObject{
+		Kind: "type",
+		Type: &snapshot.SnapType{Schema: "public", Name: "d", Variant: "DOMAIN", DomainBaseType: "integer"},
+	})
+	desired := []pipeline.IRObject{
+		&ir.Type{
+			Schema: "public", Name: "d", Variant: "DOMAIN", DomainBaseType: ir.TypeRef{Name: "integer"},
+			DomainConstraints: []*ir.Constraint{{Name: "positive_only", Type: "CHECK", Expr: "CHECK (VALUE > 0)", NotValid: true}},
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := `ALTER DOMAIN "public"."d" ADD CONSTRAINT "positive_only" CHECK (VALUE > 0) NOT VALID;`
+	if !containsSQL(ops, want) {
+		t.Errorf("expected %q, got: %v", want, sqlList(ops))
+	}
+}
+
+// TestDiffDomainConstraintValidatedEmitsValidateConstraint proves the
+// second half of the lifecycle: a constraint previously added NOT VALID
+// that has since had NOT VALID removed from source is validated in place,
+// not silently ignored.
+func TestDiffDomainConstraintValidatedEmitsValidateConstraint(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.d", &snapshot.SnapObject{
+		Kind: "type",
+		Type: &snapshot.SnapType{
+			Schema: "public", Name: "d", Variant: "DOMAIN", DomainBaseType: "integer",
+			DomainConstraints: []snapshot.SnapConstraint{{Name: "positive_only", Type: "CHECK", Expr: "CHECK (VALUE > 0)", NotValid: true}},
+		},
+	})
+	desired := []pipeline.IRObject{
+		&ir.Type{
+			Schema: "public", Name: "d", Variant: "DOMAIN", DomainBaseType: ir.TypeRef{Name: "integer"},
+			DomainConstraints: []*ir.Constraint{{Name: "positive_only", Type: "CHECK", Expr: "CHECK (VALUE > 0)"}},
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := `ALTER DOMAIN "public"."d" VALIDATE CONSTRAINT "positive_only";`
+	if !containsSQL(ops, want) {
+		t.Errorf("expected %q, got: %v", want, sqlList(ops))
+	}
+	if containsSQL(ops, "DROP CONSTRAINT") || containsSQL(ops, "ADD CONSTRAINT") {
+		t.Errorf("expected only VALIDATE CONSTRAINT (expression unchanged), got: %v", sqlList(ops))
+	}
+}
+
 func TestDiffDomainConstraintDroppedIsSafe(t *testing.T) {
 	d := New()
 	snap := &pipeline.Snapshot{}

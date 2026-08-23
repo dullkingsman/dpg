@@ -3560,6 +3560,14 @@ func buildDomainSQL(o *ir.Type) string {
 			b.WriteString(quoteIdent(cst.Name))
 			b.WriteString(" ")
 		}
+		// NOT VALID is deliberately never appended here: confirmed
+		// empirically (direct pg_query parse) that real PostgreSQL's
+		// CREATE DOMAIN grammar rejects an inline NOT VALID on its
+		// constraint clause outright ("syntax error at or near VALID") —
+		// unlike CREATE TABLE, which does accept it inline. A domain
+		// constraint can only ever be added NOT VALID via a follow-up
+		// ALTER DOMAIN ... ADD CONSTRAINT (see the diffType DOMAIN
+		// branch), never at creation time.
 		b.WriteString(cst.Expr)
 	}
 	b.WriteString(";")
@@ -5438,7 +5446,15 @@ func diffType(o *ir.Type, snap *snapshot.SnapType, fullSnap *pipeline.Snapshot, 
 					// those can differ when this is also a rename.
 					ops = append(ops, safeOp(fmt.Sprintf("ALTER DOMAIN %s DROP CONSTRAINT %s;", typeIdent, quoteIdent(sc.Name)), pos))
 				}
-				ops = append(ops, cautionOp(fmt.Sprintf("ALTER DOMAIN %s ADD CONSTRAINT %s %s;", typeIdent, quoteIdent(name), c.Expr), pos))
+				// NOT VALID lifecycle (Section 5.4, same as the table-level
+				// feature Constraint.NotValid already exists for): a newly
+				// added or replaced constraint can declare NOT VALID to skip
+				// PostgreSQL's own existing-row validation at ADD time.
+				notValid := ""
+				if c.NotValid {
+					notValid = " NOT VALID"
+				}
+				ops = append(ops, cautionOp(fmt.Sprintf("ALTER DOMAIN %s ADD CONSTRAINT %s %s%s;", typeIdent, quoteIdent(name), c.Expr, notValid), pos))
 				continue
 			}
 			if sc.Name != name {
@@ -5447,6 +5463,15 @@ func diffType(o *ir.Type, snap *snapshot.SnapType, fullSnap *pipeline.Snapshot, 
 				// rename (Section 7.3).
 				ops = append(ops, safeOp(fmt.Sprintf("ALTER DOMAIN %s RENAME CONSTRAINT %s TO %s;", typeIdent, quoteIdent(sc.Name), quoteIdent(name)), pos))
 			}
+			// VALIDATE CONSTRAINT: the second half of the NOT VALID
+			// lifecycle — a constraint added NOT VALID that has since had
+			// NOT VALID removed from source is validated in place, matching
+			// the table-level feature's identical validateConstraintOp.
+			// Uses the post-rename name (name, not sc.Name) as the target,
+			// since a rename may have just been emitted above.
+			validated := sc
+			validated.Name = name
+			ops = append(ops, validateConstraintOp("DOMAIN", typeIdent, &validated, c)...)
 		}
 		if !ptrEq(o.Comment, snap.Comment) {
 			if o.Comment != nil {
@@ -6660,7 +6685,7 @@ func diffConstraints(tbl string, o *ir.Table, snap *snapshot.SnapTable, fullSnap
 
 	for _, c := range o.Constraints {
 		if sc, exists := snapByKey[key(c.Name, c.Type, c.Expr)]; exists {
-			ops = append(ops, validateConstraintOp(tbl, sc, c)...)
+			ops = append(ops, validateConstraintOp("TABLE", tbl, sc, c)...)
 			ops = append(ops, commentOp(sc, c)...)
 			continue
 		}
@@ -6678,7 +6703,7 @@ func diffConstraints(tbl string, o *ir.Table, snap *snapshot.SnapTable, fullSnap
 				))
 				renamedSc := *sc
 				renamedSc.Name = c.Name
-				ops = append(ops, validateConstraintOp(tbl, &renamedSc, c)...)
+				ops = append(ops, validateConstraintOp("TABLE", tbl, &renamedSc, c)...)
 				ops = append(ops, commentOp(&renamedSc, c)...)
 				continue
 			}
@@ -6687,7 +6712,7 @@ func diffConstraints(tbl string, o *ir.Table, snap *snapshot.SnapTable, fullSnap
 			if label, ok := pgConstraintNameLabel(c.Type); ok {
 				if predicted, predOK := predictName(c, label); predOK {
 					if sc, exists := snapByKey["n:"+predicted]; exists {
-						ops = append(ops, validateConstraintOp(tbl, sc, c)...)
+						ops = append(ops, validateConstraintOp("TABLE", tbl, sc, c)...)
 						ops = append(ops, commentOp(sc, c)...)
 						continue
 					}
@@ -6716,23 +6741,25 @@ func diffConstraints(tbl string, o *ir.Table, snap *snapshot.SnapTable, fullSnap
 	return ops, nil
 }
 
-// validateConstraintOp emits ALTER TABLE ... VALIDATE CONSTRAINT ... when a
-// constraint that was previously added NOT VALID has had NOT VALID removed
-// from source — the second half of the RFC §7.3 NOT VALID lifecycle
+// validateConstraintOp emits ALTER <alterKW> ... VALIDATE CONSTRAINT ... when
+// a constraint that was previously added NOT VALID has had NOT VALID removed
+// from source — the second half of the RFC §7.3/§5.4 NOT VALID lifecycle
 // (ADD CONSTRAINT ... NOT VALID, then later VALIDATE CONSTRAINT once the
-// author is ready to scan existing rows). sc.Name (the snapshot's recorded
-// name), not c.Name, is used as the target: every PostgreSQL constraint has
-// a real catalog name even when DPG's source never spelled one out, and sc
-// only reaches here via a key that already matched an auto-predicted name.
-// The reverse transition (NotValid: false → true) has no PostgreSQL
-// equivalent — an already-validated constraint can't be marked NOT VALID
-// again — so it's silently a no-op, same as any other unrepresentable state.
-func validateConstraintOp(tbl string, sc *snapshot.SnapConstraint, c *ir.Constraint) []pipeline.DiffOp {
+// author is ready to scan existing rows). alterKW is "TABLE" or "DOMAIN"
+// (real PostgreSQL's VALIDATE CONSTRAINT syntax is otherwise identical for
+// both). sc.Name (the snapshot's recorded name), not c.Name, is used as the
+// target: every PostgreSQL constraint has a real catalog name even when
+// DPG's source never spelled one out, and sc only reaches here (for the
+// table case) via a key that already matched an auto-predicted name. The
+// reverse transition (NotValid: false → true) has no PostgreSQL equivalent
+// — an already-validated constraint can't be marked NOT VALID again — so
+// it's silently a no-op, same as any other unrepresentable state.
+func validateConstraintOp(alterKW, tbl string, sc *snapshot.SnapConstraint, c *ir.Constraint) []pipeline.DiffOp {
 	if !sc.NotValid || c.NotValid || sc.Name == "" {
 		return nil
 	}
 	return []pipeline.DiffOp{cautionOp(
-		fmt.Sprintf("ALTER TABLE %s VALIDATE CONSTRAINT %s;", tbl, quoteIdent(sc.Name)),
+		fmt.Sprintf("ALTER %s %s VALIDATE CONSTRAINT %s;", alterKW, tbl, quoteIdent(sc.Name)),
 		c.Pos,
 	)}
 }

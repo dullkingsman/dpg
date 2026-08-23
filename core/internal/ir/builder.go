@@ -2020,6 +2020,13 @@ func (b *Builder) buildDomain(cs *pg_query.CreateDomainStmt, block pipeline.Bloc
 		case pg_query.ConstrType_CONSTR_NOTNULL:
 			t.DomainNotNull = true
 		case pg_query.ConstrType_CONSTR_CHECK:
+			// NotValid is never set here: confirmed empirically that real
+			// PostgreSQL's CREATE DOMAIN grammar rejects an inline NOT
+			// VALID on its constraint clause outright (a domain constraint
+			// can only ever be added NOT VALID via a follow-up
+			// ALTER DOMAIN ... ADD CONSTRAINT), so c.SkipValidation is
+			// always false for this parse path — unlike CREATE TABLE's
+			// identical field, which real PostgreSQL does allow inline.
 			if c.RawExpr != nil {
 				expr := nodeToText(c.RawExpr)
 				t.DomainConstraints = append(t.DomainConstraints, &Constraint{
