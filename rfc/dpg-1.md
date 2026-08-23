@@ -2481,7 +2481,7 @@ TABLE users (
    **Cross-schema moves (`SET SCHEMA`):** For every schema-scoped object
    kind whose `RENAMED FROM` uses the generic `renamed-from-dir`
    production (Appendix A) — Table, View, Materialized View, Sequence,
-   and the kinds covered in Sections 9/14 that reuse the same directive —
+   and the kinds covered in Sections 9/12/14 that reuse the same directive —
    `identifier` there is in fact `qual-name` (`[schema.]name`), so the
    old name MAY be schema-qualified.  When the resolved old name's
    schema differs from the object's current declared schema, the
@@ -2699,6 +2699,7 @@ policy-decl    = policy-name WSP "FOR" WSP command
                  [ WSP "TO" WSP role-list ]
                  [ WSP "USING" WSP "(" expr ")" ]
                  [ WSP "WITH CHECK" WSP "(" expr ")" ]
+                 [ WSP "RENAMED FROM" WSP policy-name ]
                  ";"
 
 command        = "ALL" / "SELECT" / "INSERT" / "UPDATE" / "DELETE"
@@ -2715,6 +2716,8 @@ permissiveness = "PERMISSIVE" / "RESTRICTIVE"
    | Both removed | `ALTER TABLE t DISABLE ROW LEVEL SECURITY` | `SAFE` |
    | New policy | `CREATE POLICY name ON t FOR ... TO ... USING (...) WITH CHECK (...)` | `SAFE` |
    | Only `TO`/`USING`/`WITH CHECK` differ (`FOR`/`AS` unchanged) | `ALTER POLICY name ON t [TO ...] [USING (...)] [WITH CHECK (...)]` | `SAFE` |
+   | Renamed only (`RENAMED FROM`, `FOR`/`AS`/`TO`/`USING`/`WITH CHECK` all unchanged) | `ALTER POLICY old_name ON t RENAME TO new_name` | `SAFE` |
+   | Renamed AND `TO`/`USING`/`WITH CHECK` also differ (`FOR`/`AS` unchanged) | `ALTER POLICY old_name ON t RENAME TO new_name;` then `ALTER POLICY new_name ON t [TO ...] [USING (...)] [WITH CHECK (...)]` (two statements) | `SAFE` |
    | `FOR command` or `AS PERMISSIVE/RESTRICTIVE` differs | `DROP POLICY name ON t; CREATE POLICY ...` | `SAFE` |
    | Policy removed | `DROP POLICY name ON t` | `SAFE` |
 
@@ -2728,6 +2731,25 @@ permissiveness = "PERMISSIVE" / "RESTRICTIVE"
    `DROP POLICY; CREATE POLICY` turns into a real (if brief) window
    with zero active policy for that command — `ALTER POLICY` closes
    that window entirely.
+
+   **`RENAMED FROM` on a policy** (like Constraint/Index `RENAMED
+   FROM`, Sections 7.3/7.7) matches an existing policy by its old name
+   within the same table and emits `ALTER POLICY old_name ON t RENAME
+   TO new_name` — `SAFE`, metadata-only — instead of the drop-and-
+   recreate a name-only difference would otherwise trigger under name-
+   based policy identity. Policy identity is `(schema, table,
+   policy_name)`; PostgreSQL provides no mechanism to move a policy to
+   a different table via rename, so — unlike Table/View/Function's
+   cross-schema `RENAMED FROM` extension (Section 7.6) — there is no
+   schema- or table-qualified form here. Real PostgreSQL's `ALTER
+   POLICY` cannot rename and modify `TO`/`USING`/`WITH CHECK` in a
+   single statement (they are two distinct, mutually exclusive clause
+   forms), so when both change in the same migration the compiler
+   emits the `RENAME TO` first, then a second `ALTER POLICY` statement
+   under the new name for the remaining changes. When `FOR command` or
+   `AS PERMISSIVE/RESTRICTIVE` also differs, the existing drop-and-
+   recreate path already creates the policy under its final (new) name
+   directly, so no separate `RENAME TO` is emitted in that case.
 
    Example:
 
@@ -2777,6 +2799,7 @@ trigger-decl = trigger-name WSP timing WSP event-list
                WSP "EXECUTE FUNCTION" WSP func-ref "(" arg-list ")"
                [ WSP trigger-enable-state ]
                [ WSP depends-on-extension-dir ]
+               [ WSP "RENAMED FROM" WSP trigger-name ]
                ";"
 
 timing       = "BEFORE" / "AFTER" / "INSTEAD OF"
@@ -2803,6 +2826,7 @@ trigger-enable-state = "DISABLED" / "ENABLE REPLICA" / "ENABLE ALWAYS"
    |--------|-------------|--------|
    | New trigger | `CREATE [CONSTRAINT] TRIGGER name ... ON t ...` | `SAFE` |
    | Trigger changed | `DROP TRIGGER name ON t; CREATE TRIGGER ...` | `SAFE` |
+   | Renamed only (`RENAMED FROM`, nothing else differs) | `ALTER TRIGGER old_name ON t RENAME TO new_name` | `SAFE` |
    | Enable state changed only (`trigger-enable-state`) | `ALTER TABLE t ENABLE/DISABLE TRIGGER name` or `ALTER TABLE t ENABLE REPLICA/ALWAYS TRIGGER name` | `SAFE` |
    | `[NO] DEPENDS ON EXTENSION` changed (`depends-on-extension-dir`, Section 9.1) | `ALTER TRIGGER name ON t [NO] DEPENDS ON EXTENSION ext` | `SAFE` |
    | Trigger removed | `DROP TRIGGER name ON t` | `SAFE` |
@@ -2812,6 +2836,25 @@ trigger-enable-state = "DISABLED" / "ENABLE REPLICA" / "ENABLE ALWAYS"
    define (Section 9.1) — real PostgreSQL's `ALTER TRIGGER ... DEPENDS ON
    EXTENSION` has identical grammar to the function form, just a
    different target object.
+
+   **`RENAMED FROM` on a trigger** (like Constraint/Index/Policy
+   `RENAMED FROM`) matches an existing trigger by its old name within
+   the same table and emits `ALTER TRIGGER old_name ON t RENAME TO
+   new_name` — `SAFE`, metadata-only. PostgreSQL provides no mechanism
+   to move a trigger to a different table via rename, so — unlike
+   Table/View/Function's cross-schema `RENAMED FROM` extension (Section
+   7.6) — there is no schema- or table-qualified form here. When any
+   other trigger property changes at the same time (forcing the drop-
+   and-recreate row above), the recreated trigger is already created
+   under its final (new) name directly, so no separate `RENAME TO` is
+   emitted in that case. When only the enable state also changes, the
+   two ops are independent statements (`ALTER TABLE` vs. `ALTER
+   TRIGGER`) with no conflict. When only `[NO] DEPENDS ON EXTENSION`
+   also changes, real PostgreSQL's `ALTER TRIGGER` cannot combine
+   `RENAME TO` and `DEPENDS ON EXTENSION` in a single statement — the
+   compiler emits `RENAME TO` first (referencing the old name), then
+   the `DEPENDS ON EXTENSION` change as a second `ALTER TRIGGER`
+   statement referencing the new name.
 
    **`RULE` has no DPG equivalent** — PostgreSQL's `CREATE RULE` is out
    of scope entirely (Section 23), so the `ENABLE`/`DISABLE RULE` half of real
@@ -3098,6 +3141,9 @@ partition-decl  = [ "FOREIGN" WSP ] partition-name WSP
                   ( "FOR VALUES" WSP bounds-clause / "DEFAULT" )
                   [ WSP "SERVER" WSP identifier
                     [ WSP "OPTIONS" WSP "(" option-list ")" ] ]
+                  [ WSP "RENAMED FROM" WSP partition-name ]
+                  [ WSP partition-by-clause WSP
+                    "{" "PARTITIONS" WSP "{" *partition-decl "}" "}" ]
                   ";"
 
 bounds-clause   = "FROM" WSP "(" literal-list ")"
@@ -3105,6 +3151,13 @@ bounds-clause   = "FROM" WSP "(" literal-list ")"
                 / "IN" WSP "(" literal-list ")"        -- LIST
                 / "WITH" WSP "(" modulus-remainder ")" -- HASH
 ```
+
+   **Formalizing sub-partitioning in the grammar:** the recursive
+   `[ WSP partition-by-clause WSP "{" "PARTITIONS" WSP "{" *partition-decl
+   "}" "}" ]` suffix above makes explicit what the sub-partitioning
+   example further below already demonstrated informally — a partition
+   entry MAY itself be further partitioned to arbitrary depth, reusing
+   `partition-decl` recursively.
 
    **Foreign table partitions:** `FOREIGN partition-name ... SERVER
    server_name [OPTIONS (...)]` makes one partition a foreign table
@@ -3190,10 +3243,32 @@ detached-from-dir = "DETACHED FROM" WSP table-ref [ WSP "CONCURRENTLY" ] ";"
    | Change | DDL emitted | Safety |
    |--------|-------------|--------|
    | New partition | `CREATE TABLE <name> PARTITION OF <parent> FOR VALUES ...` | `SAFE` |
+   | Partition renamed only (`RENAMED FROM`, bound/strategy unchanged) | `ALTER TABLE old_name RENAME TO new_name` | `CAUTION` |
    | Partition attached (`ATTACHED FROM`, existing table) | `ALTER TABLE parent ATTACH PARTITION name FOR VALUES ...` | `CAUTION` |
    | Partition detached (`DETACHED FROM`) | `ALTER TABLE parent DETACH PARTITION name [CONCURRENTLY]` | `MANUAL` if `CONCURRENTLY` written, else `CAUTION` |
    | Partition removed (absent, not detached) | `DROP TABLE <name>` | `DESTRUCTIVE` |
    | Partition strategy change | Requires `--approve-partition-rebuild` | `MANUAL` |
+
+   **`RENAMED FROM` on a partition** matches an existing partition —
+   which MUST already be attached as a partition of this same parent
+   table per the snapshot; converting an unrelated standalone table
+   into a partition is `ATTACHED FROM`'s job, above, not this one's —
+   by its old name and emits `ALTER TABLE old_name RENAME TO new_name`,
+   the identical mechanism and safety classification as a plain table
+   rename (Section 7.6), since a partition is an ordinary table under
+   the hood: real PostgreSQL confirms renaming a partition has no
+   effect on its partition attachment, constraints, or stored data.
+   Because DPG does not model an independent schema for a partition (a
+   partition's schema is always its parent table's), the target here is
+   a bare `partition-name`, not the `qual-name` cross-schema form
+   Table/View/Function use — no `SET SCHEMA` variant applies. Since the
+   recursive `PARTITION BY { PARTITIONS { ... } }` suffix reuses this
+   same `partition-decl` production at every nesting depth, `RENAMED
+   FROM` is available identically on a sub-partition at any depth, with
+   no special-casing required. Combining `RENAMED FROM` with `ATTACHED
+   FROM`/`DETACHED FROM` on the same entry is out of scope — converting
+   a standalone table into a partition under a different name (or vice
+   versa) requires two separate migrations.
 
    **Partition strategy change procedure** (requires
    `--approve-partition-rebuild`):
@@ -4367,7 +4442,7 @@ tsconfig-decl = "TEXT SEARCH CONFIGURATION" WSP schema-name
 tsconfig-opts  = "COPY" WSP "=" WSP qual-name
                / "PARSER" WSP "=" WSP qual-name
 
-tsconfig-block = *( ( comment-dir / owner-dir / mapping-dir ) ";" )
+tsconfig-block = *( ( comment-dir / owner-dir / renamed-from-dir / mapping-dir ) ";" )
 
 mapping-dir = "MAPPING FOR" WSP token-type-list
               WSP "WITH" WSP dict-list
@@ -4387,6 +4462,15 @@ mapping-dir = "MAPPING FOR" WSP token-type-list
    the differ compute the same end state) — `REPLACE` exists as the
    more targeted native PostgreSQL statement for the common "swap one
    dictionary everywhere" case.
+
+   **`RENAMED FROM`** (`renamed-from-dir`, Section 7.6): a Configuration
+   MAY carry the same generic cross-schema `SET SCHEMA` extension as
+   every other schema-scoped kind — real PostgreSQL supports `ALTER
+   TEXT SEARCH CONFIGURATION ... RENAME TO`/`SET SCHEMA` identically to
+   Dictionary (Section 12.2). This was previously missing from this
+   section's grammar despite Dictionary/Parser/Template (Sections
+   12.2-12.4) already having it — Configuration is the fourth Full-Text-
+   Search kind, now consistent with its siblings.
 
    Example:
 
@@ -4416,6 +4500,8 @@ ALTER TEXT SEARCH CONFIGURATION public.english_unaccented
    | Mapping removed | `ALTER TEXT SEARCH CONFIGURATION ... DROP MAPPING FOR ...` | `SAFE` |
    | `REPLACE` form declared | `ALTER TEXT SEARCH CONFIGURATION ... ALTER MAPPING [FOR token-types] REPLACE old WITH new` | `SAFE` |
    | Owner changed | `ALTER TEXT SEARCH CONFIGURATION name OWNER TO role` | `SAFE` |
+   | Renamed (`RENAMED FROM`) | `ALTER TEXT SEARCH CONFIGURATION old RENAME TO new` | `CAUTION` |
+   | Moved to another schema (`RENAMED FROM` schema-qualified, Section 7.6) | `ALTER TEXT SEARCH CONFIGURATION old_schema.name SET SCHEMA new_schema` | `SAFE` |
    | Config removed | `DROP TEXT SEARCH CONFIGURATION name` | `DESTRUCTIVE` |
 
 ### 12.2. Text Search Dictionaries
@@ -7121,8 +7207,8 @@ serial_sequence_declared      = "off"
    | Procedures | Declared, Passthrough body | Same additions as Functions above (`[NO] DEPENDS ON EXTENSION`, `OWNER`, `REVOCATIONS`, `RENAMED FROM`/`SET SCHEMA`) |
    | Aggregates | Declared, Diffed | Full `agg-options` set (Section 9.4) diffed; any option change = DESTRUCTIVE; `RENAME TO`/`OWNER TO`/`SET SCHEMA` are the only non-destructive ALTER operations, matching real PostgreSQL's `ALTER AGGREGATE` surface |
    | Window functions | Declared, Passthrough body | |
-   | Row Level Security | Declared, Diffed | `TO`/`USING`/`WITH CHECK`-only policy changes use non-destructive `ALTER POLICY`, avoiding a zero-active-policy window (Section 7.8) |
-   | Triggers | Declared, Diffed | |
+   | Row Level Security | Declared, Diffed | `TO`/`USING`/`WITH CHECK`-only policy changes use non-destructive `ALTER POLICY`, avoiding a zero-active-policy window; policy `RENAMED FROM` also supported (Section 7.8) |
+   | Triggers | Declared, Diffed | `RENAMED FROM` supported, metadata-only via `ALTER TRIGGER` (Section 7.9) |
    | Event triggers | Declared, Passthrough | Reconstructed from catalog; hash-diffed. Enable-state (`DISABLED`/`ENABLE REPLICA`/`ENABLE ALWAYS`), `OWNER`, `RENAMED FROM` diffed structurally, not part of the hash. `login` event (PG17+) also supported (Section 14.1) |
    | Sequences | Declared, Diffed | `UNLOGGED`, `OWNED BY NONE`, `REVOCATIONS`, `RESTART [WITH n]` (Section 10) |
    | Schemas | Declared, Diffed | |
@@ -7139,7 +7225,7 @@ serial_sequence_declared      = "off"
    | Foreign Servers | Declared, Passthrough | Reconstructed from catalog; hash-diffed. `OWNER`, `RENAMED FROM`, bare `VERSION`-only change also supported (Section 14.9) |
    | User Mappings | Declared, Passthrough | Reconstructed from catalog; hash-diffed. `OPTIONS` may hold a `{{secret-uri}}` reference (Section 14.10, Appendix D.5), resolved only immediately before `CREATE USER MAPPING` executes |
    | Foreign Tables | Declared, Diffed | `SERVER`/`OPTIONS` after `)`; Section 7.12 now documents the ALTER-semantics table directly (`OPTIONS` change is `SAFE` in place, `SERVER` change is `DESTRUCTIVE` drop+recreate, column add/drop follows regular `TABLE` rules) |
-   | Partitioned Tables | Declared, Diffed | |
+   | Partitioned Tables | Declared, Diffed | Partition `RENAMED FROM` supported, same mechanism as a plain table rename (Section 7.13) |
    | Sub-partitioning | Declared, Diffed | |
    | Publications | Declared, Passthrough | Reconstructed from catalog; hash-diffed. `OWNER`, `RENAMED FROM` also supported (Section 13.1) |
    | Subscriptions | Declared, Passthrough | Reconstructed from the catalog; hash-diffed. `CONNECTION` alone is never introspected (`subconninfo` has no PUBLIC grant, and even a privileged read can't recover the original `{{secret-uri}}`) — reconstructed as a fixed placeholder instead, excluded from the drift comparison like every other reconstructed body (Section 13.2). `CONNECTION` may hold a `{{secret-uri}}` reference in source (Section 13.2, Appendix D.5), resolved only immediately before `CREATE SUBSCRIPTION` executes |
@@ -7149,7 +7235,7 @@ serial_sequence_declared      = "off"
    | Operator Families | Declared, Passthrough + Diffed | Header (name/access method) reconstructed from catalog, hash-diffed; loose members (Section 14.4, `ALTER OPERATOR FAMILY ... ADD`) are structured and diffed incrementally per member, live-path included — not gated on `Reconstructed` the way the bare header hash is |
    | Casts | Declared, Passthrough | Reconstructed from catalog, hash-diffed; any change = DESTRUCTIVE |
    | Extended Statistics Objects | Declared, Passthrough | Reconstructed from catalog; hash-diffed |
-   | Text Search Configurations | Declared, Passthrough | Reconstructed from catalog; hash-diffed. `OWNER`, `ALTER MAPPING REPLACE` (bulk and per-token-type) also supported (Section 12.1) |
+   | Text Search Configurations | Declared, Passthrough | Reconstructed from catalog; hash-diffed. `OWNER`, `RENAMED FROM`/`SET SCHEMA`, `ALTER MAPPING REPLACE` (bulk and per-token-type) also supported (Section 12.1) |
    | Text Search Dictionaries | Declared, Passthrough | Reconstructed from catalog; hash-diffed. `OWNER`/`COMMENT`/`RENAMED FROM` block now supported (Section 12.2) |
    | Text Search Parsers | Declared, Passthrough | Reconstructed from catalog; hash-diffed. `COMMENT`/`RENAMED FROM` block now supported, no `OWNER` (real PostgreSQL has none for this kind, Section 12.3) |
    | Text Search Templates | Declared, Passthrough | Reconstructed from catalog; hash-diffed. `COMMENT`/`RENAMED FROM` block now supported, no `OWNER` (Section 12.4) |
@@ -8527,6 +8613,7 @@ ENUM user_status ('active', 'inactive', 'banned') {
    | E.16 | 2026-08-23 | Sections 6/7/12/13/14/21/25 updated. Full-Text Search: TS Configuration `OWNER`/`ALTER MAPPING REPLACE`; TS Dictionary/Parser/Template gained `{ }` blocks for the first time. Namespace/Storage/FDW/Replication: Publication `OWNER`/`RENAMED FROM`; Foreign Server gained a `{ }` block plus bare `VERSION`-only change; Tablespace `RENAMED FROM` and post-creation `OWNER` diffing; Collation gained a `{ }` block, PG16+ `RULES`, and `REFRESH VERSION` (PG15+); Foreign Table's previously entirely-missing diffing table added (verified directly against `internal/diff/differ.go`: `SERVER` change is `DESTRUCTIVE`, real PostgreSQL has no `ALTER FOREIGN TABLE` clause for it); `ALTER EXTENSION ADD`/`DROP member_object` added as an explicit non-goal. Also closed the last 4 of 5 Phase-5 DESTRUCTIVE→safe-`ALTER` swaps identified in the 2026-08-18 audit: Extension `SET SCHEMA`, Base type property changes (`ALTER TYPE ... SET (...)`, diffing model changed from a single opaque hash to per-key comparison), TS Dictionary option changes, and RLS Policy `TO`/`USING`/`WITH CHECK`-only changes via `ALTER POLICY` (closing a real safety gap: drop-and-recreate previously opened a window with zero active policy for that command). |
    | E.17 | 2026-08-23 | Sections 5-7/11/14/21/25 updated: newer-PostgreSQL-version grammar (PG15-18), closing the RFC-completeness audit's last cluster. Generated-column `VIRTUAL` (PG18); `NOT NULL ... NO INHERIT`; `ENFORCED`/`NOT ENFORCED` on `CHECK`/`FOREIGN KEY` (PG18); `WITHOUT OVERLAPS`/`PERIOD` temporal keys (PG18, SQL:2011) with a new `PERIOD FOR` column-item production; table-level named `NOT NULL` constraint with its own `NOT VALID`/`VALIDATE CONSTRAINT`/`[NO] INHERIT` lifecycle (PG18); FK `ON DELETE`/`ON UPDATE SET NULL`/`SET DEFAULT (col-list)` (PG15); `SET STATISTICS DEFAULT` (PG17); Event Trigger `login` event (PG17, verified against PostgreSQL's own documentation). Confirmed (not gaps, no grammar change) that `EXCLUDE`/identity columns on partitioned tables (PG17), foreign-table `TRUNCATE` triggers (PG16) and `NOT NULL` (PG18), and `ALTER GROUP` role-membership syntax were all already covered by existing generic grammar. `DROP CONSTRAINT ... ONLY` on partitioned tables (PG18) documented as a known, narrow open gap rather than force-fitting unusable grammar. Fixed a factual error in Section 5.1.1: `ALTER TYPE ADD VALUE`'s transaction-block restriction was lifted in PostgreSQL 12, not 16 as previously stated (verified against PostgreSQL 12.0's release notes) — `core/`'s implementation has the identical error, not corrected as part of this (spec-only) revision. |
    | E.18 | 2026-08-23 | Closed the RFC-completeness audit's final mop-up items and a structural defect: Section 11.2 documents GRANT's untyped, cross-object-kind-shared privilege list as an accepted offline validation limitation (every real privilege word is expressible; nothing is unexpressable, but DPG performs no offline "wrong privilege for this object kind" check); Section 14.6 confirms Extended Statistics on an expression (not just plain columns, PG14+) passes through cleanly as `opaque-object-decl` Part 1 text; Sections 8.1/25 note temporary views are excluded on the same terms as temporary tables (Section 7.12). Also: this document's own physical section order was corrected to match its Table of Contents — Normative References/Informative References/Author's Address, previously sandwiched between Appendix C and Appendix D, now correctly follow Appendix F as the final sections (standard IETF convention), matching how every other RFC-style document in this family is laid out. |
+   | E.19 | 2026-08-23 | Sections 7.8/7.9/7.13/12.1/25 updated, closing four gaps found during a full audit of `RENAMED FROM` coverage across every object kind DPG models (following that day's fix of the generic cross-schema rename mechanism in `core/`). Policy gains `RENAMED FROM` (`ALTER POLICY ... RENAME TO`, `SAFE`, matching Constraint/Index's sub-object precedent — not the `CAUTION` classification used for independently-referenceable top-level objects), with the real PostgreSQL restriction documented that `RENAME TO` cannot combine with a `TO`/`USING`/`WITH CHECK` change in one statement (two `ALTER POLICY` statements emitted when both differ). Trigger gains `RENAMED FROM` (`ALTER TRIGGER ... RENAME TO`, `SAFE`, same sub-object precedent), with the identical real-PostgreSQL restriction against `[NO] DEPENDS ON EXTENSION` documented. Partitioned Tables gain `RENAMED FROM` on a partition entry (`ALTER TABLE ... RENAME TO`, `CAUTION` — the same classification as a plain table rename, since a partition is an ordinary table under the hood); the previously example-only recursive sub-partitioning shape is also formalized in `partition-decl`'s own ABNF for the first time, so `RENAMED FROM` (and the grammar generally) is unambiguously available at any nesting depth. Text Search Configuration gains `RENAMED FROM`/`SET SCHEMA` (`renamed-from-dir`, `CAUTION`/`SAFE` matching Dictionary's existing precedent) — closing a spec-only inconsistency where Configuration was the only Full-Text-Search kind without it, despite Dictionary/Parser/Template all already having it. Section 7.6's cross-schema `renamed-from-dir` kind list corrected to include Section 12. All four additions verified against PostgreSQL's own official documentation before drafting, not assumed. |
 
 ---
 
