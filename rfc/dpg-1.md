@@ -1212,32 +1212,35 @@ ENUM order_status ('pending', 'confirmed', 'shipped', 'delivered');
 ALTER TYPE <schema>.<name> ADD VALUE '<new_value>';
 ```
 
-   `ALTER TYPE ... ADD VALUE` MUST be emitted as a non-transactional
-   step (Safety: `MANUAL`) because PostgreSQL does not permit it inside
-   a transaction block in versions prior to 12 — confirmed against
-   PostgreSQL 12.0's own release notes ("Allow enumerated values to be
-   added more flexibly": previously `ADD VALUE` could not run in a
-   transaction block at all unless the type itself was created in that
-   same transaction; from 12 onward it can, as long as the new value
-   isn't *referenced* until after commit).  For PostgreSQL 12+, it MAY
-   be placed in the transactional block; the compiler SHOULD detect the
-   server version at apply time and choose accordingly.  When the
-   server version is unknown (offline plan), the compiler MUST emit it
-   as non-transactional.
+   `ALTER TYPE ... ADD VALUE` is emitted as a transactional step
+   (Safety: `SAFE`).  PostgreSQL did not permit it inside a transaction
+   block in versions prior to 12 — confirmed against PostgreSQL 12.0's
+   own release notes ("Allow enumerated values to be added more
+   flexibly": previously `ADD VALUE` could not run in a transaction
+   block at all unless the type itself was created in that same
+   transaction; from 12 onward it can, as long as the new value isn't
+   *referenced* until after commit) — but this restriction is moot for
+   every server DPG supports: §1.4's documented PostgreSQL version
+   floor is 14, already past the version-12 cutoff, so the compiler
+   requires no server-version detection here and always emits it inside
+   the normal transactional migration.  DPG's own migrations never
+   reference a newly added value in the same migration that adds it
+   (DPG emits schema DDL only, never data-manipulation depending on the
+   new value), so the "not referenced until after commit" condition is
+   always satisfied.
 
    **Positional control (`BEFORE`/`AFTER`):** An `enum-value` written as
    `'new_value' BEFORE 'existing_value'` (or `AFTER`) emits `ALTER TYPE
    <schema>.<name> ADD VALUE '<new_value>' BEFORE '<existing_value>'` —
-   same transactional restriction and Safety as plain `ADD VALUE` above.
-   Omitting `BEFORE`/`AFTER` always appends at the end, matching real
-   PostgreSQL's own default.
+   same Safety as plain `ADD VALUE` above.  Omitting `BEFORE`/`AFTER`
+   always appends at the end, matching real PostgreSQL's own default.
 
    **Renaming a value (`RENAMED FROM`):** An `enum-value` written as
    `'new_value' RENAMED FROM 'old_value'` — where `'old_value'` is
    present in the snapshot and `'new_value'` is not — emits `ALTER TYPE
    <schema>.<name> RENAME VALUE '<old_value>' TO '<new_value>'`, Safety
-   `SAFE` (a catalog-only rename, unlike `ADD VALUE` it has no
-   transactional restriction in any supported PostgreSQL version).
+   `SAFE` (a catalog-only rename with no transactional restriction in
+   any supported PostgreSQL version, same as `ADD VALUE` above).
    Follows the same three-state resolution algorithm as column/table
    `RENAMED FROM` (§7.6) — a value already present under its new name is
    a no-op; neither name present is a stale-directive error (DPG-E021).
@@ -5997,7 +6000,7 @@ CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_users_email ON public.users (email);
    | `SAFE` | No data loss possible; no excessive locking. | Applied automatically. |
    | `CAUTION` | Acquires `ACCESS EXCLUSIVE` lock for non-trivial duration; or reorders data; or may affect query plans. | Applied with a warning logged to stderr. |
    | `DESTRUCTIVE` | Data loss is possible (DROP TABLE, DROP COLUMN, type change without USING, etc.). | Blocked unless `--allow-destructive` is passed to `dpg apply`. |
-   | `MANUAL` | Cannot run inside a transaction (e.g., `CREATE INDEX CONCURRENTLY`, `ALTER TYPE ... ADD VALUE` on PG < 16); or requires a human-operator step (partition strategy change instruction). | Executable MANUAL ops are emitted after `COMMIT` in the non-transactional section. Instruction-only MANUAL ops (prefixed with `--`) are displayed in the plan but never executed. `--approve-partition-rebuild` is required to acknowledge instruction-only MANUAL ops. |
+   | `MANUAL` | Cannot run inside a transaction (e.g., `CREATE INDEX CONCURRENTLY`); or requires a human-operator step (partition strategy change instruction). | Executable MANUAL ops are emitted after `COMMIT` in the non-transactional section. Instruction-only MANUAL ops (prefixed with `--`) are displayed in the plan but never executed. `--approve-partition-rebuild` is required to acknowledge instruction-only MANUAL ops. |
 
    The full per-operation safety classification table is:
 
@@ -6028,7 +6031,7 @@ CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_users_email ON public.users (email);
    | `DROP MATERIALIZED VIEW CASCADE` | `DESTRUCTIVE` |
    | `CREATE FUNCTION` / `CREATE OR REPLACE FUNCTION` | `SAFE` |
    | `DROP FUNCTION CASCADE` | `DESTRUCTIVE` |
-   | `ALTER TYPE ... ADD VALUE` | `MANUAL` |
+   | `ALTER TYPE ... ADD VALUE` | `SAFE` (§1.4's version floor of 14 is past PostgreSQL 12's transaction-block restriction) |
    | `DROP TYPE CASCADE` | `DESTRUCTIVE` |
    | `CREATE POLICY` | `SAFE` |
    | `DROP POLICY` | `SAFE` |
@@ -6050,10 +6053,12 @@ CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_users_email ON public.users (email);
    -   Its SQL is `CREATE INDEX CONCURRENTLY ...` (cannot run in a
        transaction block).
    -   Its SQL is `DROP INDEX CONCURRENTLY ...`.
-   -   Its SQL is `ALTER TYPE ... ADD VALUE` (required for PostgreSQL
-       versions below 16).
    -   Its safety class is `MANUAL` and it requires being outside a
        transaction.
+
+   `ALTER TYPE ... ADD VALUE` is deliberately NOT in this list — see
+   §5.1.1: it requires non-transactional execution only on PostgreSQL
+   versions below 12, already excluded by §1.4's version floor.
 
    All other ops are transactional.
 
@@ -6698,7 +6703,7 @@ serial_sequence_declared      = "off"
 
    | Change | DDL | Safety |
    |--------|-----|--------|
-   | New value | `ALTER TYPE name ADD VALUE 'v' [BEFORE/AFTER 'existing']` | `MANUAL` |
+   | New value | `ALTER TYPE name ADD VALUE 'v' [BEFORE/AFTER 'existing']` | `SAFE` |
    | Value renamed (`RENAMED FROM`, §5.1.1) | `ALTER TYPE name RENAME VALUE 'old' TO 'new'` | `SAFE` |
    | Value removed (guarded) | MIGRATE REMOVE procedure (§5.1.2) | `DESTRUCTIVE` |
    | Value removed (unguarded) | Error DPG-E014 (or with `--allow-destructive`) | `DESTRUCTIVE` |

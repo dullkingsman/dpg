@@ -4901,10 +4901,12 @@ func diffType(o *ir.Type, snap *snapshot.SnapType, fullSnap *pipeline.Snapshot, 
 			return diffEnumRemove(o, snap, fullSnap)
 		}
 
-		// ALTER TYPE ADD VALUE cannot run inside a transaction in PG < 16.
+		// ALTER TYPE ADD VALUE couldn't run inside a transaction block
+		// before PG 12 (RFC §5.1.1) — moot given RFC §1.4's documented
+		// version floor of 14, so this always runs transactionally.
 		for _, v := range o.EnumValues {
 			if !snapVals[v] {
-				ops = append(ops, manualOp(
+				ops = append(ops, safeOp(
 					fmt.Sprintf("ALTER TYPE %s ADD VALUE %s;", typeIdent, quoteLit(v)),
 					pos,
 				))

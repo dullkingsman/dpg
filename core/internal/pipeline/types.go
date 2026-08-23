@@ -204,8 +204,8 @@ type DiffOp interface {
 	SQL() string
 	Safety() Safety
 	Pos() SourcePos
-	// Transactional returns false for MANUAL ops (concurrent indexes, enum ADD VALUE)
-	// which must execute outside a transaction block.
+	// Transactional returns false for MANUAL ops that must execute
+	// outside a transaction block (e.g. concurrent index operations).
 	Transactional() bool
 }
 

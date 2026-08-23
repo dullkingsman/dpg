@@ -81,7 +81,7 @@ func TestApplyNonTransactional(t *testing.T) {
 	conn := &mockConn{}
 	e := New()
 	m := pipeline.Migration{
-		NonTransactional: []pipeline.DiffOp{testOp{"ALTER TYPE status ADD VALUE 'archived';", false}},
+		NonTransactional: []pipeline.DiffOp{testOp{"CREATE INDEX CONCURRENTLY idx_status ON t (status);", false}},
 	}
 	if err := e.Apply(context.Background(), m, conn); err != nil {
 		t.Fatal(err)

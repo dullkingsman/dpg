@@ -645,8 +645,11 @@ func TestDiffEnumAddValue(t *testing.T) {
 	if !strings.Contains(sql, "'pending'") {
 		t.Errorf("expected pending value, got: %s", sql)
 	}
-	if ops[0].Safety() != pipeline.Manual {
-		t.Errorf("expected Manual safety for ADD VALUE")
+	if ops[0].Safety() != pipeline.Safe {
+		t.Errorf("expected Safe safety for ADD VALUE (RFC §1.4's PG 14 floor is past the PG 12 transaction-block restriction)")
+	}
+	if !ops[0].Transactional() {
+		t.Errorf("expected ADD VALUE to run transactionally")
 	}
 }
 

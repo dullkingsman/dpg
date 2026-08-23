@@ -18,8 +18,8 @@ func New() *Emitter { return &Emitter{} }
 
 // Emit splits ops into transactional and non-transactional slices.
 // Transactional ops are intended to be wrapped in BEGIN/COMMIT by the executor.
-// Non-transactional ops (e.g. CREATE INDEX CONCURRENTLY, ALTER TYPE ADD VALUE)
-// must run outside any transaction block.
+// Non-transactional ops (e.g. CREATE INDEX CONCURRENTLY, DROP INDEX
+// CONCURRENTLY) must run outside any transaction block.
 func (e *Emitter) Emit(ops []pipeline.DiffOp, meta pipeline.MigrationMeta) (pipeline.Migration, error) {
 	m := pipeline.Migration{Meta: meta}
 	for _, o := range ops {
