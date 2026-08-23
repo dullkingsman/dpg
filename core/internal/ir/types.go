@@ -560,7 +560,13 @@ type Type struct {
 	Reconstructed  bool      // Body rebuilt from the catalog; see Tablespace.Reconstructed. RANGE/BASE only.
 	Comment        *string
 	Owner          *string
-	Deprecated     *string
+	// RenamedFrom/RenamedFromSchema — see Table's identical doc comments.
+	// Applies uniformly across all 5 variants (Section 5.1-5.5), reusing the
+	// same generic cross-schema RENAME TO/SET SCHEMA mechanism as Table/
+	// View/Function/Procedure/Aggregate.
+	RenamedFrom       *string
+	RenamedFromSchema *string
+	Deprecated        *string
 	MigrateRemove  *pipeline.MigrateRemoveBlock // ENUM only: MIGRATE REMOVE { } block
 	// Grants/Revocations (RFC audit item #3) apply uniformly across all 5
 	// variants — real PostgreSQL's GRANT/REVOKE has no separate "ON DOMAIN"
@@ -975,9 +981,16 @@ type Collation struct {
 	ICULocale      *string
 	Deterministic  bool
 	Comment        *string // see EventTrigger.Comment
-	Body           string
-	Reconstructed  bool // Body rebuilt from the catalog; see Tablespace.Reconstructed
-	SrcPos         pipeline.SourcePos
+	// RenamedFrom/RenamedFromSchema — see Table's identical doc comments;
+	// reuses the same generic cross-schema RENAME TO/SET SCHEMA mechanism.
+	// Owner and REFRESH VERSION (Section 14.2's other two ALTER COLLATION
+	// capabilities) are separate, not-yet-implemented gaps — out of scope
+	// here.
+	RenamedFrom       *string
+	RenamedFromSchema *string
+	Body              string
+	Reconstructed     bool // Body rebuilt from the catalog; see Tablespace.Reconstructed
+	SrcPos            pipeline.SourcePos
 }
 
 func (c *Collation) QualifiedName() string   { return qualName(c.Schema, c.Name) }

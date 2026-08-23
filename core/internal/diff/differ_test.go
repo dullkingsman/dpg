@@ -4948,6 +4948,190 @@ func TestDiffCreateDomainWithOwnerUsesSetRole(t *testing.T) {
 	}
 }
 
+// TestDiffEnumRenamedFromEmitsAlterRename is the regression guard for Type
+// rename detection: before this, ir.Type had no RenamedFrom field at all
+// (and renamedFromKey had no *ir.Type case), so a renamed type was
+// indistinguishable from "old type dropped, new one added." Uses ENUM as
+// the representative variant since diffType's shared OWNER TO/RENAME TO
+// handling at the top of the function applies identically to all 5.
+func TestDiffEnumRenamedFromEmitsAlterRename(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.mood_old", &snapshot.SnapObject{
+		Kind: "type",
+		Type: &snapshot.SnapType{Schema: "public", Name: "mood_old", Variant: "ENUM", Values: []string{"sad", "happy"}},
+	})
+	old := "mood_old"
+	desired := []pipeline.IRObject{
+		&ir.Type{Schema: "public", Name: "mood", Variant: "ENUM", EnumValues: []string{"sad", "happy"}, RenamedFrom: &old},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if containsSQL(ops, "DROP TYPE") || containsSQL(ops, "CREATE TYPE") {
+		t.Fatalf("renamed type should match by RENAMED FROM, not drop+create, got: %v", sqlList(ops))
+	}
+	want := `ALTER TYPE "public"."mood_old" RENAME TO "mood";`
+	if !containsSQL(ops, want) {
+		t.Errorf("expected %q, got: %v", want, sqlList(ops))
+	}
+	for _, o := range ops {
+		if strings.Contains(o.SQL(), "RENAME TO") && o.Safety() != pipeline.Caution {
+			t.Errorf("expected CAUTION safety for ALTER TYPE RENAME TO (RFC's top-level-object rename classification), got %v", o.Safety())
+		}
+	}
+}
+
+// TestDiffDomainRenamedFromUsesAlterDomain confirms the DOMAIN-specific
+// ALTER verb (matching OWNER TO's existing alterKW distinction) is used for
+// a domain rename, not the generic ALTER TYPE.
+func TestDiffDomainRenamedFromUsesAlterDomain(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.posint_old", &snapshot.SnapObject{
+		Kind: "type",
+		Type: &snapshot.SnapType{Schema: "public", Name: "posint_old", Variant: "DOMAIN", DomainBaseType: "integer"},
+	})
+	old := "posint_old"
+	desired := []pipeline.IRObject{
+		&ir.Type{Schema: "public", Name: "posint", Variant: "DOMAIN", DomainBaseType: ir.TypeRef{Name: "integer"}, RenamedFrom: &old},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := `ALTER DOMAIN "public"."posint_old" RENAME TO "posint";`
+	if !containsSQL(ops, want) {
+		t.Errorf("expected %q, got: %v", want, sqlList(ops))
+	}
+}
+
+// TestDiffEnumRenamedFromWithValueRemovalKeepsRename is the regression guard
+// for a second bug found while implementing Type rename: diffType's ENUM
+// branch used to `return diffEnumRemove(...)` directly on a value removal,
+// discarding whatever ops the shared OWNER TO/RENAME TO handling at the top
+// of diffType had already accumulated — a rename combined with a value
+// removal would silently lose the rename.
+func TestDiffEnumRenamedFromWithValueRemovalKeepsRename(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.mood_old", &snapshot.SnapObject{
+		Kind: "type",
+		Type: &snapshot.SnapType{Schema: "public", Name: "mood_old", Variant: "ENUM", Values: []string{"sad", "ok", "happy"}},
+	})
+	old := "mood_old"
+	migrate := &pipeline.MigrateRemoveBlock{Reason: "ok is no longer used", SQL: pipeline.RawExpr{Text: "-- no-op"}}
+	desired := []pipeline.IRObject{
+		&ir.Type{
+			Schema: "public", Name: "mood", Variant: "ENUM", EnumValues: []string{"sad", "happy"},
+			RenamedFrom: &old, MigrateRemove: migrate,
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsSQL(ops, `ALTER TYPE "public"."mood_old" RENAME TO "mood";`) {
+		t.Errorf("expected the rename to survive alongside the value removal, got: %v", sqlList(ops))
+	}
+}
+
+// TestDiffTypeRenamedFromStaleErrors mirrors every other kind's identical
+// stale-RENAMED-FROM validation (this one runs through Differ.Diff's
+// top-level Pass 1, shared by every kind using the generic renamedFromKey
+// mechanism, not a per-kind reimplementation).
+func TestDiffTypeRenamedFromStaleErrors(t *testing.T) {
+	d := New()
+	old := "nonexistent_old_type"
+	desired := []pipeline.IRObject{
+		&ir.Type{Schema: "public", Name: "mood", Variant: "ENUM", EnumValues: []string{"sad", "happy"}, RenamedFrom: &old},
+	}
+	_, err := d.Diff(desired, &pipeline.Snapshot{})
+	if err == nil {
+		t.Fatal("expected an error for a stale RENAMED FROM matching no snapshot type")
+	}
+}
+
+// TestDiffCollationRenamedFromEmitsAlterRename is Type's Collation
+// counterpart. Collation routes through the generic SnapOpaque path, not a
+// dedicated snapshot struct, but the same renamedFromKey/RENAME TO shape
+// applies identically.
+func TestDiffCollationRenamedFromEmitsAlterRename(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.c_old", &snapshot.SnapObject{
+		Kind: "collation",
+		Opaque: &snapshot.SnapOpaque{
+			Kind: "collation", Schema: "public", Name: "c_old", CollationStructured: true,
+			CollationProvider: "c", CollationCollate: strPtr("C"), CollationCtype: strPtr("C"), CollationDeterministic: true,
+		},
+	})
+	old := "c_old"
+	desired := []pipeline.IRObject{
+		&ir.Collation{
+			Schema: "public", Name: "c", Provider: "c", Collate: strPtr("C"), Ctype: strPtr("C"), Deterministic: true,
+			RenamedFrom: &old, Body: "CREATE COLLATION public.c (LOCALE = 'C')",
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if containsSQL(ops, "DROP COLLATION") {
+		t.Fatalf("renamed collation should match by RENAMED FROM, not drop+create, got: %v", sqlList(ops))
+	}
+	want := `ALTER COLLATION "public"."c_old" RENAME TO "c";`
+	if !containsSQL(ops, want) {
+		t.Errorf("expected %q, got: %v", want, sqlList(ops))
+	}
+	for _, o := range ops {
+		if strings.Contains(o.SQL(), "RENAME TO") && o.Safety() != pipeline.Caution {
+			t.Errorf("expected CAUTION safety for ALTER COLLATION RENAME TO, got %v", o.Safety())
+		}
+	}
+}
+
+// TestDiffCollationRenamedFromAndPropertyChanged confirms a simultaneous
+// rename + property change (LOCALE/PROVIDER/etc.) still requires DROP+
+// CREATE (real PostgreSQL's ALTER COLLATION has no path to change those),
+// with no separate ALTER COLLATION RENAME TO — the CREATE already
+// establishes the final (new) name directly. Drops under the collation's
+// CURRENT (old, matched) name via dropObject's own embedded snap identity.
+func TestDiffCollationRenamedFromAndPropertyChanged(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.c_old", &snapshot.SnapObject{
+		Kind: "collation",
+		Opaque: &snapshot.SnapOpaque{
+			Kind: "collation", Schema: "public", Name: "c_old", CollationStructured: true,
+			CollationProvider: "c", CollationCollate: strPtr("C"), CollationCtype: strPtr("C"), CollationDeterministic: true,
+		},
+	})
+	old := "c_old"
+	desired := []pipeline.IRObject{
+		&ir.Collation{
+			Schema: "public", Name: "c", Provider: "c", Collate: strPtr("POSIX"), Ctype: strPtr("POSIX"), Deterministic: true,
+			RenamedFrom: &old, Body: "CREATE COLLATION public.c (LOCALE = 'POSIX')",
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsSQL(ops, `DROP COLLATION IF EXISTS "public"."c_old"`) {
+		t.Errorf("expected DROP COLLATION referencing the collation's actual (old) name, got: %v", sqlList(ops))
+	}
+	if !containsSQL(ops, `CREATE COLLATION public.c (LOCALE = 'POSIX');`) {
+		t.Errorf("expected CREATE COLLATION for the new definition under the new name, got: %v", sqlList(ops))
+	}
+	for _, o := range ops {
+		if strings.Contains(o.SQL(), "RENAME TO") {
+			t.Errorf("did not expect a separate ALTER COLLATION RENAME TO alongside drop+create, got: %v", sqlList(ops))
+		}
+	}
+}
+
 // TestDiffCreateMaterializedViewEmitsIndex guards RFC §8.2's matview-block
 // INDICES support: a new materialized view's indexes must be created
 // alongside it, non-concurrently (it doesn't exist yet — same reasoning as

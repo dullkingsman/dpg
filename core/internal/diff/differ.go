@@ -351,6 +351,14 @@ func renamedFromKey(obj pipeline.IRObject) string {
 			// item #11).
 			return fmt.Sprintf("%s(%s)", qualKey(oldSchema(o.Schema, o.RenamedFromSchema), *o.RenamedFrom), ir.ArgsKey(o.Args))
 		}
+	case *ir.Type:
+		if o.RenamedFrom != nil {
+			return qualKey(oldSchema(o.Schema, o.RenamedFromSchema), *o.RenamedFrom)
+		}
+	case *ir.Collation:
+		if o.RenamedFrom != nil {
+			return qualKey(oldSchema(o.Schema, o.RenamedFromSchema), *o.RenamedFrom)
+		}
 	}
 	return ""
 }
@@ -391,6 +399,10 @@ func describeKind(obj pipeline.IRObject) string {
 		return "procedure"
 	case *ir.Aggregate:
 		return "aggregate"
+	case *ir.Type:
+		return "type"
+	case *ir.Collation:
+		return "collation"
 	}
 	return "object"
 }
@@ -1812,8 +1824,25 @@ func diffStatisticsObject(o *ir.StatisticsObject, snap *snapshot.SnapOpaque) ([]
 func diffCollation(o *ir.Collation, snap *snapshot.SnapOpaque) ([]pipeline.DiffOp, error) {
 	pos := o.SrcPos
 	ident := qualIdent(o.Schema, o.Name)
+
+	// RENAME TO applies regardless of whether the structured property
+	// comparison below is trustworthy (CollationStructured) — Name/Schema
+	// are basic identity fields, not part of the LOCALE/PROVIDER/etc. set
+	// that sentinel gates. Uses snap's matched (old) name for the FROM
+	// side, same reasoning as diffType's identical rename handling. Not
+	// merged into the property-changed branch below — a simultaneous
+	// rename needs no separate ALTER there, since createOpaque already
+	// creates the object under its final (new) name directly.
+	var renameOps []pipeline.DiffOp
+	if snap.Name != o.Name {
+		renameOps = append(renameOps, cautionOp(
+			fmt.Sprintf("ALTER COLLATION %s RENAME TO %s;", qualIdent(snap.Schema, snap.Name), quoteIdent(o.Name)),
+			pos,
+		))
+	}
+
 	if !snap.CollationStructured {
-		var ops []pipeline.DiffOp
+		ops := renameOps
 		if !ptrEq(o.Comment, snap.Comment) {
 			if sql := commentOnOpaqueSQL("collation", o.Schema, o.Name, "", "", o.Comment); sql != "" {
 				ops = append(ops, safeOp(sql, pos))
@@ -1835,12 +1864,13 @@ func diffCollation(o *ir.Collation, snap *snapshot.SnapOpaque) ([]pipeline.DiffO
 		ops = append(ops, createOps...)
 		return appendCommentOp(ops, nil, "collation", o.Schema, o.Name, "", "", o.Comment, pos)
 	}
+	ops := renameOps
 	if !ptrEq(o.Comment, snap.Comment) {
 		if sql := commentOnOpaqueSQL("collation", o.Schema, o.Name, "", "", o.Comment); sql != "" {
-			return []pipeline.DiffOp{safeOp(sql, pos)}, nil
+			ops = append(ops, safeOp(sql, pos))
 		}
 	}
-	return nil, nil
+	return ops, nil
 }
 
 // diffFDW implements RFC §14.8's structured diffing: "any change to a FDW
@@ -4751,6 +4781,23 @@ func diffType(o *ir.Type, snap *snapshot.SnapType, fullSnap *pipeline.Snapshot, 
 		ops = append(ops, safeOp(fmt.Sprintf("ALTER %s %s OWNER TO %s;", alterKW, typeIdent, quoteIdent(*o.Owner)), pos))
 	}
 
+	// RENAME TO applies identically across every variant too, same reasoning
+	// as OWNER TO above. Uses snap's matched (old) name for the FROM side,
+	// not o.Name — RENAME TO cannot itself move schemas (a real SET SCHEMA
+	// move for a cross-schema RENAMED FROM is separate, not-yet-implemented
+	// work, same known limitation as Table/View/Function/Procedure/
+	// Aggregate's identical rename mechanism).
+	if snap.Name != o.Name {
+		alterKW := "TYPE"
+		if o.Variant == "DOMAIN" {
+			alterKW = "DOMAIN"
+		}
+		ops = append(ops, cautionOp(
+			fmt.Sprintf("ALTER %s %s RENAME TO %s;", alterKW, qualIdent(snap.Schema, snap.Name), quoteIdent(o.Name)),
+			pos,
+		))
+	}
+
 	if o.Variant == "COMPOSITE" && snap.Variant == "COMPOSITE" {
 		attrOps, err := diffCompositeAttrs(typeIdent, o.CompositeAttrs, snap.CompositeAttrs, vtypes)
 		if err != nil {
@@ -4983,7 +5030,14 @@ func diffType(o *ir.Type, snap *snapshot.SnapType, fullSnap *pipeline.Snapshot, 
 			}
 		}
 		if removedCount > 0 {
-			return diffEnumRemove(o, snap, fullSnap)
+			// Merge into ops (not a bare return) — ops may already carry the
+			// shared OWNER TO/RENAME TO handling from the top of this
+			// function, which a plain return here would silently discard.
+			removeOps, err := diffEnumRemove(o, snap, fullSnap)
+			if err != nil {
+				return nil, err
+			}
+			return append(ops, removeOps...), nil
 		}
 
 		// ALTER TYPE ADD VALUE couldn't run inside a transaction block

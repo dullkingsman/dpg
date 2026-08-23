@@ -1429,6 +1429,10 @@ func (b *Builder) buildEnum(cs *pg_query.CreateEnumStmt, block pipeline.BlockAST
 	if block.Owner != nil {
 		t.Owner = &block.Owner.Name
 	}
+	if block.RenamedFrom != nil {
+		t.RenamedFrom = &block.RenamedFrom.Name
+		t.RenamedFromSchema = renamedFromSchema(block.RenamedFrom)
+	}
 	if block.Deprecated != nil {
 		t.Deprecated = &block.Deprecated.Value
 	}
@@ -1489,6 +1493,10 @@ func (b *Builder) buildCompositeType(cs *pg_query.CompositeTypeStmt, block pipel
 	}
 	if block.Owner != nil {
 		t.Owner = &block.Owner.Name
+	}
+	if block.RenamedFrom != nil {
+		t.RenamedFrom = &block.RenamedFrom.Name
+		t.RenamedFromSchema = renamedFromSchema(block.RenamedFrom)
 	}
 	if block.Deprecated != nil {
 		t.Deprecated = &block.Deprecated.Value
@@ -1999,6 +2007,10 @@ func (b *Builder) buildDomain(cs *pg_query.CreateDomainStmt, block pipeline.Bloc
 	if block.Owner != nil {
 		t.Owner = &block.Owner.Name
 	}
+	if block.RenamedFrom != nil {
+		t.RenamedFrom = &block.RenamedFrom.Name
+		t.RenamedFromSchema = renamedFromSchema(block.RenamedFrom)
+	}
 	if block.DomainDefault != nil {
 		t.DomainDefault = &block.DomainDefault.Text
 	}
@@ -2057,6 +2069,10 @@ func (b *Builder) buildRangeType(cs *pg_query.CreateRangeStmt, block pipeline.Bl
 	}
 	if block.Owner != nil {
 		t.Owner = &block.Owner.Name
+	}
+	if block.RenamedFrom != nil {
+		t.RenamedFrom = &block.RenamedFrom.Name
+		t.RenamedFromSchema = renamedFromSchema(block.RenamedFrom)
 	}
 	for _, g := range block.Grants {
 		t.Grants = append(t.Grants, blockGrantToIR(g))
@@ -2128,6 +2144,10 @@ func (b *Builder) buildDefineStmt(ds *pg_query.DefineStmt, block pipeline.BlockA
 		}
 		if block.Owner != nil {
 			t.Owner = &block.Owner.Name
+		}
+		if block.RenamedFrom != nil {
+			t.RenamedFrom = &block.RenamedFrom.Name
+			t.RenamedFromSchema = renamedFromSchema(block.RenamedFrom)
 		}
 		// Distinguish composite/range/base by the definition elements.
 		// Composite: has list of column defs
@@ -2329,6 +2349,10 @@ func (b *Builder) buildDefineStmt(ds *pg_query.DefineStmt, block pipeline.BlockA
 		}
 		if block.Comment != nil {
 			col.Comment = &block.Comment.Value
+		}
+		if block.RenamedFrom != nil {
+			col.RenamedFrom = &block.RenamedFrom.Name
+			col.RenamedFromSchema = renamedFromSchema(block.RenamedFrom)
 		}
 		return col, nil
 
