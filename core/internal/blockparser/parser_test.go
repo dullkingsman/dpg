@@ -422,6 +422,29 @@ func TestColumnStatisticsInvalidErrors(t *testing.T) {
 	}
 }
 
+// TestDependsOnExtension is the regression guard for RFC audit item #71:
+// Section 9.1's func-block-only "DEPENDS ON EXTENSION ext;" directive
+// (Function/Procedure), repeatable.
+func TestDependsOnExtension(t *testing.T) {
+	src := `DEPENDS ON EXTENSION pgcrypto;
+DEPENDS ON EXTENSION postgis;`
+	ast := parse(t, src)
+	if len(ast.DependsOnExtensions) != 2 || ast.DependsOnExtensions[0] != "pgcrypto" || ast.DependsOnExtensions[1] != "postgis" {
+		t.Errorf("DependsOnExtensions: got %v, want [pgcrypto postgis]", ast.DependsOnExtensions)
+	}
+}
+
+// TestNoDependsOnExtensionIsNoop proves the negative form parses without
+// error but contributes nothing to the desired set — a purely declarative
+// model already expresses "does not depend on ext" by omission.
+func TestNoDependsOnExtensionIsNoop(t *testing.T) {
+	src := `NO DEPENDS ON EXTENSION pgcrypto;`
+	ast := parse(t, src)
+	if len(ast.DependsOnExtensions) != 0 {
+		t.Errorf("expected no DependsOnExtensions from the negative form, got %v", ast.DependsOnExtensions)
+	}
+}
+
 func TestColumnRenamedFrom(t *testing.T) {
 	src := `COLUMN email_address { RENAMED FROM email; }`
 	ast := parse(t, src)
@@ -861,6 +884,45 @@ func TestTriggerReferencingNewTableOnly(t *testing.T) {
 	}
 	if tr.NewTransitionName == nil || *tr.NewTransitionName != "new_rows" {
 		t.Errorf("NewTransitionName: got %v, want new_rows", tr.NewTransitionName)
+	}
+}
+
+// TestTriggerDependsOnExtension is the regression guard for RFC audit item
+// #75: Section 9.1's DEPENDS ON EXTENSION directive, reused verbatim for
+// triggers (Section 7.9) but previously not parsed anywhere.
+func TestTriggerDependsOnExtension(t *testing.T) {
+	src := `TRIGGERS {
+		audit_changes AFTER INSERT
+			FOR EACH ROW
+			EXECUTE FUNCTION audit_table_changes()
+			DEPENDS ON EXTENSION my_audit_ext;
+	}`
+	ast := parse(t, src)
+	if len(ast.Triggers) != 1 {
+		t.Fatalf("expected 1 trigger, got %d", len(ast.Triggers))
+	}
+	tr := ast.Triggers[0]
+	if len(tr.DependsOnExtensions) != 1 || tr.DependsOnExtensions[0] != "my_audit_ext" {
+		t.Errorf("DependsOnExtensions: got %v, want [my_audit_ext]", tr.DependsOnExtensions)
+	}
+}
+
+// TestTriggerNoDependsOnExtensionIsNoop proves the negative form parses
+// without error but contributes nothing — see
+// pipeline.BlockAST.DependsOnExtensions' doc comment for why.
+func TestTriggerNoDependsOnExtensionIsNoop(t *testing.T) {
+	src := `TRIGGERS {
+		audit_changes AFTER INSERT
+			FOR EACH ROW
+			EXECUTE FUNCTION audit_table_changes()
+			NO DEPENDS ON EXTENSION my_audit_ext;
+	}`
+	ast := parse(t, src)
+	if len(ast.Triggers) != 1 {
+		t.Fatalf("expected 1 trigger, got %d", len(ast.Triggers))
+	}
+	if len(ast.Triggers[0].DependsOnExtensions) != 0 {
+		t.Errorf("expected no DependsOnExtensions from the negative form, got %v", ast.Triggers[0].DependsOnExtensions)
 	}
 }
 

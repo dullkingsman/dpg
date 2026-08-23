@@ -185,7 +185,8 @@ func toSnapObject(obj pipeline.IRObject) *SnapObject {
 		so := &SnapOpaque{
 			Kind: "procedure", Schema: o.Schema, Name: o.Name,
 			Args: ir.ArgsKey(o.Args), BodyHash: o.BodyHash, Comment: o.Comment, Deprecated: o.Deprecated,
-			NameMaps: toSnapNameMaps(o.NameMaps),
+			NameMaps:                     toSnapNameMaps(o.NameMaps),
+			ProcedureDependsOnExtensions: append([]string(nil), o.DependsOnExtensions...),
 		}
 		for _, g := range o.Grants {
 			so.Grants = append(so.Grants, toSnapGrant(g))
@@ -666,8 +667,9 @@ func toSnapTrigger(trg *ir.Trigger) SnapTrigger {
 		When:            trg.When,
 		Events:          strings.Join(trg.Events, ", "),
 		ForEach:         trg.ForEach,
-		UpdateOfColumns: strings.Join(trg.UpdateOfColumns, ", "),
-		Function:        trg.Function,
+		UpdateOfColumns:     strings.Join(trg.UpdateOfColumns, ", "),
+		Function:            trg.Function,
+		DependsOnExtensions: append([]string(nil), trg.DependsOnExtensions...),
 	}
 	if trg.OldTransitionName != nil {
 		st.OldTransitionName = *trg.OldTransitionName
@@ -754,6 +756,7 @@ func toSnapFunction(o *ir.Function) *SnapFunction {
 	}
 	sf.SecurityLabels = toSnapSecurityLabels(o.SecurityLabels)
 	sf.NameMaps = toSnapNameMaps(o.NameMaps)
+	sf.DependsOnExtensions = append([]string(nil), o.DependsOnExtensions...)
 	return sf
 }
 

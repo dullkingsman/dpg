@@ -576,6 +576,24 @@ func (b *blockParser) parseBlock(pos pipeline.SourcePos) (pipeline.BlockAST, err
 			}
 		case "MIGRATE":
 			ast.MigrateRemove, err = b.parseMigrateRemove(dirPos)
+		case "DEPENDS":
+			var ext string
+			ext, err = b.parseDependsOnExtension(dirPos)
+			if err == nil {
+				ast.DependsOnExtensions = append(ast.DependsOnExtensions, ext)
+			}
+		case "NO":
+			// RFC §9.1's "NO DEPENDS ON EXTENSION ext;" — mirrors real
+			// PostgreSQL's own ALTER FUNCTION grammar shape (which allows
+			// removing a dependency the same way it was added) for
+			// familiarity, but contributes nothing to DependsOnExtensions:
+			// a purely declarative model already expresses "this function
+			// does not depend on ext" by simply never listing it, the same
+			// way Owner/Comment/every other directive here works — there
+			// is no symmetric "explicit negative" story for those either.
+			// Parsed (not rejected) so writing it doesn't error, matching
+			// the passthrough principle used throughout this grammar.
+			_, err = b.parseNoDependsOnExtension(dirPos)
 		case "DEFAULT":
 			// Overloaded keyword, disambiguated by what follows: "DEFAULT
 			// PRIVILEGES ..." (existing) vs. RFC §5.4's DOMAIN-only bare
@@ -1370,6 +1388,51 @@ func (b *blockParser) parseStatisticsValue(pos pipeline.SourcePos) (*int, error)
 	return &n, nil
 }
 
+// parseDependsOnExtension reads: ON EXTENSION ext_name; — the caller has
+// already consumed the leading "DEPENDS" keyword (either directly, for the
+// positive form, or via parseNoDependsOnExtension after "NO", for the
+// negative form, RFC §9.1).
+func (b *blockParser) parseDependsOnExtension(pos pipeline.SourcePos) (string, error) {
+	name, err := b.parseOnExtensionName()
+	if err != nil {
+		return "", err
+	}
+	if err := b.expectSemi(); err != nil {
+		return "", err
+	}
+	return name, nil
+}
+
+// parseNoDependsOnExtension reads: DEPENDS ON EXTENSION ext_name; — the
+// caller has already consumed the leading "NO" keyword (RFC §9.1's negative
+// form).
+func (b *blockParser) parseNoDependsOnExtension(pos pipeline.SourcePos) (string, error) {
+	if err := b.expect("DEPENDS"); err != nil {
+		return "", err
+	}
+	return b.parseDependsOnExtension(pos)
+}
+
+// parseOnExtensionName reads: ON EXTENSION ext_name — no trailing semicolon,
+// for use where DEPENDS ON EXTENSION appears as one of several optional
+// trailing clauses before a single shared terminating ";" (Trigger's
+// trigger-decl, Section 7.9) rather than as its own semicolon-terminated
+// block directive (Function/Procedure's func-block, Section 9.1).
+func (b *blockParser) parseOnExtensionName() (string, error) {
+	if err := b.expect("ON"); err != nil {
+		return "", err
+	}
+	if err := b.expect("EXTENSION"); err != nil {
+		return "", err
+	}
+	b.skipWS()
+	name, err := b.readIdentifier()
+	if err != nil {
+		return "", err
+	}
+	return name.Name, nil
+}
+
 // ── CONSTRAINT ────────────────────────────────────────────────────────────────
 
 func (b *blockParser) parseConstraint(pos pipeline.SourcePos) (pipeline.ConstraintDef, error) {
@@ -1756,6 +1819,37 @@ func (b *blockParser) parseOneTrigger() (pipeline.TriggerDef, error) {
 				trig.Args = append(trig.Args, a)
 			}
 		}
+	}
+
+	// [NO] DEPENDS ON EXTENSION ext (Section 9.1, reused verbatim for
+	// triggers per Section 7.9, audit item #75) — the ABNF's single
+	// square brackets mark this as optional (0 or 1), not repeatable like
+	// Function/Procedure's func-block version, and it's one of several
+	// trailing clauses sharing the trigger-decl's own single terminating
+	// ";" rather than being its own semicolon-terminated directive.
+	b.skipWS()
+	dependsMark := b.cur()
+	switch strings.ToUpper(b.peekWord()) {
+	case "DEPENDS":
+		b.readWord()
+		ext, derr := b.parseOnExtensionName()
+		if derr != nil {
+			return trig, derr
+		}
+		trig.DependsOnExtensions = append(trig.DependsOnExtensions, ext)
+	case "NO":
+		b.readWord()
+		if err := b.expect("DEPENDS"); err != nil {
+			return trig, err
+		}
+		// Contributes nothing to DependsOnExtensions — see
+		// pipeline.BlockAST.DependsOnExtensions' identical doc comment
+		// for why the negative form is parsed but a no-op.
+		if _, derr := b.parseOnExtensionName(); derr != nil {
+			return trig, derr
+		}
+	default:
+		b.restore(dependsMark)
 	}
 
 	comment, err := b.parseTrailingCommentBlock()

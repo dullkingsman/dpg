@@ -115,11 +115,16 @@ type TriggerDef struct {
 	// scoped to the trigger's execution), unlike Function below.
 	OldTransitionName *string
 	NewTransitionName *string
-	Condition         *RawExpr
-	Function          Identifier
-	Args              []string
-	Comment           *StringLit
-	Pos               SourcePos
+	Condition *RawExpr
+	Function  Identifier
+	Args      []string
+	// DependsOnExtensions is Section 9.1's `DEPENDS ON EXTENSION ext`
+	// directive reused verbatim for triggers (Section 7.9, audit item
+	// #75) — the complete desired set, same shape as Function/Procedure's
+	// identical field.
+	DependsOnExtensions []string
+	Comment             *StringLit
+	Pos                 SourcePos
 }
 
 // ColumnBlock holds DPG-specific attributes for a single column.
@@ -374,6 +379,13 @@ type BlockAST struct {
 	// "CONSTRAINT name CHECK (expr);" shape as a table's.
 	DomainDefault *RawExpr
 	DomainNotNull bool
+	// DependsOnExtensions is Section 9.1's `DEPENDS ON EXTENSION ext;`
+	// func-block directive, repeatable — the complete desired set. A
+	// literal `NO DEPENDS ON EXTENSION ext;` also parses (matching real
+	// PostgreSQL's own ALTER FUNCTION grammar shape, mirrored here for
+	// familiarity/passthrough symmetry) but contributes nothing to this
+	// set — see parseDependsOnExtension's doc comment for why.
+	DependsOnExtensions []string
 	// ReplicaIdentity is Section 7.11's `REPLICA IDENTITY {DEFAULT|FULL|
 	// NOTHING|USING INDEX name}` block directive — real PostgreSQL has no
 	// CREATE TABLE-native clause for it, only ALTER TABLE, so like RLS it's

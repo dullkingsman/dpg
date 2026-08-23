@@ -5874,6 +5874,48 @@ func TestDiffTriggerUnchangedIsNoop(t *testing.T) {
 	}
 }
 
+// TestDiffTriggerDependsOnExtension is the regression guard for RFC audit
+// item #75: Section 9.1's [NO] DEPENDS ON EXTENSION directive, reused
+// verbatim for triggers (Section 7.9), previously zero code anywhere.
+func TestDiffTriggerDependsOnExtension(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.t", &snapshot.SnapObject{
+		Kind: "table",
+		Table: &snapshot.SnapTable{
+			Schema:  "public",
+			Name:    "t",
+			Columns: []snapshot.SnapColumn{{Name: "id", Type: "bigint"}},
+			Triggers: []snapshot.SnapTrigger{
+				{Name: "trg_a", When: "AFTER", Events: "INSERT", ForEach: "ROW", Function: "public.trg_touch", DependsOnExtensions: []string{"old_ext"}},
+			},
+		},
+	})
+	desired := []pipeline.IRObject{
+		&ir.Table{
+			Schema:  "public",
+			Name:    "t",
+			Columns: []*ir.Column{{Name: "id", Type: ir.TypeRef{Name: "bigint"}}},
+			Triggers: []*ir.Trigger{
+				{Name: "trg_a", When: "AFTER", Events: []string{"INSERT"}, ForEach: "ROW", Function: "trg_touch", DependsOnExtensions: []string{"new_ext"}},
+			},
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsSQL(ops, `ALTER TRIGGER "trg_a" ON "public"."t" DEPENDS ON EXTENSION "new_ext";`) {
+		t.Errorf("expected ADD for new_ext, got: %v", sqlList(ops))
+	}
+	if !containsSQL(ops, `ALTER TRIGGER "trg_a" ON "public"."t" NO DEPENDS ON EXTENSION "old_ext";`) {
+		t.Errorf("expected NO DEPENDS for the removed old_ext, got: %v", sqlList(ops))
+	}
+	if containsSQL(ops, "DROP TRIGGER") {
+		t.Errorf("a DEPENDS ON EXTENSION-only change should not drop+recreate the trigger, got: %v", sqlList(ops))
+	}
+}
+
 func TestDiffTriggerFunctionGenuinelyChanged(t *testing.T) {
 	d := New()
 	snap := &pipeline.Snapshot{}
@@ -12012,6 +12054,72 @@ func TestDiffFunctionRenamedFromCrossSchema(t *testing.T) {
 	}
 	if !containsSQL(ops, `ALTER FUNCTION "new_schema"."calc_total"(integer) RENAME TO "calc_total_v2";`) {
 		t.Errorf("expected RENAME TO after the schema move, got: %v", sqlList(ops))
+	}
+}
+
+// TestDiffFunctionDependsOnExtension is the regression guard for RFC audit
+// item #71: Section 9.1's [NO] DEPENDS ON EXTENSION func-block directive,
+// previously zero code anywhere.
+func TestDiffFunctionDependsOnExtension(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.f(integer)", &snapshot.SnapObject{
+		Kind: "function",
+		Function: &snapshot.SnapFunction{
+			Schema: "public", Name: "f", Args: "integer",
+			ReturnType: "integer", Language: "sql", Volatility: "VOLATILE",
+			BodyHash:            "samehash",
+			DependsOnExtensions: []string{"old_ext"},
+		},
+	})
+	desired := []pipeline.IRObject{
+		&ir.Function{
+			Schema: "public", Name: "f",
+			Args:                []ir.FuncArg{{Type: ir.TypeRef{Name: "integer"}}},
+			ReturnType:          ir.TypeRef{Name: "integer"},
+			Attrs:               ir.FuncAttrs{Language: "sql", Volatility: "VOLATILE", Body: "SELECT 1"},
+			BodyHash:            "samehash",
+			DependsOnExtensions: []string{"new_ext"},
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsSQL(ops, `ALTER FUNCTION "public"."f"(integer) DEPENDS ON EXTENSION "new_ext";`) {
+		t.Errorf("expected ADD for new_ext, got: %v", sqlList(ops))
+	}
+	if !containsSQL(ops, `ALTER FUNCTION "public"."f"(integer) NO DEPENDS ON EXTENSION "old_ext";`) {
+		t.Errorf("expected NO DEPENDS for the removed old_ext, got: %v", sqlList(ops))
+	}
+	if containsSQL(ops, "DROP FUNCTION") {
+		t.Errorf("a DEPENDS ON EXTENSION-only change should not DROP+CREATE, got: %v", sqlList(ops))
+	}
+}
+
+// TestCreateFunctionWithDependsOnExtension proves a brand-new function
+// applies its declared extension dependencies at creation time (no inline
+// CREATE FUNCTION form exists for it).
+func TestCreateFunctionWithDependsOnExtension(t *testing.T) {
+	d := New()
+	desired := []pipeline.IRObject{
+		&ir.Function{
+			Schema: "public", Name: "f",
+			Args:                []ir.FuncArg{{Type: ir.TypeRef{Name: "integer"}}},
+			ReturnType:          ir.TypeRef{Name: "integer"},
+			Attrs:               ir.FuncAttrs{Language: "sql", Volatility: "VOLATILE", Body: "SELECT 1"},
+			DependsOnExtensions: []string{"pgcrypto"},
+		},
+	}
+	ops, err := d.Diff(desired, &pipeline.Snapshot{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsSQL(ops, "CREATE OR REPLACE FUNCTION") {
+		t.Fatalf("expected a CREATE OR REPLACE FUNCTION op, got: %v", sqlList(ops))
+	}
+	if !containsSQL(ops, `ALTER FUNCTION "public"."f"(integer) DEPENDS ON EXTENSION "pgcrypto";`) {
+		t.Errorf("expected the extension dependency to be applied at creation, got: %v", sqlList(ops))
 	}
 }
 

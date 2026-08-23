@@ -281,11 +281,18 @@ type Trigger struct {
 	// pattern above.
 	OldTransitionName *string
 	NewTransitionName *string
-	Condition         *string
-	Function          string // qualified function name
-	Args              []string
-	Comment           *string
-	Pos               pipeline.SourcePos
+	Condition *string
+	Function  string // qualified function name
+	Args      []string
+	// DependsOnExtensions is Section 9.1's `[NO] DEPENDS ON EXTENSION`
+	// directive reused verbatim for triggers (Section 7.9, audit item
+	// #75) — the complete desired set (at most one in practice, per the
+	// grammar's non-repeatable placement, but modeled as a slice for
+	// uniformity with Function/Procedure's identical field and to make
+	// the differ's shared stringSetDiff-based helper reusable as-is).
+	DependsOnExtensions []string
+	Comment             *string
+	Pos                 pipeline.SourcePos
 }
 
 // Grant is a single GRANT directive.
@@ -539,11 +546,22 @@ type Function struct {
 	RenamedFrom *string
 	// RenamedFromSchema — see Table.RenamedFromSchema's identical doc comment.
 	RenamedFromSchema *string
-	Grants            []Grant
-	Revocations       []Revocation
-	SecurityLabels    []pipeline.SecurityLabel
-	NameMaps          []pipeline.NameMapEntry
-	SrcPos            pipeline.SourcePos
+	// DependsOnExtensions is Section 9.1's `[NO] DEPENDS ON EXTENSION`
+	// func-block directive — the complete desired set of auto-drop
+	// extension dependencies, diffed like Grants (added entries emit
+	// ALTER FUNCTION ... DEPENDS ON EXTENSION ext, entries present in the
+	// snapshot but absent here emit ALTER FUNCTION ... NO DEPENDS ON
+	// EXTENSION ext). Real PostgreSQL has no ALTER AGGREGATE equivalent
+	// even though Aggregate shares this same func-block grammar
+	// production (passthrough principle: DPG doesn't reject it on
+	// Aggregate, PostgreSQL's own parser does) — so this field only
+	// exists on Function/Procedure, not Aggregate.
+	DependsOnExtensions []string
+	Grants              []Grant
+	Revocations         []Revocation
+	SecurityLabels      []pipeline.SecurityLabel
+	NameMaps            []pipeline.NameMapEntry
+	SrcPos              pipeline.SourcePos
 }
 
 func (f *Function) QualifiedName() string {
@@ -570,11 +588,14 @@ type Procedure struct {
 	RenamedFrom *string
 	// RenamedFromSchema — see Table.RenamedFromSchema's identical doc comment.
 	RenamedFromSchema *string
-	Grants            []Grant
-	Revocations       []Revocation
-	SecurityLabels    []pipeline.SecurityLabel
-	NameMaps          []pipeline.NameMapEntry
-	SrcPos            pipeline.SourcePos
+	// DependsOnExtensions — see ir.Function.DependsOnExtensions' identical
+	// doc comment.
+	DependsOnExtensions []string
+	Grants              []Grant
+	Revocations         []Revocation
+	SecurityLabels      []pipeline.SecurityLabel
+	NameMaps            []pipeline.NameMapEntry
+	SrcPos              pipeline.SourcePos
 }
 
 func (p *Procedure) QualifiedName() string {

@@ -1264,6 +1264,7 @@ func (b *Builder) buildFunction(cfs *pg_query.CreateFunctionStmt, pg pipeline.PG
 	}
 	fn.SecurityLabels = block.SecurityLabels
 	fn.NameMaps = block.NameMaps
+	fn.DependsOnExtensions = block.DependsOnExtensions
 	return fn, nil
 }
 
@@ -1297,6 +1298,7 @@ func (b *Builder) buildProcedure(cfs *pg_query.CreateFunctionStmt, pg pipeline.P
 	}
 	proc.SecurityLabels = block.SecurityLabels
 	proc.NameMaps = block.NameMaps
+	proc.DependsOnExtensions = block.DependsOnExtensions
 	return proc, nil
 }
 
@@ -3162,8 +3164,9 @@ func blockTriggerToIR(tr pipeline.TriggerDef) *Trigger {
 		UpdateOfColumns:   tr.UpdateOfColumns,
 		OldTransitionName: tr.OldTransitionName,
 		NewTransitionName: tr.NewTransitionName,
-		Args:              tr.Args,
-		Pos:               tr.Pos,
+		Args:                tr.Args,
+		DependsOnExtensions: tr.DependsOnExtensions,
+		Pos:                 tr.Pos,
 	}
 	t.Function = tr.Function.String()
 	if tr.Condition != nil {

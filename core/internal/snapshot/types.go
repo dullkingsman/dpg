@@ -79,6 +79,12 @@ type SnapOpaque struct {
 	// (confirmed via \h ALTER TEXT SEARCH PARSER/TEMPLATE), so neither gets
 	// an equivalent field.
 	TSDictOwner *string `json:"ts_dict_owner,omitempty"`
+	// ProcedureDependsOnExtensions is Section 9.1's `[NO] DEPENDS ON
+	// EXTENSION` diffing input for Procedure specifically (Function uses
+	// its own dedicated SnapFunction.DependsOnExtensions field instead,
+	// since Procedure — unlike Function — routes through the generic
+	// SnapOpaque shape).
+	ProcedureDependsOnExtensions []string `json:"procedure_depends_on_extensions,omitempty"`
 	// OptionsStructured/FDWHandler/FDWValidator/FDWOptions/ServerFDWName/
 	// ServerType/ServerVersion/ServerOptions/UserMappingOptions are RFC
 	// §14.8/§14.9/§14.10's structured diffing inputs for fdw/server/
@@ -368,9 +374,13 @@ type SnapTrigger struct {
 	// empty-means-unspecified convention as Condition below.
 	OldTransitionName string `json:"old_transition_name,omitempty"`
 	NewTransitionName string `json:"new_transition_name,omitempty"`
-	Function          string `json:"function"`
-	Condition         string `json:"condition,omitempty"`
-	Comment           string `json:"comment,omitempty"`
+	Function  string `json:"function"`
+	Condition string `json:"condition,omitempty"`
+	Comment   string `json:"comment,omitempty"`
+	// DependsOnExtensions is Section 9.1's `[NO] DEPENDS ON EXTENSION`
+	// diffing input reused for triggers (Section 7.9, audit item #75) —
+	// see ir.Trigger.DependsOnExtensions' identical doc comment.
+	DependsOnExtensions []string `json:"depends_on_extensions,omitempty"`
 }
 
 type SnapGrant struct {
@@ -427,6 +437,9 @@ type SnapFunction struct {
 	Revocations    []SnapGrant         `json:"revocations,omitempty"`
 	SecurityLabels []SnapSecurityLabel `json:"security_labels,omitempty"`
 	NameMaps       []SnapNameMapEntry  `json:"name_maps,omitempty"`
+	// DependsOnExtensions is Section 9.1's `[NO] DEPENDS ON EXTENSION`
+	// diffing input — see ir.Function.DependsOnExtensions' doc comment.
+	DependsOnExtensions []string `json:"depends_on_extensions,omitempty"`
 }
 
 type SnapType struct {

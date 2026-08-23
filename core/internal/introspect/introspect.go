@@ -1345,7 +1345,17 @@ SELECT n.nspname, c.relname,
        (SELECT array_agg(a.attname ORDER BY u.ord)
           FROM unnest(t.tgattr) WITH ORDINALITY AS u(attnum, ord)
           JOIN pg_attribute a ON a.attrelid = t.tgrelid AND a.attnum = u.attnum
-       ) AS update_of_columns
+       ) AS update_of_columns,
+       -- Section 9.1's [NO] DEPENDS ON EXTENSION, reused for triggers
+       -- (Section 7.9, audit item #75) — deptype='x' is PostgreSQL's own
+       -- auto-drop-dependency-on-an-extension marker, confirmed live via
+       -- the identical mechanism introspectFunctionDependsOnExtension
+       -- already uses for Function/Procedure.
+       (SELECT array_agg(e.extname ORDER BY e.extname)
+          FROM pg_depend d
+          JOIN pg_extension e ON e.oid = d.refobjid
+          WHERE d.classid = 'pg_trigger'::regclass AND d.objid = t.oid AND d.deptype = 'x'
+       ) AS depends_on_extensions
 FROM   pg_trigger t
 JOIN   pg_class c     ON c.oid = t.tgrelid
 JOIN   pg_namespace n ON n.oid = c.relnamespace
@@ -1364,9 +1374,9 @@ ORDER  BY n.nspname, c.relname, t.tgname`
 	for rs.Next() {
 		var schema, table, name, when, forEach, events, funcName, funcSchema, triggerDef string
 		var comment *string
-		var updateOfColumns []string
+		var updateOfColumns, dependsOnExtensions []string
 		var oldTransitionName, newTransitionName *string
-		if err := rs.Scan(&schema, &table, &name, &when, &forEach, &events, &funcName, &funcSchema, &triggerDef, &comment, &oldTransitionName, &newTransitionName, &updateOfColumns); err != nil {
+		if err := rs.Scan(&schema, &table, &name, &when, &forEach, &events, &funcName, &funcSchema, &triggerDef, &comment, &oldTransitionName, &newTransitionName, &updateOfColumns, &dependsOnExtensions); err != nil {
 			return err
 		}
 		condition := extractTriggerWhenCondition(triggerDef)
@@ -1392,9 +1402,10 @@ ORDER  BY n.nspname, c.relname, t.tgname`
 			UpdateOfColumns:   updateOfColumns,
 			OldTransitionName: oldTransitionName,
 			NewTransitionName: newTransitionName,
-			Function:          fn,
-			Condition:         condition,
-			Comment:           comment,
+			Function:            fn,
+			Condition:           condition,
+			Comment:             comment,
+			DependsOnExtensions: dependsOnExtensions,
 		})
 	}
 	return rs.Err()
@@ -1669,7 +1680,46 @@ ORDER  BY n.nspname, p.proname, args`
 	if err := introspectProcedureGrants(ctx, conn, procIdx); err != nil {
 		return nil, err
 	}
+	if err := introspectFunctionDependsOnExtension(ctx, conn, fnByOID, procByOID); err != nil {
+		return nil, err
+	}
 	return out, nil
+}
+
+// introspectFunctionDependsOnExtension populates DependsOnExtensions
+// (Section 9.1) for every function/procedure from pg_depend's deptype='x'
+// rows — PostgreSQL's own auto-drop-dependency-on-an-extension marker,
+// confirmed live (distinct from deptype='e', true extension membership,
+// which introspectFunctions' own WHERE clause already excludes entirely).
+func introspectFunctionDependsOnExtension(ctx context.Context, conn pipeline.Querier, fnByOID map[int64]*ir.Function, procByOID map[int64]*ir.Procedure) error {
+	const q = `
+SELECT d.objid::bigint, e.extname
+FROM   pg_depend d
+JOIN   pg_extension e ON e.oid = d.refobjid
+WHERE  d.classid = 'pg_proc'::regclass
+AND    d.deptype = 'x'
+ORDER  BY d.objid, e.extname`
+
+	rs, err := conn.QueryRows(ctx, q)
+	if err != nil {
+		return fmt.Errorf("introspect function DEPENDS ON EXTENSION: %w", err)
+	}
+	defer rs.Close()
+
+	for rs.Next() {
+		var oid int64
+		var ext string
+		if err := rs.Scan(&oid, &ext); err != nil {
+			return err
+		}
+		if fn, ok := fnByOID[oid]; ok {
+			fn.DependsOnExtensions = append(fn.DependsOnExtensions, ext)
+		}
+		if proc, ok := procByOID[oid]; ok {
+			proc.DependsOnExtensions = append(proc.DependsOnExtensions, ext)
+		}
+	}
+	return rs.Err()
 }
 
 // introspectFunctionArgs fixes up Args (name, mode, type) for every function

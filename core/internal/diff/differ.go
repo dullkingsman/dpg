@@ -2418,6 +2418,11 @@ func createProcedure(o *ir.Procedure) []pipeline.DiffOp {
 		ops = append(ops, explicitRevokeOp(r, "PROCEDURE "+sig, o.SrcPos))
 	}
 	ops = append(ops, createSecurityLabelOps(o.SecurityLabels, "PROCEDURE "+sig, o.SrcPos)...)
+	// DEPENDS ON EXTENSION (Section 9.1) — see createFunction's identical
+	// note; no inline CREATE PROCEDURE form exists either.
+	for _, ext := range o.DependsOnExtensions {
+		ops = append(ops, safeOp(fmt.Sprintf("ALTER PROCEDURE %s DEPENDS ON EXTENSION %s;", sig, quoteIdent(ext)), o.SrcPos))
+	}
 	return ops
 }
 
@@ -3178,6 +3183,17 @@ func createTrigger(schema, table string, trg *ir.Trigger) []pipeline.DiffOp {
 			trg.Pos,
 		))
 	}
+	// DEPENDS ON EXTENSION (Section 9.1, reused for triggers — Section
+	// 7.9, audit item #75) has no inline CREATE TRIGGER form (confirmed
+	// empirically — real PostgreSQL rejects it there outright, "syntax
+	// error at or near DEPENDS"), only ALTER TRIGGER, even at initial
+	// creation.
+	for _, ext := range trg.DependsOnExtensions {
+		ops = append(ops, safeOp(
+			fmt.Sprintf("ALTER TRIGGER %s ON %s DEPENDS ON EXTENSION %s;", quoteIdent(trg.Name), qualIdent(schema, table), quoteIdent(ext)),
+			trg.Pos,
+		))
+	}
 	return ops
 }
 
@@ -3422,6 +3438,13 @@ func createFunction(o *ir.Function) []pipeline.DiffOp {
 		ops = append(ops, explicitRevokeOp(r, "FUNCTION "+sig, o.SrcPos))
 	}
 	ops = append(ops, createSecurityLabelOps(o.SecurityLabels, "FUNCTION "+sig, o.SrcPos)...)
+	// DEPENDS ON EXTENSION (Section 9.1) has no inline CREATE FUNCTION form
+	// (confirmed empirically — real PostgreSQL rejects it there outright,
+	// "syntax error at or near DEPENDS"), only ALTER FUNCTION, even at
+	// initial creation.
+	for _, ext := range o.DependsOnExtensions {
+		ops = append(ops, safeOp(fmt.Sprintf("ALTER FUNCTION %s DEPENDS ON EXTENSION %s;", sig, quoteIdent(ext)), o.SrcPos))
+	}
 	return ops
 }
 
@@ -4675,6 +4698,7 @@ func diffProcedure(o *ir.Procedure, snap *snapshot.SnapOpaque) ([]pipeline.DiffO
 	ops = append(ops, diffGrantSet(snap.Grants, o.Grants, "PROCEDURE "+sig, pos)...)
 	ops = append(ops, diffRevocationSet(snap.Revocations, o.Revocations, "PROCEDURE "+sig, pos)...)
 	ops = append(ops, diffSecurityLabelSet(snap.SecurityLabels, o.SecurityLabels, "PROCEDURE "+sig, pos)...)
+	ops = append(ops, diffDependsOnExtension("PROCEDURE", sig, snap.ProcedureDependsOnExtensions, o.DependsOnExtensions, pos)...)
 	return ops, nil
 }
 
@@ -5298,6 +5322,23 @@ func diffFunction(o *ir.Function, snap *snapshot.SnapFunction) []pipeline.DiffOp
 	ops = append(ops, diffGrantSet(snap.Grants, o.Grants, "FUNCTION "+sig, pos)...)
 	ops = append(ops, diffRevocationSet(snap.Revocations, o.Revocations, "FUNCTION "+sig, pos)...)
 	ops = append(ops, diffSecurityLabelSet(snap.SecurityLabels, o.SecurityLabels, "FUNCTION "+sig, pos)...)
+	ops = append(ops, diffDependsOnExtension("FUNCTION", sig, snap.DependsOnExtensions, o.DependsOnExtensions, pos)...)
+	return ops
+}
+
+// diffDependsOnExtension diffs Section 9.1's `[NO] DEPENDS ON EXTENSION`
+// set — shared by Function and Procedure (real PostgreSQL has no ALTER
+// AGGREGATE equivalent). objKW is "FUNCTION"/"PROCEDURE"; sig is the
+// already-built "name(args)" signature.
+func diffDependsOnExtension(objKW, sig string, current, desired []string, pos pipeline.SourcePos) []pipeline.DiffOp {
+	added, removed := stringSetDiff(desired, current)
+	var ops []pipeline.DiffOp
+	for _, ext := range added {
+		ops = append(ops, safeOp(fmt.Sprintf("ALTER %s %s DEPENDS ON EXTENSION %s;", objKW, sig, quoteIdent(ext)), pos))
+	}
+	for _, ext := range removed {
+		ops = append(ops, safeOp(fmt.Sprintf("ALTER %s %s NO DEPENDS ON EXTENSION %s;", objKW, sig, quoteIdent(ext)), pos))
+	}
 	return ops
 }
 
@@ -7830,15 +7871,35 @@ func diffTriggers(schema, table string, o *ir.Table, snap *snapshot.SnapTable) [
 				trg.Pos,
 			))
 			ops = append(ops, createTrigger(schema, table, trg)...)
-		} else if ptrStr(trg.Comment) != existing.Comment {
-			if trg.Comment != nil {
+		} else {
+			if ptrStr(trg.Comment) != existing.Comment {
+				if trg.Comment != nil {
+					ops = append(ops, safeOp(
+						fmt.Sprintf("COMMENT ON TRIGGER %s ON %s IS %s;", quoteIdent(trg.Name), tblIdent, quoteLit(*trg.Comment)),
+						trg.Pos,
+					))
+				} else {
+					ops = append(ops, safeOp(
+						fmt.Sprintf("COMMENT ON TRIGGER %s ON %s IS NULL;", quoteIdent(trg.Name), tblIdent),
+						trg.Pos,
+					))
+				}
+			}
+			// [NO] DEPENDS ON EXTENSION (Section 9.1, reused verbatim for
+			// triggers — Section 7.9, audit item #75): real PostgreSQL's
+			// ALTER TRIGGER ... [NO] DEPENDS ON EXTENSION grammar is
+			// identical to the function form, just against
+			// "name ON table" instead of "name(args)".
+			added, removed := stringSetDiff(trg.DependsOnExtensions, existing.DependsOnExtensions)
+			for _, ext := range added {
 				ops = append(ops, safeOp(
-					fmt.Sprintf("COMMENT ON TRIGGER %s ON %s IS %s;", quoteIdent(trg.Name), tblIdent, quoteLit(*trg.Comment)),
+					fmt.Sprintf("ALTER TRIGGER %s ON %s DEPENDS ON EXTENSION %s;", quoteIdent(trg.Name), tblIdent, quoteIdent(ext)),
 					trg.Pos,
 				))
-			} else {
+			}
+			for _, ext := range removed {
 				ops = append(ops, safeOp(
-					fmt.Sprintf("COMMENT ON TRIGGER %s ON %s IS NULL;", quoteIdent(trg.Name), tblIdent),
+					fmt.Sprintf("ALTER TRIGGER %s ON %s NO DEPENDS ON EXTENSION %s;", quoteIdent(trg.Name), tblIdent, quoteIdent(ext)),
 					trg.Pos,
 				))
 			}

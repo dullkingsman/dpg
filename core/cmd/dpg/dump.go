@@ -917,7 +917,7 @@ func renderObjectDPG(b *strings.Builder, obj pipeline.IRObject, fmtOpts format.O
 			fmt.Fprintf(b, " %s %v", kw("ROWS"), *o.Attrs.Rows)
 		}
 		fmt.Fprintf(b, " %s $$%s$$", kw("AS"), o.Attrs.Body)
-		writeFuncBlockWithLabels(b, ind, fmtOpts, o.Comment, o.Grants, o.Revocations, o.SecurityLabels)
+		writeFuncBlockWithDepends(b, ind, fmtOpts, o.Comment, o.Grants, o.Revocations, o.SecurityLabels, o.DependsOnExtensions)
 
 	case *ir.Aggregate:
 		// Previously had no case at all in this switch — an AGGREGATE
@@ -956,7 +956,7 @@ func renderObjectDPG(b *strings.Builder, obj pipeline.IRObject, fmtOpts format.O
 		b.WriteString(" ")
 		b.WriteString(o.Attrs.Language)
 		fmt.Fprintf(b, " %s $$%s$$", kw("AS"), o.Attrs.Body)
-		writeFuncBlockWithLabels(b, ind, fmtOpts, o.Comment, o.Grants, o.Revocations, o.SecurityLabels)
+		writeFuncBlockWithDepends(b, ind, fmtOpts, o.Comment, o.Grants, o.Revocations, o.SecurityLabels, o.DependsOnExtensions)
 
 	case *ir.Type:
 		switch o.Variant {
@@ -1477,6 +1477,54 @@ func writeFuncBlockWithLabels(b *strings.Builder, ind string, fmtOpts format.Opt
 			fmt.Fprintf(b, " %s", kw("CASCADE"))
 		}
 		b.WriteString(";\n")
+	}
+	writeSecurityLabels(b, ind, fmtOpts, securityLabels)
+	b.WriteString("}\n")
+}
+
+// writeFuncBlockWithDepends is writeFuncBlockWithLabels plus DEPENDS ON
+// EXTENSION (Section 9.1) — kept as a separate entry point rather than
+// adding a parameter to writeFuncBlockWithLabels itself, same reasoning as
+// that function's own doc comment: Aggregate shares writeFuncBlockWithLabels
+// too, but real PostgreSQL has no ALTER AGGREGATE ... DEPENDS ON EXTENSION
+// at all (passthrough principle — DPG doesn't reject it there, but Aggregate
+// should never actually render one), and every other unrelated caller would
+// need a trailing nil/empty slice for a directive that will never apply to
+// it either.
+func writeFuncBlockWithDepends(b *strings.Builder, ind string, fmtOpts format.Options, comment *string, grants []ir.Grant, revocations []ir.Revocation, securityLabels []pipeline.SecurityLabel, dependsOnExtensions []string) {
+	kw := fmtOpts.Keyword
+	if comment == nil && len(grants) == 0 && len(revocations) == 0 && len(securityLabels) == 0 && len(dependsOnExtensions) == 0 {
+		b.WriteString(";\n")
+		return
+	}
+	b.WriteString(" {\n")
+	if comment != nil {
+		fmt.Fprintf(b, "%s%s %s;\n", ind, kw("COMMENT"), sqlStringLit(*comment))
+	}
+	for _, g := range grants {
+		priv := "ALL"
+		if len(g.Privileges) > 0 {
+			priv = strings.Join(g.Privileges, ", ")
+		}
+		fmt.Fprintf(b, "%s%s %s %s %s", ind, kw("GRANT"), priv, kw("TO"), strings.Join(g.Roles, ", "))
+		if g.WithGrant {
+			fmt.Fprintf(b, " %s %s %s", kw("WITH"), kw("GRANT"), kw("OPTION"))
+		}
+		b.WriteString(";\n")
+	}
+	for _, r := range revocations {
+		priv := "ALL"
+		if len(r.Privileges) > 0 {
+			priv = strings.Join(r.Privileges, ", ")
+		}
+		fmt.Fprintf(b, "%s%s %s %s %s", ind, kw("REVOCATION"), priv, kw("FROM"), strings.Join(r.Roles, ", "))
+		if r.Cascade {
+			fmt.Fprintf(b, " %s", kw("CASCADE"))
+		}
+		b.WriteString(";\n")
+	}
+	for _, ext := range dependsOnExtensions {
+		fmt.Fprintf(b, "%s%s %s %s %s;\n", ind, kw("DEPENDS"), kw("ON"), kw("EXTENSION"), quoteIdentIfNeeded(ext))
 	}
 	writeSecurityLabels(b, ind, fmtOpts, securityLabels)
 	b.WriteString("}\n")
@@ -2078,6 +2126,12 @@ func renderTrigger(b *strings.Builder, trg *ir.Trigger, fmtOpts format.Options) 
 		fmt.Fprintf(b, " %s (%s)", kw("WHEN"), *trg.Condition)
 	}
 	fmt.Fprintf(b, " %s %s %s(%s)", kw("EXECUTE"), kw("FUNCTION"), trg.Function, strings.Join(trg.Args, ", "))
+	// DEPENDS ON EXTENSION (Section 9.1, reused for triggers — Section
+	// 7.9, audit item #75): the grammar allows at most one, unlike
+	// Function/Procedure's repeatable func-block form.
+	for _, ext := range trg.DependsOnExtensions {
+		fmt.Fprintf(b, " %s %s %s %s", kw("DEPENDS"), kw("ON"), kw("EXTENSION"), quoteIdentIfNeeded(ext))
+	}
 	writeEntryCommentBlock(b, ind, fmtOpts, trg.Comment)
 }
 
