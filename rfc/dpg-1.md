@@ -1610,7 +1610,8 @@ EXTENSION pg_trgm CASCADE;
 
 ```abnf
 table-decl  = [ "UNLOGGED" WSP ] "TABLE" WSP schema-table-name WSP
-              "(" column-list ")"
+              ( "(" column-list ")"
+              / "OF" WSP type-ref [ WSP "(" typed-column-list ")" ] )
               *( table-clause )
               [ ";" ]
               [ "{" table-block "}" ]
@@ -1622,21 +1623,49 @@ table-decl  = [ "UNLOGGED" WSP ] "TABLE" WSP schema-table-name WSP
               [ ";" ]
               [ "{" table-block "}" ]
 
+column-list = column-item *( "," WSP column-item )
+column-item = column-def / table-constraint / like-clause
+
+; CREATE TABLE ... (LIKE source_table [{INCLUDING|EXCLUDING} ...]) — a
+; column-list item copying another table's column definitions (and,
+; selectively, its constraints/indexes/defaults/etc.) rather than
+; restating them. May appear anywhere column-def/table-constraint may,
+; including multiple times and mixed with either.
+like-clause  = "LIKE" WSP table-ref *( WSP like-option )
+like-option  = ( "INCLUDING" / "EXCLUDING" ) WSP like-attribute
+like-attribute = "COMMENTS" / "COMPRESSION" / "CONSTRAINTS" / "DEFAULTS"
+               / "GENERATED" / "IDENTITY" / "INDEXES" / "STATISTICS"
+               / "STORAGE" / "ALL"
+
+; CREATE TABLE ... OF type_name — "Form 2" typed tables, backing a
+; previously-declared composite type (§5.2) instead of an independent
+; column list. The optional parenthesized list may only narrow
+; constraints on the type's existing attributes (WITH OPTIONS) or add
+; table-level constraints — it cannot add new columns, matching real
+; PostgreSQL's own restriction.
+typed-column-list = typed-column-item *( "," WSP typed-column-item )
+typed-column-item = col-name WSP "WITH OPTIONS" WSP *( col-constraint )
+                   / table-constraint
+
 table-clause = WITH "(" storage-params ")"
              / TABLESPACE identifier
              / INHERITS "(" table-ref-list ")"
              / partition-by-clause
+             / "USING" WSP method
 
 table-block  = *( table-directive )
 
 table-directive = owner-dir
                 / comment-dir
                 / renamed-from-dir
+                / detached-from-dir
                 / protected-dir
                 / deprecated-dir
                 / drop-cascade-dir
                 / rls-enable-dir
                 / rls-force-dir
+                / replica-identity-dir
+                / cluster-dir
                 / column-block
                 / indices-block
                 / policies-block
@@ -1651,6 +1680,55 @@ table-directive = owner-dir
    semicolon between `)` (or the last `table-clause`) and `{`.  When
    the table has NO `{ }` block, the Part 1 is terminated with `;`
    after the last `table-clause` (or directly after `)`).
+
+   **`LIKE source_table`:** May appear anywhere inside the `( )` list,
+   mixed freely with ordinary column definitions and table constraints,
+   including more than once.  Each `{INCLUDING|EXCLUDING} <attribute>`
+   pair is emitted verbatim into the generated `CREATE TABLE` in
+   declaration order, matching real PostgreSQL's own left-to-right
+   `LIKE` option semantics (a later option for the same attribute wins).
+   Omitting all `{INCLUDING|EXCLUDING}` clauses copies only column names
+   and types, PostgreSQL's own default.  Diffing treats a table declared
+   via `LIKE` no differently from one with an equivalent explicit column
+   list — the snapshot records the *resolved* columns/constraints, not
+   the `LIKE` clause itself, since `source_table` may change or
+   disappear independently after the copy is made.
+
+```sql
+TABLE order_items_archive (
+    LIKE order_items INCLUDING DEFAULTS INCLUDING CONSTRAINTS,
+    archived_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+```
+
+   **`OF type_name` (typed tables):** Backs the table's row type with a
+   previously-declared composite type (§5.2) instead of an independent
+   column list.  `WITH OPTIONS` narrows a constraint (`NOT NULL`,
+   `DEFAULT`, etc.) on one of the type's existing attributes — real
+   PostgreSQL rejects any attempt to introduce a *new* column this way,
+   and DPG does not attempt to detect that error itself; it is left to
+   PostgreSQL's own parser (per the passthrough principle already
+   applied to every other clause-combination rule in this document, see
+   e.g. §7.9's `REFERENCING` note).  Adding, changing, or removing the
+   `OF type_name` association after creation is an `ALTER`-side
+   operation — see §7.11's `OF type_name`/`NOT OF` entry.
+
+```sql
+TYPE address AS (street TEXT, city TEXT, zip TEXT) {}
+
+TABLE shipping_address OF address (
+    street WITH OPTIONS NOT NULL,
+    CONSTRAINT zip_format CHECK (zip ~ '^[0-9]{5}$')
+);
+```
+
+   **`USING method` (table access method):** Selects the storage access
+   method (e.g. a columnar extension's method, once installed via
+   `CREATE EXTENSION`) instead of the cluster's default.  Positioned
+   among the other `table-clause` alternatives, matching real
+   PostgreSQL's clause ordering after the column list / `OF type_name`
+   and before `WITH (...)`/`TABLESPACE`.  Changing `USING` post-creation
+   is a separate, ALTER-side concern — see §21's `SET ACCESS METHOD` row.
 
 ### 7.2. Column Definitions
 
@@ -1823,6 +1901,7 @@ TABLE order_items (
 table-constraint = "CONSTRAINT" WSP identifier WSP table-constraint-body
                    [ "NOT VALID" ]
                    [ "DEFERRABLE" [ "INITIALLY DEFERRED" / "INITIALLY IMMEDIATE" ] ]
+                   [ WSP "RENAMED FROM" WSP identifier ]
 
 table-constraint-body
     = "PRIMARY KEY" WSP "(" col-list ")"
@@ -1857,6 +1936,27 @@ table-constraint-body
    subsequent `ALTER TABLE ADD CONSTRAINT ... DEFERRABLE`.  If a cycle
    exists with no `DEFERRABLE` FK, the compiler emits error DPG-E017
    with the full dependency cycle listed.
+
+   **`RENAMED FROM` on a constraint** (like index `RENAMED FROM`, §7.7)
+   emits `ALTER TABLE t RENAME CONSTRAINT old TO new` — `SAFE`,
+   metadata-only — instead of the drop-and-recreate that a name-only
+   difference would otherwise trigger under name-based constraint
+   identity (§7.3's opening paragraph).  MUST appear in the `{ }`
+   block, the same placement restriction as `NOT VALID`, since it is
+   itself a lifecycle directive rather than a `CREATE TABLE`-native
+   clause.
+
+   **Deferrability-only changes:** When an existing `FOREIGN KEY`
+   constraint's `DEFERRABLE`/`INITIALLY DEFERRED`/`INITIALLY IMMEDIATE`
+   flags differ from the snapshot but every other part of the
+   constraint (columns, `REFERENCES` target, `ref-opts`) is unchanged,
+   the compiler emits `ALTER TABLE t ALTER CONSTRAINT name [[NOT]
+   DEFERRABLE] [INITIALLY DEFERRED|IMMEDIATE]` — `SAFE` — instead of
+   drop + re-add.  Real PostgreSQL's `ALTER CONSTRAINT` supports only
+   this narrow deferrability-timing change and only for `FOREIGN KEY`
+   constraints; any other simultaneous change, or a non-FK constraint,
+   falls back to the general "constraint changed" drop-and-recreate row
+   below.
 
    Examples:
 
@@ -1949,6 +2049,30 @@ col-block-directive
    **Compression methods:** `pglz`, `lz4` (requires PostgreSQL 14+
    compiled with LZ4 support).
 
+   **Generated-column expression changes:** No separate directive is
+   needed — the `GENERATED ALWAYS AS ( expr ) STORED` clause is already
+   part of `column-def` (§7.2).  The differ recognises three distinct
+   transitions on it and emits the matching targeted `ALTER`, instead
+   of falling through to the generic "column type changed" row:
+
+   | Change | DDL emitted | Safety |
+   |--------|-------------|--------|
+   | `GENERATED ... AS (expr)` added where none existed | `ALTER TABLE t ALTER COLUMN c ADD GENERATED ALWAYS AS (expr) STORED` | `CAUTION` (rewrites the column) |
+   | Existing generated expression text changed | `ALTER TABLE t ALTER COLUMN c SET EXPRESSION AS (expr)` — PG18+ only; older targets fall back to drop-and-recreate of the column | `CAUTION` |
+   | `GENERATED ... AS (expr)` removed, column kept | `ALTER TABLE t ALTER COLUMN c DROP EXPRESSION [IF EXISTS]` | `SAFE` (freezes the column's current values, no rewrite) |
+
+   **Identity-column changes:** Likewise driven entirely by `column-def`'s
+   already-declarative `GENERATED ALWAYS/BY DEFAULT AS IDENTITY
+   [identity-opts]` (§7.2) — no new grammar, only new diffing rules,
+   distinguished from a generic column-type change:
+
+   | Change | DDL emitted | Safety |
+   |--------|-------------|--------|
+   | Identity clause added where none existed | `ALTER TABLE t ALTER COLUMN c ADD GENERATED {ALWAYS\|BY DEFAULT} AS IDENTITY [(seq-options)]` | `CAUTION` |
+   | `ALWAYS`↔`BY DEFAULT` changed, options unchanged | `ALTER TABLE t ALTER COLUMN c SET GENERATED {ALWAYS\|BY DEFAULT}` | `SAFE` |
+   | `identity-opts` (increment/min/max/cache/cycle) changed | `ALTER TABLE t ALTER COLUMN c SET <option> ...` (one `SET` per changed option, PostgreSQL's own identity-sequence syntax — distinct from `ALTER SEQUENCE`, no sequence name involved) | `SAFE` |
+   | Identity clause removed, column kept | `ALTER TABLE t ALTER COLUMN c DROP IDENTITY [IF EXISTS]` | `SAFE` |
+
 ### 7.5. Column-Level Grants
 
    Column-level grants use the `GRANTS { }` / `REVOCATIONS { }` syntax
@@ -2031,6 +2155,34 @@ TABLE users (
    -   `SCHEMA reporting { RENAMED FROM old_reporting; }` →
        `ALTER SCHEMA old_reporting RENAME TO reporting;`
 
+   **Cross-schema moves (`SET SCHEMA`):** For every schema-scoped object
+   kind whose `RENAMED FROM` uses the generic `renamed-from-dir`
+   production (Appendix A) — Table, View, Materialized View, Sequence,
+   and the kinds covered in §9/§14 that reuse the same directive —
+   `identifier` there is in fact `qual-name` (`[schema.]name`), so the
+   old name MAY be schema-qualified.  When the resolved old name's
+   schema differs from the object's current declared schema, the
+   compiler emits `ALTER <kind> old_schema.name SET SCHEMA new_schema`
+   *in addition to* `RENAME TO`, in that order (`SET SCHEMA` first,
+   since a still-in-flight rename could otherwise collide with an
+   existing name in the target schema) — matching the fact that real
+   PostgreSQL has no single statement that does both at once for any of
+   these kinds:
+
+   -   `TABLE archive.orders { RENAMED FROM public.orders; }` →
+       `ALTER TABLE public.orders SET SCHEMA archive;` (name unchanged,
+       schema-only move; `RENAME TO` omitted since the bare name is the
+       same).
+   -   `VIEW archive.order_summary { RENAMED FROM public.orders_summary; }`
+       → `ALTER VIEW public.orders_summary SET SCHEMA archive;` then
+       `ALTER VIEW archive.orders_summary RENAME TO order_summary;`
+       (both schema and name changed).
+
+   An unqualified `RENAMED FROM old_name` is always resolved within the
+   object's *current* declared schema — this is a strictly additive
+   grammar change; every existing same-schema `RENAMED FROM` in this
+   document continues to mean exactly what it always has.
+
 ### 7.7. Indexes
 
    Indexes are declared in the `INDICES { }` block (or using the
@@ -2039,13 +2191,16 @@ TABLE users (
 ```abnf
 index-decl  = [ "UNIQUE" WSP ]
               [ "CONCURRENTLY" WSP ]
+              [ "ONLY" WSP ]
               index-name WSP
               [ "USING" WSP method WSP ]
               "(" index-col-list ")"
               [ "INCLUDE" WSP "(" col-list ")" ]
+              [ WSP "NULLS" WSP ( "DISTINCT" / "NOT DISTINCT" ) ]
               [ "WITH" WSP "(" storage-params ")" ]
               [ "WHERE" WSP "(" predicate ")" ]
               [ "TABLESPACE" WSP identifier ]
+              [ WSP "RENAMED FROM" WSP index-name ]
               ";"
 
 index-col-list = index-col *( "," index-col )
@@ -2053,17 +2208,57 @@ index-col   = ( col-name / "(" expr ")" )
               [ "ASC" / "DESC" ]
               [ "NULLS FIRST" / "NULLS LAST" ]
               [ "COLLATE" WSP identifier ]
-              [ "opclass" ]
+              [ WSP identifier [ "(" storage-params ")" ] ]  -- opclass [(params)]
 ```
 
-   `UNIQUE` and `CONCURRENTLY` are both prefix keywords before the index
-   name, in that fixed order — mirroring real PostgreSQL's own
-   `CREATE UNIQUE INDEX CONCURRENTLY name ON table USING method (columns)`
+   `UNIQUE`, `CONCURRENTLY`, and `ONLY` are all prefix keywords before the
+   index name, in that fixed order — mirroring real PostgreSQL's own
+   `CREATE UNIQUE INDEX CONCURRENTLY name ON ONLY table USING method (columns)`
    exactly (only the implicit `INDEX`/`ON table` are dropped, since DPG's
    `INDICES { }` block already establishes both). In **Mode B** (§4.8),
    which does carry the literal `INDEX` keyword, the same order applies
    with `INDEX` inserted where PostgreSQL puts it:
-   `[ "UNIQUE" WSP ] "INDEX" WSP [ "CONCURRENTLY" WSP ] index-name ...`.
+   `[ "UNIQUE" WSP ] "INDEX" WSP [ "CONCURRENTLY" WSP ] [ "ONLY" WSP ] index-name ...`.
+
+   **`ONLY`** suppresses recursion into a partitioned table's own
+   partitions — the index is created solely on the parent, matching real
+   PostgreSQL's `CREATE INDEX ... ON ONLY table` exactly.  Meaningful only
+   when the enclosing table has a `PARTITION BY` clause (§7.13); DPG
+   performs no validation of this and leaves the combination to
+   PostgreSQL's own parser, per the passthrough principle already applied
+   to other clause-combination rules in this document (e.g. §7.9's
+   `REFERENCING` note).
+
+   **Index opclass parameters:** `index-col`'s trailing `identifier
+   [ "(" storage-params ")" ]` is the operator class name, optionally
+   followed by its own parameters (`opclass(param = value, ...)`) — the
+   identical shape already used by `excl-list`'s `EXCLUDE` element
+   (Appendix A), reused here rather than inventing a second name for it.
+
+```sql
+INDICES {
+    idx_search_doc USING gist (doc tsvector_ops(siglen = 32));
+}
+```
+
+   **`NULLS [NOT] DISTINCT`** controls whether a `UNIQUE` index treats
+   multiple `NULL`s in the indexed columns as distinct (PostgreSQL's
+   default, `NULLS DISTINCT`) or as duplicates that violate uniqueness
+   (`NULLS NOT DISTINCT`).  Valid only on a `UNIQUE` index — DPG performs
+   no validation of this combination itself, leaving it to PostgreSQL's
+   parser (same passthrough principle as `ONLY` above).  This clause was
+   already implemented identically at the inline `PRIMARY
+   KEY`/`UNIQUE` constraint level (`conflict-clause`, §7.2) and at the
+   table-constraint level (`table-constraint-body`, §7.3); this closes
+   the one remaining position — the standalone `index-decl` — where the
+   grammar previously didn't document what the implementation already
+   does.
+
+```sql
+INDICES {
+    UNIQUE idx_unique_optional_email (email) NULLS NOT DISTINCT;
+}
+```
 
    **`CONCURRENTLY` is a bare presence keyword, not a boolean** — this
    matches real PostgreSQL exactly: `CONCURRENTLY` is either written or it
@@ -2097,6 +2292,19 @@ index-col   = ( col-name / "(" expr ")" )
    within a schema.  Two indexes with the same name but different
    definitions are a compiler error (DPG-E005).
 
+   **Index renaming:** `RENAMED FROM old_name` follows the same
+   algorithm as Table/Schema renaming (§7.6/§7.11) — a metadata-only
+   `ALTER INDEX old_name RENAME TO new_name` is emitted instead of the
+   usual drop-and-recreate path, and a rename combined with any other
+   structural change still falls back to drop + recreate (the rename
+   carve-out applies only when nothing else about the index differs).
+
+```sql
+INDICES {
+    idx_email_lower (lower(email)) RENAMED FROM idx_lower_email;
+}
+```
+
    **Partial index predicates** are stored as normalised text and
    diffed by text equality.  Whitespace normalisation is applied:
    all runs of whitespace are collapsed to a single space.
@@ -2117,7 +2325,8 @@ index-col   = ( col-name / "(" expr ")" )
    |--------|-------------|--------|
    | New index (existing table) | `CREATE [UNIQUE] INDEX [CONCURRENTLY] [IF NOT EXISTS] name ON ...` | `MANUAL` if `CONCURRENTLY` written, else `CAUTION` (default) |
    | Index removed | `DROP INDEX [CONCURRENTLY] name` | `CAUTION` |
-   | Any structural change | Drop + recreate | `CAUTION` or `MANUAL` |
+   | Index renamed only (`RENAMED FROM`, nothing else differs) | `ALTER INDEX old_name RENAME TO new_name` | `SAFE` |
+   | Any other structural change | Drop + recreate | `CAUTION` or `MANUAL` |
 
    Indexes on new tables (emitted in the same migration as the
    `CREATE TABLE`) are always emitted as non-concurrent `CREATE INDEX` in
@@ -2179,6 +2388,7 @@ permissiveness = "PERMISSIVE" / "RESTRICTIVE"
    |--------|-------------|--------|
    | `ENABLE ROW LEVEL SECURITY` added | `ALTER TABLE t ENABLE ROW LEVEL SECURITY` | `SAFE` |
    | `FORCE ROW LEVEL SECURITY` added | `ALTER TABLE t FORCE ROW LEVEL SECURITY` | `SAFE` |
+   | `FORCE ROW LEVEL SECURITY` removed, `ENABLE` still present | `ALTER TABLE t NO FORCE ROW LEVEL SECURITY` | `SAFE` |
    | Both removed | `ALTER TABLE t DISABLE ROW LEVEL SECURITY` | `SAFE` |
    | New policy | `CREATE POLICY name ON t FOR ... TO ... USING (...) WITH CHECK (...)` | `SAFE` |
    | Policy changed | `DROP POLICY name ON t; CREATE POLICY ...` | `SAFE` |
@@ -2230,6 +2440,7 @@ trigger-decl = trigger-name WSP timing WSP event-list
                WSP for-each
                [ WSP "WHEN" WSP "(" expr ")" ]
                WSP "EXECUTE FUNCTION" WSP func-ref "(" arg-list ")"
+               [ WSP trigger-enable-state ]
                ";"
 
 timing       = "BEFORE" / "AFTER" / "INSTEAD OF"
@@ -2240,6 +2451,14 @@ for-each     = "FOR EACH ROW" / "FOR EACH STATEMENT"
 referencing-clause = "REFERENCING"
     ( "OLD TABLE AS" identifier [ "NEW TABLE AS" identifier ]
     / "NEW TABLE AS" identifier [ "OLD TABLE AS" identifier ] )
+
+; Real PostgreSQL has no such clause on CREATE TRIGGER itself — a new
+; trigger is always ENABLED, and the other three states are ALTER-only.
+; DPG models the state declaratively anyway (same reasoning as RLS's
+; enable-dir/force-dir, §7.8), so a source file's trigger declaration is
+; a complete description of desired state without a separate directive
+; block. Omitting this clause means ENABLED — real PostgreSQL's default.
+trigger-enable-state = "DISABLED" / "ENABLE REPLICA" / "ENABLE ALWAYS"
 ```
 
    **Diffing semantics:**
@@ -2248,9 +2467,15 @@ referencing-clause = "REFERENCING"
    |--------|-------------|--------|
    | New trigger | `CREATE [CONSTRAINT] TRIGGER name ... ON t ...` | `SAFE` |
    | Trigger changed | `DROP TRIGGER name ON t; CREATE TRIGGER ...` | `SAFE` |
+   | Enable state changed only (`trigger-enable-state`) | `ALTER TABLE t ENABLE/DISABLE TRIGGER name` or `ALTER TABLE t ENABLE REPLICA/ALWAYS TRIGGER name` | `SAFE` |
    | Trigger removed | `DROP TRIGGER name ON t` | `SAFE` |
 
    Trigger identity is `(schema, table, trigger_name)`.
+
+   **`RULE` has no DPG equivalent** — PostgreSQL's `CREATE RULE` is out
+   of scope entirely (§23), so the `ENABLE`/`DISABLE RULE` half of real
+   PostgreSQL's enable-state model has nothing to attach to and is not
+   addressed by this section.
 
    **`REFERENCING` constraints (informative).** DPG performs no
    clause-combination validation of its own for `REFERENCING` — every
@@ -2332,7 +2557,7 @@ privilege      = "SELECT" / "INSERT" / "UPDATE" / "DELETE" /
 ### 7.11. Table Lifecycle Directives
 
 ```abnf
-renamed-from-dir = "RENAMED FROM" WSP identifier
+renamed-from-dir = "RENAMED FROM" WSP qual-name
 protected-dir    = "PROTECTED"
 deprecated-dir   = "DEPRECATED" WSP SQUOTE text SQUOTE
 drop-cascade-dir = "DROP CASCADE"
@@ -2355,13 +2580,70 @@ comment-dir      = "COMMENT" WSP SQUOTE text SQUOTE
    specific object.  The compiler emits `DROP TABLE name CASCADE` when
    removing this table.
 
-   **`RENAMED FROM`:** See Section 7.6.
+   **`RENAMED FROM`:** See Section 7.6, including the cross-schema
+   `SET SCHEMA` behaviour a schema-qualified old name triggers.
 
    **Attaching a downstream naming convention:** a `NAME MAP`/`NAME
    MAPS` directive can also appear in this block, independently of
    `RENAMED FROM` — see §D.10 (Name Maps) for the full feature (ten
    rule keywords, `[namemaps]` `dpg.toml` config, block-layer
    directives, and snapshot representation).
+
+   **`REPLICA IDENTITY`/`CLUSTER ON`** are declared the same way as RLS
+   (§7.8) — as block directives even though real PostgreSQL has no
+   `CREATE TABLE`-native clause for either, only an `ALTER TABLE`
+   statement:
+
+```abnf
+replica-identity-dir = "REPLICA IDENTITY" WSP
+                        ( "DEFAULT" / "FULL" / "NOTHING"
+                        / "USING INDEX" WSP index-name )
+cluster-dir           = "CLUSTER ON" WSP index-name
+```
+
+   **`REPLICA IDENTITY`** controls how much of an updated/deleted row
+   PostgreSQL's logical replication can capture — directly gates what a
+   Publication (§13.1) can actually replicate for `UPDATE`/`DELETE`.
+   Omitting the directive means `DEFAULT` (the primary key only),
+   PostgreSQL's own default; `USING INDEX` requires a `UNIQUE` index on
+   `NOT NULL` columns, left to PostgreSQL's own parser to enforce.
+   Changing it emits `ALTER TABLE t REPLICA IDENTITY ...` — `SAFE`
+   (metadata-only, no rewrite).
+
+   **`CLUSTER ON`** records which index a future manual `CLUSTER`
+   (§23 — the `CLUSTER` command itself remains a runtime operation, out
+   of scope) would use; declaring it does not itself cluster the table.
+   Removing a previously-declared `CLUSTER ON` emits `ALTER TABLE t SET
+   WITHOUT CLUSTER` — `SAFE`.
+
+```sql
+TABLE orders ( ... )
+{
+    REPLICA IDENTITY FULL;
+    CLUSTER ON idx_orders_created_at;
+}
+```
+
+   **`OF type_name`/`NOT OF` (post-creation):** A table gaining, losing,
+   or switching its `OF type_name` association (§7.1) after creation is
+   an `ALTER`-only transition, distinct from the CREATE-time Form 2
+   already covered in §7.1: `ALTER TABLE t OF type_name` (gained or
+   switched to a different type) / `ALTER TABLE t NOT OF` (removed) —
+   `CAUTION` (PostgreSQL validates every column against the type's
+   attributes at execution time).
+
+   **`SET ACCESS METHOD` (post-creation):** A change to a table's
+   already-declared `USING method` clause (§7.1) after creation emits
+   `ALTER TABLE t SET ACCESS METHOD method` — `CAUTION` (rewrites the
+   table's storage using the new method).
+
+   **`INHERIT`/`NO INHERIT` (post-creation):** A change to a table's
+   `INHERITS (...)` list (§7.1) after creation — a parent added or
+   removed — emits `ALTER TABLE child INHERIT parent` /
+   `ALTER TABLE child NO INHERIT parent` per added/removed parent,
+   rather than requiring the whole table to be recreated — `SAFE`
+   (`INHERIT` briefly validates existing rows against the parent's
+   constraints; no rewrite).
 
 ### 7.12. Unlogged and Foreign Tables
 
@@ -2375,8 +2657,11 @@ UNLOGGED TABLE session_cache (
 ```
 
    Emits `CREATE UNLOGGED TABLE`.  Changing a regular table to unlogged
-   (or vice versa) requires `DROP TABLE CASCADE` + `CREATE TABLE`:
-   classified as `DESTRUCTIVE`.
+   (or vice versa) emits `ALTER TABLE name SET UNLOGGED` /
+   `ALTER TABLE name SET LOGGED` — classified `CAUTION` (rewrites the
+   table's storage in place; briefly holds `ACCESS EXCLUSIVE`, but
+   unlike the drop-and-recreate path this document previously
+   prescribed, no dependent FK/view/index is ever destroyed).
 
    **Temporary tables** are session-scoped.  DPG MUST NOT manage them.
    A `TEMPORARY TABLE` keyword anywhere in a `.dpg` file is a compiler
@@ -2417,13 +2702,37 @@ partition-col       = col-name / "(" expr ")"
    table's `{ }` block.
 
 ```abnf
-partition-decl  = partition-name WSP "FOR VALUES" WSP bounds-clause ";"
-                / partition-name WSP "DEFAULT" ";"
+partition-decl  = [ "FOREIGN" WSP ] partition-name WSP
+                  ( "FOR VALUES" WSP bounds-clause / "DEFAULT" )
+                  [ WSP "SERVER" WSP identifier
+                    [ WSP "OPTIONS" WSP "(" option-list ")" ] ]
+                  ";"
 
 bounds-clause   = "FROM" WSP "(" literal-list ")"
                   "TO" WSP "(" literal-list ")"        -- RANGE
                 / "IN" WSP "(" literal-list ")"        -- LIST
                 / "WITH" WSP "(" modulus-remainder ")" -- HASH
+```
+
+   **Foreign table partitions:** `FOREIGN partition-name ... SERVER
+   server_name [OPTIONS (...)]` makes one partition a foreign table
+   instead of a regular one — real PostgreSQL's own sharding pattern,
+   where each partition's data actually lives on a different remote
+   server (`postgres_fdw`, etc.).  Column definitions are never
+   restated — a partition, foreign or not, always inherits its parent's
+   columns.  Emits `CREATE FOREIGN TABLE name PARTITION OF parent FOR
+   VALUES ... SERVER server_name [OPTIONS (...)]`.
+
+```sql
+TABLE events ( id BIGINT, region TEXT, payload JSONB )
+    PARTITION BY LIST (region)
+{
+    PARTITIONS {
+        events_us FOR VALUES IN ('us-east', 'us-west');
+        FOREIGN events_archive DEFAULT
+            SERVER archive_server OPTIONS (table_name 'events_archive');
+    }
+}
 ```
 
    **Sub-partitioning:** A partition entry MAY have its own
@@ -2445,12 +2754,53 @@ TABLE events ( ... ) PARTITION BY RANGE (created_at)
 }
 ```
 
+   **Attaching/detaching an existing standalone table:** Declaring a
+   partition from scratch (above) always emits `CREATE TABLE ... PARTITION
+   OF ...`. To instead convert an *already-existing standalone table*
+   into a partition — or a partition back into a standalone table —
+   without dropping and recreating it (and its data), DPG offers a
+   symmetric pair of directives mirroring `RENAMED FROM`'s "point at a
+   prior identity" shape:
+
+```abnf
+; PARTITIONS { } entry form — attaches an existing standalone table
+attached-partition-decl = "ATTACHED FROM" WSP table-ref WSP
+                           "FOR VALUES" WSP bounds-clause ";"
+                         / "ATTACHED FROM" WSP table-ref WSP "DEFAULT" ";"
+
+; Standalone TABLE { } block directive — detaches a former partition
+detached-from-dir = "DETACHED FROM" WSP table-ref [ WSP "CONCURRENTLY" ] ";"
+```
+
+   -   A `PARTITIONS { }` entry written as `ATTACHED FROM
+       existing_table FOR VALUES ...` — where `existing_table` is a
+       standalone table already present in the snapshot — emits `ALTER
+       TABLE parent ATTACH PARTITION existing_table FOR VALUES ...`
+       instead of `CREATE TABLE ... PARTITION OF ...`.  Real PostgreSQL
+       validates the existing table's structure and any `CHECK`
+       constraints against the target partition bound at attach time;
+       DPG performs no additional validation of its own (passthrough
+       principle, as elsewhere in this document).  `ATTACH PARTITION`
+       has no `CONCURRENTLY` variant in real PostgreSQL — none is
+       offered here either.
+   -   A standalone `TABLE` declaration carrying `DETACHED FROM
+       parent_table [CONCURRENTLY]` in its `{ }` block — where the
+       table is currently a partition of `parent_table` per the
+       snapshot — emits `ALTER TABLE parent_table DETACH PARTITION
+       name [CONCURRENTLY]` instead of the drop this document would
+       otherwise prescribe for "declared table disappeared from its
+       parent's `PARTITIONS { }` block."  `CONCURRENTLY` runs the
+       detach in two non-blocking steps (matching real PostgreSQL);
+       omitting it holds a brief `ACCESS EXCLUSIVE` on the parent.
+
    **Diffing semantics:**
 
    | Change | DDL emitted | Safety |
    |--------|-------------|--------|
    | New partition | `CREATE TABLE <name> PARTITION OF <parent> FOR VALUES ...` | `SAFE` |
-   | Partition removed | `DROP TABLE <name>` | `DESTRUCTIVE` |
+   | Partition attached (`ATTACHED FROM`, existing table) | `ALTER TABLE parent ATTACH PARTITION name FOR VALUES ...` | `CAUTION` |
+   | Partition detached (`DETACHED FROM`) | `ALTER TABLE parent DETACH PARTITION name [CONCURRENTLY]` | `MANUAL` if `CONCURRENTLY` written, else `CAUTION` |
+   | Partition removed (absent, not detached) | `DROP TABLE <name>` | `DESTRUCTIVE` |
    | Partition strategy change | Requires `--approve-partition-rebuild` | `MANUAL` |
 
    **Partition strategy change procedure** (requires
@@ -2550,6 +2900,8 @@ SCHEMA public {
    | Output column list changed (any way) | `DROP VIEW CASCADE; CREATE VIEW` | `DESTRUCTIVE` |
    | Owner changed | `ALTER VIEW name OWNER TO role` | `SAFE` |
    | Comment changed | `COMMENT ON VIEW name IS '...'` | `SAFE` |
+   | View renamed (`RENAMED FROM`) | `ALTER VIEW old RENAME TO new` | `CAUTION` |
+   | View moved to another schema (`RENAMED FROM` schema-qualified, §7.6) | `ALTER VIEW old_schema.name SET SCHEMA new_schema` | `SAFE` |
    | View removed | `DROP VIEW name [CASCADE]` | `DESTRUCTIVE` |
 
    **Output column list comparison:** The compiler compares the columns
@@ -2614,7 +2966,12 @@ SCHEMA analytics {
    materialized view requires `DROP MATERIALIZED VIEW` followed by
    `CREATE MATERIALIZED VIEW` — classified as `DESTRUCTIVE`.
    `REFRESH MATERIALIZED VIEW` is a runtime operation and is out of
-   scope for DPG (Section 23).
+   scope for DPG (Section 23).  `RENAMED FROM` (§7.6) and `OWNER`/
+   `COMMENT` changes follow the same rules as regular views: renaming
+   emits `ALTER MATERIALIZED VIEW old RENAME TO new` (`CAUTION`); a
+   schema-qualified `RENAMED FROM` emits `ALTER MATERIALIZED VIEW
+   old_schema.name SET SCHEMA new_schema` (`SAFE`) alongside it when the
+   schema also changed.
 
 ### 8.3. Recursive Views
 
@@ -2938,10 +3295,10 @@ SCHEMA public {
    not backed by `GENERATED AS IDENTITY` or `SERIAL`.
 
    **PG equivalent:**
-   `CREATE SEQUENCE name [AS type] [INCREMENT BY n] [MINVALUE n] [MAXVALUE n] [START WITH n] [CACHE n] [CYCLE|NO CYCLE] [OWNED BY table.col]`
+   `CREATE [UNLOGGED] SEQUENCE name [AS type] [INCREMENT BY n] [MINVALUE n] [MAXVALUE n] [START WITH n] [CACHE n] [CYCLE|NO CYCLE] [OWNED BY {table.col|NONE}]`
 
 ```abnf
-sequence-decl  = "SEQUENCE" WSP schema-name
+sequence-decl  = [ "UNLOGGED" WSP ] "SEQUENCE" WSP schema-name
                  *( sequence-option )
                  ";"
                  [ "{" sequence-block "}" ]
@@ -2953,12 +3310,48 @@ sequence-option = "AS" WSP seq-type
                 / "START WITH" WSP integer
                 / "CACHE" WSP integer
                 / "CYCLE" / "NO CYCLE"
-                / "OWNED BY" WSP table-col-ref
+                / "OWNED BY" WSP ( table-col-ref / "NONE" )
+                / "RESTART" [ WSP "WITH" WSP integer ]
 
 seq-type        = "SMALLINT" / "INTEGER" / "BIGINT"
 
-sequence-block  = *( ( owner-dir / comment-dir / grants-block ) ";" )
+sequence-block  = *( ( owner-dir / comment-dir / grants-block
+                      / revocations-block ) ";" )
 ```
+
+   **`UNLOGGED`:** Like `UNLOGGED TABLE` (§7.12), trades crash-safety
+   (the sequence's current value is not WAL-logged) for reduced write
+   overhead — a genuinely different tradeoff axis from the temp-table
+   session-scoping exclusion (§7.12), and available on any PostgreSQL
+   version this document targets (§1.4).  Toggling it after creation
+   follows the same `ALTER SEQUENCE name SET LOGGED/UNLOGGED` path as
+   tables, `CAUTION`.
+
+   **`OWNED BY NONE`:** Explicitly detaches the sequence from any
+   column, distinct from never having declared `OWNED BY` at all (which
+   simply leaves the sequence's existing ownership, if any, untouched).
+   Diffed like any other option change — see below.
+
+   **`RESTART [WITH n]`:** Unlike every other `sequence-option`, this
+   does not describe persistent, comparable state — real PostgreSQL's
+   `RESTART` is an imperative action (reset the sequence's *current*
+   value now) that leaves no queryable "current RESTART value" for a
+   later `plan` to diff against; `nextval()` calls immediately begin
+   moving the value away from `n` again.  The compiler therefore does
+   NOT persist `RESTART`'s argument in the snapshot the way it persists
+   `START WITH`/`INCREMENT BY`/etc.  Instead, `RESTART`'s mere presence
+   in the desired source unconditionally emits `ALTER SEQUENCE name
+   RESTART [WITH n]` on every `plan`/`apply` for as long as it remains
+   declared — Safety `MANUAL`, and the compiler emits an inline comment
+   recommending the directive be removed from source once the reset has
+   been applied, the same one-shot-then-remove usage pattern real
+   PostgreSQL's own documentation recommends for `RESTART` itself.
+
+   Sequences gain a `REVOCATIONS { }` block (§11.3's `revoke-entry`
+   grammar) identical in shape to Table's (§7.10) — previously absent
+   from `sequence-block` even though `GRANTS { }` was already present,
+   which silently discarded any declared sequence revocation with no
+   error and no DDL emitted.
 
    **Rule:** Sequences backing `GENERATED AS IDENTITY` or `SERIAL`
    columns are managed automatically by PostgreSQL and MUST NOT be
@@ -2989,7 +3382,9 @@ SCHEMA public {
    |--------|-------------|--------|
    | New sequence | `CREATE SEQUENCE ...` | `SAFE` |
    | Increment/min/max/cache/cycle changed | `ALTER SEQUENCE name ...` | `SAFE` |
-   | `OWNED BY` changed | `ALTER SEQUENCE name OWNED BY ...` | `SAFE` |
+   | `OWNED BY` changed (incl. to/from `NONE`) | `ALTER SEQUENCE name OWNED BY {table.col\|NONE}` | `SAFE` |
+   | `RESTART [WITH n]` present in source | `ALTER SEQUENCE name RESTART [WITH n]` (re-emitted every plan/apply while present, see above) | `MANUAL` |
+   | `UNLOGGED` toggled | `ALTER SEQUENCE name SET LOGGED/UNLOGGED` | `CAUTION` |
    | `AS type` changed | `DROP SEQUENCE; CREATE SEQUENCE` | `DESTRUCTIVE` |
    | Sequence removed | `DROP SEQUENCE name` | `DESTRUCTIVE` |
 
@@ -3610,7 +4005,7 @@ EVENT TRIGGER prevent_drop_table
 ### 14.2. Collations
 
    **PG equivalent:**
-   `CREATE COLLATION [IF NOT EXISTS] name (LOCALE = locale | LC_COLLATE = lc, LC_CTYPE = lc | PROVIDER = provider [, DETERMINISTIC = bool])`
+   `CREATE COLLATION [IF NOT EXISTS] name { (LOCALE = locale | LC_COLLATE = lc, LC_CTYPE = lc | PROVIDER = provider [, DETERMINISTIC = bool]) | FROM existing_collation }`
 
 ```sql
 SCHEMA public {
@@ -3619,12 +4014,24 @@ SCHEMA public {
         LOCALE        = 'und-u-ks-level2',
         DETERMINISTIC = false
     );
+
+    -- FROM copies an existing collation's definition under a new name
+    -- (e.g. a differently-cased alias of a system-provided collation).
+    COLLATION case_insensitive_alias FROM case_insensitive;
 }
 ```
 
+   Since Collation is an `opaque-object-decl` kind (Part 1 passthrough,
+   Appendix A), the `FROM existing_collation` form requires no DPG-side
+   grammar of its own — it is real PostgreSQL `CREATE COLLATION` syntax,
+   handed to `pg_query` verbatim like every other property form above.
+
    **Diffing semantics:** Any property change requires `DROP COLLATION`
    + `CREATE COLLATION` — classified as `DESTRUCTIVE` (dependent objects
-   must be dropped and recreated).
+   must be dropped and recreated). This applies identically to the
+   `FROM existing_collation` form: since the body is diffed as opaque
+   text (§14's `opaque-object-decl` note), changing which collation a
+   `FROM` clause points at is itself a property change.
 
 ### 14.3. Operators
 
@@ -3804,12 +4211,13 @@ SCHEMA public {
    Tablespaces are cluster-level objects.
 
    **PG equivalent:**
-   `CREATE TABLESPACE name [OWNER owner] LOCATION 'path'`
+   `CREATE TABLESPACE name [OWNER owner] LOCATION 'path' [WITH (tablespace_option = value, ...)]`
 
 ```abnf
 tablespace-decl = "TABLESPACE" WSP identifier
                   [ WSP "OWNER" WSP role-spec ]
                   WSP "LOCATION" WSP SQUOTE <text> SQUOTE
+                  [ WSP "WITH" WSP "(" storage-params ")" ]
                   ";"
                   [ "{" tablespace-block "}" ]
 
@@ -3822,15 +4230,18 @@ tablespace-block = *( comment-dir ";" )
    `CREATE TABLESPACE` grammar exactly (Tenet 2/5) rather than a `{ }`
    block directive — unlike Table/View/etc., where `OWNER` has no
    place in the native `CREATE` statement and is therefore a block
-   directive instead.  `WITH (tablespace_option = value, ...)` storage
-   parameters and the full `ALTER TABLESPACE` surface (`RENAME TO`,
-   `OWNER TO`, `SET`/`RESET` options) are a separate, still-open gap —
-   this section documents `CREATE`-time grammar only.
+   directive instead.  `WITH (tablespace_option = value, ...)` (e.g.
+   `seq_page_cost`, `random_page_cost`) follows the same trailing
+   position real PostgreSQL uses, after `LOCATION`. The full `ALTER
+   TABLESPACE` surface (`RENAME TO`, `OWNER TO`, `SET`/`RESET` options)
+   remains a separate, still-open gap — this section documents
+   `CREATE`-time grammar only.
 
 ```sql
 -- production/cluster/tablespaces.dpg
 
-TABLESPACE fast_ssd LOCATION '/mnt/nvme/pg_data';
+TABLESPACE fast_ssd LOCATION '/mnt/nvme/pg_data'
+    WITH (random_page_cost = 1.1, seq_page_cost = 1.0);
 TABLESPACE archive  LOCATION '/mnt/hdd/pg_archive';
 ```
 
@@ -3839,7 +4250,10 @@ TABLESPACE archive  LOCATION '/mnt/hdd/pg_archive';
    (`DESTRUCTIVE`).  Dropping a non-empty tablespace fails at the
    PostgreSQL level; the compiler classifies it as `DESTRUCTIVE` and
    additionally emits a warning comment noting that it will fail if
-   any objects reside in the tablespace.
+   any objects reside in the tablespace. `WITH (...)` option changes,
+   independent of `LOCATION`, are grouped with the still-open `ALTER
+   TABLESPACE` gap noted above — this document does not yet specify a
+   non-destructive diffing path for them.
 
 ### 14.8. Foreign Data Wrappers
 
@@ -5340,23 +5754,40 @@ serial_sequence_declared      = "off"
    | Column comment | `comment` differs | `COMMENT ON COLUMN t.c IS '...'` | `SAFE` |
    | Constraint added | Name absent in snapshot | `ALTER TABLE t ADD CONSTRAINT name ...` | `CAUTION` |
    | Constraint dropped | Name absent in desired | `ALTER TABLE t DROP CONSTRAINT name` | `DESTRUCTIVE` |
+   | Constraint renamed only (`RENAMED FROM`, §7.3) | `renamed_from` set, body unchanged | `ALTER TABLE t RENAME CONSTRAINT old TO new` | `SAFE` |
+   | Constraint deferrability-only change (FK, §7.3) | Only `DEFERRABLE`/`INITIALLY ...` differs | `ALTER TABLE t ALTER CONSTRAINT name ...` | `SAFE` |
    | Constraint changed | Body text differs | Drop + re-add | `DESTRUCTIVE` |
    | NOT VALID removed | `not_valid` false in desired | `ALTER TABLE t VALIDATE CONSTRAINT name` | `CAUTION` |
+   | Generated-column expression added/changed/dropped (§7.4) | `GENERATED ... AS (expr)` differs | `ADD GENERATED`/`SET EXPRESSION`/`DROP EXPRESSION` (§7.4 table) | `SAFE`/`CAUTION` |
+   | Identity clause added/changed/dropped (§7.4) | `identity-opts` differ | `ADD GENERATED AS IDENTITY`/`SET GENERATED`/`SET <option>`/`DROP IDENTITY` (§7.4 table) | `SAFE`/`CAUTION` |
    | Index added (existing table) | Name absent in snapshot | `CREATE [UNIQUE] INDEX [CONCURRENTLY] ...` | `MANUAL` or `CAUTION` |
    | Index dropped | Name absent in desired | `DROP INDEX [CONCURRENTLY] name` | `CAUTION` |
-   | Index changed | Any field differs | Drop + recreate | `CAUTION`/`MANUAL` |
+   | Index renamed only (`RENAMED FROM`, §7.7) | Name changed, nothing else differs | `ALTER INDEX old RENAME TO new` | `SAFE` |
+   | Index changed | Any other field differs | Drop + recreate | `CAUTION`/`MANUAL` |
    | RLS enabled | `rls_enabled` changed | `ALTER TABLE t ENABLE ROW LEVEL SECURITY` | `SAFE` |
    | RLS disabled | `rls_enabled` changed | `ALTER TABLE t DISABLE ROW LEVEL SECURITY` | `SAFE` |
+   | RLS force removed (enable still set, §7.8) | `rls_forced` false in desired, `rls_enabled` still true | `ALTER TABLE t NO FORCE ROW LEVEL SECURITY` | `SAFE` |
    | Policy added | Name absent in snapshot | `CREATE POLICY name ON t ...` | `SAFE` |
    | Policy changed | Any field differs | Drop + recreate | `SAFE` |
    | Policy dropped | Name absent in desired | `DROP POLICY name ON t` | `SAFE` |
    | Trigger added | Name absent in snapshot | `CREATE TRIGGER name ...` | `SAFE` |
    | Trigger changed | Any field differs | Drop + recreate | `SAFE` |
+   | Trigger enable state changed only (§7.9) | `trigger-enable-state` differs, rest unchanged | `ALTER TABLE t ENABLE/DISABLE TRIGGER name` (or `ENABLE REPLICA/ALWAYS TRIGGER`) | `SAFE` |
    | Trigger dropped | Name absent in desired | `DROP TRIGGER name ON t` | `SAFE` |
    | Grant added | Not in snapshot grant list | `GRANT privs ON TABLE t TO role` | `SAFE` |
    | Owner changed | `owner` differs | `ALTER TABLE t OWNER TO role` | `SAFE` |
    | Comment changed | `comment` differs | `COMMENT ON TABLE t IS '...'` | `SAFE` |
    | Table renamed | `renamed_from` set | `ALTER TABLE old RENAME TO new` | `CAUTION` |
+   | Table moved to another schema (`RENAMED FROM` schema-qualified, §7.6) | Schema component of `renamed_from` differs | `ALTER TABLE old_schema.name SET SCHEMA new_schema` | `SAFE` |
+   | Tablespace changed | `tablespace` (§7.1's `TABLESPACE` clause) differs | `ALTER TABLE t SET TABLESPACE ts` | `CAUTION` |
+   | Access method changed | `USING` method (§7.1) differs | `ALTER TABLE t SET ACCESS METHOD method` | `CAUTION` |
+   | Storage parameters changed | `WITH (...)` (§7.1) params differ | `ALTER TABLE t SET (...)` / `ALTER TABLE t RESET (...)` | `SAFE` |
+   | Parent added/removed | `INHERITS (...)` (§7.1) list differs | `ALTER TABLE child INHERIT parent` / `ALTER TABLE child NO INHERIT parent` | `SAFE` |
+   | Typed-table association added/switched/removed | `OF type_name` (§7.1) differs | `ALTER TABLE t OF type_name` / `ALTER TABLE t NOT OF` | `CAUTION` |
+   | `REPLICA IDENTITY` changed | `replica-identity-dir` (§7.11) differs | `ALTER TABLE t REPLICA IDENTITY ...` | `SAFE` |
+   | `CLUSTER ON` changed/removed | `cluster-dir` (§7.11) differs | `ALTER TABLE t CLUSTER ON index` / `ALTER TABLE t SET WITHOUT CLUSTER` | `SAFE` |
+   | `LOGGED`/`UNLOGGED` toggled (§7.12) | `UNLOGGED` prefix differs | `ALTER TABLE t SET LOGGED` / `ALTER TABLE t SET UNLOGGED` | `CAUTION` |
+   | Partition attached/detached (§7.13) | `ATTACHED FROM`/`DETACHED FROM` present | `ALTER TABLE parent ATTACH/DETACH PARTITION ...` | `CAUTION`/`MANUAL` |
    | Table dropped | Absent in desired, not PROTECTED | `DROP TABLE t [CASCADE]` | `DESTRUCTIVE` |
 
    **FUNCTION / PROCEDURE:**
@@ -5378,6 +5809,8 @@ serial_sequence_declared      = "off"
    | New view | `CREATE VIEW ...` | `SAFE` |
    | Query changed, same column list | `CREATE OR REPLACE VIEW ...` | `SAFE` |
    | Column list changed | `DROP VIEW CASCADE; CREATE VIEW` | `DESTRUCTIVE` |
+   | View/Matview renamed (`RENAMED FROM`, §8.1/§8.2) | `ALTER [MATERIALIZED] VIEW old RENAME TO new` | `CAUTION` |
+   | View/Matview moved to another schema (`RENAMED FROM` schema-qualified) | `ALTER [MATERIALIZED] VIEW old_schema.name SET SCHEMA new_schema` | `SAFE` |
    | View dropped | `DROP VIEW CASCADE` | `DESTRUCTIVE` |
 
    **ENUM:**
@@ -5395,6 +5828,9 @@ serial_sequence_declared      = "off"
    |--------|-----|--------|
    | New sequence | `CREATE SEQUENCE ...` | `SAFE` |
    | Numeric parameters changed | `ALTER SEQUENCE name [INCREMENT BY n] [MINVALUE n] ...` | `SAFE` |
+   | `OWNED BY` changed (incl. to/from `NONE`) | `ALTER SEQUENCE name OWNED BY {table.col\|NONE}` | `SAFE` |
+   | `RESTART [WITH n]` present in source (§10) | `ALTER SEQUENCE name RESTART [WITH n]` (re-emitted every apply while present) | `MANUAL` |
+   | `UNLOGGED` toggled (§10) | `ALTER SEQUENCE name SET LOGGED/UNLOGGED` | `CAUTION` |
    | `AS type` changed | Drop + recreate | `DESTRUCTIVE` |
    | Sequence dropped | `DROP SEQUENCE name` | `DESTRUCTIVE` |
 
@@ -5559,6 +5995,18 @@ serial_sequence_declared      = "off"
    exactly the same reason `ALTER` is structurally excluded from DPG's
    no-verb object model (§4). Not planned for any future version.
 
+   **`ALTER SYSTEM`:**
+   Out of scope. It writes a GUC override to `postgresql.auto.conf`, a
+   cluster-wide configuration file outside any database's catalog —
+   nothing DPG introspects, diffs, or otherwise treats as schema state.
+   Even where a value it sets does persist (unlike `REASSIGN OWNED
+   BY`/`DROP OWNED BY` above), the object it changes is server
+   configuration, not a schema object; many of the settings it touches
+   also require a server reload or restart to take effect, a cluster-
+   provisioning concern a tier below this specification's scope — the
+   same distinction that puts `CREATE`/`ALTER`/`DROP DATABASE` out of
+   scope above. Not planned for any future version.
+
    **`CREATE ACCESS METHOD`:**
    Out of scope. The motivating real-world case — installing a custom
    index access method such as `pgvector`'s `hnsw`/`ivfflat` or
@@ -5706,8 +6154,8 @@ serial_sequence_declared      = "off"
 
    | Feature | Status | Notes |
    |---------|--------|-------|
-   | Tables (regular) | Declared, Diffed | Full per-field diff |
-   | Tables (unlogged) | Declared, Diffed | `UNLOGGED` prefix |
+   | Tables (regular) | Declared, Diffed | Full per-field diff, incl. `LIKE`, typed (`OF type_name`), `USING` access method, `REPLICA IDENTITY`, `CLUSTER ON`, `ATTACH`/`DETACH PARTITION`, cheap constraint rename |
+   | Tables (unlogged) | Declared, Diffed | `UNLOGGED` prefix; toggling post-creation uses `SET LOGGED`/`SET UNLOGGED`, not drop+recreate |
    | Tables (temporary) | Out of scope | Session-scoped |
    | Columns — all built-in types | Declared, Diffed | In `()` list |
    | Columns — generated (`ALWAYS AS`) | Declared, Diffed | In `()` list |
@@ -5731,14 +6179,15 @@ serial_sequence_declared      = "off"
    | Indexes — expression | Declared, Diffed | Expression as text |
    | Indexes — covering (`INCLUDE`) | Declared, Diffed | Drop + recreate on change |
    | Indexes — concurrent creation | Declared, Manual | `CREATE INDEX CONCURRENTLY` |
+   | Indexes — `ON ONLY`, opclass parameters, `NULLS [NOT] DISTINCT`, rename | Declared, Diffed | `ONLY` suppresses partition recursion; rename is metadata-only (§7.7) |
    | ENUM types | Declared, Diffed | `MIGRATE REMOVE` for value removal |
    | Composite types | Declared, Diffed | |
    | Range types | Declared, Diffed | Any change = DESTRUCTIVE |
    | Domain types | Declared, Diffed | |
    | Base (shell) types | Declared, Passthrough | |
    | Virtual types | Declared, No SQL | DPG-native; snapshot only |
-   | Views | Declared, Diffed | Column list change = DESTRUCTIVE |
-   | Materialized views | Declared, Diffed | Query change = DESTRUCTIVE |
+   | Views | Declared, Diffed | Column list change = DESTRUCTIVE; `RENAMED FROM` and cross-schema `SET SCHEMA` supported (§7.6, §8.1) |
+   | Materialized views | Declared, Diffed | Query change = DESTRUCTIVE; `RENAMED FROM`/`SET SCHEMA` supported (§8.2) |
    | Recursive views | Declared, Diffed | |
    | Functions — all languages | Declared, Passthrough body | Body hash-diffed |
    | Procedures | Declared, Passthrough body | |
@@ -5747,7 +6196,7 @@ serial_sequence_declared      = "off"
    | Row Level Security | Declared, Diffed | |
    | Triggers | Declared, Diffed | |
    | Event triggers | Declared, Passthrough | Reconstructed from catalog; hash-diffed |
-   | Sequences | Declared, Diffed | |
+   | Sequences | Declared, Diffed | `UNLOGGED`, `OWNED BY NONE`, `REVOCATIONS`, `RESTART [WITH n]` (§10) |
    | Schemas | Declared, Diffed | |
    | Extensions | Declared, Diffed | |
    | Roles | Declared, Diffed | Cluster-level; `PASSWORD` (§11.1) never live-introspected (superuser-only in PG), diffed offline via a hash of the declared text. No `RENAME TO` (can be genuinely impossible via DROP+CREATE, since PostgreSQL refuses to drop a role that owns objects) and no `SET`/`RESET` session-config-parameter grammar |
@@ -5756,7 +6205,7 @@ serial_sequence_declared      = "off"
    | Explicit revocations | Declared, Diffed | |
    | Default Privileges | Declared, Diffed | |
    | Security Labels (§14.11) | Declared, Diffed | Keyed by provider; every kind PostgreSQL's own `SECURITY LABEL` grammar supports and DPG models |
-   | Tablespaces | Declared, Passthrough | Cluster-level; reconstructed from catalog, hash-diffed |
+   | Tablespaces | Declared, Passthrough | Cluster-level; reconstructed from catalog, hash-diffed. `CREATE`-time `WITH (...)` storage params declared (§14.7); `ALTER TABLESPACE` surface (`RENAME TO`/`OWNER TO`/`SET`/`RESET`) still a separate, open gap |
    | Foreign Data Wrappers | Declared, Passthrough | Cluster-level; reconstructed from catalog, hash-diffed |
    | Foreign Servers | Declared, Passthrough | Reconstructed from catalog; hash-diffed |
    | User Mappings | Declared, Passthrough | Reconstructed from catalog; hash-diffed. `OPTIONS` may hold a `{{secret-uri}}` reference (§14.10, §D.5), resolved only immediately before `CREATE USER MAPPING` executes |
@@ -5765,7 +6214,7 @@ serial_sequence_declared      = "off"
    | Sub-partitioning | Declared, Diffed | |
    | Publications | Declared, Passthrough | Reconstructed from catalog; hash-diffed |
    | Subscriptions | Declared, Passthrough | Reconstructed from the catalog; hash-diffed. `CONNECTION` alone is never introspected (`subconninfo` has no PUBLIC grant, and even a privileged read can't recover the original `{{secret-uri}}`) — reconstructed as a fixed placeholder instead, excluded from the drift comparison like every other reconstructed body (§13.2). `CONNECTION` may hold a `{{secret-uri}}` reference in source (§13.2, §D.5), resolved only immediately before `CREATE SUBSCRIPTION` executes |
-   | Collations | Declared, Passthrough | Reconstructed from catalog, hash-diffed; any change = DESTRUCTIVE |
+   | Collations | Declared, Passthrough | Reconstructed from catalog, hash-diffed; any change = DESTRUCTIVE. `FROM existing_collation` form supported (§14.2) via the same passthrough |
    | Operators | Declared, Passthrough | Reconstructed from catalog, hash-diffed; any change = DESTRUCTIVE |
    | Operator Classes | Declared, Passthrough | Reconstructed from catalog, hash-diffed; any `AS` member-list change = DESTRUCTIVE (PostgreSQL has no incremental `ALTER OPERATOR CLASS`) |
    | Operator Families | Declared, Passthrough + Diffed | Header (name/access method) reconstructed from catalog, hash-diffed; loose members (§14.4, `ALTER OPERATOR FAMILY ... ADD`) are structured and diffed incrementally per member, live-path included — not gated on `Reconstructed` the way the bare header hash is |
@@ -5784,6 +6233,7 @@ serial_sequence_declared      = "off"
    | Inline data seeding | Out of scope | DPG is a schema tool; data management is outside its scope |
    | Database management (`CREATE`/`ALTER`/`DROP DATABASE`) | Out of scope | Cluster-provisioning, not schema management; see §23 — permanent, not deferred |
    | `REASSIGN OWNED BY` / `DROP OWNED BY` | Out of scope | One-shot maintenance command, not a declarable object; see §23 |
+   | `ALTER SYSTEM` | Out of scope | Cluster-wide GUC configuration, not schema state; see §23 |
    | `CREATE ACCESS METHOD` | Out of scope | Covered by extension install (`CREATE EXTENSION`); see §23 |
    | `CREATE CONVERSION` | Out of scope | No realistic use case under UTF-8 dominance; see §23 |
    | `CREATE [PROCEDURAL] LANGUAGE` | Out of scope | Covered by extension install (`CREATE EXTENSION`); see §23 |
@@ -5895,7 +6345,11 @@ safe-char   = <any Unicode character except DQUOTE>
 ; Common directives
 owner-dir        = "OWNER" WSP DQUOTE identifier DQUOTE
 comment-dir      = "COMMENT" WSP string-literal
-renamed-from-dir = "RENAMED FROM" WSP identifier
+; qual-name (not bare identifier) since §7.6 extends this production to
+; cross-schema moves: a schema-qualified old name whose schema differs
+; from the object's current one additionally triggers ALTER ... SET
+; SCHEMA alongside RENAME TO.
+renamed-from-dir = "RENAMED FROM" WSP qual-name
 protected-dir    = "PROTECTED"
 deprecated-dir   = "DEPRECATED" WSP string-literal
 drop-cascade-dir = "DROP CASCADE"
