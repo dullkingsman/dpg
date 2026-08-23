@@ -425,8 +425,56 @@ type Table struct {
 	StorageParams  map[string]string
 	Tablespace     *string
 	NameMaps       []pipeline.NameMapEntry
-	SrcPos         pipeline.SourcePos
+	// LikeClauses holds unresolved `LIKE source_table [INCLUDING/EXCLUDING
+	// ...]` entries (Section 7.1) captured verbatim by buildTable. A
+	// Builder builds one object at a time with no visibility into any
+	// other declared table, so a LIKE clause can't be resolved there —
+	// ResolveLikeClauses (called once, after every object in the compile
+	// unit is built and merged) looks up each source table by qualified
+	// name and splices its resolved columns/constraints in, then clears
+	// this field. By the time diffing/snapshotting sees a Table, this is
+	// always empty: per the RFC, "the snapshot records the resolved
+	// columns/constraints, not the LIKE clause itself."
+	LikeClauses []*LikeClause
+	SrcPos      pipeline.SourcePos
 }
+
+// LikeClause is one `LIKE source_table [{INCLUDING|EXCLUDING} attr ...]`
+// column-list entry (Section 7.1), before resolution. SourceSchema is ""
+// when written unqualified — resolved against the referencing table's own
+// schema by ResolveLikeClauses, not here (the table's final Schema, after
+// any enclosing SCHEMA block context is merged in, isn't necessarily known
+// yet at buildTable time).
+type LikeClause struct {
+	SourceSchema string
+	SourceName   string
+	// Options is the raw CREATE_TABLE_LIKE_* bitmask pg_query hands back
+	// (confirmed empirically against a real parse: bit 0 COMMENTS, 1
+	// COMPRESSION, 2 CONSTRAINTS, 3 DEFAULTS, 4 GENERATED, 5 IDENTITY, 6
+	// INDEXES, 7 STATISTICS, 8 STORAGE — matching PostgreSQL's own
+	// CREATE_TABLE_LIKE_* #defines in parsenodes.h exactly, so it's used
+	// directly rather than re-mapped to a DPG-local enum).
+	Options uint32
+	// InsertAt is the index into Columns/Constraints at the moment this
+	// clause was encountered (i.e., how many explicit columns preceded it
+	// in source) — used to splice the resolved copy in at the right
+	// position instead of always appending to the end.
+	InsertAt int
+	Pos      pipeline.SourcePos
+}
+
+// LIKE option bits — see LikeClause.Options' doc comment.
+const (
+	LikeIncludeComments    uint32 = 1 << 0
+	LikeIncludeCompression uint32 = 1 << 1
+	LikeIncludeConstraints uint32 = 1 << 2
+	LikeIncludeDefaults    uint32 = 1 << 3
+	LikeIncludeGenerated   uint32 = 1 << 4
+	LikeIncludeIdentity    uint32 = 1 << 5
+	LikeIncludeIndexes     uint32 = 1 << 6
+	LikeIncludeStatistics  uint32 = 1 << 7
+	LikeIncludeStorage     uint32 = 1 << 8
+)
 
 func (t *Table) QualifiedName() string   { return qualName(t.Schema, t.Name) }
 func (t *Table) Pos() pipeline.SourcePos { return t.SrcPos }

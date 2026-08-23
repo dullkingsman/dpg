@@ -54,6 +54,15 @@ type IRBuilder interface {
 	// declaration naming TABLES, FUNCTIONS, and SEQUENCES together, per the
 	// RFC's own example, splits into three independently-diffable objects).
 	BuildDefaultPrivileges(block DefaultPrivilegesBlock) ([]IRObject, error)
+
+	// ResolveLikeClauses resolves every Table's pending `LIKE source_table`
+	// column-list entries (Section 7.1) into concrete columns/constraints,
+	// once every object in the compile unit has been built and merged.
+	// Build converts one (PGParseResult, BlockAST) pair at a time and has
+	// no visibility into any other declared table, so a LIKE clause can't
+	// be resolved there — this runs as its own stage, after Merger.Merge
+	// and before DependencyResolver.Sort, mutating objects in place.
+	ResolveLikeClauses(objects []IRObject) error
 }
 
 // Merger merges same-object IRObject declarations from multiple .dpg files

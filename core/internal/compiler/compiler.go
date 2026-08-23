@@ -217,6 +217,14 @@ func Compile(files []string, dbDir string, reg *pipeline.Registry) ([]pipeline.I
 		return nil, mergeDiags, mergeErr
 	}
 
+	// Stage 4.5: Resolve LIKE source_table column-list entries (Section
+	// 7.1) into concrete columns/constraints now that every table in the
+	// compile unit is known — must run before Sort, so the sorter's
+	// dependency edges see the table's actual (resolved) column types.
+	if err := irBuilder.ResolveLikeClauses(merged); err != nil {
+		return nil, mergeDiags, err
+	}
+
 	// Stage 5: Topological sort with FK / type dependency resolution.
 	sorted, sortErr := resolver.Sort(merged)
 	if sortErr != nil {

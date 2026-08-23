@@ -428,3 +428,163 @@ func TestCompile_EmptyFileList(t *testing.T) {
 		t.Errorf("expected empty output, got %d objects", len(objects))
 	}
 }
+
+// ── LIKE source_table (Section 7.1) ───────────────────────────────────────────
+
+func findTable(t *testing.T, objects []pipeline.IRObject, name string) *ir.Table {
+	t.Helper()
+	for _, o := range objects {
+		if tbl, ok := o.(*ir.Table); ok && tbl.Name == name {
+			return tbl
+		}
+	}
+	t.Fatalf("table %q not found", name)
+	return nil
+}
+
+// TestCompile_LikeBareCopiesNamesTypesNotNullOnly is the regression guard
+// for the audit's headline finding: buildTable's TableElts switch had no
+// case for a LIKE clause at all, so it was silently discarded — "CREATE
+// TABLE foo (LIKE bar)" built a table with zero columns and no error.
+func TestCompile_LikeBareCopiesNamesTypesNotNullOnly(t *testing.T) {
+	dbDir := t.TempDir()
+	f := filepath.Join(dbDir, "schemas", "app", "tables.dpg")
+	writeDPG(t, f, `TABLE orders (id BIGINT NOT NULL, total NUMERIC DEFAULT 0);
+TABLE orders_copy (LIKE orders);`)
+
+	objects := compile(t, dbDir, []string{f})
+	tbl := findTable(t, objects, "orders_copy")
+
+	if len(tbl.Columns) != 2 {
+		t.Fatalf("expected 2 columns copied from LIKE, got %d: %v", len(tbl.Columns), tbl.Columns)
+	}
+	if tbl.Columns[0].Name != "id" || !tbl.Columns[0].NotNull {
+		t.Errorf("expected id NOT NULL copied, got %+v", tbl.Columns[0])
+	}
+	if tbl.Columns[1].Name != "total" {
+		t.Errorf("expected total copied, got %+v", tbl.Columns[1])
+	}
+	// Bare LIKE (no INCLUDING) must NOT copy the default — PostgreSQL's own
+	// documented default behavior.
+	if tbl.Columns[1].Default != nil {
+		t.Errorf("bare LIKE should not copy DEFAULT, got %v", *tbl.Columns[1].Default)
+	}
+	if len(tbl.LikeClauses) != 0 {
+		t.Errorf("LikeClauses should be cleared after resolution, got %v", tbl.LikeClauses)
+	}
+}
+
+// TestCompile_LikeIncludingDefaultsAndConstraints matches the RFC's own
+// Section 7.1 example exactly.
+func TestCompile_LikeIncludingDefaultsAndConstraints(t *testing.T) {
+	dbDir := t.TempDir()
+	f := filepath.Join(dbDir, "schemas", "app", "tables.dpg")
+	writeDPG(t, f, `TABLE order_items (
+    id BIGINT NOT NULL,
+    qty INTEGER NOT NULL DEFAULT 1,
+    CHECK (qty > 0)
+);
+TABLE order_items_archive (
+    LIKE order_items INCLUDING DEFAULTS INCLUDING CONSTRAINTS,
+    archived_at TIMESTAMPTZ NOT NULL
+);`)
+
+	objects := compile(t, dbDir, []string{f})
+	tbl := findTable(t, objects, "order_items_archive")
+
+	if len(tbl.Columns) != 3 {
+		t.Fatalf("expected 3 columns (2 copied + 1 explicit), got %d: %v", len(tbl.Columns), tbl.Columns)
+	}
+	// Position: LIKE-copied columns land where the LIKE clause appeared,
+	// before the explicit trailing column.
+	if tbl.Columns[0].Name != "id" || tbl.Columns[1].Name != "qty" || tbl.Columns[2].Name != "archived_at" {
+		t.Fatalf("unexpected column order: %v", []string{tbl.Columns[0].Name, tbl.Columns[1].Name, tbl.Columns[2].Name})
+	}
+	if tbl.Columns[1].Default == nil || *tbl.Columns[1].Default != "1" {
+		t.Errorf("expected qty's DEFAULT 1 copied (INCLUDING DEFAULTS), got %v", tbl.Columns[1].Default)
+	}
+	var checkCount int
+	for _, c := range tbl.Constraints {
+		if c.Type == "CHECK" {
+			checkCount++
+			if c.Name != "" {
+				t.Errorf("copied CHECK constraint should have Name cleared for PG auto-naming, got %q", c.Name)
+			}
+		}
+	}
+	if checkCount != 1 {
+		t.Errorf("expected the CHECK constraint copied (INCLUDING CONSTRAINTS), got %d CHECK constraints", checkCount)
+	}
+}
+
+// TestCompile_LikeIncludingIndexesCopiesUniqueConstraint proves the
+// constraint-shaped half of INCLUDING INDEXES (PRIMARY KEY/UNIQUE/EXCLUDE)
+// works, with the copied constraint's Name cleared for PG's own auto-naming.
+func TestCompile_LikeIncludingIndexesCopiesUniqueConstraint(t *testing.T) {
+	dbDir := t.TempDir()
+	f := filepath.Join(dbDir, "schemas", "app", "tables.dpg")
+	writeDPG(t, f, `TABLE accounts (id BIGINT NOT NULL, email TEXT UNIQUE);
+TABLE accounts_copy (LIKE accounts INCLUDING INDEXES);`)
+
+	objects := compile(t, dbDir, []string{f})
+	tbl := findTable(t, objects, "accounts_copy")
+
+	var uniqueCount int
+	for _, c := range tbl.Constraints {
+		if c.Type == "UNIQUE" {
+			uniqueCount++
+			if c.Name != "" {
+				t.Errorf("copied UNIQUE constraint should have Name cleared, got %q", c.Name)
+			}
+		}
+	}
+	if uniqueCount != 1 {
+		t.Errorf("expected the UNIQUE constraint copied (INCLUDING INDEXES), got %d", uniqueCount)
+	}
+}
+
+// TestCompile_LikeChainResolvesTransitively proves a LIKE-of-a-LIKE ("C
+// likes B likes A") resolves correctly regardless of declaration order,
+// since a source table may itself have unresolved LikeClauses.
+func TestCompile_LikeChainResolvesTransitively(t *testing.T) {
+	dbDir := t.TempDir()
+	f := filepath.Join(dbDir, "schemas", "app", "tables.dpg")
+	writeDPG(t, f, `TABLE c (LIKE b);
+TABLE b (LIKE a);
+TABLE a (id BIGINT NOT NULL);`)
+
+	objects := compile(t, dbDir, []string{f})
+	tbl := findTable(t, objects, "c")
+	if len(tbl.Columns) != 1 || tbl.Columns[0].Name != "id" {
+		t.Fatalf("expected LIKE chain to transitively resolve to [id], got %v", tbl.Columns)
+	}
+}
+
+// TestCompile_LikeCircularReferenceErrors proves a genuine LIKE cycle is
+// reported as a compile error rather than infinite-looping or silently
+// producing an empty table.
+func TestCompile_LikeCircularReferenceErrors(t *testing.T) {
+	dbDir := t.TempDir()
+	f := filepath.Join(dbDir, "schemas", "app", "tables.dpg")
+	writeDPG(t, f, `TABLE a (LIKE b);
+TABLE b (LIKE a);`)
+
+	_, _, err := compiler.Compile([]string{f}, dbDir, pipeline.Default)
+	if err == nil {
+		t.Fatal("expected an error for a circular LIKE reference")
+	}
+}
+
+// TestCompile_LikeUnresolvedSourceErrors proves a LIKE naming a table
+// nowhere in the compile unit is a compile error, not a silent empty table
+// — DPG is offline-first, so a LIKE target must be declared in source.
+func TestCompile_LikeUnresolvedSourceErrors(t *testing.T) {
+	dbDir := t.TempDir()
+	f := filepath.Join(dbDir, "schemas", "app", "tables.dpg")
+	writeDPG(t, f, `TABLE orders_copy (LIKE nonexistent_table);`)
+
+	_, _, err := compiler.Compile([]string{f}, dbDir, pipeline.Default)
+	if err == nil {
+		t.Fatal("expected an error for a LIKE source table absent from the compile unit")
+	}
+}

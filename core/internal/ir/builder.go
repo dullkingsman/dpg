@@ -238,6 +238,23 @@ func (b *Builder) buildTable(cs *pg_query.CreateStmt, block pipeline.BlockAST, p
 		case *pg_query.Node_Constraint:
 			cst := buildConstraint(e.Constraint, pos)
 			tbl.Constraints = append(tbl.Constraints, cst)
+		case *pg_query.Node_TableLikeClause:
+			// LIKE source_table [{INCLUDING|EXCLUDING} attr ...] (Section
+			// 7.1) — captured verbatim; ResolveLikeClauses (internal/ir)
+			// resolves it into concrete Columns/Constraints once every
+			// object in the compile unit has been built, since a single
+			// Build call has no visibility into other declared tables.
+			// Previously this case didn't exist at all: the element was
+			// silently discarded, so "CREATE TABLE foo (LIKE bar)" built a
+			// table with zero columns and no error.
+			tlc := e.TableLikeClause
+			tbl.LikeClauses = append(tbl.LikeClauses, &LikeClause{
+				SourceSchema: rangeVarSchema(tlc.Relation),
+				SourceName:   tlc.Relation.Relname,
+				Options:      tlc.Options,
+				InsertAt:     len(tbl.Columns),
+				Pos:          pos,
+			})
 		}
 	}
 
