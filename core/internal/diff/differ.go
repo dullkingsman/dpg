@@ -1205,6 +1205,9 @@ func createObject(obj pipeline.IRObject, vtypes map[string]string) ([]pipeline.D
 		return createSubscription(o)
 	case *ir.EventTrigger:
 		ops, err := createOpaque(o.Name, o.Body, "EVENT TRIGGER", "", o.SrcPos)
+		if err == nil && o.Owner != nil && len(ops) > 0 {
+			ops = append(wrapCreateWithOwner(ops[0], o.Owner, o.SrcPos), ops[1:]...)
+		}
 		ops, err = appendCommentOp(ops, err, "event_trigger", "", o.Name, "", "", o.Comment, o.SrcPos)
 		return appendSecurityLabelOps(ops, err, "event_trigger", "", o.Name, "", "", o.SecurityLabels, o.SrcPos)
 	case *ir.Collation:
@@ -1764,6 +1767,9 @@ func diffEventTrigger(o *ir.EventTrigger, snap *snapshot.SnapOpaque) ([]pipeline
 				ops = append(ops, safeOp(sql, pos))
 			}
 		}
+		if !ptrEq(o.Owner, snap.EventTriggerOwner) && o.Owner != nil {
+			ops = append(ops, safeOp(fmt.Sprintf("ALTER EVENT TRIGGER %s OWNER TO %s;", quoteIdent(o.Name), quoteIdent(*o.Owner)), pos))
+		}
 		ops = append(ops, diffSecurityLabelSet(snap.SecurityLabels, o.SecurityLabels, onClause, pos)...)
 		if len(ops) == 0 {
 			ops = append(ops, safeOp(fmt.Sprintf("-- refresh snapshot metadata for event trigger %s", quoteIdent(o.Name)), pos))
@@ -1778,6 +1784,9 @@ func diffEventTrigger(o *ir.EventTrigger, snap *snapshot.SnapOpaque) ([]pipeline
 		if err != nil {
 			return nil, err
 		}
+		if o.Owner != nil && len(createOps) > 0 {
+			createOps = append(wrapCreateWithOwner(createOps[0], o.Owner, pos), createOps[1:]...)
+		}
 		ops = append(ops, createOps...)
 		ops, err = appendCommentOp(ops, nil, "event_trigger", "", o.Name, "", "", o.Comment, pos)
 		if err != nil {
@@ -1791,6 +1800,9 @@ func diffEventTrigger(o *ir.EventTrigger, snap *snapshot.SnapOpaque) ([]pipeline
 		if sql := commentOnOpaqueSQL("event_trigger", "", o.Name, "", "", o.Comment); sql != "" {
 			ops = append(ops, safeOp(sql, pos))
 		}
+	}
+	if !ptrEq(o.Owner, snap.EventTriggerOwner) && o.Owner != nil {
+		ops = append(ops, safeOp(fmt.Sprintf("ALTER EVENT TRIGGER %s OWNER TO %s;", quoteIdent(o.Name), quoteIdent(*o.Owner)), pos))
 	}
 	ops = append(ops, diffSecurityLabelSet(snap.SecurityLabels, o.SecurityLabels, onClause, pos)...)
 	return ops, nil

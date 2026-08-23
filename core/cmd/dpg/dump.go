@@ -1272,7 +1272,7 @@ func renderObjectDPG(b *strings.Builder, obj pipeline.IRObject, fmtOpts format.O
 	case *ir.Cast:
 		renderOpaqueBody(b, ind, fmtOpts, o.Body, o.Comment)
 	case *ir.EventTrigger:
-		renderOpaqueBodyWithLabels(b, ind, fmtOpts, o.Body, o.Comment, o.SecurityLabels)
+		renderEventTriggerBody(b, ind, fmtOpts, o)
 	case *ir.ForeignDataWrapper:
 		renderOpaqueBodyWithGrants(b, ind, fmtOpts, o.Body, o.Comment, o.Grants, o.Revocations)
 	case *ir.ForeignServer:
@@ -1636,6 +1636,37 @@ func renderOpaqueBodyWithLabels(b *strings.Builder, ind string, fmtOpts format.O
 // writeFuncBlockWithLabels helper without adding a parameter every other
 // caller would pass nil for.
 func renderPublicationBody(b *strings.Builder, ind string, fmtOpts format.Options, o *ir.Publication) {
+	kw := fmtOpts.Keyword
+	body := strings.TrimSpace(o.Body)
+	const createPrefix = "CREATE "
+	if len(body) >= len(createPrefix) && strings.EqualFold(body[:len(createPrefix)], createPrefix) {
+		body = strings.TrimSpace(body[len(createPrefix):])
+	}
+	if body == "" {
+		return
+	}
+	fmt.Fprintf(b, "\n%s", body)
+	if o.Owner == nil && o.Comment == nil && len(o.SecurityLabels) == 0 {
+		b.WriteString(";\n")
+		return
+	}
+	b.WriteString(" {\n")
+	if o.Owner != nil {
+		fmt.Fprintf(b, "%s%s %s;\n", ind, kw("OWNER"), quoteIdentIfNeeded(*o.Owner))
+	}
+	if o.Comment != nil {
+		fmt.Fprintf(b, "%s%s %s;\n", ind, kw("COMMENT"), sqlStringLit(*o.Comment))
+	}
+	writeSecurityLabels(b, ind, fmtOpts, o.SecurityLabels)
+	b.WriteString("}\n")
+}
+
+// renderEventTriggerBody is renderOpaqueBodyWithLabels's EventTrigger-
+// specific variant: EventTrigger's OWNER (Section 14.1) has no counterpart
+// in renderOpaqueBodyWithLabels's other callers (Subscription), so it can't
+// go through that shared helper without adding a parameter every other
+// caller would pass nil for — same reasoning as renderPublicationBody.
+func renderEventTriggerBody(b *strings.Builder, ind string, fmtOpts format.Options, o *ir.EventTrigger) {
 	kw := fmtOpts.Keyword
 	body := strings.TrimSpace(o.Body)
 	const createPrefix = "CREATE "

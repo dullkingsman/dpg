@@ -13881,6 +13881,64 @@ func TestDiffEventTriggerStaleSnapshotDoesNotRecreate(t *testing.T) {
 	}
 }
 
+// TestDiffEventTriggerOwnerChanged is the regression guard for Section
+// 14.1's OWNER TO capability: previously ir.EventTrigger had no Owner
+// field at all, so a declared owner had zero effect.
+func TestDiffEventTriggerOwnerChanged(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("et", &snapshot.SnapObject{
+		Kind: "event_trigger",
+		Opaque: &snapshot.SnapOpaque{
+			Kind: "event_trigger", Name: "et",
+			EventTriggerEvent: "sql_drop", EventTriggerTags: []string{"DROP TABLE"}, EventTriggerFunction: "public.f1",
+		},
+	})
+	owner := "audit_admin"
+	desired := []pipeline.IRObject{
+		&ir.EventTrigger{
+			Name: "et", Event: "sql_drop", Tags: []string{"DROP TABLE"}, Function: "f1",
+			Body:  "CREATE EVENT TRIGGER et ON sql_drop WHEN TAG IN ('DROP TABLE') EXECUTE FUNCTION f1()",
+			Owner: &owner,
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := `ALTER EVENT TRIGGER "et" OWNER TO "audit_admin";`
+	if !containsSQL(ops, want) {
+		t.Errorf("expected %q, got: %v", want, sqlList(ops))
+	}
+	if containsSQL(ops, "DROP EVENT TRIGGER") {
+		t.Errorf("owner-only change should not DROP+CREATE, got: %v", sqlList(ops))
+	}
+}
+
+// TestCreateEventTriggerWithOwner proves a brand-new event trigger with a
+// declared owner applies it at creation time.
+func TestCreateEventTriggerWithOwner(t *testing.T) {
+	d := New()
+	owner := "audit_admin"
+	desired := []pipeline.IRObject{
+		&ir.EventTrigger{
+			Name: "et", Event: "sql_drop", Tags: []string{"DROP TABLE"}, Function: "f1",
+			Body:  "CREATE EVENT TRIGGER et ON sql_drop WHEN TAG IN ('DROP TABLE') EXECUTE FUNCTION f1()",
+			Owner: &owner,
+		},
+	}
+	ops, err := d.Diff(desired, &pipeline.Snapshot{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsSQL(ops, "CREATE EVENT TRIGGER") {
+		t.Fatalf("expected a CREATE EVENT TRIGGER op, got: %v", sqlList(ops))
+	}
+	if !containsSQL(ops, `SET ROLE "audit_admin";`) {
+		t.Errorf("expected owner to be applied at creation via SET ROLE/RESET ROLE, got: %v", sqlList(ops))
+	}
+}
+
 // TestDiffEventTriggerRenamedFromEmitsAlterRename is the regression guard
 // for EventTrigger rename detection: before this, ir.EventTrigger had no
 // RenamedFrom field at all — the struct's own doc comment explicitly said

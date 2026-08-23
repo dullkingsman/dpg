@@ -496,10 +496,12 @@ func introspectEventTriggers(ctx context.Context, conn pipeline.Querier) ([]pipe
 	q := `
 SELECT e.evtname, e.evtevent, e.evttags,
        n.nspname, p.proname,
-       obj_description(e.oid, 'pg_event_trigger') AS comment
+       obj_description(e.oid, 'pg_event_trigger') AS comment,
+       r.rolname AS owner
 FROM   pg_event_trigger e
 JOIN   pg_proc p      ON p.oid = e.evtfoid
 JOIN   pg_namespace n ON n.oid = p.pronamespace
+JOIN   pg_roles r     ON r.oid = e.evtowner
 WHERE  ` + notExtensionOwned("pg_event_trigger", "e.oid") + `
 ORDER  BY e.evtname`
 
@@ -511,10 +513,10 @@ ORDER  BY e.evtname`
 
 	var out []pipeline.IRObject
 	for rs.Next() {
-		var name, event, fnSchema, fnName string
+		var name, event, fnSchema, fnName, owner string
 		var tags []string
 		var comment *string
-		if err := rs.Scan(&name, &event, &tags, &fnSchema, &fnName, &comment); err != nil {
+		if err := rs.Scan(&name, &event, &tags, &fnSchema, &fnName, &comment, &owner); err != nil {
 			return nil, err
 		}
 		var sb strings.Builder
@@ -534,6 +536,7 @@ ORDER  BY e.evtname`
 			Function:      fnSchema + "." + fnName,
 			Body:          canonicalDDL(sb.String()),
 			Comment:       comment,
+			Owner:         &owner,
 			Reconstructed: true,
 		})
 	}

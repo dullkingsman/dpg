@@ -2733,6 +2733,9 @@ func (b *Builder) buildOpaque(node *pg_query.Node, block pipeline.BlockAST, pos 
 		if block.Comment != nil {
 			evt.Comment = &block.Comment.Value
 		}
+		if block.Owner != nil {
+			evt.Owner = &block.Owner.Name
+		}
 		if block.RenamedFrom != nil {
 			evt.RenamedFrom = &block.RenamedFrom.Name
 		}

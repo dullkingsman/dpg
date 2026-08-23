@@ -70,6 +70,9 @@ type SnapOpaque struct {
 	EventTriggerEvent    string   `json:"event_trigger_event,omitempty"`
 	EventTriggerTags     []string `json:"event_trigger_tags,omitempty"`
 	EventTriggerFunction string   `json:"event_trigger_function,omitempty"`
+	// EventTriggerOwner is Section 14.1's ALTER EVENT TRIGGER ... OWNER TO
+	// diffing input — same shape as PublicationOwner above.
+	EventTriggerOwner *string `json:"event_trigger_owner,omitempty"`
 	// OptionsStructured/FDWHandler/FDWValidator/FDWOptions/ServerFDWName/
 	// ServerType/ServerVersion/ServerOptions/UserMappingOptions are RFC
 	// §14.8/§14.9/§14.10's structured diffing inputs for fdw/server/

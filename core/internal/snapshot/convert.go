@@ -291,7 +291,8 @@ func toSnapObject(obj pipeline.IRObject) *SnapObject {
 		return &SnapObject{Kind: "event_trigger", Opaque: &SnapOpaque{
 			Kind: "event_trigger", Name: o.Name,
 			EventTriggerEvent: o.Event, EventTriggerTags: o.Tags, EventTriggerFunction: o.Function,
-			BodyHash: sourceBodyHash(o.Body, o.Reconstructed), Comment: o.Comment,
+			EventTriggerOwner: o.Owner,
+			BodyHash:          sourceBodyHash(o.Body, o.Reconstructed), Comment: o.Comment,
 			SecurityLabels: toSnapSecurityLabels(o.SecurityLabels),
 		}}
 	case *ir.Collation:
