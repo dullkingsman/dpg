@@ -4119,11 +4119,26 @@ tsconfig-decl = "TEXT SEARCH CONFIGURATION" WSP schema-name
 tsconfig-opts  = "COPY" WSP "=" WSP qual-name
                / "PARSER" WSP "=" WSP qual-name
 
-tsconfig-block = *( ( comment-dir / mapping-dir ) ";" )
+tsconfig-block = *( ( comment-dir / owner-dir / mapping-dir ) ";" )
 
 mapping-dir = "MAPPING FOR" WSP token-type-list
               WSP "WITH" WSP dict-list
+            / "MAPPING FOR" WSP token-type-list
+              WSP "REPLACE" WSP qual-name WSP "WITH" WSP qual-name
+            / "MAPPING" WSP "REPLACE" WSP qual-name WSP "WITH" WSP qual-name
 ```
+
+   **`REPLACE`** substitutes one dictionary for another within a
+   mapping without restating the rest of that mapping's dictionary
+   chain — `MAPPING FOR token-types REPLACE old WITH new` scopes the
+   substitution to the named token types; bare `MAPPING REPLACE old
+   WITH new` (no `FOR`) applies it across every token type's mapping at
+   once, matching real PostgreSQL's two `ALTER ... ALTER MAPPING`
+   forms exactly. Functionally reachable via the plain `WITH dict-list`
+   form too (fully restating the desired dictionary chain already lets
+   the differ compute the same end state) — `REPLACE` exists as the
+   more targeted native PostgreSQL statement for the common "swap one
+   dictionary everywhere" case.
 
    Example:
 
@@ -4151,6 +4166,8 @@ ALTER TEXT SEARCH CONFIGURATION public.english_unaccented
    | New config | `CREATE TEXT SEARCH CONFIGURATION ...` | `SAFE` |
    | Mapping added/changed | `ALTER TEXT SEARCH CONFIGURATION ... ALTER MAPPING FOR ...` | `SAFE` |
    | Mapping removed | `ALTER TEXT SEARCH CONFIGURATION ... DROP MAPPING FOR ...` | `SAFE` |
+   | `REPLACE` form declared | `ALTER TEXT SEARCH CONFIGURATION ... ALTER MAPPING [FOR token-types] REPLACE old WITH new` | `SAFE` |
+   | Owner changed | `ALTER TEXT SEARCH CONFIGURATION name OWNER TO role` | `SAFE` |
    | Config removed | `DROP TEXT SEARCH CONFIGURATION name` | `DESTRUCTIVE` |
 
 ### 12.2. Text Search Dictionaries
@@ -4165,13 +4182,26 @@ SCHEMA public {
         DictFile  = english,
         AffFile   = english,
         StopWords = english
-    );
+    )
+    {
+        OWNER "search_admin";
+        COMMENT 'Ispell-based English dictionary';
+    }
 }
 ```
 
+   Unlike Text Search Parser/Template (§12.3/§12.4), a Dictionary MAY
+   carry an optional `{ }` block (`owner-dir`/`comment-dir`/
+   `renamed-from-dir`, the same generic cross-schema `SET SCHEMA`
+   extension as every other kind, §7.6) — real PostgreSQL supports
+   `ALTER TEXT SEARCH DICTIONARY ... OWNER TO`/`RENAME TO`/`SET SCHEMA`
+   for Dictionary but has no `OWNER` concept at all for Parser/Template.
+
    Any change to a text search dictionary's options requires
    `DROP TEXT SEARCH DICTIONARY` followed by recreation —
-   classified as `DESTRUCTIVE` if the dictionary is in use.
+   classified as `DESTRUCTIVE` if the dictionary is in use. `OWNER`/
+   `RENAMED FROM` changes are `SAFE`/`CAUTION` respectively, same rules
+   as every other kind (§5.1).
 
 ### 12.3. Text Search Parsers
 
@@ -4189,11 +4219,21 @@ SCHEMA public {
         END      = prsd_end,
         LEXTYPES = prsd_lextype,
         HEADLINE = prsd_headline
-    );
+    )
+    {
+        COMMENT 'Custom document parser';
+    }
 }
 ```
 
+   Real PostgreSQL has no `OWNER` concept for Parser at all — the `{ }`
+   block accepts only `comment-dir`/`renamed-from-dir`.  `SET SCHEMA` is
+   unrelated to ownership and still applies via a schema-qualified
+   `RENAMED FROM` (§7.6) — real PostgreSQL supports moving a Parser
+   between schemas despite it having no owner-based ACL surface at all.
+
    Any change to a parser requires drop + recreate (`DESTRUCTIVE`).
+   `COMMENT`/`RENAMED FROM` changes are `SAFE`/`CAUTION` respectively.
 
 ### 12.4. Text Search Templates
 
@@ -4205,9 +4245,16 @@ SCHEMA public {
     TEXT SEARCH TEMPLATE ispell_template (
         LEXIZE = dispell_lexize,
         INIT   = dispell_init
-    );
+    )
+    {
+        COMMENT 'Ispell-family dictionary template';
+    }
 }
 ```
+
+   Same `{ }` block rules as Parser above (`comment-dir`/
+   `renamed-from-dir`, no `owner-dir` — real PostgreSQL has no `OWNER`
+   concept for Template either).
 
    Any change to a template requires drop + recreate (`DESTRUCTIVE`).
 
@@ -6710,10 +6757,10 @@ serial_sequence_declared      = "off"
    | Operator Families | Declared, Passthrough + Diffed | Header (name/access method) reconstructed from catalog, hash-diffed; loose members (§14.4, `ALTER OPERATOR FAMILY ... ADD`) are structured and diffed incrementally per member, live-path included — not gated on `Reconstructed` the way the bare header hash is |
    | Casts | Declared, Passthrough | Reconstructed from catalog, hash-diffed; any change = DESTRUCTIVE |
    | Extended Statistics Objects | Declared, Passthrough | Reconstructed from catalog; hash-diffed |
-   | Text Search Configurations | Declared, Passthrough | Reconstructed from catalog; hash-diffed |
-   | Text Search Dictionaries | Declared, Passthrough | Reconstructed from catalog; hash-diffed |
-   | Text Search Parsers | Declared, Passthrough | Reconstructed from catalog; hash-diffed |
-   | Text Search Templates | Declared, Passthrough | Reconstructed from catalog; hash-diffed |
+   | Text Search Configurations | Declared, Passthrough | Reconstructed from catalog; hash-diffed. `OWNER`, `ALTER MAPPING REPLACE` (bulk and per-token-type) also supported (§12.1) |
+   | Text Search Dictionaries | Declared, Passthrough | Reconstructed from catalog; hash-diffed. `OWNER`/`COMMENT`/`RENAMED FROM` block now supported (§12.2) |
+   | Text Search Parsers | Declared, Passthrough | Reconstructed from catalog; hash-diffed. `COMMENT`/`RENAMED FROM` block now supported, no `OWNER` (real PostgreSQL has none for this kind, §12.3) |
+   | Text Search Templates | Declared, Passthrough | Reconstructed from catalog; hash-diffed. `COMMENT`/`RENAMED FROM` block now supported, no `OWNER` (§12.4) |
    | Macro preprocessor | Declared, No SQL | Compile-time text expansion |
    | Cross-file macro sharing | Declared, No SQL | Macros defined in any file in the compilation scope are available to all others |
    | Rules (REWRITE) | Out of scope | Legacy |
@@ -6810,10 +6857,15 @@ base-type-decl = "TYPE" WSP schema-name WSP "(" storage-params ")" ";"
 ; four Text Search object kinds (Dictionary, Parser, Template — Text
 ; Search Configuration is the exception, with real structured grammar
 ; of its own: tsconfig-decl, §12.1).  None of these has (or needs) a
-; DPG-specific ABNF production beyond
-; its own section's worked "PG equivalent" line — inventing one would
-; violate Tenet 2 by giving PostgreSQL's own syntax a second, redundant
-; DPG-specific name.
+; DPG-specific ABNF production for its Part 1 body beyond its own
+; section's worked "PG equivalent" line — inventing one would violate
+; Tenet 2 by giving PostgreSQL's own syntax a second, redundant DPG-
+; specific name.  Several of them DO carry an optional trailing { }
+; block of ordinary lifecycle directives (owner-dir/comment-dir/
+; renamed-from-dir), same as every non-opaque kind — that block is DPG
+; grammar for concepts with no place in the native CREATE statement, not
+; a second name for the passthrough body, so it doesn't violate the
+; same rule (Text Search Dictionary/Parser/Template, §12.2-§12.4).
 opaque-object-decl = <the object kind's own native CREATE statement,
                        verbatim, per its section's "PG equivalent" line>
 
