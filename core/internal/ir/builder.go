@@ -972,10 +972,11 @@ func mergeTableBlock(tbl *Table, block pipeline.BlockAST) error {
 	// Additional constraints from block.
 	for _, cst := range block.Constraints {
 		newCst := &Constraint{
-			Name:     cst.Name.Name,
-			Expr:     cst.Expr.Text,
-			NotValid: cst.NotValid,
-			Pos:      cst.Pos,
+			Name:        cst.Name.Name,
+			Expr:        cst.Expr.Text,
+			NotValid:    cst.NotValid,
+			RenamedFrom: cst.RenamedFrom,
+			Pos:         cst.Pos,
 		}
 		if cst.Comment != nil {
 			newCst.Comment = &cst.Comment.Value
@@ -2006,10 +2007,12 @@ func (b *Builder) buildDomain(cs *pg_query.CreateDomainStmt, block pipeline.Bloc
 	}
 	for _, cst := range block.Constraints {
 		t.DomainConstraints = append(t.DomainConstraints, &Constraint{
-			Name: cst.Name.Name,
-			Type: "CHECK",
-			Expr: cst.Expr.Text,
-			Pos:  cst.Pos,
+			Name:        cst.Name.Name,
+			Type:        "CHECK",
+			Expr:        cst.Expr.Text,
+			NotValid:    cst.NotValid,
+			RenamedFrom: cst.RenamedFrom,
+			Pos:         cst.Pos,
 		})
 	}
 	for _, g := range block.Grants {
@@ -2991,6 +2994,9 @@ func blockIndexToIR(idx pipeline.IndexDef) *Index {
 	}
 	if idx.Comment != nil {
 		ir.Comment = &idx.Comment.Value
+	}
+	if idx.RenamedFrom != nil {
+		ir.RenamedFrom = &idx.RenamedFrom.Name
 	}
 	return ir
 }

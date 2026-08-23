@@ -3556,7 +3556,7 @@ func diffObject(desired pipeline.IRObject, snap *snapshot.SnapObject, fullSnap *
 		if snap.View == nil {
 			return nil, nil
 		}
-		return diffView(o, snap.View), nil
+		return diffView(o, snap.View)
 	case *ir.Function:
 		if snap.Function == nil {
 			return nil, nil
@@ -4573,7 +4573,7 @@ func viewTargetIsStar(val *pg_query.Node) bool {
 	return false
 }
 
-func diffView(o *ir.View, snap *snapshot.SnapView) []pipeline.DiffOp {
+func diffView(o *ir.View, snap *snapshot.SnapView) ([]pipeline.DiffOp, error) {
 	var ops []pipeline.DiffOp
 	pos := o.SrcPos
 	tbl := qualIdent(o.Schema, o.Name)
@@ -4598,7 +4598,7 @@ func diffView(o *ir.View, snap *snapshot.SnapView) []pipeline.DiffOp {
 		ops = append(ops, destructiveOp(fmt.Sprintf("DROP %s IF EXISTS %s;", viewKind, tbl), pos))
 		ops = append(ops, createView(o)...)
 		// createView emits comments and grants; nothing more to do.
-		return ops
+		return ops, nil
 	}
 
 	if normalizeWS(o.Query) != normalizeWS(snap.Query) {
@@ -4616,7 +4616,7 @@ func diffView(o *ir.View, snap *snapshot.SnapView) []pipeline.DiffOp {
 		if changed, ok := viewOutputColumnsChanged(o.Query, snap.Query); ok && changed {
 			ops = append(ops, destructiveOp(fmt.Sprintf("DROP %s IF EXISTS %s CASCADE;", viewKind, tbl), pos))
 			ops = append(ops, createView(o)...)
-			return ops
+			return ops, nil
 		}
 		ops = append(ops, safeOp(fmt.Sprintf("CREATE OR REPLACE VIEW %s AS %s;", tbl, o.Query), pos))
 	}
@@ -4644,8 +4644,12 @@ func diffView(o *ir.View, snap *snapshot.SnapView) []pipeline.DiffOp {
 	ops = append(ops, diffGrantSet(snap.Grants, o.Grants, "TABLE "+tbl, pos)...)
 	ops = append(ops, diffRevocationSet(snap.Revocations, o.Revocations, "TABLE "+tbl, pos)...)
 	ops = append(ops, diffSecurityLabelSet(snap.SecurityLabels, o.SecurityLabels, viewKind+" "+tbl, pos)...)
-	ops = append(ops, diffViewIndexes(o.Schema, o.Name, o.Indexes, snap.Indexes)...)
-	return ops
+	viewIdxOps, err := diffViewIndexes(o.Schema, o.Name, o.Indexes, snap.Indexes)
+	if err != nil {
+		return nil, err
+	}
+	ops = append(ops, viewIdxOps...)
+	return ops, nil
 }
 
 func diffFunction(o *ir.Function, snap *snapshot.SnapFunction) []pipeline.DiffOp {
@@ -4848,20 +4852,66 @@ func diffType(o *ir.Type, snap *snapshot.SnapType, fullSnap *pipeline.Snapshot, 
 				desiredByName[c.Name] = c
 			}
 		}
-		for name := range snapByName {
-			if _, ok := desiredByName[name]; !ok {
-				ops = append(ops, safeOp(fmt.Sprintf("ALTER DOMAIN %s DROP CONSTRAINT %s;", typeIdent, quoteIdent(name)), pos))
+
+		// Constraints renamed in desired: map old name -> new name, validated
+		// the same shape as diffConstraints/diffIndexes' RENAMED FROM
+		// handling (Section 7.4).
+		renamedFrom := make(map[string]string) // snap name -> desired name
+		for _, c := range o.DomainConstraints {
+			if c.RenamedFrom == nil {
+				continue
 			}
+			if _, collide := desiredByName[*c.RenamedFrom]; collide {
+				return nil, pipeline.Errorf(c.Pos,
+					"RENAMED FROM %q on domain constraint %q collides with another constraint of the same name in the desired declaration. Remove the stale constraint.",
+					*c.RenamedFrom, c.Name)
+			}
+			_, oldInSnap := snapByName[*c.RenamedFrom]
+			_, newInSnap := snapByName[c.Name]
+			if newInSnap {
+				continue // post-apply / no-op state
+			}
+			if !oldInSnap {
+				return nil, pipeline.Errorf(c.Pos,
+					"RENAMED FROM %q on domain constraint %q does not match the snapshot — neither the old nor the new name exists there. Remove RENAMED FROM if this is a genuinely new constraint.",
+					*c.RenamedFrom, c.Name)
+			}
+			renamedFrom[*c.RenamedFrom] = c.Name
+		}
+
+		for name := range snapByName {
+			if _, ok := desiredByName[name]; ok {
+				continue
+			}
+			if _, wasRenamed := renamedFrom[name]; wasRenamed {
+				continue
+			}
+			ops = append(ops, safeOp(fmt.Sprintf("ALTER DOMAIN %s DROP CONSTRAINT %s;", typeIdent, quoteIdent(name)), pos))
 		}
 		for name, c := range desiredByName {
-			if sc, existed := snapByName[name]; !existed || sc.Expr != c.Expr {
+			sc, existed := snapByName[name]
+			if !existed && c.RenamedFrom != nil {
+				if oldSc, ok := snapByName[*c.RenamedFrom]; ok {
+					sc, existed = oldSc, true
+				}
+			}
+			if !existed || sc.Expr != c.Expr {
 				if existed {
-					// Same name, different expression: PG has no ALTER
+					// Same identity, different expression: PG has no ALTER
 					// DOMAIN ... ALTER CONSTRAINT for the check expression
-					// itself, so replace it via drop + add.
-					ops = append(ops, safeOp(fmt.Sprintf("ALTER DOMAIN %s DROP CONSTRAINT %s;", typeIdent, quoteIdent(name)), pos))
+					// itself, so replace it via drop + add. Drops under sc's
+					// CURRENT (matched-snapshot) name, not the desired name —
+					// those can differ when this is also a rename.
+					ops = append(ops, safeOp(fmt.Sprintf("ALTER DOMAIN %s DROP CONSTRAINT %s;", typeIdent, quoteIdent(sc.Name)), pos))
 				}
 				ops = append(ops, cautionOp(fmt.Sprintf("ALTER DOMAIN %s ADD CONSTRAINT %s %s;", typeIdent, quoteIdent(name), c.Expr), pos))
+				continue
+			}
+			if sc.Name != name {
+				// RENAMED FROM on a domain constraint (Section 5.4) — same
+				// mechanism and SAFE classification as a table constraint
+				// rename (Section 7.3).
+				ops = append(ops, safeOp(fmt.Sprintf("ALTER DOMAIN %s RENAME CONSTRAINT %s TO %s;", typeIdent, quoteIdent(sc.Name), quoteIdent(name)), pos))
 			}
 		}
 		if !ptrEq(o.Comment, snap.Comment) {
@@ -5148,8 +5198,16 @@ func diffTable(o *ir.Table, snap *snapshot.SnapTable, fullSnap *pipeline.Snapsho
 		return nil, err
 	}
 	ops = append(ops, colOps...)
-	ops = append(ops, diffConstraints(tbl, o, snap, fullSnap, pos, renamedCols, droppedCols)...)
-	ops = append(ops, diffIndexes(o.Schema, o.Name, o, snap, renamedCols, droppedCols)...)
+	constraintOps, err := diffConstraints(tbl, o, snap, fullSnap, pos, renamedCols, droppedCols)
+	if err != nil {
+		return nil, err
+	}
+	ops = append(ops, constraintOps...)
+	indexOps, err := diffIndexes(o.Schema, o.Name, o, snap, renamedCols, droppedCols)
+	if err != nil {
+		return nil, err
+	}
+	ops = append(ops, indexOps...)
 	ops = append(ops, diffPolicies(o.Schema, o.Name, o, snap)...)
 	ops = append(ops, diffTriggers(o.Schema, o.Name, o, snap)...)
 	ops = append(ops, diffTableInherits(tbl, o, snap, pos)...)
@@ -5701,7 +5759,7 @@ func diffColumns(tbl string, o *ir.Table, snap *snapshot.SnapTable, vtypes map[s
 	return ops, renamedFrom, droppedCols, nil
 }
 
-func diffConstraints(tbl string, o *ir.Table, snap *snapshot.SnapTable, fullSnap *pipeline.Snapshot, pos pipeline.SourcePos, renamedCols map[string]string, droppedCols map[string]bool) []pipeline.DiffOp {
+func diffConstraints(tbl string, o *ir.Table, snap *snapshot.SnapTable, fullSnap *pipeline.Snapshot, pos pipeline.SourcePos, renamedCols map[string]string, droppedCols map[string]bool) ([]pipeline.DiffOp, error) {
 	var ops []pipeline.DiffOp
 
 	// Inline constraints (e.g. `id BIGINT PRIMARY KEY`) have no user-supplied
@@ -5867,9 +5925,43 @@ func diffConstraints(tbl string, o *ir.Table, snap *snapshot.SnapTable, fullSnap
 		}
 	}
 
+	// Constraints renamed in desired: map old key -> new name, validated the
+	// same shape as diffPartitionList/diffIndexes' RENAMED FROM handling.
+	// RENAMED FROM is only reachable via the RFC's grammar on a NAMED
+	// constraint (an unnamed one has no prior name to reference), so this
+	// only ever keys off "n:"+name, never a structural key.
+	renamedFrom := make(map[string]string) // snap key -> desired name
+	for _, c := range o.Constraints {
+		if c.RenamedFrom == nil {
+			continue
+		}
+		oldKey, newKey := "n:"+*c.RenamedFrom, "n:"+c.Name
+		if _, collide := desiredByKey[oldKey]; collide {
+			return nil, pipeline.Errorf(c.Pos,
+				"RENAMED FROM %q on constraint %q collides with another constraint of the same name in the desired declaration. Remove the stale constraint.",
+				*c.RenamedFrom, c.Name)
+		}
+		_, oldInSnap := snapByKey[oldKey]
+		_, newInSnap := snapByKey[newKey]
+		if newInSnap {
+			// Post-apply / no-op state: the snapshot already has the new name.
+			continue
+		}
+		if !oldInSnap {
+			return nil, pipeline.Errorf(c.Pos,
+				"RENAMED FROM %q on constraint %q does not match the snapshot — neither the old nor the new name exists there. Remove RENAMED FROM if this is a genuinely new constraint.",
+				*c.RenamedFrom, c.Name)
+		}
+		renamedFrom[oldKey] = c.Name
+	}
+
 	for i := range snap.Constraints {
 		sc := &snap.Constraints[i]
-		if _, ok := desiredByKey[key(sc.Name, sc.Type, translateConstraintExpr(sc.Expr, renamedCols))]; ok {
+		skey := key(sc.Name, sc.Type, translateConstraintExpr(sc.Expr, renamedCols))
+		if _, ok := desiredByKey[skey]; ok {
+			continue
+		}
+		if _, wasRenamed := renamedFrom[skey]; wasRenamed {
 			continue
 		}
 		// PG cascades constraint removal when the underlying column is dropped.
@@ -5919,6 +6011,25 @@ func diffConstraints(tbl string, o *ir.Table, snap *snapshot.SnapTable, fullSnap
 			ops = append(ops, commentOp(sc, c)...)
 			continue
 		}
+		if c.RenamedFrom != nil {
+			if sc, exists := snapByKey["n:"+*c.RenamedFrom]; exists {
+				// RENAMED FROM on a constraint (like index RENAMED FROM,
+				// Section 7.7) emits ALTER TABLE ... RENAME CONSTRAINT —
+				// SAFE, metadata-only — instead of the drop-and-recreate a
+				// name-only difference would otherwise trigger. Subsequent
+				// ops reference the constraint's NEW (post-rename) name, not
+				// sc's snapshot name, since the rename already executed.
+				ops = append(ops, safeOp(
+					fmt.Sprintf("ALTER TABLE %s RENAME CONSTRAINT %s TO %s;", tbl, quoteIdent(sc.Name), quoteIdent(c.Name)),
+					c.Pos,
+				))
+				renamedSc := *sc
+				renamedSc.Name = c.Name
+				ops = append(ops, validateConstraintOp(tbl, &renamedSc, c)...)
+				ops = append(ops, commentOp(&renamedSc, c)...)
+				continue
+			}
+		}
 		if c.Name == "" {
 			if label, ok := pgConstraintNameLabel(c.Type); ok {
 				if predicted, predOK := predictName(c, label); predOK {
@@ -5949,7 +6060,7 @@ func diffConstraints(tbl string, o *ir.Table, snap *snapshot.SnapTable, fullSnap
 			))
 		}
 	}
-	return ops
+	return ops, nil
 }
 
 // validateConstraintOp emits ALTER TABLE ... VALIDATE CONSTRAINT ... when a
@@ -6195,7 +6306,10 @@ func schemaRelationNames(fullSnap *pipeline.Snapshot, schema, excludeTable strin
 // (RFC §8.2). Simpler than the table version: a view has no COLUMN block, so
 // there's no RENAMED FROM / DROP COLUMN cascade to translate index
 // definitions through — indexes are matched by name and compared as-is.
-func diffViewIndexes(schema, view string, desired []*ir.Index, snapIdx []snapshot.SnapIndex) []pipeline.DiffOp {
+// diffViewIndexes mirrors diffIndexes' RENAMED FROM handling (see its own
+// doc comment) minus the column-rename translation step, which has no View
+// counterpart.
+func diffViewIndexes(schema, view string, desired []*ir.Index, snapIdx []snapshot.SnapIndex) ([]pipeline.DiffOp, error) {
 	var ops []pipeline.DiffOp
 
 	snapByName := make(map[string]*snapshot.SnapIndex, len(snapIdx))
@@ -6207,16 +6321,30 @@ func diffViewIndexes(schema, view string, desired []*ir.Index, snapIdx []snapsho
 		desiredByName[idx.Name] = idx
 	}
 
+	renamedFrom, err := validateIndexRenames(desired, desiredByName, snapByName)
+	if err != nil {
+		return nil, err
+	}
+
 	for _, si := range snapIdx {
-		if _, ok := desiredByName[si.Name]; !ok {
-			ops = append(ops, cautionOp(
-				fmt.Sprintf("DROP INDEX IF EXISTS %s;", quoteIdent(si.Name)),
-				pipeline.SourcePos{},
-			))
+		if _, ok := desiredByName[si.Name]; ok {
+			continue
 		}
+		if _, wasRenamed := renamedFrom[si.Name]; wasRenamed {
+			continue
+		}
+		ops = append(ops, cautionOp(
+			fmt.Sprintf("DROP INDEX IF EXISTS %s;", quoteIdent(si.Name)),
+			pipeline.SourcePos{},
+		))
 	}
 	for _, idx := range desired {
 		si, exists := snapByName[idx.Name]
+		if !exists && idx.RenamedFrom != nil {
+			if oldSi, ok := snapByName[*idx.RenamedFrom]; ok {
+				si, exists = oldSi, true
+			}
+		}
 		if !exists {
 			ops = append(ops, createIndex(schema, view, idx, idx.Concurrently)...)
 			continue
@@ -6226,19 +6354,30 @@ func diffViewIndexes(schema, view string, desired []*ir.Index, snapIdx []snapsho
 		// the same way — see stripOuterParens' doc comment — since pg_get_expr
 		// always wraps a WHERE predicate in one extra pair of parens on
 		// reconstruction, which would otherwise compare unequal against an
-		// unchanged, hand-written predicate that never had them.
+		// unchanged, hand-written predicate that never had them. Name is also
+		// excluded — a pure rename is its own ALTER INDEX below, not a
+		// definition change requiring DROP+CREATE.
 		desiredSnap := snapshot.ToSnapIndex(idx)
 		definitionDesired, definitionSnap := desiredSnap, *si
 		definitionDesired.Comment, definitionSnap.Comment = "", ""
+		definitionDesired.Name, definitionSnap.Name = "", ""
 		definitionDesired.Where = normalizeExprForCompare(definitionDesired.Where)
 		definitionSnap.Where = normalizeExprForCompare(definitionSnap.Where)
 		if definitionDesired != definitionSnap {
 			ops = append(ops, cautionOp(
-				fmt.Sprintf("DROP INDEX IF EXISTS %s;", quoteIdent(idx.Name)),
+				fmt.Sprintf("DROP INDEX IF EXISTS %s;", quoteIdent(si.Name)),
 				idx.Pos,
 			))
 			ops = append(ops, createIndex(schema, view, idx, idx.Concurrently)...)
-		} else if desiredSnap.Comment != si.Comment {
+			continue
+		}
+		if si.Name != idx.Name {
+			ops = append(ops, safeOp(
+				fmt.Sprintf("ALTER INDEX %s RENAME TO %s;", quoteIdent(si.Name), quoteIdent(idx.Name)),
+				idx.Pos,
+			))
+		}
+		if desiredSnap.Comment != si.Comment {
 			if idx.Comment != nil {
 				ops = append(ops, safeOp(
 					fmt.Sprintf("COMMENT ON INDEX %s IS %s;", quoteIdent(idx.Name), quoteLit(*idx.Comment)),
@@ -6252,10 +6391,51 @@ func diffViewIndexes(schema, view string, desired []*ir.Index, snapIdx []snapsho
 			}
 		}
 	}
-	return ops
+	return ops, nil
 }
 
-func diffIndexes(schema, table string, o *ir.Table, snap *snapshot.SnapTable, renamedCols map[string]string, droppedCols map[string]bool) []pipeline.DiffOp {
+// validateIndexRenames validates every desired index's RENAMED FROM
+// directive against the snapshot, the same stale-directive validation shape
+// as diffCompositeAttrs/diffPartitionList (see either's doc comment), and
+// returns a map of snapshot name -> desired name for every genuine rename —
+// used by callers to (a) look up the OLD snapshot entry when an index isn't
+// found under its new name, and (b) suppress a spurious DROP INDEX for an
+// entry consumed by a rename. Shared by diffIndexes and diffViewIndexes
+// since indexes are identical objects in both contexts (no schema/table
+// namespacing differs between the two).
+func validateIndexRenames(desired []*ir.Index, desiredByName map[string]*ir.Index, snapByName map[string]*snapshot.SnapIndex) (map[string]string, error) {
+	renamedFrom := make(map[string]string) // snap name -> desired name
+	for _, idx := range desired {
+		if idx.RenamedFrom == nil {
+			continue
+		}
+		if _, collide := desiredByName[*idx.RenamedFrom]; collide {
+			return nil, pipeline.Errorf(idx.Pos,
+				"RENAMED FROM %q on index %q collides with another index of the same name in the desired declaration. Remove the stale index.",
+				*idx.RenamedFrom, idx.Name)
+		}
+		_, oldInSnap := snapByName[*idx.RenamedFrom]
+		_, newInSnap := snapByName[idx.Name]
+		if newInSnap {
+			// Post-apply / no-op state: the snapshot already has the new name.
+			continue
+		}
+		if !oldInSnap {
+			return nil, pipeline.Errorf(idx.Pos,
+				"RENAMED FROM %q on index %q does not match the snapshot — neither the old nor the new name exists there. Remove RENAMED FROM if this is a genuinely new index.",
+				*idx.RenamedFrom, idx.Name)
+		}
+		renamedFrom[*idx.RenamedFrom] = idx.Name
+	}
+	return renamedFrom, nil
+}
+
+// diffIndexes' RENAMED FROM handling mirrors diffCompositeAttrs/
+// diffPartitionList's identical shape (name-keyed collection, matched by old
+// name within the same table, same stale-directive validation via
+// validateIndexRenames) — an index has no independent schema, so matching is
+// always within THIS table's own index list, never cross-schema.
+func diffIndexes(schema, table string, o *ir.Table, snap *snapshot.SnapTable, renamedCols map[string]string, droppedCols map[string]bool) ([]pipeline.DiffOp, error) {
 	var ops []pipeline.DiffOp
 
 	snapByName := make(map[string]*snapshot.SnapIndex, len(snap.Indexes))
@@ -6267,8 +6447,16 @@ func diffIndexes(schema, table string, o *ir.Table, snap *snapshot.SnapTable, re
 		desiredByName[idx.Name] = idx
 	}
 
+	renamedFrom, err := validateIndexRenames(o.Indexes, desiredByName, snapByName)
+	if err != nil {
+		return nil, err
+	}
+
 	for _, si := range snap.Indexes {
 		if _, ok := desiredByName[si.Name]; ok {
+			continue
+		}
+		if _, wasRenamed := renamedFrom[si.Name]; wasRenamed {
 			continue
 		}
 		// Indexes are matched by name. If a column was renamed via RENAMED FROM
@@ -6294,6 +6482,11 @@ func diffIndexes(schema, table string, o *ir.Table, snap *snapshot.SnapTable, re
 		concurrent := idx.Concurrently
 
 		si, exists := snapByName[idx.Name]
+		if !exists && idx.RenamedFrom != nil {
+			if oldSi, ok := snapByName[*idx.RenamedFrom]; ok {
+				si, exists = oldSi, true
+			}
+		}
 		if !exists {
 			ops = append(ops, createIndex(schema, table, idx, concurrent)...)
 			continue
@@ -6322,9 +6515,12 @@ func diffIndexes(schema, table string, o *ir.Table, snap *snapshot.SnapTable, re
 		// applied when a real definition change happens alongside it) — an
 		// index has no in-place ALTER for its structural definition, but it
 		// does for its comment (COMMENT ON INDEX), so a comment-only edit
-		// must not trigger a destructive rebuild.
+		// must not trigger a destructive rebuild. Name is also excluded — a
+		// pure rename is its own ALTER INDEX below, not a definition change
+		// requiring DROP+CREATE.
 		definitionDesired, definitionSnap := desiredSnap, translatedSnap
 		definitionDesired.Comment, definitionSnap.Comment = "", ""
+		definitionDesired.Name, definitionSnap.Name = "", ""
 		// Where is normalized (not excluded) the same way Comment is
 		// excluded above — see stripOuterParens' doc comment — since
 		// pg_get_indexdef always wraps a WHERE predicate in one extra pair
@@ -6335,11 +6531,22 @@ func diffIndexes(schema, table string, o *ir.Table, snap *snapshot.SnapTable, re
 		definitionSnap.Where = normalizeExprForCompare(definitionSnap.Where)
 		if definitionDesired != definitionSnap {
 			ops = append(ops, cautionOp(
-				fmt.Sprintf("DROP INDEX IF EXISTS %s;", quoteIdent(idx.Name)),
+				fmt.Sprintf("DROP INDEX IF EXISTS %s;", quoteIdent(si.Name)),
 				idx.Pos,
 			))
 			ops = append(ops, createIndex(schema, table, idx, concurrent)...)
-		} else if desiredSnap.Comment != translatedSnap.Comment {
+			continue
+		}
+		if si.Name != idx.Name {
+			// Same mechanism and safety class as Constraint/composite-attribute
+			// rename — metadata-only, no in-place ALTER exists for anything
+			// else about an index's definition.
+			ops = append(ops, safeOp(
+				fmt.Sprintf("ALTER INDEX %s RENAME TO %s;", quoteIdent(si.Name), quoteIdent(idx.Name)),
+				idx.Pos,
+			))
+		}
+		if desiredSnap.Comment != translatedSnap.Comment {
 			if idx.Comment != nil {
 				ops = append(ops, safeOp(
 					fmt.Sprintf("COMMENT ON INDEX %s IS %s;", quoteIdent(idx.Name), quoteLit(*idx.Comment)),
@@ -6353,7 +6560,7 @@ func diffIndexes(schema, table string, o *ir.Table, snap *snapshot.SnapTable, re
 			}
 		}
 	}
-	return ops
+	return ops, nil
 }
 
 // translateConstraintExpr rewrites quoted column identifiers inside a

@@ -141,8 +141,12 @@ type Index struct {
 	With             []pipeline.StorageParam
 	Tablespace       *string
 	Concurrently     bool
-	Comment          *string
-	Pos              pipeline.SourcePos
+	// RenamedFrom names the index's prior identity (RENAMED FROM, Section
+	// 7.7) — matched within the same table's index list; a bare name, no
+	// cross-schema form (see pipeline.IndexDef.RenamedFrom's doc comment).
+	RenamedFrom *string
+	Comment     *string
+	Pos         pipeline.SourcePos
 }
 
 // Constraint is a table or column constraint.
@@ -190,8 +194,11 @@ type Constraint struct {
 	NotValid          bool
 	Deferrable        bool
 	InitiallyDeferred bool
-	Comment           *string
-	Pos               pipeline.SourcePos
+	// RenamedFrom names the constraint's prior identity (RENAMED FROM,
+	// Section 7.3) — see pipeline.ConstraintDef.RenamedFrom's doc comment.
+	RenamedFrom *string
+	Comment     *string
+	Pos         pipeline.SourcePos
 }
 
 // ExcludeSpec is the structured body of an EXCLUDE constraint: PostgreSQL's

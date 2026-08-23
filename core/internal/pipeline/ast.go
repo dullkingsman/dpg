@@ -58,8 +58,14 @@ type IndexDef struct {
 	With             []StorageParam
 	Tablespace       *Identifier
 	Concurrently     bool
-	Comment          *StringLit
-	Pos              SourcePos
+	// RenamedFrom names the index's prior identity (RENAMED FROM, RFC
+	// Section 7.7) — real PostgreSQL's ALTER INDEX ... RENAME TO takes a
+	// bare new name only (moving schemas is a separate ALTER INDEX ... SET
+	// SCHEMA, not modeled here), so this is a bare identifier, not the
+	// qual-name cross-schema form Table/View/Function use.
+	RenamedFrom *Identifier
+	Comment     *StringLit
+	Pos         SourcePos
 }
 
 // GrantEntry is a single GRANTS directive.
@@ -153,8 +159,13 @@ type ConstraintDef struct {
 	Name     Identifier
 	Expr     RawExpr
 	NotValid bool
-	Comment  *StringLit
-	Pos      SourcePos
+	// RenamedFrom names the constraint's prior identity (RENAMED FROM, RFC
+	// Section 7.3) — a bare identifier, matched within the same table's
+	// constraint list; no cross-schema form, same as Index's (a
+	// constraint's schema is always its parent table's).
+	RenamedFrom *string
+	Comment     *StringLit
+	Pos         SourcePos
 }
 
 // PartitionBound describes a single partition's bounds, optionally with its

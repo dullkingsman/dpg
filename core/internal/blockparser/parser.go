@@ -930,11 +930,34 @@ func (b *blockParser) parseOneIndex(presetUnique bool) (pipeline.IndexDef, error
 		case "WHERE":
 			b.readWord()
 			b.skipWS()
-			raw, err2 := b.readRawUntil(";,}")
-			if err2 != nil {
-				return idx, err2
+			if b.peek() == '(' {
+				// A parenthesized predicate (RFC Section 7.7's own grammar
+				// shape, "WHERE" WSP "(" predicate ")") is read as a
+				// balanced expression — like INCLUDE/WITH below — so a
+				// subsequent clause (RENAMED FROM, TABLESPACE) isn't
+				// swallowed into it too. A raw run to the next statement
+				// terminator had no way to know the predicate ended at its
+				// own closing paren rather than the next ';'.
+				b.advance() // consume (
+				inner, err2 := b.readRawUntil(")")
+				if err2 != nil {
+					return idx, err2
+				}
+				b.advance() // consume )
+				idx.Where = &pipeline.RawExpr{Text: "(" + strings.TrimSpace(inner) + ")", Pos: b.srcPos()}
+			} else {
+				// A bare (unparenthesized) predicate has no delimiter of
+				// its own to bound a balanced read, so it's read exactly as
+				// it always has been — to the next statement terminator. A
+				// clause written after a bare WHERE (e.g. RENAMED FROM) is
+				// not separable from it this way; write WHERE (...) with
+				// parens instead if that combination is needed.
+				raw, err2 := b.readRawUntil(";,}")
+				if err2 != nil {
+					return idx, err2
+				}
+				idx.Where = &pipeline.RawExpr{Text: strings.TrimSpace(raw), Pos: b.srcPos()}
 			}
-			idx.Where = &pipeline.RawExpr{Text: strings.TrimSpace(raw), Pos: b.srcPos()}
 		case "INCLUDE":
 			b.readWord()
 			b.skipWS()
@@ -994,6 +1017,18 @@ func (b *blockParser) parseOneIndex(presetUnique bool) (pipeline.IndexDef, error
 				return idx, err2
 			}
 			idx.Tablespace = &ts
+		case "RENAMED":
+			b.readWord()
+			b.skipWS()
+			if err2 := b.expect("FROM"); err2 != nil {
+				return idx, err2
+			}
+			b.skipWS()
+			oldName, err2 := b.readIdentifier()
+			if err2 != nil {
+				return idx, err2
+			}
+			idx.RenamedFrom = &oldName
 		default:
 			b.restore(c)
 			goto doneIndexClauses
@@ -1287,6 +1322,14 @@ func (b *blockParser) parseConstraint(pos pipeline.SourcePos) (pipeline.Constrai
 		return cst, err
 	}
 	raw = strings.TrimSpace(raw)
+	// Check for a trailing RENAMED FROM clause first (RFC Section 7.3: the
+	// last optional clause on a table-constraint, appearing after NOT VALID
+	// when both are present).
+	if rm := renamedFromSuffixRe.FindStringSubmatch(raw); rm != nil {
+		renamed := unquoteRawIdent(rm[2])
+		cst.RenamedFrom = &renamed
+		raw = strings.TrimSpace(rm[1])
+	}
 	// Check for NOT VALID suffix
 	upper := strings.ToUpper(raw)
 	if strings.HasSuffix(upper, "NOT VALID") {
@@ -1906,23 +1949,27 @@ func (b *blockParser) parsePartitionsBlock(pos pipeline.SourcePos) (*pipeline.Pa
 // so a plain trailing match is unambiguous.
 var subPartitionByRe = regexp.MustCompile(`(?is)^(.*?)\bPARTITION\s+BY\s+(RANGE|LIST|HASH)\s*\(([^)]*)\)\s*$`)
 
-// partitionRenamedFromRe matches a trailing "RENAMED FROM name" clause on a
-// partition entry (RFC Section 7.13), applied to whatever text remains after
-// subPartitionByRe has already stripped off any trailing sub-partitioning
-// suffix — RENAMED FROM sits before PARTITION BY in the grammar. The
-// identifier alternative accepts a bare word or a double-quoted identifier
-// (unquoted below via unquotePartitionIdent), the same two forms
+// renamedFromSuffixRe matches a trailing "RENAMED FROM name" clause at the
+// end of a raw-text-captured entry (a partition's bounds, Section 7.13; a
+// table constraint's body, Section 7.3) — the shape shared by every
+// declaration whose body is captured as opaque raw text rather than
+// tokenized field-by-field, so RENAMED FROM can't be read via readIdentifier
+// mid-parse the way it is for a proper `{ }` block directive. For a
+// partition entry specifically, this is applied to whatever text remains
+// after subPartitionByRe has already stripped off any trailing sub-
+// partitioning suffix — RENAMED FROM sits before PARTITION BY in that
+// grammar. The identifier alternative accepts a bare word or a double-quoted
+// identifier (unquoted below via unquoteRawIdent), the same two forms
 // readIdentifier accepts elsewhere in this parser. Same assumption as
-// subPartitionByRe above: bounds-clause literals are never expected to end
-// in something that looks like "RENAMED FROM identifier", so a plain
-// trailing match is unambiguous in practice.
-var partitionRenamedFromRe = regexp.MustCompile(`(?is)^(.*?)\bRENAMED\s+FROM\s+("(?:[^"]|"")+"|[A-Za-z_][A-Za-z0-9_$]*)\s*$`)
+// subPartitionByRe above: a raw body is never expected to end in something
+// that looks like "RENAMED FROM identifier" unless it genuinely is one, so a
+// plain trailing match is unambiguous in practice.
+var renamedFromSuffixRe = regexp.MustCompile(`(?is)^(.*?)\bRENAMED\s+FROM\s+("(?:[^"]|"")+"|[A-Za-z_][A-Za-z0-9_$]*)\s*$`)
 
-// unquotePartitionIdent strips a double-quoted identifier's surrounding
-// quotes and un-escapes doubled internal quotes ("" -> "), matching
-// readQuotedString's own escaping rules. Returns s unchanged if it isn't
-// quoted.
-func unquotePartitionIdent(s string) string {
+// unquoteRawIdent strips a double-quoted identifier's surrounding quotes and
+// un-escapes doubled internal quotes ("" -> "), matching readQuotedString's
+// own escaping rules. Returns s unchanged if it isn't quoted.
+func unquoteRawIdent(s string) string {
 	if len(s) >= 2 && s[0] == '"' && s[len(s)-1] == '"' {
 		return strings.ReplaceAll(s[1:len(s)-1], `""`, `"`)
 	}
@@ -1970,8 +2017,8 @@ func (b *blockParser) parseOnePartitionBound() (pipeline.PartitionBound, error) 
 			}
 		}
 	}
-	if rm := partitionRenamedFromRe.FindStringSubmatch(boundsText); rm != nil {
-		renamed := unquotePartitionIdent(rm[2])
+	if rm := renamedFromSuffixRe.FindStringSubmatch(boundsText); rm != nil {
+		renamed := unquoteRawIdent(rm[2])
 		bound.RenamedFrom = &renamed
 		boundsText = rm[1]
 	}

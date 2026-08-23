@@ -1818,6 +1818,225 @@ func TestDiffForeignTableOptionsChange(t *testing.T) {
 	}
 }
 
+// TestDiffConstraintRenamedFromEmitsAlterRename is the regression guard for
+// table-level constraint rename detection: before this, RENAMED FROM had no
+// field to carry the old name at all, so a renamed constraint was
+// indistinguishable from "old constraint dropped, new one added" — a
+// DROP CONSTRAINT + ADD CONSTRAINT pair instead of a metadata-only rename.
+func TestDiffConstraintRenamedFromEmitsAlterRename(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.orders", &snapshot.SnapObject{
+		Kind: "table",
+		Table: &snapshot.SnapTable{
+			Schema:  "public",
+			Name:    "orders",
+			Columns: []snapshot.SnapColumn{{Name: "amount", Type: "numeric"}},
+			Constraints: []snapshot.SnapConstraint{
+				{Name: "ck_amount_old", Type: "CHECK", Expr: "CHECK (amount > 0)"},
+			},
+		},
+	})
+	old := "ck_amount_old"
+	desired := []pipeline.IRObject{
+		&ir.Table{
+			Schema:  "public",
+			Name:    "orders",
+			Columns: []*ir.Column{{Name: "amount", Type: ir.TypeRef{Name: "numeric"}}},
+			Constraints: []*ir.Constraint{
+				{Name: "ck_amount_positive", Type: "CHECK", Expr: "CHECK (amount > 0)", RenamedFrom: &old},
+			},
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if containsSQL(ops, "DROP CONSTRAINT") || containsSQL(ops, "ADD CONSTRAINT") {
+		t.Fatalf("renamed constraint should match by RENAMED FROM, not drop+add, got: %v", sqlList(ops))
+	}
+	want := `ALTER TABLE "public"."orders" RENAME CONSTRAINT "ck_amount_old" TO "ck_amount_positive";`
+	if !containsSQL(ops, want) {
+		t.Errorf("expected %q, got: %v", want, sqlList(ops))
+	}
+	for _, o := range ops {
+		if strings.Contains(o.SQL(), "RENAME CONSTRAINT") && o.Safety() != pipeline.Safe {
+			t.Errorf("expected SAFE safety for RENAME CONSTRAINT (matches Index's sub-object rename precedent), got %v", o.Safety())
+		}
+	}
+}
+
+// TestDiffConstraintRenamedFromMatchIsIdentityOnly documents an existing,
+// pre-existing (not introduced by RENAMED FROM support) property of
+// diffConstraints: matching is identity-only, by name — a constraint's own
+// Expr is never compared once its identity (direct name, or now RENAMED
+// FROM) is found. So a rename accompanied by an expression change still
+// only emits the rename; the expression change goes undetected, the exact
+// same way it already would for a plain, non-renamed same-name constraint
+// whose Expr changed (see this function's own top-of-function doc comment:
+// "a named constraint whose definition changes while keeping the same name
+// was already invisible to it before this fix"). This test exists to pin
+// that RENAMED FROM support didn't change that pre-existing behavior either
+// way, not to endorse it as correct — it's a known, separately-scoped gap.
+func TestDiffConstraintRenamedFromMatchIsIdentityOnly(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.orders", &snapshot.SnapObject{
+		Kind: "table",
+		Table: &snapshot.SnapTable{
+			Schema:  "public",
+			Name:    "orders",
+			Columns: []snapshot.SnapColumn{{Name: "amount", Type: "numeric"}},
+			Constraints: []snapshot.SnapConstraint{
+				{Name: "ck_amount_old", Type: "CHECK", Expr: "CHECK (amount > 0)"},
+			},
+		},
+	})
+	old := "ck_amount_old"
+	desired := []pipeline.IRObject{
+		&ir.Table{
+			Schema:  "public",
+			Name:    "orders",
+			Columns: []*ir.Column{{Name: "amount", Type: ir.TypeRef{Name: "numeric"}}},
+			Constraints: []*ir.Constraint{
+				{Name: "ck_amount_positive", Type: "CHECK", Expr: "CHECK (amount > 10)", RenamedFrom: &old},
+			},
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := `ALTER TABLE "public"."orders" RENAME CONSTRAINT "ck_amount_old" TO "ck_amount_positive";`
+	if !containsSQL(ops, want) {
+		t.Errorf("expected %q, got: %v", want, sqlList(ops))
+	}
+	if containsSQL(ops, "DROP CONSTRAINT") || containsSQL(ops, "ADD CONSTRAINT") {
+		t.Errorf("did not expect drop+add — matching is identity-only, same as the pre-existing non-rename case; got: %v", sqlList(ops))
+	}
+}
+
+// TestDiffConstraintRenamedFromStaleErrors mirrors diffCompositeAttrs/
+// diffPartitionList's identical stale-RENAMED-FROM validation: neither the
+// old nor new name exists in the snapshot, indistinguishable from a typo on
+// a genuinely new constraint.
+func TestDiffConstraintRenamedFromStaleErrors(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.orders", &snapshot.SnapObject{
+		Kind: "table",
+		Table: &snapshot.SnapTable{
+			Schema:  "public",
+			Name:    "orders",
+			Columns: []snapshot.SnapColumn{{Name: "amount", Type: "numeric"}},
+		},
+	})
+	old := "nonexistent_old_name"
+	desired := []pipeline.IRObject{
+		&ir.Table{
+			Schema:  "public",
+			Name:    "orders",
+			Columns: []*ir.Column{{Name: "amount", Type: ir.TypeRef{Name: "numeric"}}},
+			Constraints: []*ir.Constraint{
+				{Name: "ck_amount_positive", Type: "CHECK", Expr: "CHECK (amount > 0)", RenamedFrom: &old},
+			},
+		},
+	}
+	_, err := d.Diff(desired, snap)
+	if err == nil {
+		t.Fatal("expected an error for a stale RENAMED FROM matching no snapshot constraint")
+	}
+}
+
+// TestDiffDomainConstraintRenamedFromEmitsAlterRename is
+// TestDiffConstraintRenamedFromEmitsAlterRename's Domain counterpart —
+// ir.Constraint is reused verbatim for DomainConstraints (RFC Section 5.4),
+// so the same RenamedFrom field and matching logic applies there too.
+func TestDiffDomainConstraintRenamedFromEmitsAlterRename(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.positive_amount", &snapshot.SnapObject{
+		Kind: "type",
+		Type: &snapshot.SnapType{
+			Schema:         "public",
+			Name:           "positive_amount",
+			Variant:        "DOMAIN",
+			DomainBaseType: "numeric",
+			DomainConstraints: []snapshot.SnapConstraint{
+				{Name: "ck_positive_old", Type: "CHECK", Expr: "CHECK (VALUE > 0)"},
+			},
+		},
+	})
+	old := "ck_positive_old"
+	desired := []pipeline.IRObject{
+		&ir.Type{
+			Schema:         "public",
+			Name:           "positive_amount",
+			Variant:        "DOMAIN",
+			DomainBaseType: ir.TypeRef{Name: "numeric"},
+			DomainConstraints: []*ir.Constraint{
+				{Name: "ck_positive", Type: "CHECK", Expr: "CHECK (VALUE > 0)", RenamedFrom: &old},
+			},
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if containsSQL(ops, "DROP CONSTRAINT") || containsSQL(ops, "ADD CONSTRAINT") {
+		t.Fatalf("renamed domain constraint should match by RENAMED FROM, not drop+add, got: %v", sqlList(ops))
+	}
+	want := `ALTER DOMAIN "public"."positive_amount" RENAME CONSTRAINT "ck_positive_old" TO "ck_positive";`
+	if !containsSQL(ops, want) {
+		t.Errorf("expected %q, got: %v", want, sqlList(ops))
+	}
+}
+
+// TestDiffDomainConstraintRenamedFromAndExprChanged confirms a simultaneous
+// rename + expression change on a DOMAIN constraint still requires drop+add
+// (unlike table-level constraints, Domain's diffing DOES compare Expr — see
+// TestDiffConstraintRenamedFromMatchIsIdentityOnly's doc comment for the
+// contrast), but drops under the constraint's CURRENT (old, matched-
+// snapshot) name, not the desired new name, which doesn't exist live yet.
+func TestDiffDomainConstraintRenamedFromAndExprChanged(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.positive_amount", &snapshot.SnapObject{
+		Kind: "type",
+		Type: &snapshot.SnapType{
+			Schema:         "public",
+			Name:           "positive_amount",
+			Variant:        "DOMAIN",
+			DomainBaseType: "numeric",
+			DomainConstraints: []snapshot.SnapConstraint{
+				{Name: "ck_positive_old", Type: "CHECK", Expr: "CHECK (VALUE > 0)"},
+			},
+		},
+	})
+	old := "ck_positive_old"
+	desired := []pipeline.IRObject{
+		&ir.Type{
+			Schema:         "public",
+			Name:           "positive_amount",
+			Variant:        "DOMAIN",
+			DomainBaseType: ir.TypeRef{Name: "numeric"},
+			DomainConstraints: []*ir.Constraint{
+				{Name: "ck_positive", Type: "CHECK", Expr: "CHECK (VALUE > 10)", RenamedFrom: &old},
+			},
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsSQL(ops, `ALTER DOMAIN "public"."positive_amount" DROP CONSTRAINT "ck_positive_old";`) {
+		t.Errorf("expected DROP CONSTRAINT referencing the constraint's actual (old) name, got: %v", sqlList(ops))
+	}
+	if !containsSQL(ops, `ALTER DOMAIN "public"."positive_amount" ADD CONSTRAINT "ck_positive" CHECK (VALUE > 10);`) {
+		t.Errorf("expected ADD CONSTRAINT for the new expression under the new name, got: %v", sqlList(ops))
+	}
+}
+
 func TestDiffColumnRenameKeepsConstraints(t *testing.T) {
 	d := New()
 	snap := &pipeline.Snapshot{}
@@ -10425,6 +10644,170 @@ func baseFullIndexTable(idx *ir.Index) *ir.Table {
 // comparison fix: a same-named index whose definition is byte-for-byte
 // identical (every property diffIndexes now compares) must still produce zero
 // ops, not a spurious recreate.
+// TestDiffIndexRenamedFromEmitsAlterRename is the regression guard for index
+// rename detection: before this, RENAMED FROM had no field to carry the old
+// name at all, so a renamed index was indistinguishable from "old index
+// dropped, new one added" — a DROP INDEX + CREATE INDEX pair instead of a
+// metadata-only rename.
+func TestDiffIndexRenamedFromEmitsAlterRename(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.users", &snapshot.SnapObject{
+		Kind: "table",
+		Table: &snapshot.SnapTable{
+			Schema:  "public",
+			Name:    "users",
+			Columns: []snapshot.SnapColumn{{Name: "email", Type: "text"}},
+			Indexes: []snapshot.SnapIndex{
+				{Name: "users_email_idx_old", Method: "btree", Columns: "email"},
+			},
+		},
+	})
+	old := "users_email_idx_old"
+	desired := []pipeline.IRObject{
+		&ir.Table{
+			Schema:  "public",
+			Name:    "users",
+			Columns: []*ir.Column{{Name: "email", Type: ir.TypeRef{Name: "text"}}},
+			Indexes: []*ir.Index{
+				{Name: "users_email_idx", Method: "btree", Columns: []pipeline.IndexColumn{{Name: "email"}}, RenamedFrom: &old},
+			},
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if containsSQL(ops, "DROP INDEX") || containsSQL(ops, "CREATE INDEX") {
+		t.Fatalf("renamed index should match by RENAMED FROM, not drop+create, got: %v", sqlList(ops))
+	}
+	want := `ALTER INDEX "users_email_idx_old" RENAME TO "users_email_idx";`
+	if !containsSQL(ops, want) {
+		t.Errorf("expected %q, got: %v", want, sqlList(ops))
+	}
+	for _, o := range ops {
+		if strings.Contains(o.SQL(), "RENAME TO") && o.Safety() != pipeline.Safe {
+			t.Errorf("expected SAFE safety for ALTER INDEX RENAME TO, got %v", o.Safety())
+		}
+	}
+}
+
+// TestDiffIndexRenamedFromAndContentChanged confirms a simultaneous rename +
+// definition change (unlike Constraint, an Index's full definition IS
+// compared even when matched — see TestDiffIndexContentChangeRecreates)
+// still requires DROP+CREATE, but drops under the index's CURRENT (old,
+// matched-snapshot) name — not the desired new name, which doesn't exist
+// live yet.
+func TestDiffIndexRenamedFromAndContentChanged(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.users", &snapshot.SnapObject{
+		Kind: "table",
+		Table: &snapshot.SnapTable{
+			Schema:  "public",
+			Name:    "users",
+			Columns: []snapshot.SnapColumn{{Name: "email", Type: "text"}},
+			Indexes: []snapshot.SnapIndex{
+				{Name: "users_email_idx_old", Method: "btree", Columns: "email"},
+			},
+		},
+	})
+	old := "users_email_idx_old"
+	desired := []pipeline.IRObject{
+		&ir.Table{
+			Schema:  "public",
+			Name:    "users",
+			Columns: []*ir.Column{{Name: "email", Type: ir.TypeRef{Name: "text"}}},
+			Indexes: []*ir.Index{
+				{Name: "users_email_idx", Method: "gin", Columns: []pipeline.IndexColumn{{Name: "email"}}, RenamedFrom: &old},
+			},
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsSQL(ops, `DROP INDEX IF EXISTS "users_email_idx_old";`) {
+		t.Errorf("expected DROP INDEX referencing the index's actual (old) name, got: %v", sqlList(ops))
+	}
+	if !containsSQL(ops, `CREATE INDEX "users_email_idx"`) {
+		t.Errorf("expected CREATE INDEX for the new definition under the new name, got: %v", sqlList(ops))
+	}
+}
+
+// TestDiffIndexRenamedFromStaleErrors mirrors diffCompositeAttrs/
+// diffPartitionList/diffConstraints' identical stale-RENAMED-FROM
+// validation: neither the old nor new name exists in the snapshot.
+func TestDiffIndexRenamedFromStaleErrors(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.users", &snapshot.SnapObject{
+		Kind: "table",
+		Table: &snapshot.SnapTable{
+			Schema:  "public",
+			Name:    "users",
+			Columns: []snapshot.SnapColumn{{Name: "email", Type: "text"}},
+		},
+	})
+	old := "nonexistent_old_idx"
+	desired := []pipeline.IRObject{
+		&ir.Table{
+			Schema:  "public",
+			Name:    "users",
+			Columns: []*ir.Column{{Name: "email", Type: ir.TypeRef{Name: "text"}}},
+			Indexes: []*ir.Index{
+				{Name: "users_email_idx", Method: "btree", Columns: []pipeline.IndexColumn{{Name: "email"}}, RenamedFrom: &old},
+			},
+		},
+	}
+	_, err := d.Diff(desired, snap)
+	if err == nil {
+		t.Fatal("expected an error for a stale RENAMED FROM matching no snapshot index")
+	}
+}
+
+// TestDiffMaterializedViewIndexRenamedFrom is
+// TestDiffIndexRenamedFromEmitsAlterRename's materialized-view counterpart
+// (diffViewIndexes, a separate function from diffIndexes).
+func TestDiffMaterializedViewIndexRenamedFrom(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.mv_summary", &snapshot.SnapObject{
+		Kind: "view",
+		View: &snapshot.SnapView{
+			Schema: "public",
+			Name:   "mv_summary",
+			Query:  "SELECT 1",
+			Indexes: []snapshot.SnapIndex{
+				{Name: "mv_summary_idx_old", Method: "btree", Columns: "id"},
+			},
+		},
+	})
+	old := "mv_summary_idx_old"
+	desired := []pipeline.IRObject{
+		&ir.View{
+			Schema:       "public",
+			Name:         "mv_summary",
+			Materialized: true,
+			Query:        "SELECT 1",
+			Indexes: []*ir.Index{
+				{Name: "mv_summary_idx", Method: "btree", Columns: []pipeline.IndexColumn{{Name: "id"}}, RenamedFrom: &old},
+			},
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if containsSQL(ops, "DROP INDEX") || containsSQL(ops, "CREATE INDEX") {
+		t.Fatalf("renamed matview index should match by RENAMED FROM, not drop+create, got: %v", sqlList(ops))
+	}
+	want := `ALTER INDEX "mv_summary_idx_old" RENAME TO "mv_summary_idx";`
+	if !containsSQL(ops, want) {
+		t.Errorf("expected %q, got: %v", want, sqlList(ops))
+	}
+}
+
 func TestDiffIndexUnchangedNoOps(t *testing.T) {
 	d := New()
 	snap := &pipeline.Snapshot{}

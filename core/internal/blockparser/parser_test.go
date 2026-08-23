@@ -272,6 +272,31 @@ func TestIndexModeAAndBCanMix(t *testing.T) {
 	}
 }
 
+// TestIndexRenamedFrom guards RFC Section 7.7's RENAMED FROM directive on an
+// index entry.
+func TestIndexRenamedFrom(t *testing.T) {
+	ast := parse(t, `INDICES { idx_email (email) RENAMED FROM idx_email_old; }`)
+	idx := ast.Indices[0]
+	if idx.RenamedFrom == nil || idx.RenamedFrom.Name != "idx_email_old" {
+		t.Fatalf("RenamedFrom: got %v, want \"idx_email_old\"", idx.RenamedFrom)
+	}
+}
+
+// TestIndexRenamedFromWithOtherClauses confirms RENAMED FROM composes with
+// other trailing clauses regardless of the order they're written in — the
+// clause loop matches whichever known keyword comes next, not a fixed
+// sequence.
+func TestIndexRenamedFromWithOtherClauses(t *testing.T) {
+	ast := parse(t, `INDICES { idx_active (status) WHERE (status != 'deleted') RENAMED FROM idx_active_old; }`)
+	idx := ast.Indices[0]
+	if idx.RenamedFrom == nil || idx.RenamedFrom.Name != "idx_active_old" {
+		t.Fatalf("RenamedFrom: got %v, want \"idx_active_old\"", idx.RenamedFrom)
+	}
+	if idx.Where == nil {
+		t.Fatal("expected WHERE clause to still parse")
+	}
+}
+
 func TestIndexNullsNotDistinct(t *testing.T) {
 	ast := parse(t, `INDICES { UNIQUE idx_uq (email) NULLS NOT DISTINCT; }`)
 	idx := ast.Indices[0]
@@ -854,6 +879,39 @@ func TestConstraintNotValid(t *testing.T) {
 	}
 	if !cst.NotValid {
 		t.Error("expected NotValid = true")
+	}
+}
+
+// TestConstraintRenamedFrom guards RFC Section 7.3's RENAMED FROM directive
+// on a table constraint.
+func TestConstraintRenamedFrom(t *testing.T) {
+	ast := parse(t, `CONSTRAINT ck_positive CHECK (amount > 0) RENAMED FROM ck_positive_old;`)
+	cst := ast.Constraints[0]
+	if cst.RenamedFrom == nil || *cst.RenamedFrom != "ck_positive_old" {
+		t.Fatalf("RenamedFrom: got %v, want \"ck_positive_old\"", cst.RenamedFrom)
+	}
+	wantExpr := "CHECK (amount > 0)"
+	if cst.Expr.Text != wantExpr {
+		t.Errorf("Expr.Text: got %q, want %q (RENAMED FROM should be stripped out)", cst.Expr.Text, wantExpr)
+	}
+}
+
+// TestConstraintRenamedFromWithNotValid confirms RENAMED FROM and NOT VALID
+// compose correctly regardless of which comes textually first in a raw,
+// suffix-stripped body (RFC Section 7.3: RENAMED FROM is the LAST optional
+// clause, appearing after NOT VALID).
+func TestConstraintRenamedFromWithNotValid(t *testing.T) {
+	ast := parse(t, `CONSTRAINT ck_positive CHECK (amount > 0) NOT VALID RENAMED FROM ck_positive_old;`)
+	cst := ast.Constraints[0]
+	if !cst.NotValid {
+		t.Error("expected NotValid = true")
+	}
+	if cst.RenamedFrom == nil || *cst.RenamedFrom != "ck_positive_old" {
+		t.Fatalf("RenamedFrom: got %v, want \"ck_positive_old\"", cst.RenamedFrom)
+	}
+	wantExpr := "CHECK (amount > 0)"
+	if cst.Expr.Text != wantExpr {
+		t.Errorf("Expr.Text: got %q, want %q", cst.Expr.Text, wantExpr)
 	}
 }
 
