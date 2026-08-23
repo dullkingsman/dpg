@@ -185,6 +185,18 @@ func (s *state) peekWord() string {
 	return w
 }
 
+// skipDottedName consumes a (possibly schema-qualified) name matching RFC's
+// schema-name production (identifier *("." identifier)) — every dotted
+// segment, not just the first. See detectTypeKind's call sites for why this
+// matters: readWord() alone stops at "." and leaves it unconsumed.
+func (s *state) skipDottedName() {
+	s.readWord()
+	for s.peek() == '.' {
+		s.advance()
+		s.readWord()
+	}
+}
+
 // readQuotedIdentifier reads a double-quoted SQL identifier (e.g. "My Schema"
 // or "select"), unescaping "" to a literal ". The opening " must not have
 // been consumed yet. Returns the unquoted, unescaped identifier text.
@@ -642,9 +654,19 @@ func (s *state) detectKind(pos pipeline.SourcePos) (pipeline.ObjectKind, error) 
 // at what follows the name. The TYPE keyword has already been consumed.
 func (s *state) detectTypeKind(pos pipeline.SourcePos) (pipeline.ObjectKind, error) {
 	// Read the type name (we must restore it so readPart1 includes it).
+	// The name follows RFC's schema-name production
+	// (identifier *("." identifier)) — a schema-qualified TYPE declaration
+	// like "TYPE archive.mood AS ENUM (...)" is valid grammar, so every
+	// dotted segment must be consumed here too, not just the first one:
+	// readWord() alone stops at the "." (not a word char), leaving it
+	// unconsumed and making the immediately-following skipWS()/peekWord()
+	// see "." as the next token — peekWord() returns "" for that (it only
+	// captures word characters), which previously made every qualified
+	// TYPE name fail with "cannot determine TYPE variant; expected AS or
+	// (, got \"\"" regardless of the real variant that followed.
 	c := s.cur()
 	s.skipWS()
-	s.readWord() // name
+	s.skipDottedName() // name
 	s.skipWS()
 	// peekWord() only captures word characters — it silently returns "" when
 	// the next token is "(" (BASE type's own form, RFC §5.5's "TYPE name
@@ -665,7 +687,7 @@ func (s *state) detectTypeKind(pos pipeline.SourcePos) (pipeline.ObjectKind, err
 		// Save and peek two words ahead.
 		c2 := s.cur()
 		s.skipWS()
-		s.readWord() // name
+		s.skipDottedName() // name
 		s.skipWS()
 		s.readWord() // AS
 		s.skipWS()

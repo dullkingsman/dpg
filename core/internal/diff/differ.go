@@ -111,6 +111,39 @@ func (d *Differ) Diff(desired []pipeline.IRObject, snap *pipeline.Snapshot) ([]p
 	// Build virtual type set up-front so all passes can resolve jsonb references.
 	vtypes := buildVTypeSet(desired)
 
+	// Pass 0: create brand-new schemas before anything else. Pass 1's
+	// cross-schema SET SCHEMA (RFC Section 7.6) can target a schema that is
+	// declared in this same apply but doesn't exist in the live database
+	// yet — Pass 1 runs before Pass 3's own "create new objects" handling,
+	// so without this, moving an object into a brand-new schema emits
+	// ALTER ... SET SCHEMA before the CREATE SCHEMA that must precede it
+	// (confirmed live: "schema ... does not exist"). A schema itself being
+	// renamed is excluded here and left to Pass 1, which matches it by its
+	// OLD key — Pass 0 only ever sees the new key, which by definition isn't
+	// in the snapshot yet for either a genuinely new schema or a renamed
+	// one, so it can't tell those apart without this check.
+	schemasCreatedEarly := make(map[string]bool)
+	for _, obj := range desired {
+		s, ok := obj.(*ir.Schema)
+		if !ok || renamedFromKey(obj) != "" {
+			continue
+		}
+		var so snapshot.SnapObject
+		found, err := snap.GetObject(s.QualifiedName(), &so)
+		if err != nil {
+			return nil, fmt.Errorf("diff: decoding snapshot for %q: %w", s.QualifiedName(), err)
+		}
+		if found {
+			continue
+		}
+		createOps, err := createObject(obj, vtypes)
+		if err != nil {
+			return nil, err
+		}
+		ops = append(ops, createOps...)
+		schemasCreatedEarly[s.QualifiedName()] = true
+	}
+
 	// Pass 1: handle object renames.
 	//
 	// A rename is detected when desired has RenamedFrom, the snapshot has the
@@ -205,6 +238,10 @@ func (d *Differ) Diff(desired []pipeline.IRObject, snap *pipeline.Snapshot) ([]p
 	for _, obj := range desired {
 		// Skip objects already handled in pass 1.
 		if oldKey := renamedFromKey(obj); oldKey != "" && consumed[oldKey] {
+			continue
+		}
+		// Skip schemas already created early by Pass 0.
+		if s, ok := obj.(*ir.Schema); ok && schemasCreatedEarly[s.QualifiedName()] {
 			continue
 		}
 		key := obj.QualifiedName()
@@ -1934,18 +1971,25 @@ func diffCollation(o *ir.Collation, snap *snapshot.SnapOpaque) ([]pipeline.DiffO
 	pos := o.SrcPos
 	ident := qualIdent(o.Schema, o.Name)
 
-	// RENAME TO applies regardless of whether the structured property
-	// comparison below is trustworthy (CollationStructured) — Name/Schema
-	// are basic identity fields, not part of the LOCALE/PROVIDER/etc. set
-	// that sentinel gates. Uses snap's matched (old) name for the FROM
-	// side, same reasoning as diffType's identical rename handling. Not
+	// SET SCHEMA / RENAME TO apply regardless of whether the structured
+	// property comparison below is trustworthy (CollationStructured) —
+	// Name/Schema are basic identity fields, not part of the LOCALE/
+	// PROVIDER/etc. set that sentinel gates. Same ordering as diffType's
+	// identical mechanism: SET SCHEMA first (old_schema.old_name -> new
+	// schema), then RENAME TO (new_schema.old_name -> new_name). Not
 	// merged into the property-changed branch below — a simultaneous
-	// rename needs no separate ALTER there, since createOpaque already
-	// creates the object under its final (new) name directly.
+	// rename/move needs no separate ALTER there, since createOpaque already
+	// creates the object under its final (new) name/schema directly.
 	var renameOps []pipeline.DiffOp
+	if snap.Schema != o.Schema {
+		renameOps = append(renameOps, safeOp(
+			fmt.Sprintf("ALTER COLLATION %s SET SCHEMA %s;", qualIdent(snap.Schema, snap.Name), quoteIdent(o.Schema)),
+			pos,
+		))
+	}
 	if snap.Name != o.Name {
 		renameOps = append(renameOps, cautionOp(
-			fmt.Sprintf("ALTER COLLATION %s RENAME TO %s;", qualIdent(snap.Schema, snap.Name), quoteIdent(o.Name)),
+			fmt.Sprintf("ALTER COLLATION %s RENAME TO %s;", qualIdent(o.Schema, snap.Name), quoteIdent(o.Name)),
 			pos,
 		))
 	}
@@ -4976,11 +5020,19 @@ func diffView(o *ir.View, snap *snapshot.SnapView) ([]pipeline.DiffOp, error) {
 		viewKind = "MATERIALIZED VIEW"
 	}
 
-	// See diffTable's identical reasoning: the FROM side must use snap.Schema
-	// (where the view actually currently lives), not o.Schema.
-	if snap.Name != o.Name {
+	// SET SCHEMA / RENAME TO, in that order — see diffTable's identical
+	// reasoning. Uses viewKind so a materialized view emits
+	// ALTER MATERIALIZED VIEW, not ALTER VIEW (real PostgreSQL rejects
+	// ALTER VIEW against a matview relkind).
+	if snap.Schema != o.Schema {
 		ops = append(ops, safeOp(
-			fmt.Sprintf("ALTER VIEW %s RENAME TO %s;", qualIdent(snap.Schema, snap.Name), quoteIdent(o.Name)),
+			fmt.Sprintf("ALTER %s %s SET SCHEMA %s;", viewKind, qualIdent(snap.Schema, snap.Name), quoteIdent(o.Schema)),
+			pos,
+		))
+	}
+	if snap.Name != o.Name {
+		ops = append(ops, cautionOp(
+			fmt.Sprintf("ALTER %s %s RENAME TO %s;", viewKind, qualIdent(o.Schema, snap.Name), quoteIdent(o.Name)),
 			pos,
 		))
 	}
@@ -5145,19 +5197,23 @@ func diffType(o *ir.Type, snap *snapshot.SnapType, fullSnap *pipeline.Snapshot, 
 		ops = append(ops, safeOp(fmt.Sprintf("ALTER %s %s OWNER TO %s;", alterKW, typeIdent, quoteIdent(*o.Owner)), pos))
 	}
 
-	// RENAME TO applies identically across every variant too, same reasoning
-	// as OWNER TO above. Uses snap's matched (old) name for the FROM side,
-	// not o.Name — RENAME TO cannot itself move schemas (a real SET SCHEMA
-	// move for a cross-schema RENAMED FROM is separate, not-yet-implemented
-	// work, same known limitation as Table/View/Function/Procedure/
-	// Aggregate's identical rename mechanism).
+	// SET SCHEMA / RENAME TO apply identically across every variant too,
+	// same reasoning as OWNER TO above and the same ordering as diffTable's
+	// identical mechanism: SET SCHEMA first (old_schema.old_name -> new
+	// schema), then RENAME TO (new_schema.old_name -> new_name).
+	renameAlterKW := "TYPE"
+	if o.Variant == "DOMAIN" {
+		renameAlterKW = "DOMAIN"
+	}
+	if snap.Schema != o.Schema {
+		ops = append(ops, safeOp(
+			fmt.Sprintf("ALTER %s %s SET SCHEMA %s;", renameAlterKW, qualIdent(snap.Schema, snap.Name), quoteIdent(o.Schema)),
+			pos,
+		))
+	}
 	if snap.Name != o.Name {
-		alterKW := "TYPE"
-		if o.Variant == "DOMAIN" {
-			alterKW = "DOMAIN"
-		}
 		ops = append(ops, cautionOp(
-			fmt.Sprintf("ALTER %s %s RENAME TO %s;", alterKW, qualIdent(snap.Schema, snap.Name), quoteIdent(o.Name)),
+			fmt.Sprintf("ALTER %s %s RENAME TO %s;", renameAlterKW, qualIdent(o.Schema, snap.Name), quoteIdent(o.Name)),
 			pos,
 		))
 	}
@@ -5551,15 +5607,23 @@ func diffTable(o *ir.Table, snap *snapshot.SnapTable, fullSnap *pipeline.Snapsho
 	pos := o.SrcPos
 	tbl := qualIdent(o.Schema, o.Name)
 
-	// Rename: snap stores the old name and schema — RENAME TO only renames
-	// (it cannot move schemas), so the FROM side must reference the table by
-	// where it actually currently lives (snap.Schema), not o.Schema (the
-	// desired/new schema, which can now differ from snap.Schema on a cross-
-	// schema RENAMED FROM — a real SET SCHEMA move is a separate, not-yet-
-	// implemented ALTER TABLE ... SET SCHEMA op).
-	if snap.Name != o.Name {
+	// SET SCHEMA / RENAME TO, in that order: RFC Section 7.6's cross-schema
+	// RENAMED FROM extension emits SET SCHEMA first (using the table's
+	// actual current identity, old_schema.old_name) so a still-in-flight
+	// rename can't collide with an existing name already in the target
+	// schema, then RENAME TO (new_schema.old_name -> new_name) — real
+	// PostgreSQL has no single statement that does both at once. RENAME TO
+	// alone is CAUTION per RFC's own diffing table (top-level object,
+	// independently referenceable); SET SCHEMA is SAFE.
+	if snap.Schema != o.Schema {
 		ops = append(ops, safeOp(
-			fmt.Sprintf("ALTER TABLE %s RENAME TO %s;", qualIdent(snap.Schema, snap.Name), quoteIdent(o.Name)),
+			fmt.Sprintf("ALTER TABLE %s SET SCHEMA %s;", qualIdent(snap.Schema, snap.Name), quoteIdent(o.Schema)),
+			pos,
+		))
+	}
+	if snap.Name != o.Name {
+		ops = append(ops, cautionOp(
+			fmt.Sprintf("ALTER TABLE %s RENAME TO %s;", qualIdent(o.Schema, snap.Name), quoteIdent(o.Name)),
 			pos,
 		))
 	}

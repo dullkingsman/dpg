@@ -448,7 +448,9 @@ func TestDiffRenameTable(t *testing.T) {
 // existed, renamedFromKey assumed the old name lived in the object's own
 // (new) schema, so this case never matched the snapshot entry at all —
 // producing a DROP of the orphaned old table plus a CREATE of a "new" one,
-// instead of recognizing it as the same table.
+// instead of recognizing it as the same table. Per RFC Section 7.6, a
+// cross-schema move now emits SET SCHEMA first (old_schema.old_name -> new
+// schema), then RENAME TO (new_schema.old_name -> new_name).
 func TestDiffRenameTableCrossSchema(t *testing.T) {
 	d := New()
 	snap := &pipeline.Snapshot{}
@@ -477,10 +479,49 @@ func TestDiffRenameTableCrossSchema(t *testing.T) {
 	if containsSQL(ops, "DROP TABLE") || containsSQL(ops, "CREATE TABLE") {
 		t.Fatalf("cross-schema rename should match the existing table, not DROP+CREATE, got: %v", sqlList(ops))
 	}
-	// The RENAME TO's FROM side must reference the table by where it actually
-	// lives today (old_schema) — RENAME TO cannot itself move schemas.
-	if !containsSQL(ops, `ALTER TABLE "old_schema"."users" RENAME TO "accounts";`) {
-		t.Errorf("expected RENAME TO referencing the table's actual (old) schema, got: %v", sqlList(ops))
+	// SET SCHEMA moves the table using its actual current identity
+	// (old_schema.users), then RENAME TO operates on it in its new schema.
+	if !containsSQL(ops, `ALTER TABLE "old_schema"."users" SET SCHEMA "new_schema";`) {
+		t.Errorf("expected SET SCHEMA referencing the table's actual (old) schema, got: %v", sqlList(ops))
+	}
+	if !containsSQL(ops, `ALTER TABLE "new_schema"."users" RENAME TO "accounts";`) {
+		t.Errorf("expected RENAME TO after the schema move, got: %v", sqlList(ops))
+	}
+}
+
+// TestDiffRenameViewCrossSchema is diffTable's TestDiffRenameTableCrossSchema
+// counterpart for View, also confirming a materialized view emits
+// ALTER MATERIALIZED VIEW (not ALTER VIEW, which real PostgreSQL rejects
+// against a matview relkind) for both statements.
+func TestDiffRenameViewCrossSchema(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("old_schema.orders_summary", &snapshot.SnapObject{
+		Kind: "view",
+		View: &snapshot.SnapView{
+			Schema: "old_schema", Name: "orders_summary", Query: "SELECT 1",
+		},
+	})
+	old := "orders_summary"
+	oldSchema := "old_schema"
+	desired := []pipeline.IRObject{
+		&ir.View{
+			Schema: "new_schema", Name: "order_summary", Materialized: true, Query: "SELECT 1",
+			RenamedFrom: &old, RenamedFromSchema: &oldSchema,
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if containsSQL(ops, "DROP MATERIALIZED VIEW") || containsSQL(ops, "CREATE MATERIALIZED VIEW") {
+		t.Fatalf("cross-schema rename should match the existing matview, not DROP+CREATE, got: %v", sqlList(ops))
+	}
+	if !containsSQL(ops, `ALTER MATERIALIZED VIEW "old_schema"."orders_summary" SET SCHEMA "new_schema";`) {
+		t.Errorf("expected SET SCHEMA referencing the matview's actual (old) schema, got: %v", sqlList(ops))
+	}
+	if !containsSQL(ops, `ALTER MATERIALIZED VIEW "new_schema"."orders_summary" RENAME TO "order_summary";`) {
+		t.Errorf("expected RENAME TO after the schema move, got: %v", sqlList(ops))
 	}
 }
 
@@ -5037,6 +5078,40 @@ func TestDiffEnumRenamedFromWithValueRemovalKeepsRename(t *testing.T) {
 	}
 }
 
+// TestDiffTypeRenamedFromCrossSchema is diffTable's
+// TestDiffRenameTableCrossSchema counterpart for Type: SET SCHEMA emitted
+// first against the type's actual current identity, then RENAME TO in the
+// new schema.
+func TestDiffTypeRenamedFromCrossSchema(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("old_schema.mood_old", &snapshot.SnapObject{
+		Kind: "type",
+		Type: &snapshot.SnapType{Schema: "old_schema", Name: "mood_old", Variant: "ENUM", Values: []string{"sad", "happy"}},
+	})
+	old := "mood_old"
+	oldSchema := "old_schema"
+	desired := []pipeline.IRObject{
+		&ir.Type{
+			Schema: "new_schema", Name: "mood", Variant: "ENUM", EnumValues: []string{"sad", "happy"},
+			RenamedFrom: &old, RenamedFromSchema: &oldSchema,
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if containsSQL(ops, "DROP TYPE") || containsSQL(ops, "CREATE TYPE") {
+		t.Fatalf("cross-schema rename should match the existing type, not drop+create, got: %v", sqlList(ops))
+	}
+	if !containsSQL(ops, `ALTER TYPE "old_schema"."mood_old" SET SCHEMA "new_schema";`) {
+		t.Errorf("expected SET SCHEMA referencing the type's actual (old) schema, got: %v", sqlList(ops))
+	}
+	if !containsSQL(ops, `ALTER TYPE "new_schema"."mood_old" RENAME TO "mood";`) {
+		t.Errorf("expected RENAME TO after the schema move, got: %v", sqlList(ops))
+	}
+}
+
 // TestDiffTypeRenamedFromStaleErrors mirrors every other kind's identical
 // stale-RENAMED-FROM validation (this one runs through Differ.Diff's
 // top-level Pass 1, shared by every kind using the generic renamedFromKey
@@ -5089,6 +5164,41 @@ func TestDiffCollationRenamedFromEmitsAlterRename(t *testing.T) {
 		if strings.Contains(o.SQL(), "RENAME TO") && o.Safety() != pipeline.Caution {
 			t.Errorf("expected CAUTION safety for ALTER COLLATION RENAME TO, got %v", o.Safety())
 		}
+	}
+}
+
+// TestDiffCollationRenamedFromCrossSchema is diffTable's
+// TestDiffRenameTableCrossSchema counterpart for Collation.
+func TestDiffCollationRenamedFromCrossSchema(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("old_schema.c_old", &snapshot.SnapObject{
+		Kind: "collation",
+		Opaque: &snapshot.SnapOpaque{
+			Kind: "collation", Schema: "old_schema", Name: "c_old", CollationStructured: true,
+			CollationProvider: "c", CollationCollate: strPtr("C"), CollationCtype: strPtr("C"), CollationDeterministic: true,
+		},
+	})
+	old := "c_old"
+	oldSchema := "old_schema"
+	desired := []pipeline.IRObject{
+		&ir.Collation{
+			Schema: "new_schema", Name: "c", Provider: "c", Collate: strPtr("C"), Ctype: strPtr("C"), Deterministic: true,
+			RenamedFrom: &old, RenamedFromSchema: &oldSchema, Body: "CREATE COLLATION new_schema.c (LOCALE = 'C')",
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if containsSQL(ops, "DROP COLLATION") {
+		t.Fatalf("cross-schema rename should match the existing collation, not drop+create, got: %v", sqlList(ops))
+	}
+	if !containsSQL(ops, `ALTER COLLATION "old_schema"."c_old" SET SCHEMA "new_schema";`) {
+		t.Errorf("expected SET SCHEMA referencing the collation's actual (old) schema, got: %v", sqlList(ops))
+	}
+	if !containsSQL(ops, `ALTER COLLATION "new_schema"."c_old" RENAME TO "c";`) {
+		t.Errorf("expected RENAME TO after the schema move, got: %v", sqlList(ops))
 	}
 }
 

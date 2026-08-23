@@ -24,17 +24,12 @@ import (
 // in place.
 //
 // This proves, against a real database, that the table is (a) matched (no
-// DROP+CREATE — same OID before and after) and (b) actually renamed live via
-// ALTER TABLE ... RENAME TO, referencing the table by the schema it actually
-// lives in (old_schema), not the desired new one.
-//
-// It also documents a known, intentional limit of this fix: RENAMED FROM
-// only triggers a RENAME TO (a name change); actually moving the table to
-// the new schema requires a dedicated ALTER TABLE ... SET SCHEMA op, which
-// this fix does not add (tracked separately in
-// .dpg-notes/core-fix-order-2026-08-23.md's Phase 4, item #54). So after
-// applying, the table is expected to end up at old_schema.accounts — renamed
-// but not yet moved — not at new_schema.accounts.
+// DROP+CREATE — same OID before and after) and (b) actually moved AND
+// renamed live: ALTER TABLE ... SET SCHEMA (referencing the table by the
+// schema it actually lives in, old_schema) followed by ALTER TABLE ...
+// RENAME TO, per RFC Section 7.6's ordering (SET SCHEMA first, so a
+// still-in-flight rename can't collide with an existing name in the target
+// schema).
 func TestRoundtripTableRenamedFromCrossSchema(t *testing.T) {
 	connStr := testpg.Start(t)
 	ctx := context.Background()
@@ -98,21 +93,17 @@ TABLE new_schema.accounts (id INTEGER) {
 	applyFixture(t, ctx, conn, []string{f}, dir, differ, emitter, applyExec, store)
 
 	if regclassOID("old_schema.users") != nil {
-		t.Fatalf("old_schema.users still exists after rename — expected it to be renamed away")
+		t.Fatalf("old_schema.users still exists after rename — expected it to be moved/renamed away")
+	}
+	if regclassOID("old_schema.accounts") != nil {
+		t.Fatalf("old_schema.accounts unexpectedly exists — SET SCHEMA should have moved it to new_schema")
 	}
 
-	// Not yet moved to new_schema (SET SCHEMA is separate, not-yet-implemented
-	// work) — it should have landed at old_schema.accounts: same schema,
-	// renamed in place.
-	renamedOID := regclassOID("old_schema.accounts")
-	if renamedOID == nil {
-		t.Fatalf("old_schema.accounts does not exist after rename — the cross-schema RENAMED FROM match failed, likely a DROP+CREATE regression")
+	movedOID := regclassOID("new_schema.accounts")
+	if movedOID == nil {
+		t.Fatalf("new_schema.accounts does not exist after rename — the cross-schema RENAMED FROM SET SCHEMA move failed")
 	}
-	if *renamedOID != *oldOID {
-		t.Fatalf("old_schema.accounts has a different OID (%d) than old_schema.users had (%d) — the table was dropped and recreated instead of renamed", *renamedOID, *oldOID)
-	}
-
-	if regclassOID("new_schema.accounts") != nil {
-		t.Fatalf("new_schema.accounts unexpectedly exists — SET SCHEMA is not implemented yet; if this now passes, update this test's expectations (Phase 4, item #54 has landed)")
+	if *movedOID != *oldOID {
+		t.Fatalf("new_schema.accounts has a different OID (%d) than old_schema.users had (%d) — the table was dropped and recreated instead of moved/renamed", *movedOID, *oldOID)
 	}
 }

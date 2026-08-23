@@ -148,6 +148,68 @@ func TestRoundtripDomainRenamedFrom(t *testing.T) {
 	}
 }
 
+// TestRoundtripEnumRenamedFromCrossSchema is
+// TestRoundtripTableRenamedFromCrossSchema's Type counterpart, live-proving
+// that a cross-schema RENAMED FROM emits a real ALTER TYPE ... SET SCHEMA
+// (not just a rename in place) before the ALTER TYPE ... RENAME TO.
+func TestRoundtripEnumRenamedFromCrossSchema(t *testing.T) {
+	connStr := testpg.Start(t)
+	ctx := context.Background()
+
+	differ := diff.New()
+	emitter := emit.New()
+	applyExec := executor.New()
+	store := newMemStore()
+
+	conn, err := executor.Connect(ctx, connStr)
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	defer conn.Close(ctx)
+
+	dir := t.TempDir()
+	f := filepath.Join(dir, "schema.dpg")
+
+	v1 := `SCHEMA old_schema {}
+
+TYPE old_schema.mood_old AS ENUM ('sad', 'happy');`
+	if err := os.WriteFile(f, []byte(v1), 0o644); err != nil {
+		t.Fatalf("write v1: %v", err)
+	}
+	applyFixture(t, ctx, conn, []string{f}, dir, differ, emitter, applyExec, store)
+
+	oldOID := oidByCast(t, ctx, conn, "regtype", "old_schema.mood_old")
+	if oldOID == nil {
+		t.Fatalf("old_schema.mood_old does not exist after initial apply")
+	}
+
+	v2 := `SCHEMA old_schema {}
+
+SCHEMA new_schema {}
+
+TYPE new_schema.mood AS ENUM ('sad', 'happy') {
+    RENAMED FROM old_schema.mood_old;
+}`
+	if err := os.WriteFile(f, []byte(v2), 0o644); err != nil {
+		t.Fatalf("write v2: %v", err)
+	}
+	applyFixture(t, ctx, conn, []string{f}, dir, differ, emitter, applyExec, store)
+
+	if oidByCast(t, ctx, conn, "regtype", "old_schema.mood_old") != nil {
+		t.Fatalf("old_schema.mood_old still exists — expected it to be moved/renamed away")
+	}
+	if oidByCast(t, ctx, conn, "regtype", "new_schema.mood_old") != nil {
+		t.Fatalf("new_schema.mood_old unexpectedly exists — RENAME TO should have renamed it to mood")
+	}
+	movedOID := oidByCast(t, ctx, conn, "regtype", "new_schema.mood")
+	if movedOID == nil {
+		t.Fatalf("new_schema.mood does not exist — the cross-schema RENAMED FROM SET SCHEMA move failed")
+	}
+	if *movedOID != *oldOID {
+		t.Fatalf("new_schema.mood has a different OID (%d) than old_schema.mood_old had (%d) — dropped and recreated instead of moved/renamed", *movedOID, *oldOID)
+	}
+}
+
 // TestRoundtripCollationRenamedFrom is the Collation counterpart, live-
 // verified the same way.
 func TestRoundtripCollationRenamedFrom(t *testing.T) {
@@ -196,5 +258,65 @@ func TestRoundtripCollationRenamedFrom(t *testing.T) {
 	}
 	if *renamedOID != *oldOID {
 		t.Fatalf("public.case_insensitive has a different OID (%d) than case_insensitive_old had (%d) — dropped and recreated instead of renamed", *renamedOID, *oldOID)
+	}
+}
+
+// TestRoundtripCollationRenamedFromCrossSchema is
+// TestRoundtripTableRenamedFromCrossSchema's Collation counterpart.
+func TestRoundtripCollationRenamedFromCrossSchema(t *testing.T) {
+	connStr := testpg.Start(t)
+	ctx := context.Background()
+
+	differ := diff.New()
+	emitter := emit.New()
+	applyExec := executor.New()
+	store := newMemStore()
+
+	conn, err := executor.Connect(ctx, connStr)
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	defer conn.Close(ctx)
+
+	dir := t.TempDir()
+	f := filepath.Join(dir, "schema.dpg")
+
+	v1 := `SCHEMA old_schema {}
+
+COLLATION old_schema.case_insensitive_old (PROVIDER = icu, LOCALE = 'und-u-ks-level2', DETERMINISTIC = false);`
+	if err := os.WriteFile(f, []byte(v1), 0o644); err != nil {
+		t.Fatalf("write v1: %v", err)
+	}
+	applyFixture(t, ctx, conn, []string{f}, dir, differ, emitter, applyExec, store)
+
+	oldOID := oidByCast(t, ctx, conn, "regcollation", "old_schema.case_insensitive_old")
+	if oldOID == nil {
+		t.Fatalf("old_schema.case_insensitive_old does not exist after initial apply")
+	}
+
+	v2 := `SCHEMA old_schema {}
+
+SCHEMA new_schema {}
+
+COLLATION new_schema.case_insensitive (PROVIDER = icu, LOCALE = 'und-u-ks-level2', DETERMINISTIC = false) {
+    RENAMED FROM old_schema.case_insensitive_old;
+}`
+	if err := os.WriteFile(f, []byte(v2), 0o644); err != nil {
+		t.Fatalf("write v2: %v", err)
+	}
+	applyFixture(t, ctx, conn, []string{f}, dir, differ, emitter, applyExec, store)
+
+	if oidByCast(t, ctx, conn, "regcollation", "old_schema.case_insensitive_old") != nil {
+		t.Fatalf("old_schema.case_insensitive_old still exists — expected it to be moved/renamed away")
+	}
+	if oidByCast(t, ctx, conn, "regcollation", "new_schema.case_insensitive_old") != nil {
+		t.Fatalf("new_schema.case_insensitive_old unexpectedly exists — RENAME TO should have renamed it to case_insensitive")
+	}
+	movedOID := oidByCast(t, ctx, conn, "regcollation", "new_schema.case_insensitive")
+	if movedOID == nil {
+		t.Fatalf("new_schema.case_insensitive does not exist — the cross-schema RENAMED FROM SET SCHEMA move failed")
+	}
+	if *movedOID != *oldOID {
+		t.Fatalf("new_schema.case_insensitive has a different OID (%d) than old_schema.case_insensitive_old had (%d) — dropped and recreated instead of moved/renamed", *movedOID, *oldOID)
 	}
 }
