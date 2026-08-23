@@ -1909,6 +1909,9 @@ func (b *Builder) buildFDW(cs *pg_query.CreateFdwStmt, block pipeline.BlockAST, 
 	if block.Comment != nil {
 		f.Comment = &block.Comment.Value
 	}
+	if block.RenamedFrom != nil {
+		f.RenamedFrom = &block.RenamedFrom.Name
+	}
 	for _, g := range block.Grants {
 		f.Grants = append(f.Grants, blockGrantToIR(g))
 	}
@@ -2131,6 +2134,10 @@ func (b *Builder) buildStatistics(cs *pg_query.CreateStatsStmt, block pipeline.B
 	}
 	if block.Comment != nil {
 		s.Comment = &block.Comment.Value
+	}
+	if block.RenamedFrom != nil {
+		s.RenamedFrom = &block.RenamedFrom.Name
+		s.RenamedFromSchema = renamedFromSchema(block.RenamedFrom)
 	}
 	return s, nil
 }
@@ -2556,6 +2563,9 @@ func (b *Builder) buildSubscription(stmt *pg_query.CreateSubscriptionStmt, block
 	if block.Comment != nil {
 		sub.Comment = &block.Comment.Value
 	}
+	if block.RenamedFrom != nil {
+		sub.RenamedFrom = &block.RenamedFrom.Name
+	}
 	sub.SecurityLabels = block.SecurityLabels
 	return sub, nil
 }
@@ -2715,12 +2725,20 @@ func (b *Builder) buildOpaque(node *pg_query.Node, block pipeline.BlockAST, pos 
 		if block.Comment != nil {
 			opc.Comment = &block.Comment.Value
 		}
+		if block.RenamedFrom != nil {
+			opc.RenamedFrom = &block.RenamedFrom.Name
+			opc.RenamedFromSchema = renamedFromSchema(block.RenamedFrom)
+		}
 		return opc, nil
 	case *pg_query.Node_CreateOpFamilyStmt:
 		schema, name := extractTypeName(n.CreateOpFamilyStmt.Opfamilyname)
 		opf := &OperatorFamily{Schema: schema, Name: name, AccessMethod: n.CreateOpFamilyStmt.Amname, Body: sql, SrcPos: pos}
 		if block.Comment != nil {
 			opf.Comment = &block.Comment.Value
+		}
+		if block.RenamedFrom != nil {
+			opf.RenamedFrom = &block.RenamedFrom.Name
+			opf.RenamedFromSchema = renamedFromSchema(block.RenamedFrom)
 		}
 		members, err := normalizeOpFamilyMembers(block.OpFamilyMembers)
 		if err != nil {

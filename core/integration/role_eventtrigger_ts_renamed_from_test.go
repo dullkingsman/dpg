@@ -157,7 +157,14 @@ EVENT TRIGGER evt ON sql_drop
 }
 
 // TestRoundtripTSDictRenamedFrom is the regression guard for TSDict rename
-// detection.
+// detection — including a second bug found while implementing the Group 3
+// kinds: TSDict's Body embeds its own name
+// ("CREATE TEXT SEARCH DICTIONARY name (...)"), so a real compiled rename
+// always changed the hashed body text, misdetecting as a definition change
+// and falling back to DROP+CREATE. An existence-only check ("old name
+// gone, new name present") is also true after a DROP+CREATE, so OID
+// stability is checked directly, the same rigor used for Table/Partition/
+// Type's own rename fixes.
 func TestRoundtripTSDictRenamedFrom(t *testing.T) {
 	connStr := testpg.Start(t)
 	ctx := context.Background()
@@ -182,19 +189,8 @@ func TestRoundtripTSDictRenamedFrom(t *testing.T) {
 	}
 	applyFixture(t, ctx, conn, []string{f}, dir, differ, emitter, applyExec, store)
 
-	dictExists := func(name string) bool {
-		t.Helper()
-		rows, err := conn.QueryRows(ctx, `SELECT count(*) FROM pg_ts_dict WHERE dictname = $1`, name)
-		if err != nil {
-			t.Fatalf("query pg_ts_dict for %s: %v", name, err)
-		}
-		defer rows.Close()
-		var n int
-		rows.Next()
-		_ = rows.Scan(&n)
-		return n == 1
-	}
-	if !dictExists("simple_dict_old") {
+	oldOID := catalogOID(t, ctx, conn, "pg_ts_dict", "dictname", "simple_dict_old")
+	if oldOID == nil {
 		t.Fatalf("simple_dict_old does not exist after initial apply")
 	}
 
@@ -206,11 +202,15 @@ func TestRoundtripTSDictRenamedFrom(t *testing.T) {
 	}
 	applyFixture(t, ctx, conn, []string{f}, dir, differ, emitter, applyExec, store)
 
-	if dictExists("simple_dict_old") {
+	if catalogOID(t, ctx, conn, "pg_ts_dict", "dictname", "simple_dict_old") != nil {
 		t.Fatalf("simple_dict_old still exists after rename")
 	}
-	if !dictExists("simple_dict") {
+	newOID := catalogOID(t, ctx, conn, "pg_ts_dict", "dictname", "simple_dict")
+	if newOID == nil {
 		t.Fatalf("simple_dict does not exist after rename")
+	}
+	if *newOID != *oldOID {
+		t.Fatalf("simple_dict has a different OID (%d) than simple_dict_old had (%d) — dropped and recreated instead of renamed", *newOID, *oldOID)
 	}
 }
 
@@ -218,7 +218,9 @@ func TestRoundtripTSDictRenamedFrom(t *testing.T) {
 // rename together, using PostgreSQL's own built-in support functions
 // (prsd_*/dsimple_*, the same ones its default parser/template use
 // internally) so both can be created and renamed from pure SQL without a C
-// extension.
+// extension. OID stability is checked for the same reason as
+// TestRoundtripTSDictRenamedFrom — both kinds share the identical
+// Body-embeds-its-own-name bug TSDict does.
 func TestRoundtripTSParserAndTemplateRenamedFrom(t *testing.T) {
 	connStr := testpg.Start(t)
 	ctx := context.Background()
@@ -244,34 +246,12 @@ TEXT SEARCH TEMPLATE tmpl_old (LEXIZE = dsimple_lexize);`
 	}
 	applyFixture(t, ctx, conn, []string{f}, dir, differ, emitter, applyExec, store)
 
-	parserExists := func(name string) bool {
-		t.Helper()
-		rows, err := conn.QueryRows(ctx, `SELECT count(*) FROM pg_ts_parser WHERE prsname = $1`, name)
-		if err != nil {
-			t.Fatalf("query pg_ts_parser for %s: %v", name, err)
-		}
-		defer rows.Close()
-		var n int
-		rows.Next()
-		_ = rows.Scan(&n)
-		return n == 1
-	}
-	templateExists := func(name string) bool {
-		t.Helper()
-		rows, err := conn.QueryRows(ctx, `SELECT count(*) FROM pg_ts_template WHERE tmplname = $1`, name)
-		if err != nil {
-			t.Fatalf("query pg_ts_template for %s: %v", name, err)
-		}
-		defer rows.Close()
-		var n int
-		rows.Next()
-		_ = rows.Scan(&n)
-		return n == 1
-	}
-	if !parserExists("prs_old") {
+	oldParserOID := catalogOID(t, ctx, conn, "pg_ts_parser", "prsname", "prs_old")
+	if oldParserOID == nil {
 		t.Fatalf("prs_old does not exist after initial apply")
 	}
-	if !templateExists("tmpl_old") {
+	oldTemplateOID := catalogOID(t, ctx, conn, "pg_ts_template", "tmplname", "tmpl_old")
+	if oldTemplateOID == nil {
 		t.Fatalf("tmpl_old does not exist after initial apply")
 	}
 
@@ -286,16 +266,25 @@ TEXT SEARCH TEMPLATE tmpl (LEXIZE = dsimple_lexize) {
 	}
 	applyFixture(t, ctx, conn, []string{f}, dir, differ, emitter, applyExec, store)
 
-	if parserExists("prs_old") {
+	if catalogOID(t, ctx, conn, "pg_ts_parser", "prsname", "prs_old") != nil {
 		t.Fatalf("prs_old still exists after rename")
 	}
-	if !parserExists("prs") {
+	newParserOID := catalogOID(t, ctx, conn, "pg_ts_parser", "prsname", "prs")
+	if newParserOID == nil {
 		t.Fatalf("prs does not exist after rename")
 	}
-	if templateExists("tmpl_old") {
+	if *newParserOID != *oldParserOID {
+		t.Fatalf("prs has a different OID (%d) than prs_old had (%d) — dropped and recreated instead of renamed", *newParserOID, *oldParserOID)
+	}
+
+	if catalogOID(t, ctx, conn, "pg_ts_template", "tmplname", "tmpl_old") != nil {
 		t.Fatalf("tmpl_old still exists after rename")
 	}
-	if !templateExists("tmpl") {
+	newTemplateOID := catalogOID(t, ctx, conn, "pg_ts_template", "tmplname", "tmpl")
+	if newTemplateOID == nil {
 		t.Fatalf("tmpl does not exist after rename")
+	}
+	if *newTemplateOID != *oldTemplateOID {
+		t.Fatalf("tmpl has a different OID (%d) than tmpl_old had (%d) — dropped and recreated instead of renamed", *newTemplateOID, *oldTemplateOID)
 	}
 }

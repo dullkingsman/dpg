@@ -8889,6 +8889,72 @@ func TestDiffOpFamilyMemberNoChange(t *testing.T) {
 	}
 }
 
+// TestDiffOperatorFamilyRenamedFromEmitsAlterRename is the regression guard
+// for OperatorFamily rename detection: before this, ir.OperatorFamily had
+// no RenamedFrom field at all, so a renamed family was indistinguishable
+// from "old one dropped, new one added." Reconstructed: true keeps the
+// rename isolated from diffOpaqueIR's body-hash comparison, matching
+// opFamilyMemberObj's own established fixture shape.
+func TestDiffOperatorFamilyRenamedFromEmitsAlterRename(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	sm := snapshot.SnapOpFamilyMember{Number: 1, NameSchema: "pg_catalog", Name: "<", LeftType: "integer", RightType: "bigint"}
+	// Body text differs by name on each side, matching real compiler
+	// output (Reconstructed: false, a real BodyHash set) — proves
+	// opaqueBodyForHash's name-normalization fix, not just that the
+	// rename mechanism exists; a Reconstructed:true or empty-BodyHash
+	// fixture would bypass the hash comparison entirely and not actually
+	// exercise it.
+	oldBody := `CREATE OPERATOR FAMILY "public"."member_fam_old" USING btree`
+	newBody := `CREATE OPERATOR FAMILY "public"."member_fam" USING btree`
+	_ = snap.SetObject("public.member_fam_old USING btree FAMILY", &snapshot.SnapObject{
+		Kind: "operator_family",
+		Opaque: &snapshot.SnapOpaque{
+			Kind: "operator_family", Schema: "public", Name: "member_fam_old", Using: "btree",
+			BodyHash:                  hashText(oldBody),
+			OpFamilyMembersStructured: true, OpFamilyMembers: []snapshot.SnapOpFamilyMember{sm},
+		},
+	})
+	old := "member_fam_old"
+	m := pipeline.OpFamilyMember{Number: 1, Name: pipeline.Identifier{Name: "<"}, LeftType: "integer", RightType: "bigint"}
+	desired := &ir.OperatorFamily{
+		Schema: "public", Name: "member_fam", AccessMethod: "btree",
+		Body: newBody, Members: []pipeline.OpFamilyMember{m},
+		RenamedFrom: &old,
+	}
+	ops, err := d.Diff([]pipeline.IRObject{desired}, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if containsSQL(ops, "DROP OPERATOR FAMILY") {
+		t.Fatalf("renamed operator family should match by RENAMED FROM, not drop+create, got: %v", sqlList(ops))
+	}
+	want := `ALTER OPERATOR FAMILY "public"."member_fam_old" USING btree RENAME TO "member_fam";`
+	if !containsSQL(ops, want) {
+		t.Errorf("expected %q, got: %v", want, sqlList(ops))
+	}
+	for _, o := range ops {
+		if strings.Contains(o.SQL(), "RENAME TO") && o.Safety() != pipeline.Caution {
+			t.Errorf("expected CAUTION safety for ALTER OPERATOR FAMILY RENAME TO, got %v", o.Safety())
+		}
+	}
+}
+
+// TestDiffOperatorFamilyRenamedFromStaleErrors mirrors every other kind's
+// identical stale-RENAMED-FROM validation.
+func TestDiffOperatorFamilyRenamedFromStaleErrors(t *testing.T) {
+	d := New()
+	old := "nonexistent_old_fam"
+	desired := &ir.OperatorFamily{
+		Schema: "public", Name: "member_fam", AccessMethod: "btree",
+		Body: `CREATE OPERATOR FAMILY "public"."member_fam" USING btree`, RenamedFrom: &old,
+	}
+	_, err := d.Diff([]pipeline.IRObject{desired}, &pipeline.Snapshot{})
+	if err == nil {
+		t.Fatal("expected an error for a stale RENAMED FROM matching no snapshot operator family")
+	}
+}
+
 // TestDiffOpFamilyMemberStaleSnapshotNoOp guards the mandatory
 // OpFamilyMembersStructured sentinel: a snapshot written before this
 // feature existed must never be treated as "genuinely zero members" — that
@@ -9042,6 +9108,75 @@ func TestDiffOperatorClassCosmeticBodyDriftIsNoop(t *testing.T) {
 	}
 	if len(ops) != 0 {
 		t.Errorf("expected no ops for structurally-identical members, got: %v", sqlList(ops))
+	}
+}
+
+// TestDiffOperatorClassRenamedFromEmitsAlterRename is the regression guard
+// for OperatorClass rename detection: before this, ir.OperatorClass had no
+// RenamedFrom field at all, so a renamed class was indistinguishable from
+// "old one dropped, new one added." Uses the same structurally-equal-
+// members fixture as TestDiffOperatorClassCosmeticBodyDriftIsNoop so the
+// rename is isolated from any member-change branch.
+func TestDiffOperatorClassRenamedFromEmitsAlterRename(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	// FamilySchema/FamilyName deliberately reference a family that is NOT
+	// the class's own auto-created same-name one, and stays identical on
+	// both sides — a class rename doesn't rename its (independent) family
+	// in real PostgreSQL, so this isolates the rename test from that
+	// unrelated comparison rather than accidentally exercising it.
+	_ = snap.SetObject("public.my_ops_old USING btree", &snapshot.SnapObject{
+		Kind: "operator_class",
+		Opaque: &snapshot.SnapOpaque{
+			Kind: "operator_class", Schema: "public", Name: "my_ops_old", Using: "btree",
+			BodyHash:                       fmt.Sprintf("%x", sha256Sum("CREATE OPERATOR CLASS public.my_ops_old FOR TYPE int4 USING btree FAMILY public.shared_family AS OPERATOR 1 <(integer, integer), OPERATOR 3 =(integer, integer), FUNCTION 1 (integer, integer) btint4cmp(integer, integer)")),
+			OperatorClassMembersStructured: true,
+			OperatorClassMembers:           opClassMemberFixtureIntrospected(),
+			OperatorClassFamilySchema:      "public", OperatorClassFamilyName: "shared_family",
+		},
+	})
+	old := "my_ops_old"
+	desired := []pipeline.IRObject{
+		&ir.OperatorClass{
+			Schema: "public", Name: "my_ops", AccessMethod: "btree",
+			FamilySchema: "public", FamilyName: "shared_family",
+			RenamedFrom: &old,
+			Body:        "CREATE OPERATOR CLASS public.my_ops FOR TYPE int4 USING btree FAMILY public.shared_family AS OPERATOR 1 <, OPERATOR 3 =, FUNCTION 1 btint4cmp(int4, int4)",
+			Members:     opClassMemberFixture(),
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if containsSQL(ops, "DROP OPERATOR CLASS") {
+		t.Fatalf("renamed operator class should match by RENAMED FROM, not drop+create, got: %v", sqlList(ops))
+	}
+	want := `ALTER OPERATOR CLASS "public"."my_ops_old" USING btree RENAME TO "my_ops";`
+	if !containsSQL(ops, want) {
+		t.Errorf("expected %q, got: %v", want, sqlList(ops))
+	}
+	for _, o := range ops {
+		if strings.Contains(o.SQL(), "RENAME TO") && o.Safety() != pipeline.Caution {
+			t.Errorf("expected CAUTION safety for ALTER OPERATOR CLASS RENAME TO, got %v", o.Safety())
+		}
+	}
+}
+
+// TestDiffOperatorClassRenamedFromStaleErrors mirrors every other kind's
+// identical stale-RENAMED-FROM validation.
+func TestDiffOperatorClassRenamedFromStaleErrors(t *testing.T) {
+	d := New()
+	old := "nonexistent_old_ops"
+	desired := []pipeline.IRObject{
+		&ir.OperatorClass{
+			Schema: "public", Name: "my_ops", AccessMethod: "btree", RenamedFrom: &old,
+			Body: "CREATE OPERATOR CLASS public.my_ops FOR TYPE int4 USING btree AS OPERATOR 1 <",
+		},
+	}
+	_, err := d.Diff(desired, &pipeline.Snapshot{})
+	if err == nil {
+		t.Fatal("expected an error for a stale RENAMED FROM matching no snapshot operator class")
 	}
 }
 
@@ -9756,6 +9891,95 @@ func TestDiffSubscriptionCommentOnlyChangeIsFieldLevel(t *testing.T) {
 	}
 	if strings.Contains(ops[0].SQL(), "DROP SUBSCRIPTION") {
 		t.Error("comment-only change must not drop and recreate the subscription")
+	}
+}
+
+// TestDiffSubscriptionRenamedFromEmitsAlterRename is the regression guard
+// for Subscription rename detection: before this, ir.Subscription had no
+// RenamedFrom field at all, so a renamed subscription was indistinguishable
+// from "old one dropped, new one added."
+func TestDiffSubscriptionRenamedFromEmitsAlterRename(t *testing.T) {
+	d := New()
+	// Body text differs by name on each side — matching what the real
+	// compiler actually produces for each declaration (Body is the literal
+	// "CREATE SUBSCRIPTION <name> ..." text, always embedding that
+	// declaration's own name) — not a shared/identical string, which would
+	// mask the exact bug this test guards against (opaqueBodyForHash
+	// normalizing the name back out before hashing).
+	oldBody := "CREATE SUBSCRIPTION sub_old CONNECTION 'host=x user=y' PUBLICATION pub"
+	newBody := "CREATE SUBSCRIPTION sub CONNECTION 'host=x user=y' PUBLICATION pub"
+	snap := &pipeline.Snapshot{}
+	if err := snapshot.Populate(snap, []pipeline.IRObject{
+		&ir.Subscription{Name: "sub_old", ConnInfo: "host=x user=y", Body: oldBody},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	old := "sub_old"
+	desired := []pipeline.IRObject{
+		&ir.Subscription{Name: "sub", ConnInfo: "host=x user=y", Body: newBody, RenamedFrom: &old},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if containsSQL(ops, "DROP SUBSCRIPTION") {
+		t.Fatalf("renamed subscription should match by RENAMED FROM, not drop+create, got: %v", sqlList(ops))
+	}
+	want := `ALTER SUBSCRIPTION "sub_old" RENAME TO "sub";`
+	if !containsSQL(ops, want) {
+		t.Errorf("expected %q, got: %v", want, sqlList(ops))
+	}
+	for _, o := range ops {
+		if strings.Contains(o.SQL(), "RENAME TO") && o.Safety() != pipeline.Caution {
+			t.Errorf("expected CAUTION safety for ALTER SUBSCRIPTION RENAME TO, got %v", o.Safety())
+		}
+	}
+}
+
+// TestDiffSubscriptionRenamedFromAndBodyChanged confirms a simultaneous
+// rename + connection/publication change still requires DROP+CREATE, with
+// no redundant separate rename — createSubscription already creates under
+// the final (new) name.
+func TestDiffSubscriptionRenamedFromAndBodyChanged(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	if err := snapshot.Populate(snap, []pipeline.IRObject{
+		&ir.Subscription{Name: "sub_old", ConnInfo: "host=x user=y", Body: "CREATE SUBSCRIPTION sub_old CONNECTION 'host=x user=y' PUBLICATION pub"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	old := "sub_old"
+	desired := []pipeline.IRObject{
+		&ir.Subscription{
+			Name: "sub", ConnInfo: "host=z user=y", RenamedFrom: &old,
+			Body: "CREATE SUBSCRIPTION sub CONNECTION 'host=z user=y' PUBLICATION pub",
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsSQL(ops, `DROP SUBSCRIPTION IF EXISTS "sub_old"`) {
+		t.Errorf("expected DROP referencing the subscription's actual (old) name, got: %v", sqlList(ops))
+	}
+	for _, o := range ops {
+		if strings.Contains(o.SQL(), "RENAME TO") {
+			t.Errorf("did not expect a separate RENAME TO alongside drop+create, got: %v", sqlList(ops))
+		}
+	}
+}
+
+// TestDiffSubscriptionRenamedFromStaleErrors mirrors every other kind's
+// identical stale-RENAMED-FROM validation.
+func TestDiffSubscriptionRenamedFromStaleErrors(t *testing.T) {
+	d := New()
+	old := "nonexistent_old_sub"
+	desired := []pipeline.IRObject{
+		&ir.Subscription{Name: "sub", RenamedFrom: &old, Body: "CREATE SUBSCRIPTION sub CONNECTION 'host=x' PUBLICATION pub"},
+	}
+	_, err := d.Diff(desired, &pipeline.Snapshot{})
+	if err == nil {
+		t.Fatal("expected an error for a stale RENAMED FROM matching no snapshot subscription")
 	}
 }
 
@@ -10662,6 +10886,11 @@ func TestDiffTSConfigMappingUnchangedIsNoop(t *testing.T) {
 func TestDiffTSDictRenamedFromEmitsAlterRename(t *testing.T) {
 	d := New()
 	snap := &pipeline.Snapshot{}
+	// Body text differs by name on each side — matching what the real
+	// compiler actually produces for each declaration — not a shared/
+	// identical string, which would mask the exact bug this test guards
+	// against (opaqueBodyForHash normalizing the name back out before
+	// hashing).
 	_ = snap.SetObject("public.ispell_old", &snapshot.SnapObject{
 		Kind: "ts_dict",
 		Opaque: &snapshot.SnapOpaque{
@@ -10673,7 +10902,7 @@ func TestDiffTSDictRenamedFromEmitsAlterRename(t *testing.T) {
 	desired := []pipeline.IRObject{
 		&ir.TSDict{
 			Schema: "public", Name: "ispell", RenamedFrom: &old,
-			Body: "CREATE TEXT SEARCH DICTIONARY public.ispell_old (TEMPLATE = ispell)",
+			Body: "CREATE TEXT SEARCH DICTIONARY public.ispell (TEMPLATE = ispell)",
 		},
 	}
 	ops, err := d.Diff(desired, snap)
@@ -10734,16 +10963,20 @@ func TestDiffTSDictRenamedFromAndBodyChanged(t *testing.T) {
 func TestDiffTSParserRenamedFromEmitsAlterRename(t *testing.T) {
 	d := New()
 	snap := &pipeline.Snapshot{}
-	body := "CREATE TEXT SEARCH PARSER public.prs_old (START = prsd_start, GETTOKEN = prsd_nexttoken, END = prsd_end, LEXTYPES = prsd_lextype)"
+	// Body text differs by name on each side, matching real compiler
+	// output — see TestDiffTSDictRenamedFromEmitsAlterRename's identical
+	// note.
+	oldBody := "CREATE TEXT SEARCH PARSER public.prs_old (START = prsd_start, GETTOKEN = prsd_nexttoken, END = prsd_end, LEXTYPES = prsd_lextype)"
+	newBody := "CREATE TEXT SEARCH PARSER public.prs (START = prsd_start, GETTOKEN = prsd_nexttoken, END = prsd_end, LEXTYPES = prsd_lextype)"
 	_ = snap.SetObject("public.prs_old", &snapshot.SnapObject{
 		Kind: "ts_parser",
 		Opaque: &snapshot.SnapOpaque{
-			Kind: "ts_parser", Schema: "public", Name: "prs_old", BodyHash: hashText(body),
+			Kind: "ts_parser", Schema: "public", Name: "prs_old", BodyHash: hashText(oldBody),
 		},
 	})
 	old := "prs_old"
 	desired := []pipeline.IRObject{
-		&ir.TSParser{Schema: "public", Name: "prs", RenamedFrom: &old, Body: body},
+		&ir.TSParser{Schema: "public", Name: "prs", RenamedFrom: &old, Body: newBody},
 	}
 	ops, err := d.Diff(desired, snap)
 	if err != nil {
@@ -10763,16 +10996,20 @@ func TestDiffTSParserRenamedFromEmitsAlterRename(t *testing.T) {
 func TestDiffTSTemplateRenamedFromEmitsAlterRename(t *testing.T) {
 	d := New()
 	snap := &pipeline.Snapshot{}
-	body := "CREATE TEXT SEARCH TEMPLATE public.tmpl_old (LEXIZE = dsimple_lexize)"
+	// Body text differs by name on each side, matching real compiler
+	// output — see TestDiffTSDictRenamedFromEmitsAlterRename's identical
+	// note.
+	oldBody := "CREATE TEXT SEARCH TEMPLATE public.tmpl_old (LEXIZE = dsimple_lexize)"
+	newBody := "CREATE TEXT SEARCH TEMPLATE public.tmpl (LEXIZE = dsimple_lexize)"
 	_ = snap.SetObject("public.tmpl_old", &snapshot.SnapObject{
 		Kind: "ts_template",
 		Opaque: &snapshot.SnapOpaque{
-			Kind: "ts_template", Schema: "public", Name: "tmpl_old", BodyHash: hashText(body),
+			Kind: "ts_template", Schema: "public", Name: "tmpl_old", BodyHash: hashText(oldBody),
 		},
 	})
 	old := "tmpl_old"
 	desired := []pipeline.IRObject{
-		&ir.TSTemplate{Schema: "public", Name: "tmpl", RenamedFrom: &old, Body: body},
+		&ir.TSTemplate{Schema: "public", Name: "tmpl", RenamedFrom: &old, Body: newBody},
 	}
 	ops, err := d.Diff(desired, snap)
 	if err != nil {
@@ -13157,6 +13394,97 @@ func TestDiffFDWStaleSnapshotDoesNotRecreate(t *testing.T) {
 	}
 }
 
+// TestDiffFDWRenamedFromEmitsAlterRename is the regression guard for FDW
+// rename detection: before this, ir.ForeignDataWrapper had no RenamedFrom
+// field at all, so a renamed FDW was indistinguishable from "old one
+// dropped, new one added."
+func TestDiffFDWRenamedFromEmitsAlterRename(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("myfdw_old", &snapshot.SnapObject{
+		Kind: "fdw",
+		Opaque: &snapshot.SnapOpaque{
+			Kind: "fdw", Name: "myfdw_old", OptionsStructured: true,
+			FDWOptions: []snapshot.SnapOptionKV{{Key: "debug", Value: "true"}},
+		},
+	})
+	old := "myfdw_old"
+	desired := []pipeline.IRObject{
+		&ir.ForeignDataWrapper{
+			Name: "myfdw", RenamedFrom: &old,
+			Options: []pipeline.StorageParam{{Key: "debug", Value: "true"}},
+			Body:    "CREATE FOREIGN DATA WRAPPER myfdw OPTIONS (debug 'true')",
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if containsSQL(ops, "DROP FOREIGN DATA WRAPPER") {
+		t.Fatalf("renamed FDW should match by RENAMED FROM, not drop+create, got: %v", sqlList(ops))
+	}
+	want := `ALTER FOREIGN DATA WRAPPER "myfdw_old" RENAME TO "myfdw";`
+	if !containsSQL(ops, want) {
+		t.Errorf("expected %q, got: %v", want, sqlList(ops))
+	}
+	for _, o := range ops {
+		if strings.Contains(o.SQL(), "RENAME TO") && o.Safety() != pipeline.Caution {
+			t.Errorf("expected CAUTION safety for ALTER FOREIGN DATA WRAPPER RENAME TO, got %v", o.Safety())
+		}
+	}
+}
+
+// TestDiffFDWRenamedFromAndOptionsChanged confirms a simultaneous rename +
+// options change still requires DROP+CREATE (RFC's own documented FDW
+// semantics — no ALTER FOREIGN DATA WRAPPER path modeled), with no
+// redundant separate rename — createOpaque already creates under the final
+// (new) name.
+func TestDiffFDWRenamedFromAndOptionsChanged(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("myfdw_old", &snapshot.SnapObject{
+		Kind: "fdw",
+		Opaque: &snapshot.SnapOpaque{
+			Kind: "fdw", Name: "myfdw_old", OptionsStructured: true,
+			FDWOptions: []snapshot.SnapOptionKV{{Key: "debug", Value: "false"}},
+		},
+	})
+	old := "myfdw_old"
+	desired := []pipeline.IRObject{
+		&ir.ForeignDataWrapper{
+			Name: "myfdw", RenamedFrom: &old,
+			Options: []pipeline.StorageParam{{Key: "debug", Value: "true"}},
+			Body:    "CREATE FOREIGN DATA WRAPPER myfdw OPTIONS (debug 'true')",
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsSQL(ops, `DROP FOREIGN DATA WRAPPER IF EXISTS "myfdw_old"`) {
+		t.Errorf("expected DROP referencing the FDW's actual (old) name, got: %v", sqlList(ops))
+	}
+	for _, o := range ops {
+		if strings.Contains(o.SQL(), "RENAME TO") {
+			t.Errorf("did not expect a separate RENAME TO alongside drop+create, got: %v", sqlList(ops))
+		}
+	}
+}
+
+// TestDiffFDWRenamedFromStaleErrors mirrors every other kind's identical
+// stale-RENAMED-FROM validation.
+func TestDiffFDWRenamedFromStaleErrors(t *testing.T) {
+	d := New()
+	old := "nonexistent_old_fdw"
+	desired := []pipeline.IRObject{
+		&ir.ForeignDataWrapper{Name: "myfdw", RenamedFrom: &old, Body: "CREATE FOREIGN DATA WRAPPER myfdw"},
+	}
+	_, err := d.Diff(desired, &pipeline.Snapshot{})
+	if err == nil {
+		t.Fatal("expected an error for a stale RENAMED FROM matching no snapshot FDW")
+	}
+}
+
 func TestDiffForeignServerOptionsChangeIsSafeAlter(t *testing.T) {
 	d := New()
 	snap := &pipeline.Snapshot{}
@@ -13846,6 +14174,98 @@ func TestDiffStatisticsObjectTargetChangeIsSafeAlter(t *testing.T) {
 	}
 	if ops[0].Safety() != pipeline.Safe {
 		t.Errorf("expected ALTER STATISTICS SET STATISTICS to be Safe (RFC §14.6), got %v: %s", ops[0].Safety(), sql)
+	}
+}
+
+// TestDiffStatisticsObjectRenamedFromEmitsAlterRename is the regression
+// guard for StatisticsObject rename detection: before this,
+// ir.StatisticsObject had no RenamedFrom field at all, so a renamed
+// statistics object was indistinguishable from "old one dropped, new one
+// added."
+func TestDiffStatisticsObjectRenamedFromEmitsAlterRename(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.st_old", &snapshot.SnapObject{
+		Kind: "statistics",
+		Opaque: &snapshot.SnapOpaque{
+			Kind: "statistics", Schema: "public", Name: "st_old", StatisticsStructured: true,
+			StatisticsTable: "public.orders", StatisticsKinds: []string{"ndistinct"}, StatisticsColumns: []string{"a", "b"},
+		},
+	})
+	old := "st_old"
+	desired := []pipeline.IRObject{
+		&ir.StatisticsObject{
+			Schema: "public", Name: "st", Table: "public.orders", Kinds: []string{"ndistinct"}, Columns: []string{"a", "b"},
+			RenamedFrom: &old,
+			Body:        "CREATE STATISTICS public.st (ndistinct) ON a, b FROM orders",
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if containsSQL(ops, "DROP STATISTICS") {
+		t.Fatalf("renamed statistics object should match by RENAMED FROM, not drop+create, got: %v", sqlList(ops))
+	}
+	want := `ALTER STATISTICS "public"."st_old" RENAME TO "st";`
+	if !containsSQL(ops, want) {
+		t.Errorf("expected %q, got: %v", want, sqlList(ops))
+	}
+	for _, o := range ops {
+		if strings.Contains(o.SQL(), "RENAME TO") && o.Safety() != pipeline.Caution {
+			t.Errorf("expected CAUTION safety for ALTER STATISTICS RENAME TO, got %v", o.Safety())
+		}
+	}
+}
+
+// TestDiffStatisticsObjectRenamedFromAndColumnsChanged confirms a
+// simultaneous rename + column-list change still requires DROP+CREATE (no
+// ALTER STATISTICS path changes the column list), with no redundant
+// separate rename — createOpaque already creates under the final (new)
+// name.
+func TestDiffStatisticsObjectRenamedFromAndColumnsChanged(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.st_old", &snapshot.SnapObject{
+		Kind: "statistics",
+		Opaque: &snapshot.SnapOpaque{
+			Kind: "statistics", Schema: "public", Name: "st_old", StatisticsStructured: true,
+			StatisticsTable: "public.orders", StatisticsKinds: []string{"ndistinct"}, StatisticsColumns: []string{"a"},
+		},
+	})
+	old := "st_old"
+	desired := []pipeline.IRObject{
+		&ir.StatisticsObject{
+			Schema: "public", Name: "st", Table: "public.orders", Kinds: []string{"ndistinct"}, Columns: []string{"a", "b"},
+			RenamedFrom: &old,
+			Body:        "CREATE STATISTICS public.st (ndistinct) ON a, b FROM orders",
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsSQL(ops, `DROP STATISTICS IF EXISTS "public"."st_old"`) {
+		t.Errorf("expected DROP referencing the statistics object's actual (old) name, got: %v", sqlList(ops))
+	}
+	for _, o := range ops {
+		if strings.Contains(o.SQL(), "RENAME TO") {
+			t.Errorf("did not expect a separate RENAME TO alongside drop+create, got: %v", sqlList(ops))
+		}
+	}
+}
+
+// TestDiffStatisticsObjectRenamedFromStaleErrors mirrors every other kind's
+// identical stale-RENAMED-FROM validation.
+func TestDiffStatisticsObjectRenamedFromStaleErrors(t *testing.T) {
+	d := New()
+	old := "nonexistent_old_st"
+	desired := []pipeline.IRObject{
+		&ir.StatisticsObject{Schema: "public", Name: "st", RenamedFrom: &old, Body: "CREATE STATISTICS public.st ON a FROM orders"},
+	}
+	_, err := d.Diff(desired, &pipeline.Snapshot{})
+	if err == nil {
+		t.Fatal("expected an error for a stale RENAMED FROM matching no snapshot statistics object")
 	}
 }
 

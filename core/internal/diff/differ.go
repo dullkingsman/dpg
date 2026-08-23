@@ -382,6 +382,40 @@ func renamedFromKey(obj pipeline.IRObject) string {
 		if o.RenamedFrom != nil {
 			return *o.RenamedFrom
 		}
+	case *ir.ForeignDataWrapper:
+		// Bare, like *ir.Role/*ir.EventTrigger above — database-level, no
+		// schema component.
+		if o.RenamedFrom != nil {
+			return *o.RenamedFrom
+		}
+	case *ir.Subscription:
+		// Bare, same reasoning as *ir.ForeignDataWrapper above.
+		if o.RenamedFrom != nil {
+			return *o.RenamedFrom
+		}
+	case *ir.OperatorClass:
+		if o.RenamedFrom != nil {
+			// Includes the " USING accessmethod" suffix, like Function/
+			// Procedure/Aggregate above include their arg-types signature:
+			// ir.OperatorClass.QualifiedName() (the actual snapshot key)
+			// always does — a class's name is only unique per access
+			// method, so omitting it here would either never match the
+			// stored key at all, or (worse) match the wrong class under a
+			// same-named-different-method collision.
+			return qualKey(oldSchema(o.Schema, o.RenamedFromSchema), *o.RenamedFrom) + " USING " + o.AccessMethod
+		}
+	case *ir.OperatorFamily:
+		if o.RenamedFrom != nil {
+			// See *ir.OperatorClass's identical reasoning just above, plus
+			// the trailing " FAMILY" ir.OperatorFamily.QualifiedName() also
+			// always appends, to avoid colliding with PostgreSQL's own
+			// same-named auto-created family for a class.
+			return qualKey(oldSchema(o.Schema, o.RenamedFromSchema), *o.RenamedFrom) + " USING " + o.AccessMethod + " FAMILY"
+		}
+	case *ir.StatisticsObject:
+		if o.RenamedFrom != nil {
+			return qualKey(oldSchema(o.Schema, o.RenamedFromSchema), *o.RenamedFrom)
+		}
 	}
 	return ""
 }
@@ -436,6 +470,16 @@ func describeKind(obj pipeline.IRObject) string {
 		return "text search template"
 	case *ir.EventTrigger:
 		return "event trigger"
+	case *ir.ForeignDataWrapper:
+		return "foreign data wrapper"
+	case *ir.Subscription:
+		return "subscription"
+	case *ir.OperatorClass:
+		return "operator class"
+	case *ir.OperatorFamily:
+		return "operator family"
+	case *ir.StatisticsObject:
+		return "statistics object"
 	}
 	return "object"
 }
@@ -1825,13 +1869,29 @@ func alterOptionsSQL(desired, live []snapshot.SnapOptionKV) string {
 func diffStatisticsObject(o *ir.StatisticsObject, snap *snapshot.SnapOpaque) ([]pipeline.DiffOp, error) {
 	pos := o.SrcPos
 	ident := qualIdent(o.Schema, o.Name)
+
+	// RENAME TO applies regardless of whether the structured Table/Kinds/
+	// Columns comparison below is trustworthy — Name/Schema are basic
+	// identity fields, not part of that set. Uses snap's matched (old)
+	// name for the FROM side, same reasoning as diffType/diffCollation's
+	// identical rename handling. Not merged into the drop+create branch
+	// below — a simultaneous rename needs no separate ALTER there, since
+	// createOpaque already creates the object under its final (new) name.
+	var renameOps []pipeline.DiffOp
+	if snap.Name != o.Name {
+		renameOps = append(renameOps, cautionOp(
+			fmt.Sprintf("ALTER STATISTICS %s RENAME TO %s;", qualIdent(snap.Schema, snap.Name), quoteIdent(o.Name)),
+			pos,
+		))
+	}
+
 	if !snap.StatisticsStructured {
 		// Stale snapshot predating these structured fields — same
 		// self-healing pattern as diffCollation/diffFDW. An empty
 		// Kinds/Columns list is not itself a reliable "unpopulated"
 		// signal (a freshly-populated object could legitimately have
 		// neither yet, e.g. mid-edit), hence the explicit sentinel.
-		var ops []pipeline.DiffOp
+		ops := renameOps
 		if !ptrEq(o.Comment, snap.Comment) {
 			if sql := commentOnOpaqueSQL("statistics", o.Schema, o.Name, "", "", o.Comment); sql != "" {
 				ops = append(ops, safeOp(sql, pos))
@@ -1854,7 +1914,7 @@ func diffStatisticsObject(o *ir.StatisticsObject, snap *snapshot.SnapOpaque) ([]
 		ops = append(ops, createOps...)
 		return appendCommentOp(ops, nil, "statistics", o.Schema, o.Name, "", "", o.Comment, pos)
 	}
-	var ops []pipeline.DiffOp
+	ops := renameOps
 	if !intPtrEq(o.StatisticsTarget, snap.StatisticsTarget) {
 		if o.StatisticsTarget != nil {
 			ops = append(ops, safeOp(fmt.Sprintf("ALTER STATISTICS %s SET STATISTICS %d;", ident, *o.StatisticsTarget), pos))
@@ -1933,12 +1993,29 @@ func diffCollation(o *ir.Collation, snap *snapshot.SnapOpaque) ([]pipeline.DiffO
 func diffFDW(o *ir.ForeignDataWrapper, snap *snapshot.SnapOpaque) ([]pipeline.DiffOp, error) {
 	pos := o.SrcPos
 	onClause := "FOREIGN DATA WRAPPER " + quoteIdent(o.Name)
+
+	// RENAME TO applies regardless of whether the structured Handler/
+	// Validator/Options comparison below is trustworthy — Name is a basic
+	// identity field, not part of that set. Uses snap's matched (old) name
+	// for the FROM side, same reasoning as diffType/diffCollation's
+	// identical rename handling. Not merged into the drop+create branch
+	// below — a simultaneous rename needs no separate ALTER there, since
+	// createOpaque already creates the object under its final (new) name.
+	// Bare (no schema qualifier) — FDWs are database-level.
+	var renameOps []pipeline.DiffOp
+	if snap.Name != o.Name {
+		renameOps = append(renameOps, cautionOp(
+			fmt.Sprintf("ALTER FOREIGN DATA WRAPPER %s RENAME TO %s;", quoteIdent(snap.Name), quoteIdent(o.Name)),
+			pos,
+		))
+	}
+
 	// Stale snapshot predating these structured fields: unlike Tablespace/
 	// Cast/EventTrigger, no single field is guaranteed non-empty on a real
 	// FDW (a bare FOREIGN DATA WRAPPER with no HANDLER/VALIDATOR/OPTIONS
 	// is valid), so OptionsStructured is an explicit sentinel instead.
 	if !snap.OptionsStructured {
-		var ops []pipeline.DiffOp
+		ops := renameOps
 		if !ptrEq(o.Comment, snap.Comment) {
 			if sql := commentOnOpaqueSQL("fdw", "", o.Name, "", "", o.Comment); sql != "" {
 				ops = append(ops, safeOp(sql, pos))
@@ -1963,7 +2040,7 @@ func diffFDW(o *ir.ForeignDataWrapper, snap *snapshot.SnapOpaque) ([]pipeline.Di
 		ops = append(ops, createSimpleGrantOps("FOREIGN DATA WRAPPER", quoteIdent(o.Name), o.Grants, o.Revocations, pos, false)...)
 		return appendCommentOp(ops, nil, "fdw", "", o.Name, "", "", o.Comment, pos)
 	}
-	var ops []pipeline.DiffOp
+	ops := renameOps
 	if !ptrEq(o.Comment, snap.Comment) {
 		if sql := commentOnOpaqueSQL("fdw", "", o.Name, "", "", o.Comment); sql != "" {
 			ops = append(ops, safeOp(sql, pos))
@@ -2201,8 +2278,38 @@ func diffPublication(o *ir.Publication, snap *snapshot.SnapOpaque) ([]pipeline.D
 // Comment-bearing kind) rather than folded into the body hash — a
 // comment-only edit doesn't need the subscription dropped and recreated.
 func diffSubscription(o *ir.Subscription, snap *snapshot.SnapOpaque) ([]pipeline.DiffOp, error) {
+	pos := o.SrcPos
+
+	// RENAME TO applies regardless of the body-hash comparison below — Name
+	// is a basic identity field, not part of the hashed body. Uses snap's
+	// matched (old) name for the FROM side, same reasoning as every other
+	// kind's identical rename handling. Not merged into the drop+create
+	// branch below — a simultaneous rename needs no separate ALTER there,
+	// since createSubscription already creates under the final (new) name.
+	// Bare (no schema qualifier) — subscriptions are database-level.
+	var renameOps []pipeline.DiffOp
+	if snap.Name != o.Name {
+		renameOps = append(renameOps, cautionOp(
+			fmt.Sprintf("ALTER SUBSCRIPTION %s RENAME TO %s;", quoteIdent(snap.Name), quoteIdent(o.Name)),
+			pos,
+		))
+	}
+
 	if o.Body != "" {
-		newHash := hashText(o.Body)
+		// hashBody normalizes the subscription's own (new) name back to its
+		// old (matched) name before hashing — Body embeds the subscription's
+		// own name ("CREATE SUBSCRIPTION name ..."), so hashing it unmodified
+		// against a snapshot hash computed under the old name would always
+		// misdetect a pure rename as a body change: confirmed live, this
+		// previously emitted a real DROP SUBSCRIPTION + CREATE SUBSCRIPTION
+		// for a bare rename with no other change, which can even error
+		// outright (DROP SUBSCRIPTION also tries to drop the associated
+		// replication slot on the publisher, which may not exist under the
+		// dropped name). Same reasoning and pattern as diffOpaqueIRHash's
+		// callers (diffTSDict et al.), applied inline since Subscription's
+		// body-hash comparison is bespoke, not routed through diffOpaqueIR.
+		hashBody := opaqueBodyForHash(o.Body, o.Name, snap.Name)
+		newHash := hashText(hashBody)
 		if snap.BodyHash != "" && newHash != snap.BodyHash {
 			ops := dropObject(&snapshot.SnapObject{Kind: snap.Kind, Opaque: snap})
 			createOps, err := createSubscription(o)
@@ -2212,15 +2319,15 @@ func diffSubscription(o *ir.Subscription, snap *snapshot.SnapOpaque) ([]pipeline
 			return append(ops, createOps...), nil
 		}
 	}
-	var ops []pipeline.DiffOp
+	ops := renameOps
 	if !ptrEq(o.Comment, snap.Comment) {
 		if o.Comment != nil {
-			ops = append(ops, safeOp(fmt.Sprintf("COMMENT ON SUBSCRIPTION %s IS %s;", quoteIdent(o.Name), quoteLit(*o.Comment)), o.SrcPos))
+			ops = append(ops, safeOp(fmt.Sprintf("COMMENT ON SUBSCRIPTION %s IS %s;", quoteIdent(o.Name), quoteLit(*o.Comment)), pos))
 		} else {
-			ops = append(ops, safeOp(fmt.Sprintf("COMMENT ON SUBSCRIPTION %s IS NULL;", quoteIdent(o.Name)), o.SrcPos))
+			ops = append(ops, safeOp(fmt.Sprintf("COMMENT ON SUBSCRIPTION %s IS NULL;", quoteIdent(o.Name)), pos))
 		}
 	}
-	ops = append(ops, diffSecurityLabelSet(snap.SecurityLabels, o.SecurityLabels, "SUBSCRIPTION "+quoteIdent(o.Name), o.SrcPos)...)
+	ops = append(ops, diffSecurityLabelSet(snap.SecurityLabels, o.SecurityLabels, "SUBSCRIPTION "+quoteIdent(o.Name), pos)...)
 	return ops, nil
 }
 
@@ -3867,10 +3974,24 @@ func opMemberNameMatches(isFunction bool, famSchema, dSchema, dName, sSchema, sN
 	if dSchema != "" {
 		return dSchema == sSchema
 	}
+	// sSchema == "" is a second, genuine legitimate resolution alongside
+	// famSchema/pg_catalog below, found live-testing operator class rename:
+	// this function's existing branches assume the snapshot side is always
+	// resolved/qualified (true for a live-introspected snapshot, per this
+	// function's own doc comment), but an OFFLINE (non-introspected)
+	// snapshot populated directly from a prior compile — snapshot.Populate,
+	// not introspection — stores the identical unqualified text the
+	// desired side has, on BOTH sides equally. Without this branch, a
+	// same-declaration offline apply/plan compared "" (snap) against
+	// famSchema/"pg_catalog" and always mismatched, permanently breaking
+	// idempotency for any operator class member with an unqualified
+	// FUNCTION/OPERATOR reference — confirmed live against a real
+	// postgres:17 server via the exact offline (compile-vs-committed-
+	// snapshot) path apply/plan actually uses between two applies.
 	if isFunction {
-		return sSchema == famSchema || sSchema == "pg_catalog"
+		return sSchema == "" || sSchema == famSchema || sSchema == "pg_catalog"
 	}
-	return sSchema == "pg_catalog"
+	return sSchema == "" || sSchema == "pg_catalog"
 }
 
 // opFamilyMemberEqual compares the "payload" of a same-slot member pair —
@@ -3948,6 +4069,29 @@ func opClassMembersEqual(famSchema string, desired []pipeline.OpFamilyMember, sn
 //
 // A stale pre-feature snapshot (OperatorClassMembersStructured false) falls
 // back to today's unstructured BodyHash path, same as before this fix.
+// renameOperatorIfUnchanged is renameOpaqueIfUnchanged's OperatorClass/
+// OperatorFamily-specific counterpart: the FROM side needs an extra
+// "USING access_method" qualifier neither Table-shaped kinds nor the other
+// opaque wrapper kinds need — real PostgreSQL's ALTER OPERATOR CLASS/FAMILY
+// ... USING method RENAME TO new_name, since a class/family name is unique
+// only per access method, which itself cannot change via a rename. alterKW
+// is "OPERATOR CLASS" or "OPERATOR FAMILY" (the "FAMILY" keyword belongs
+// there, not after RENAME TO).
+func renameOperatorIfUnchanged(ops []pipeline.DiffOp, alterKW, accessMethod string, snap *snapshot.SnapOpaque, desiredName string, pos pipeline.SourcePos) []pipeline.DiffOp {
+	if snap.Name == desiredName {
+		return ops
+	}
+	for _, op := range ops {
+		if op.Safety() == pipeline.Destructive {
+			return ops
+		}
+	}
+	return append(ops, cautionOp(
+		fmt.Sprintf("ALTER %s %s USING %s RENAME TO %s;", alterKW, qualIdent(snap.Schema, snap.Name), accessMethod, quoteIdent(desiredName)),
+		pos,
+	))
+}
+
 func diffOperatorClass(o *ir.OperatorClass, snap *snapshot.SnapOpaque) ([]pipeline.DiffOp, error) {
 	famSchema := o.FamilySchema
 	if famSchema == "" {
@@ -3967,16 +4111,51 @@ func diffOperatorClass(o *ir.OperatorClass, snap *snapshot.SnapOpaque) ([]pipeli
 	if famName == "" {
 		famName = o.Name
 	}
+	// The snapshot side needs the identical fallback resolution applied to
+	// the desired side just above — a genuine, pre-existing bug found while
+	// live-testing operator class rename (unrelated to renaming itself):
+	// toSnapObject stores o.FamilySchema/FamilyName raw, so an unqualified
+	// FAMILY clause (the common case — same-schema, or omitted entirely)
+	// left snap's value "" while the desired side's fallback resolved it to
+	// a real schema/name, permanently miscomparing "public" != "" on every
+	// single plan/apply and spuriously DROP+CREATE-ing an entirely
+	// unmodified operator class every time — the offline analog of RFC
+	// audit item C.5, which only ever fixed the live-introspection side
+	// (introspectOperatorClasses always names the family explicitly, so it
+	// never hit this path) — confirmed live against a real postgres:17
+	// server, not merely suspected from reading the code.
+	snapFamSchema := snap.OperatorClassFamilySchema
+	if snapFamSchema == "" {
+		snapFamSchema = snap.Schema
+	}
+	snapFamName := snap.OperatorClassFamilyName
+	if snapFamName == "" {
+		snapFamName = snap.Name
+	}
+	var ops []pipeline.DiffOp
+	var err error
 	if snap.OperatorClassMembersStructured {
 		if o.StorageType == snap.OperatorClassStorageType &&
-			famSchema == snap.OperatorClassFamilySchema &&
-			famName == snap.OperatorClassFamilyName &&
+			famSchema == snapFamSchema &&
+			famName == snapFamName &&
 			opClassMembersEqual(famSchema, o.Members, snap.OperatorClassMembers) {
-			return diffOpaqueIR(o.QualifiedName(), "", o.Reconstructed, o.Comment, snap, o.SrcPos)
+			ops, err = diffOpaqueIR(o.QualifiedName(), "", o.Reconstructed, o.Comment, snap, o.SrcPos)
+		} else {
+			ops, err = dropCreateOpaque(o.QualifiedName(), o.Body, o.Comment, snap, o.SrcPos)
 		}
-		return dropCreateOpaque(o.QualifiedName(), o.Body, o.Comment, snap, o.SrcPos)
+	} else {
+		// hashBody normalizes the class's own (new) name back to its old
+		// (matched) name before hashing — same reasoning as diffTSDict's
+		// identical fix: Body embeds the class's own name, so hashing it
+		// unmodified against a snapshot hash computed under the old name
+		// would always misdetect a pure rename as a body change.
+		hashBody := opaqueBodyForHash(o.Body, o.Name, snap.Name)
+		ops, err = diffOpaqueIRHash(o.QualifiedName(), o.Body, hashBody, o.Reconstructed, o.Comment, snap, o.SrcPos)
 	}
-	return diffOpaqueIR(o.QualifiedName(), o.Body, o.Reconstructed, o.Comment, snap, o.SrcPos)
+	if err != nil {
+		return nil, err
+	}
+	return renameOperatorIfUnchanged(ops, "OPERATOR CLASS", o.AccessMethod, snap, o.Name, o.SrcPos), nil
 }
 
 // diffOpFamilyMembers diffs an operator family's loose members (RFC §14.4)
@@ -4095,8 +4274,33 @@ func diffTSConfigMappings(configIdent string, desired []pipeline.TSMappingDef, s
 // no canonical-form-vs-hand-written ambiguity the way a reconstructed body
 // does, so comparing it is always reliable.
 func diffOpaqueIR(name, body string, reconstructed bool, comment *string, snap *snapshot.SnapOpaque, pos pipeline.SourcePos) ([]pipeline.DiffOp, error) {
-	if body != "" && !reconstructed {
-		sum := sha256.Sum256([]byte(strings.TrimSpace(body)))
+	return diffOpaqueIRHash(name, body, body, reconstructed, comment, snap, pos)
+}
+
+// diffOpaqueIRHash is diffOpaqueIR generalized with a separate hashBody:
+// the text actually hashed for the body-changed comparison, which may
+// differ from body (the text used to emit CREATE on a genuine change).
+// diffOpaqueIR itself passes body for both — every caller with no rename
+// concept (Operator, TSConfig, and OperatorClass/Family's structured-equal
+// path, which passes "" for body and so never reaches this branch at all)
+// goes through it unchanged.
+//
+// Rename-aware wrappers (diffTSDict/diffTSParser/diffTSTemplate/
+// diffOperatorFamily/diffOperatorClass's unstructured fallback) call this
+// directly with hashBody normalized via opaqueBodyForHash: their Body text
+// embeds the object's own name (e.g. "CREATE TEXT SEARCH DICTIONARY
+// name (...)"), so hashing the real (new-name) body against a snapshot
+// hash computed under the OLD name would always misdetect a pure rename
+// as a body/definition change — confirmed live: a bare RENAMED FROM with
+// no other change was silently emitting DROP + CREATE for these kinds
+// (and, for Subscription specifically — handled separately, not through
+// this function, but the identical bug — erroring outright on DROP
+// SUBSCRIPTION's own replication-slot cleanup) before this fix. body
+// itself is left untouched, so a genuine change still emits CREATE under
+// the correct (new) name via dropCreateOpaque below.
+func diffOpaqueIRHash(name, body, hashBody string, reconstructed bool, comment *string, snap *snapshot.SnapOpaque, pos pipeline.SourcePos) ([]pipeline.DiffOp, error) {
+	if hashBody != "" && !reconstructed {
+		sum := sha256.Sum256([]byte(strings.TrimSpace(hashBody)))
 		newHash := fmt.Sprintf("%x", sum)
 		if snap.BodyHash != "" && newHash != snap.BodyHash {
 			return dropCreateOpaque(name, body, comment, snap, pos)
@@ -4108,6 +4312,26 @@ func diffOpaqueIR(name, body string, reconstructed bool, comment *string, snap *
 		}
 	}
 	return nil, nil
+}
+
+// opaqueBodyForHash returns body with its own (new) desiredName normalized
+// back to oldName before hashing, when a rename is in effect (oldName set
+// and different from desiredName) — the same "normalize the renamed
+// identity out before comparing" principle translateConstraintExpr/
+// translateIndexColumnList already use for column renames (Section 7.6),
+// applied here to an opaque object's raw body text instead of a
+// constraint/index expression. Only the bare (unqualified) name is
+// substituted (first occurrence), not a schema-qualified form — correct
+// for the common same-schema rename case this mechanism actually supports;
+// a simultaneous cross-schema move (not itself implemented for these
+// opaque kinds) may still misdetect, the same known, accepted limitation
+// already documented for Table/View's own cross-schema RENAMED FROM
+// (renames in place, doesn't move schema).
+func opaqueBodyForHash(body, desiredName, oldName string) string {
+	if oldName != "" && oldName != desiredName {
+		return strings.Replace(body, desiredName, oldName, 1)
+	}
+	return body
 }
 
 // dropCreateOpaque emits the standard DROP+CREATE(+COMMENT) sequence for an
@@ -4156,7 +4380,8 @@ func renameOpaqueIfUnchanged(ops []pipeline.DiffOp, alterKW string, snap *snapsh
 // renameOpaqueIfUnchanged's doc comment for why this lives in a per-kind
 // wrapper instead of the shared function.
 func diffTSDict(o *ir.TSDict, snap *snapshot.SnapOpaque) ([]pipeline.DiffOp, error) {
-	ops, err := diffOpaqueIR(o.QualifiedName(), o.Body, o.Reconstructed, o.Comment, snap, o.SrcPos)
+	hashBody := opaqueBodyForHash(o.Body, o.Name, snap.Name)
+	ops, err := diffOpaqueIRHash(o.QualifiedName(), o.Body, hashBody, o.Reconstructed, o.Comment, snap, o.SrcPos)
 	if err != nil {
 		return nil, err
 	}
@@ -4167,7 +4392,8 @@ func diffTSDict(o *ir.TSDict, snap *snapshot.SnapOpaque) ([]pipeline.DiffOp, err
 // 12.3). Real PostgreSQL has no OWNER concept for a parser at all, unlike
 // TSDict, so there is no analogous Owner gap to track here.
 func diffTSParser(o *ir.TSParser, snap *snapshot.SnapOpaque) ([]pipeline.DiffOp, error) {
-	ops, err := diffOpaqueIR(o.QualifiedName(), o.Body, o.Reconstructed, o.Comment, snap, o.SrcPos)
+	hashBody := opaqueBodyForHash(o.Body, o.Name, snap.Name)
+	ops, err := diffOpaqueIRHash(o.QualifiedName(), o.Body, hashBody, o.Reconstructed, o.Comment, snap, o.SrcPos)
 	if err != nil {
 		return nil, err
 	}
@@ -4177,7 +4403,8 @@ func diffTSParser(o *ir.TSParser, snap *snapshot.SnapOpaque) ([]pipeline.DiffOp,
 // diffTSTemplate is diffTSDict's TSTemplate-specific counterpart (RFC
 // Section 12.4). Same no-OWNER-concept note as diffTSParser.
 func diffTSTemplate(o *ir.TSTemplate, snap *snapshot.SnapOpaque) ([]pipeline.DiffOp, error) {
-	ops, err := diffOpaqueIR(o.QualifiedName(), o.Body, o.Reconstructed, o.Comment, snap, o.SrcPos)
+	hashBody := opaqueBodyForHash(o.Body, o.Name, snap.Name)
+	ops, err := diffOpaqueIRHash(o.QualifiedName(), o.Body, hashBody, o.Reconstructed, o.Comment, snap, o.SrcPos)
 	if err != nil {
 		return nil, err
 	}
@@ -4226,21 +4453,36 @@ func diffTSConfig(o *ir.TSConfig, snap *snapshot.SnapOpaque) ([]pipeline.DiffOp,
 // ALTER OPERATOR FAMILY ... ADD/DROP for family-level members, so there is
 // no need to force a full drop+recreate here the way OperatorClass does.
 func diffOperatorFamily(o *ir.OperatorFamily, snap *snapshot.SnapOpaque) ([]pipeline.DiffOp, error) {
-	ops, err := diffOpaqueIR(o.QualifiedName(), o.Body, o.Reconstructed, o.Comment, snap, o.SrcPos)
+	// hashBody normalizes the family's own (new) name back to its old
+	// (matched) name before hashing — same reasoning as diffTSDict's
+	// identical fix: Body embeds the family's own name, so hashing it
+	// unmodified against a snapshot hash computed under the old name
+	// would always misdetect a pure rename as a body change.
+	hashBody := opaqueBodyForHash(o.Body, o.Name, snap.Name)
+	ops, err := diffOpaqueIRHash(o.QualifiedName(), o.Body, hashBody, o.Reconstructed, o.Comment, snap, o.SrcPos)
 	if err != nil {
 		return nil, err
 	}
 	famIdent := qualIdent(o.Schema, o.Name)
+	destructive := false
 	for _, op := range ops {
 		if op.Safety() == pipeline.Destructive {
-			for _, m := range o.Members {
-				ops = append(ops, safeOp(opFamilyAddSQL(famIdent, o.AccessMethod, m), o.SrcPos))
-			}
-			return ops, nil
+			destructive = true
+			break
 		}
 	}
-	ops = append(ops, diffOpFamilyMembers(o.Schema, famIdent, o.AccessMethod, o.Members, snap.OpFamilyMembers, snap.OpFamilyMembersStructured, o.SrcPos)...)
-	return ops, nil
+	if destructive {
+		for _, m := range o.Members {
+			ops = append(ops, safeOp(opFamilyAddSQL(famIdent, o.AccessMethod, m), o.SrcPos))
+		}
+	} else {
+		ops = append(ops, diffOpFamilyMembers(o.Schema, famIdent, o.AccessMethod, o.Members, snap.OpFamilyMembers, snap.OpFamilyMembersStructured, o.SrcPos)...)
+	}
+	// renameOperatorIfUnchanged's own Destructive scan correctly skips the
+	// rename here too — a body change already recreates the family under
+	// its final (new) name via dropCreateOpaque, so no separate ALTER is
+	// needed even though this function appends more (safe) ops afterward.
+	return renameOperatorIfUnchanged(ops, "OPERATOR FAMILY", o.AccessMethod, snap, o.Name, o.SrcPos), nil
 }
 
 func diffProcedure(o *ir.Procedure, snap *snapshot.SnapOpaque) ([]pipeline.DiffOp, error) {

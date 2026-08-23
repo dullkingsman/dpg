@@ -754,6 +754,13 @@ type ForeignDataWrapper struct {
 	// comment.
 	Grants      []Grant
 	Revocations []Revocation
+	// RenamedFrom names the FDW's prior identity (RENAMED FROM) — bare, like
+	// Role/EventTrigger's identical field: foreign data wrappers are
+	// database-level, not schema-scoped, so there is no RenamedFromSchema
+	// counterpart here. Owner is a separate, still-open gap (real
+	// PostgreSQL supports ALTER FOREIGN DATA WRAPPER ... OWNER TO,
+	// superuser-only), out of scope here.
+	RenamedFrom *string
 	SrcPos      pipeline.SourcePos
 }
 
@@ -906,11 +913,17 @@ func (p *Publication) irObject()               {}
 // conninfo/DSN literal may itself contain a ':' (e.g. a postgresql:// URI),
 // so nothing else triggers resolution.
 type Subscription struct {
-	Name           string
-	ConnInfo       string
-	Body           string
-	Comment        *string
-	Reconstructed  bool // Body rebuilt from the catalog; see Tablespace.Reconstructed
+	Name          string
+	ConnInfo      string
+	Body          string
+	Comment       *string
+	Reconstructed bool // Body rebuilt from the catalog; see Tablespace.Reconstructed
+	// RenamedFrom names the subscription's prior identity (RENAMED FROM) —
+	// bare, like ForeignDataWrapper's identical field: subscriptions are
+	// database-level, not schema-scoped. Owner is a separate, still-open
+	// gap (real PostgreSQL supports ALTER SUBSCRIPTION ... OWNER TO), out
+	// of scope here.
+	RenamedFrom    *string
 	SecurityLabels []pipeline.SecurityLabel
 	SrcPos         pipeline.SourcePos
 }
@@ -1106,7 +1119,17 @@ type OperatorClass struct {
 	Comment       *string // see EventTrigger.Comment
 	Body          string
 	Reconstructed bool // Body rebuilt from the catalog; see Tablespace.Reconstructed
-	SrcPos        pipeline.SourcePos
+	// RenamedFrom/RenamedFromSchema — see Table's identical doc comments;
+	// real PostgreSQL supports ALTER OPERATOR CLASS ... RENAME TO/SET
+	// SCHEMA (Owner is a separate, still-open gap, out of scope here). The
+	// rename's FROM side additionally needs a USING access_method
+	// qualifier, unlike Table/View — an operator class name is only unique
+	// per access method (see QualifiedName's doc comment) — so this is
+	// diffed with bespoke logic in diffOperatorClass, not the shared
+	// renameOpaqueIfUnchanged helper TSDict/TSParser/TSTemplate use.
+	RenamedFrom       *string
+	RenamedFromSchema *string
+	SrcPos            pipeline.SourcePos
 }
 
 // QualifiedName includes the access method because operator class names are
@@ -1139,7 +1162,11 @@ type OperatorFamily struct {
 	// OperatorClass's AS-list, which stays whole-body passthrough because
 	// PostgreSQL genuinely offers no incremental opclass member DDL.
 	Members []pipeline.OpFamilyMember
-	SrcPos  pipeline.SourcePos
+	// RenamedFrom/RenamedFromSchema — see OperatorClass's identical doc
+	// comment (same USING access_method rename-qualifier shape).
+	RenamedFrom       *string
+	RenamedFromSchema *string
+	SrcPos            pipeline.SourcePos
 }
 
 // QualifiedName carries a trailing " FAMILY" so an operator family never
@@ -1226,7 +1253,12 @@ type StatisticsObject struct {
 	Comment          *string // see EventTrigger.Comment
 	Body             string
 	Reconstructed    bool // Body rebuilt from the catalog; see Tablespace.Reconstructed
-	SrcPos           pipeline.SourcePos
+	// RenamedFrom/RenamedFromSchema — see Table's identical doc comments;
+	// real PostgreSQL supports ALTER STATISTICS ... RENAME TO/SET SCHEMA
+	// (Owner is a separate, still-open gap, out of scope here).
+	RenamedFrom       *string
+	RenamedFromSchema *string
+	SrcPos            pipeline.SourcePos
 }
 
 func (s *StatisticsObject) QualifiedName() string   { return qualName(s.Schema, s.Name) }
