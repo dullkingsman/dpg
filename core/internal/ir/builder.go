@@ -993,12 +993,13 @@ func mergeTableBlock(tbl *Table, block pipeline.BlockAST) error {
 }
 
 // buildPartitionBound converts a parsed pipeline.PartitionBound into an
-// ir.Partition, recursing into any nested sub-partitioning (RFC §7.13).
+// ir.Partition, recursing into any nested sub-partitioning (RFC Section 7.13).
 func buildPartitionBound(p pipeline.PartitionBound) *Partition {
 	part := &Partition{
-		Name:   p.Name.Name,
-		Bounds: p.Bounds.Text,
-		SrcPos: p.Pos,
+		Name:        p.Name.Name,
+		Bounds:      p.Bounds.Text,
+		RenamedFrom: p.RenamedFrom,
+		SrcPos:      p.Pos,
 	}
 	if p.SubStrategy != "" {
 		part.PartitionBy = &PartitionSpec{

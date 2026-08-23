@@ -159,14 +159,19 @@ type ConstraintDef struct {
 
 // PartitionBound describes a single partition's bounds, optionally with its
 // own nested PARTITION BY clause and PARTITIONS block (sub-partitioning,
-// RFC §7.13). SubStrategy is "" for a leaf partition; when non-empty,
+// RFC Section 7.13). SubStrategy is "" for a leaf partition; when non-empty,
 // SubColumns/SubPartitions describe that partition's own partitioning —
 // recursively, since a sub-partition may itself be further sub-partitioned.
 type PartitionBound struct {
-	Name          Identifier
-	Bounds        RawExpr
-	SubStrategy   string // "RANGE"/"LIST"/"HASH"; "" means no sub-partitioning
-	SubColumns    []string
+	Name        Identifier
+	Bounds      RawExpr
+	SubStrategy string // "RANGE"/"LIST"/"HASH"; "" means no sub-partitioning
+	SubColumns  []string
+	// RenamedFrom names the partition's prior identity (RFC Section 7.13's
+	// RENAMED FROM addition) — matched within the same parent's partition
+	// list, never cross-schema (a partition's schema is always its parent
+	// table's, unlike Table/View/Function's cross-schema RENAMED FROM).
+	RenamedFrom   *string
 	SubPartitions []PartitionBound
 	Pos           SourcePos
 }

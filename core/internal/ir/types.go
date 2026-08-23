@@ -324,13 +324,19 @@ type PartitionSpec struct {
 }
 
 // Partition is one partition entry. PartitionBy/Partitions describe
-// sub-partitioning (RFC §7.13): PartitionBy is nil for a leaf partition; when
-// set, Partitions holds that partition's own nested partition entries, which
-// may themselves be further sub-partitioned (arbitrary depth).
+// sub-partitioning (RFC Section 7.13): PartitionBy is nil for a leaf
+// partition; when set, Partitions holds that partition's own nested
+// partition entries, which may themselves be further sub-partitioned
+// (arbitrary depth).
 type Partition struct {
 	Name        string
 	Bounds      string // raw bounds expression
 	PartitionBy *PartitionSpec
+	// RenamedFrom names the partition's prior identity (RENAMED FROM,
+	// Section 7.13) — matched within the same parent's partition list only;
+	// a partition's schema is always its parent table's, so there is no
+	// cross-schema variant the way Table/View/Function have one.
+	RenamedFrom *string
 	Partitions  []*Partition
 	SrcPos      pipeline.SourcePos
 }

@@ -5956,6 +5956,186 @@ func TestDiffPartitionRemoved(t *testing.T) {
 	}
 }
 
+// TestDiffPartitionRenamedFromEmitsAlterRename is the regression guard for
+// the partition rename-detection gap: before this, a partition rename was
+// indistinguishable from "old partition removed, new partition added" —
+// silently emitting a real DROP TABLE (data loss) for the old name plus a
+// CREATE/ATTACH for the new one, instead of a metadata-only rename.
+func TestDiffPartitionRenamedFromEmitsAlterRename(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.events", &snapshot.SnapObject{
+		Kind: "table",
+		Table: &snapshot.SnapTable{
+			Schema:      "public",
+			Name:        "events",
+			PartitionBy: "RANGE (created_at)",
+			Columns:     []snapshot.SnapColumn{{Name: "id", Type: "bigint"}},
+			Partitions: []snapshot.SnapPartition{
+				{Schema: "public", Name: "events_2024_old", Bound: "FOR VALUES FROM ('2024-01-01') TO ('2025-01-01')"},
+			},
+		},
+	})
+	old := "events_2024_old"
+	desired := []pipeline.IRObject{
+		&ir.Table{
+			Schema:      "public",
+			Name:        "events",
+			PartitionBy: &ir.PartitionSpec{Strategy: "RANGE", Columns: []string{"created_at"}},
+			Columns:     []*ir.Column{{Name: "id", Type: ir.TypeRef{Name: "bigint"}}},
+			Partitions: []*ir.Partition{
+				{Name: "events_2024", Bounds: "FOR VALUES FROM ('2024-01-01') TO ('2025-01-01')", RenamedFrom: &old},
+			},
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if containsSQL(ops, "DROP TABLE") || containsSQL(ops, "CREATE TABLE") {
+		t.Fatalf("renamed partition should match by RENAMED FROM, not DROP+CREATE, got: %v", sqlList(ops))
+	}
+	if !containsSQL(ops, `ALTER TABLE "public"."events_2024_old" RENAME TO "events_2024";`) {
+		t.Errorf("expected ALTER TABLE ... RENAME TO, got: %v", sqlList(ops))
+	}
+}
+
+// TestDiffPartitionRenamedFromAndBoundChanged confirms a simultaneous rename
+// + bound change still requires DROP+CREATE (real PostgreSQL cannot alter a
+// partition's bound in place), but crucially drops the partition under its
+// CURRENT (old, matched-snapshot) name — not the desired new name, which
+// doesn't exist live yet. This is the same class of bug fixed today for
+// Table/View/Function/Procedure/Aggregate's RENAME TO emission.
+func TestDiffPartitionRenamedFromAndBoundChanged(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.events", &snapshot.SnapObject{
+		Kind: "table",
+		Table: &snapshot.SnapTable{
+			Schema:      "public",
+			Name:        "events",
+			PartitionBy: "RANGE (created_at)",
+			Columns:     []snapshot.SnapColumn{{Name: "id", Type: "bigint"}},
+			Partitions: []snapshot.SnapPartition{
+				{Schema: "public", Name: "events_2024_old", Bound: "FOR VALUES FROM ('2024-01-01') TO ('2025-01-01')"},
+			},
+		},
+	})
+	old := "events_2024_old"
+	desired := []pipeline.IRObject{
+		&ir.Table{
+			Schema:      "public",
+			Name:        "events",
+			PartitionBy: &ir.PartitionSpec{Strategy: "RANGE", Columns: []string{"created_at"}},
+			Columns:     []*ir.Column{{Name: "id", Type: ir.TypeRef{Name: "bigint"}}},
+			Partitions: []*ir.Partition{
+				{Name: "events_2024", Bounds: "FOR VALUES FROM ('2024-06-01') TO ('2025-01-01')", RenamedFrom: &old},
+			},
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsSQL(ops, `DROP TABLE "public"."events_2024_old";`) {
+		t.Errorf("expected DROP TABLE referencing the partition's actual (old) name, got: %v", sqlList(ops))
+	}
+	if !containsSQL(ops, `CREATE TABLE "public"."events_2024" PARTITION OF`) {
+		t.Errorf("expected CREATE TABLE for the new bound under the new name, got: %v", sqlList(ops))
+	}
+}
+
+// TestDiffSubPartitionRenamedFrom confirms RENAMED FROM works identically on
+// a nested sub-partition, since diffPartitionList recurses using the same
+// production/matching logic at every depth.
+func TestDiffSubPartitionRenamedFrom(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.events", &snapshot.SnapObject{
+		Kind: "table",
+		Table: &snapshot.SnapTable{
+			Schema:      "public",
+			Name:        "events",
+			PartitionBy: "RANGE (created_at)",
+			Columns:     []snapshot.SnapColumn{{Name: "id", Type: "bigint"}, {Name: "region", Type: "text"}},
+			Partitions: []snapshot.SnapPartition{
+				{
+					Schema: "public", Name: "events_2024", Bound: "FOR VALUES FROM ('2024-01-01') TO ('2025-01-01')",
+					PartitionBy: "LIST (region)",
+					Partitions: []snapshot.SnapPartition{
+						{Schema: "public", Name: "events_2024_us_old", Bound: "FOR VALUES IN ('us-east')"},
+					},
+				},
+			},
+		},
+	})
+	old := "events_2024_us_old"
+	desired := []pipeline.IRObject{
+		&ir.Table{
+			Schema:      "public",
+			Name:        "events",
+			PartitionBy: &ir.PartitionSpec{Strategy: "RANGE", Columns: []string{"created_at"}},
+			Columns: []*ir.Column{
+				{Name: "id", Type: ir.TypeRef{Name: "bigint"}},
+				{Name: "region", Type: ir.TypeRef{Name: "text"}},
+			},
+			Partitions: []*ir.Partition{
+				{
+					Name: "events_2024", Bounds: "FOR VALUES FROM ('2024-01-01') TO ('2025-01-01')",
+					PartitionBy: &ir.PartitionSpec{Strategy: "LIST", Columns: []string{"region"}},
+					Partitions: []*ir.Partition{
+						{Name: "events_2024_us", Bounds: "FOR VALUES IN ('us-east')", RenamedFrom: &old},
+					},
+				},
+			},
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if containsSQL(ops, "DROP TABLE") || containsSQL(ops, "CREATE TABLE") {
+		t.Fatalf("renamed sub-partition should match by RENAMED FROM, not DROP+CREATE, got: %v", sqlList(ops))
+	}
+	if !containsSQL(ops, `ALTER TABLE "public"."events_2024_us_old" RENAME TO "events_2024_us";`) {
+		t.Errorf("expected ALTER TABLE ... RENAME TO for the sub-partition, got: %v", sqlList(ops))
+	}
+}
+
+// TestDiffPartitionRenamedFromStaleErrors mirrors diffCompositeAttrs'
+// identical stale-RENAMED-FROM validation: neither the old nor new name
+// exists in the snapshot at all, so this can't be distinguished from a typo
+// on a genuinely new partition.
+func TestDiffPartitionRenamedFromStaleErrors(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.events", &snapshot.SnapObject{
+		Kind: "table",
+		Table: &snapshot.SnapTable{
+			Schema:      "public",
+			Name:        "events",
+			PartitionBy: "RANGE (created_at)",
+			Columns:     []snapshot.SnapColumn{{Name: "id", Type: "bigint"}},
+		},
+	})
+	old := "nonexistent_old_name"
+	desired := []pipeline.IRObject{
+		&ir.Table{
+			Schema:      "public",
+			Name:        "events",
+			PartitionBy: &ir.PartitionSpec{Strategy: "RANGE", Columns: []string{"created_at"}},
+			Columns:     []*ir.Column{{Name: "id", Type: ir.TypeRef{Name: "bigint"}}},
+			Partitions: []*ir.Partition{
+				{Name: "events_2024", Bounds: "FOR VALUES FROM ('2024-01-01') TO ('2025-01-01')", RenamedFrom: &old},
+			},
+		},
+	}
+	_, err := d.Diff(desired, snap)
+	if err == nil {
+		t.Fatal("expected an error for a stale RENAMED FROM matching no snapshot partition")
+	}
+}
+
 func TestDiffPartitionBoundChangedDropsAndRecreates(t *testing.T) {
 	d := New()
 	snap := &pipeline.Snapshot{}

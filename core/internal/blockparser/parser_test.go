@@ -906,6 +906,78 @@ func TestPartitions(t *testing.T) {
 	}
 }
 
+// TestPartitionRenamedFrom guards RFC Section 7.13's new RENAMED FROM
+// directive on a partition entry: the old name must be captured into
+// PartitionBound.RenamedFrom without corrupting the bounds text it's
+// stripped from.
+func TestPartitionRenamedFrom(t *testing.T) {
+	src := `PARTITIONS {
+		events_2024 FOR VALUES FROM ('2024-01-01') TO ('2025-01-01') RENAMED FROM events_2024_old;
+	}`
+	ast := parse(t, src)
+	if ast.Partitions == nil || len(ast.Partitions.Partitions) != 1 {
+		t.Fatalf("expected 1 partition, got %v", ast.Partitions)
+	}
+	p := ast.Partitions.Partitions[0]
+	if p.RenamedFrom == nil || *p.RenamedFrom != "events_2024_old" {
+		t.Fatalf("RenamedFrom: got %v, want \"events_2024_old\"", p.RenamedFrom)
+	}
+	wantBounds := "FOR VALUES FROM ('2024-01-01') TO ('2025-01-01')"
+	if p.Bounds.Text != wantBounds {
+		t.Errorf("Bounds.Text: got %q, want %q (RENAMED FROM should be stripped out)", p.Bounds.Text, wantBounds)
+	}
+}
+
+// TestPartitionRenamedFromQuotedIdent confirms a double-quoted old name
+// (e.g. containing a reserved word or mixed case) is unquoted correctly.
+func TestPartitionRenamedFromQuotedIdent(t *testing.T) {
+	src := `PARTITION events_2024 DEFAULT RENAMED FROM "Events 2024 Old";`
+	ast := parse(t, src)
+	if ast.Partitions == nil || len(ast.Partitions.Partitions) != 1 {
+		t.Fatalf("expected 1 partition, got %v", ast.Partitions)
+	}
+	p := ast.Partitions.Partitions[0]
+	if p.RenamedFrom == nil || *p.RenamedFrom != "Events 2024 Old" {
+		t.Fatalf("RenamedFrom: got %v, want \"Events 2024 Old\"", p.RenamedFrom)
+	}
+	if p.Bounds.Text != "DEFAULT" {
+		t.Errorf("Bounds.Text: got %q, want \"DEFAULT\"", p.Bounds.Text)
+	}
+}
+
+// TestPartitionRenamedFromWithSubPartitioning confirms RENAMED FROM and the
+// nested sub-partitioning suffix compose correctly (RENAMED FROM precedes
+// PARTITION BY in the grammar) without either clobbering the other.
+func TestPartitionRenamedFromWithSubPartitioning(t *testing.T) {
+	src := `PARTITIONS {
+		events_2024 FOR VALUES FROM ('2024-01-01') TO ('2025-01-01')
+			RENAMED FROM events_2024_old
+			PARTITION BY LIST (region) {
+				PARTITIONS {
+					events_2024_us FOR VALUES IN ('us-east');
+				}
+			};
+	}`
+	ast := parse(t, src)
+	if ast.Partitions == nil || len(ast.Partitions.Partitions) != 1 {
+		t.Fatalf("expected 1 partition, got %v", ast.Partitions)
+	}
+	p := ast.Partitions.Partitions[0]
+	if p.RenamedFrom == nil || *p.RenamedFrom != "events_2024_old" {
+		t.Fatalf("RenamedFrom: got %v, want \"events_2024_old\"", p.RenamedFrom)
+	}
+	wantBounds := "FOR VALUES FROM ('2024-01-01') TO ('2025-01-01')"
+	if p.Bounds.Text != wantBounds {
+		t.Errorf("Bounds.Text: got %q, want %q", p.Bounds.Text, wantBounds)
+	}
+	if p.SubStrategy != "LIST" || len(p.SubPartitions) != 1 {
+		t.Fatalf("expected sub-partitioning to still parse correctly, got SubStrategy=%q SubPartitions=%v", p.SubStrategy, p.SubPartitions)
+	}
+	if p.SubPartitions[0].Name.Name != "events_2024_us" {
+		t.Errorf("sub-partition name: got %q", p.SubPartitions[0].Name.Name)
+	}
+}
+
 // Mode B: the singular PARTITION keyword precedes a single entry outside a
 // plural block — same conflation-bug family as POLICY/TRIGGER/INDEX/GRANT/
 // REVOCATION. PartitionDef wraps a slice (unlike the others, nothing else

@@ -1901,10 +1901,33 @@ func (b *blockParser) parsePartitionsBlock(pos pipeline.SourcePos) (*pipeline.Pa
 }
 
 // subPartitionByRe matches a trailing "PARTITION BY <strategy> (<cols>)" clause
-// at the end of a partition entry's raw bounds text, i.e. RFC §7.13
+// at the end of a partition entry's raw bounds text, i.e. RFC Section 7.13
 // sub-partitioning. Bounds-clause literals never contain the word PARTITION,
 // so a plain trailing match is unambiguous.
 var subPartitionByRe = regexp.MustCompile(`(?is)^(.*?)\bPARTITION\s+BY\s+(RANGE|LIST|HASH)\s*\(([^)]*)\)\s*$`)
+
+// partitionRenamedFromRe matches a trailing "RENAMED FROM name" clause on a
+// partition entry (RFC Section 7.13), applied to whatever text remains after
+// subPartitionByRe has already stripped off any trailing sub-partitioning
+// suffix — RENAMED FROM sits before PARTITION BY in the grammar. The
+// identifier alternative accepts a bare word or a double-quoted identifier
+// (unquoted below via unquotePartitionIdent), the same two forms
+// readIdentifier accepts elsewhere in this parser. Same assumption as
+// subPartitionByRe above: bounds-clause literals are never expected to end
+// in something that looks like "RENAMED FROM identifier", so a plain
+// trailing match is unambiguous in practice.
+var partitionRenamedFromRe = regexp.MustCompile(`(?is)^(.*?)\bRENAMED\s+FROM\s+("(?:[^"]|"")+"|[A-Za-z_][A-Za-z0-9_$]*)\s*$`)
+
+// unquotePartitionIdent strips a double-quoted identifier's surrounding
+// quotes and un-escapes doubled internal quotes ("" -> "), matching
+// readQuotedString's own escaping rules. Returns s unchanged if it isn't
+// quoted.
+func unquotePartitionIdent(s string) string {
+	if len(s) >= 2 && s[0] == '"' && s[len(s)-1] == '"' {
+		return strings.ReplaceAll(s[1:len(s)-1], `""`, `"`)
+	}
+	return s
+}
 
 // parseOnePartitionBound parses a single "name bounds [PARTITION BY strategy
 // (cols) { PARTITIONS {...} }];" entry, shared by parsePartitionsBlock
@@ -1926,18 +1949,40 @@ func (b *blockParser) parseOnePartitionBound() (pipeline.PartitionBound, error) 
 
 	bound := pipeline.PartitionBound{Name: name, Pos: pPos}
 
+	// Strip a trailing sub-partitioning suffix first (it's expected last in
+	// the grammar), then a trailing RENAMED FROM from whatever remains
+	// (RFC Section 7.13: RENAMED FROM precedes the PARTITION BY suffix) — in
+	// either order relative to each other, only one strip applies per
+	// clause, so extracting sub-partitioning before RENAMED FROM (rather
+	// than the reverse) is just the fixed order the grammar declares.
+	boundsText := raw
+	hasSubPartition := false
+	var subStrategy string
+	var subColumns []string
 	if m := subPartitionByRe.FindStringSubmatch(raw); m != nil {
-		if b.peek() != '{' {
-			return pipeline.PartitionBound{}, b.errorf("expected '{' after PARTITION BY %s clause", m[2])
-		}
-		bound.Bounds = pipeline.RawExpr{Text: strings.TrimSpace(m[1]), Pos: pPos}
-		bound.SubStrategy = strings.ToUpper(m[2])
+		hasSubPartition = true
+		boundsText = m[1]
+		subStrategy = strings.ToUpper(m[2])
 		for _, c := range splitTopLevel(m[3], ',') {
 			c = strings.TrimSpace(c)
 			if c != "" {
-				bound.SubColumns = append(bound.SubColumns, c)
+				subColumns = append(subColumns, c)
 			}
 		}
+	}
+	if rm := partitionRenamedFromRe.FindStringSubmatch(boundsText); rm != nil {
+		renamed := unquotePartitionIdent(rm[2])
+		bound.RenamedFrom = &renamed
+		boundsText = rm[1]
+	}
+	bound.Bounds = pipeline.RawExpr{Text: strings.TrimSpace(boundsText), Pos: pPos}
+
+	if hasSubPartition {
+		if b.peek() != '{' {
+			return pipeline.PartitionBound{}, b.errorf("expected '{' after PARTITION BY %s clause", subStrategy)
+		}
+		bound.SubStrategy = subStrategy
+		bound.SubColumns = subColumns
 
 		if err := b.consumeBrace(); err != nil {
 			return pipeline.PartitionBound{}, err
@@ -1961,7 +2006,6 @@ func (b *blockParser) parseOnePartitionBound() (pipeline.PartitionBound, error) 
 		if b.peek() == '{' {
 			return pipeline.PartitionBound{}, b.errorf("unexpected '{' in partition bounds (missing PARTITION BY clause?)")
 		}
-		bound.Bounds = pipeline.RawExpr{Text: strings.TrimSpace(raw), Pos: pPos}
 	}
 
 	b.skipWS()

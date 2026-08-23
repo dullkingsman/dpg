@@ -5160,7 +5160,11 @@ func diffTable(o *ir.Table, snap *snapshot.SnapTable, fullSnap *pipeline.Snapsho
 		tableObjType = "FOREIGN TABLE"
 	}
 	ops = append(ops, diffSecurityLabelSet(snap.SecurityLabels, o.SecurityLabels, tableObjType+" "+tbl, pos)...)
-	ops = append(ops, diffPartitions(tbl, o, snap, pos)...)
+	partitionOps, err := diffPartitions(tbl, o, snap, pos)
+	if err != nil {
+		return nil, err
+	}
+	ops = append(ops, partitionOps...)
 	return ops, nil
 }
 
@@ -5238,7 +5242,7 @@ func createPartitionOps(schema string, parent string, p *ir.Partition) []pipelin
 	return ops
 }
 
-func diffPartitions(tbl string, o *ir.Table, snap *snapshot.SnapTable, pos pipeline.SourcePos) []pipeline.DiffOp {
+func diffPartitions(tbl string, o *ir.Table, snap *snapshot.SnapTable, pos pipeline.SourcePos) ([]pipeline.DiffOp, error) {
 	var ops []pipeline.DiffOp
 
 	// Partition strategy change cannot be done in-place.
@@ -5251,31 +5255,71 @@ func diffPartitions(tbl string, o *ir.Table, snap *snapshot.SnapTable, pos pipel
 			fmt.Sprintf("-- PARTITION BY changed on %s; table must be recreated to alter the partition strategy", tbl),
 			pos,
 		))
-		return ops
+		return ops, nil
 	}
 
-	ops = append(ops, diffPartitionList(o.Schema, tbl, o.Partitions, snap.Partitions, pos)...)
-	return ops
+	partOps, err := diffPartitionList(o.Schema, tbl, o.Partitions, snap.Partitions, pos)
+	if err != nil {
+		return nil, err
+	}
+	ops = append(ops, partOps...)
+	return ops, nil
 }
 
 // diffPartitionList diffs one level of partition entries (desired vs.
 // snapshot), recursing into each matched pair's sub-partitions
-// (RFC §7.13). parent is the qualified name of the owning table (or, one
-// level down, the qualified name of the parent partition).
-func diffPartitionList(schema, parent string, desired []*ir.Partition, snap []snapshot.SnapPartition, pos pipeline.SourcePos) []pipeline.DiffOp {
+// (RFC Section 7.13). parent is the qualified name of the owning table (or,
+// one level down, the qualified name of the parent partition).
+//
+// RENAMED FROM matching mirrors diffCompositeAttrs' identical shape (name-
+// keyed collection, matched by old name within the same parent, same stale-
+// directive validation) — a partition has no independent schema, so matching
+// is always within THIS parent's own list, never cross-schema.
+func diffPartitionList(schema, parent string, desired []*ir.Partition, snap []snapshot.SnapPartition, pos pipeline.SourcePos) ([]pipeline.DiffOp, error) {
 	var ops []pipeline.DiffOp
 
-	snapMap := make(map[string]snapshot.SnapPartition, len(snap))
+	snapByName := make(map[string]snapshot.SnapPartition, len(snap))
 	for _, sp := range snap {
-		snapMap[sp.Name] = sp
+		snapByName[sp.Name] = sp
 	}
-	desiredSet := make(map[string]bool, len(desired))
+	desiredHasName := make(map[string]bool, len(desired))
 	for _, p := range desired {
-		desiredSet[p.Name] = true
+		desiredHasName[p.Name] = true
+	}
+
+	// Partitions renamed in desired: map old name -> new name, validated the
+	// same way as diffCompositeAttrs/diffColumns' RENAMED FROM handling.
+	renamedFrom := make(map[string]string) // snap name -> desired name
+	for _, p := range desired {
+		if p.RenamedFrom == nil {
+			continue
+		}
+		if desiredHasName[*p.RenamedFrom] {
+			return nil, pipeline.Errorf(p.SrcPos,
+				"RENAMED FROM %q on partition %q collides with another partition of the same name in the desired declaration. Remove the stale partition.",
+				*p.RenamedFrom, p.Name)
+		}
+		_, oldInSnap := snapByName[*p.RenamedFrom]
+		_, newInSnap := snapByName[p.Name]
+		if newInSnap {
+			// Post-apply / no-op state: the snapshot already has the new name.
+			continue
+		}
+		if !oldInSnap {
+			return nil, pipeline.Errorf(p.SrcPos,
+				"RENAMED FROM %q on partition %q does not match the snapshot — neither the old nor the new name exists there. Remove RENAMED FROM if this is a genuinely new partition.",
+				*p.RenamedFrom, p.Name)
+		}
+		renamedFrom[*p.RenamedFrom] = p.Name
 	}
 
 	for _, p := range desired {
-		sp, exists := snapMap[p.Name]
+		sp, exists := snapByName[p.Name]
+		if !exists && p.RenamedFrom != nil {
+			if oldSp, ok := snapByName[*p.RenamedFrom]; ok {
+				sp, exists = oldSp, true
+			}
+		}
 		partTbl := qualIdent(schema, p.Name)
 		desiredPB := ""
 		if p.PartitionBy != nil {
@@ -5285,8 +5329,11 @@ func diffPartitionList(schema, parent string, desired []*ir.Partition, snap []sn
 		case !exists:
 			ops = append(ops, createPartitionOps(schema, parent, p)...)
 		case sp.Bound != p.Bounds:
-			// PG cannot alter partition bounds; requires DROP + CREATE.
-			ops = append(ops, destructiveOp(fmt.Sprintf("DROP TABLE %s;", partTbl), p.SrcPos))
+			// PG cannot alter partition bounds; requires DROP + CREATE. Drops
+			// the partition under its CURRENT (matched-snapshot) identity —
+			// sp.Name, not p.Name — since a RENAMED FROM match means those
+			// two can legitimately differ at this point in the diff.
+			ops = append(ops, destructiveOp(fmt.Sprintf("DROP TABLE %s;", qualIdent(sp.Schema, sp.Name)), p.SrcPos))
 			ops = append(ops, createPartitionOps(schema, parent, p)...)
 		case sp.PartitionBy != desiredPB:
 			// A sub-partition's own PARTITION BY strategy cannot be altered
@@ -5296,18 +5343,34 @@ func diffPartitionList(schema, parent string, desired []*ir.Partition, snap []sn
 				p.SrcPos,
 			))
 		default:
-			ops = append(ops, diffPartitionList(schema, partTbl, p.Partitions, sp.Partitions, p.SrcPos)...)
+			if sp.Name != p.Name {
+				// Same mechanism and safety class as a plain table rename
+				// (Section 7.6) — a partition is an ordinary table under the
+				// hood, and renaming it has no effect on its attachment.
+				ops = append(ops, cautionOp(
+					fmt.Sprintf("ALTER TABLE %s RENAME TO %s;", qualIdent(sp.Schema, sp.Name), quoteIdent(p.Name)),
+					p.SrcPos,
+				))
+			}
+			subOps, err := diffPartitionList(schema, partTbl, p.Partitions, sp.Partitions, p.SrcPos)
+			if err != nil {
+				return nil, err
+			}
+			ops = append(ops, subOps...)
 		}
 	}
 	for _, sp := range snap {
-		if !desiredSet[sp.Name] {
+		if _, wasRenamed := renamedFrom[sp.Name]; wasRenamed {
+			continue
+		}
+		if !desiredHasName[sp.Name] {
 			ops = append(ops, destructiveOp(
 				fmt.Sprintf("DROP TABLE %s;", qualIdent(sp.Schema, sp.Name)),
 				pos,
 			))
 		}
 	}
-	return ops
+	return ops, nil
 }
 
 // normalizeInheritRef canonicalises a possibly-bare parent-table reference
