@@ -3165,6 +3165,7 @@ func blockTriggerToIR(tr pipeline.TriggerDef) *Trigger {
 		OldTransitionName: tr.OldTransitionName,
 		NewTransitionName: tr.NewTransitionName,
 		Args:                tr.Args,
+		EnableState:         tr.EnableState,
 		DependsOnExtensions: tr.DependsOnExtensions,
 		Pos:                 tr.Pos,
 	}

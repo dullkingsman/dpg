@@ -669,6 +669,7 @@ func toSnapTrigger(trg *ir.Trigger) SnapTrigger {
 		ForEach:         trg.ForEach,
 		UpdateOfColumns:     strings.Join(trg.UpdateOfColumns, ", "),
 		Function:            trg.Function,
+		EnableState:         trg.EnableState,
 		DependsOnExtensions: append([]string(nil), trg.DependsOnExtensions...),
 	}
 	if trg.OldTransitionName != nil {

@@ -284,6 +284,9 @@ type Trigger struct {
 	Condition *string
 	Function  string // qualified function name
 	Args      []string
+	// EnableState — see pipeline.TriggerDef.EnableState's identical doc
+	// comment.
+	EnableState string
 	// DependsOnExtensions is Section 9.1's `[NO] DEPENDS ON EXTENSION`
 	// directive reused verbatim for triggers (Section 7.9, audit item
 	// #75) — the complete desired set (at most one in practice, per the

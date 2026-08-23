@@ -1821,6 +1821,33 @@ func (b *blockParser) parseOneTrigger() (pipeline.TriggerDef, error) {
 		}
 	}
 
+	// trigger-enable-state (Section 7.9): DISABLED / ENABLE REPLICA /
+	// ENABLE ALWAYS, appearing after EXECUTE FUNCTION and before any
+	// DEPENDS ON EXTENSION clause. Omitted means ENABLED, PostgreSQL's
+	// own default — matches how RLS's enable-dir/force-dir work.
+	b.skipWS()
+	enableMark := b.cur()
+	switch strings.ToUpper(b.peekWord()) {
+	case "DISABLED":
+		b.readWord()
+		trig.EnableState = "DISABLED"
+	case "ENABLE":
+		b.readWord()
+		b.skipWS()
+		switch strings.ToUpper(b.peekWord()) {
+		case "REPLICA":
+			b.readWord()
+			trig.EnableState = "ENABLE REPLICA"
+		case "ALWAYS":
+			b.readWord()
+			trig.EnableState = "ENABLE ALWAYS"
+		default:
+			return trig, b.errorf("expected REPLICA or ALWAYS after ENABLE in trigger-enable-state, got %q", b.peekWord())
+		}
+	default:
+		b.restore(enableMark)
+	}
+
 	// [NO] DEPENDS ON EXTENSION ext (Section 9.1, reused verbatim for
 	// triggers per Section 7.9, audit item #75) — the ABNF's single
 	// square brackets mark this as optional (0 or 1), not repeatable like

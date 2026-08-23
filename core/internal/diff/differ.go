@@ -3183,6 +3183,13 @@ func createTrigger(schema, table string, trg *ir.Trigger) []pipeline.DiffOp {
 			trg.Pos,
 		))
 	}
+	// trigger-enable-state (Section 7.9, audit item #56) has no inline
+	// CREATE TRIGGER form either (confirmed empirically — a new trigger
+	// is always ENABLED per real PostgreSQL's own grammar), only
+	// ALTER TABLE, even at initial creation.
+	if trg.EnableState != "" {
+		ops = append(ops, safeOp(triggerEnableStateSQL(qualIdent(schema, table), trg.Name, trg.EnableState), trg.Pos))
+	}
 	// DEPENDS ON EXTENSION (Section 9.1, reused for triggers — Section
 	// 7.9, audit item #75) has no inline CREATE TRIGGER form (confirmed
 	// empirically — real PostgreSQL rejects it there outright, "syntax
@@ -7885,6 +7892,14 @@ func diffTriggers(schema, table string, o *ir.Table, snap *snapshot.SnapTable) [
 					))
 				}
 			}
+			// trigger-enable-state (Section 7.9, audit item #56) — a
+			// targeted, SAFE ALTER TABLE ... ENABLE/DISABLE TRIGGER,
+			// deliberately excluded from the recreate condition above:
+			// real PostgreSQL supports changing this in place, no need
+			// for a drop+recreate the way When/Events/Function etc. do.
+			if trg.EnableState != existing.EnableState {
+				ops = append(ops, safeOp(triggerEnableStateSQL(tblIdent, trg.Name, trg.EnableState), trg.Pos))
+			}
 			// [NO] DEPENDS ON EXTENSION (Section 9.1, reused verbatim for
 			// triggers — Section 7.9, audit item #75): real PostgreSQL's
 			// ALTER TRIGGER ... [NO] DEPENDS ON EXTENSION grammar is
@@ -7916,6 +7931,22 @@ func diffTriggers(schema, table string, o *ir.Table, snap *snapshot.SnapTable) [
 // relying on the default "public" schema — the same convention DPG's own
 // objects get via applySchemaContext. Comparing raw strings treated every
 // unqualified trigger function as changed on every verify/plan --live.
+// triggerEnableStateSQL renders Section 7.9's trigger-enable-state as a
+// real PostgreSQL ALTER TABLE ... {ENABLE|DISABLE}[ REPLICA|ALWAYS] TRIGGER
+// statement. state is "" (ENABLED, PostgreSQL's own default), "DISABLED",
+// "ENABLE REPLICA", or "ENABLE ALWAYS" — ir.Trigger.EnableState's exact
+// value set.
+func triggerEnableStateSQL(tblIdent, triggerName, state string) string {
+	verb := "ENABLE"
+	switch state {
+	case "DISABLED":
+		verb = "DISABLE"
+	case "ENABLE REPLICA", "ENABLE ALWAYS":
+		verb = state
+	}
+	return fmt.Sprintf("ALTER TABLE %s %s TRIGGER %s;", tblIdent, verb, quoteIdent(triggerName))
+}
+
 func qualifyFuncForCompare(f string) string {
 	if strings.Contains(f, ".") {
 		return f

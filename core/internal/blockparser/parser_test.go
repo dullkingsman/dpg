@@ -890,6 +890,96 @@ func TestTriggerReferencingNewTableOnly(t *testing.T) {
 // TestTriggerDependsOnExtension is the regression guard for RFC audit item
 // #75: Section 9.1's DEPENDS ON EXTENSION directive, reused verbatim for
 // triggers (Section 7.9) but previously not parsed anywhere.
+// TestTriggerEnableStateDisabled is the regression guard for RFC audit
+// item #56: Section 7.9's trigger-enable-state, previously not parsed
+// anywhere.
+func TestTriggerEnableStateDisabled(t *testing.T) {
+	src := `TRIGGERS {
+		audit_changes AFTER INSERT
+			FOR EACH ROW
+			EXECUTE FUNCTION audit_table_changes()
+			DISABLED;
+	}`
+	ast := parse(t, src)
+	if len(ast.Triggers) != 1 {
+		t.Fatalf("expected 1 trigger, got %d", len(ast.Triggers))
+	}
+	if got := ast.Triggers[0].EnableState; got != "DISABLED" {
+		t.Errorf("EnableState: got %q, want DISABLED", got)
+	}
+}
+
+func TestTriggerEnableStateReplica(t *testing.T) {
+	src := `TRIGGERS {
+		audit_changes AFTER INSERT
+			FOR EACH ROW
+			EXECUTE FUNCTION audit_table_changes()
+			ENABLE REPLICA;
+	}`
+	ast := parse(t, src)
+	if got := ast.Triggers[0].EnableState; got != "ENABLE REPLICA" {
+		t.Errorf("EnableState: got %q, want ENABLE REPLICA", got)
+	}
+}
+
+func TestTriggerEnableStateAlways(t *testing.T) {
+	src := `TRIGGERS {
+		audit_changes AFTER INSERT
+			FOR EACH ROW
+			EXECUTE FUNCTION audit_table_changes()
+			ENABLE ALWAYS;
+	}`
+	ast := parse(t, src)
+	if got := ast.Triggers[0].EnableState; got != "ENABLE ALWAYS" {
+		t.Errorf("EnableState: got %q, want ENABLE ALWAYS", got)
+	}
+}
+
+// TestTriggerEnableStateOmittedIsEnabled proves omitting the clause
+// entirely leaves EnableState "" (ENABLED, PostgreSQL's own default) —
+// the overwhelmingly common case.
+func TestTriggerEnableStateOmittedIsEnabled(t *testing.T) {
+	src := `TRIGGERS {
+		audit_changes AFTER INSERT
+			FOR EACH ROW
+			EXECUTE FUNCTION audit_table_changes();
+	}`
+	ast := parse(t, src)
+	if got := ast.Triggers[0].EnableState; got != "" {
+		t.Errorf("EnableState: got %q, want empty (ENABLED)", got)
+	}
+}
+
+func TestTriggerEnableStateThenDependsOnExtension(t *testing.T) {
+	src := `TRIGGERS {
+		audit_changes AFTER INSERT
+			FOR EACH ROW
+			EXECUTE FUNCTION audit_table_changes()
+			ENABLE REPLICA
+			DEPENDS ON EXTENSION my_audit_ext;
+	}`
+	ast := parse(t, src)
+	tr := ast.Triggers[0]
+	if tr.EnableState != "ENABLE REPLICA" {
+		t.Errorf("EnableState: got %q, want ENABLE REPLICA", tr.EnableState)
+	}
+	if len(tr.DependsOnExtensions) != 1 || tr.DependsOnExtensions[0] != "my_audit_ext" {
+		t.Errorf("DependsOnExtensions: got %v, want [my_audit_ext]", tr.DependsOnExtensions)
+	}
+}
+
+func TestTriggerEnableStateInvalidErrors(t *testing.T) {
+	src := `TRIGGERS {
+		audit_changes AFTER INSERT
+			FOR EACH ROW
+			EXECUTE FUNCTION audit_table_changes()
+			ENABLE BOGUS;
+	}`
+	if err := parseErr(t, src); err == nil {
+		t.Fatal("expected an error for ENABLE not followed by REPLICA or ALWAYS")
+	}
+}
+
 func TestTriggerDependsOnExtension(t *testing.T) {
 	src := `TRIGGERS {
 		audit_changes AFTER INSERT

@@ -377,6 +377,8 @@ type SnapTrigger struct {
 	Function  string `json:"function"`
 	Condition string `json:"condition,omitempty"`
 	Comment   string `json:"comment,omitempty"`
+	// EnableState — see ir.Trigger.EnableState's identical doc comment.
+	EnableState string `json:"enable_state,omitempty"`
 	// DependsOnExtensions is Section 9.1's `[NO] DEPENDS ON EXTENSION`
 	// diffing input reused for triggers (Section 7.9, audit item #75) —
 	// see ir.Trigger.DependsOnExtensions' identical doc comment.

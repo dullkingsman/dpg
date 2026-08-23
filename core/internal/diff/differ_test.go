@@ -5877,6 +5877,106 @@ func TestDiffTriggerUnchangedIsNoop(t *testing.T) {
 // TestDiffTriggerDependsOnExtension is the regression guard for RFC audit
 // item #75: Section 9.1's [NO] DEPENDS ON EXTENSION directive, reused
 // verbatim for triggers (Section 7.9), previously zero code anywhere.
+// TestDiffTriggerEnableStateChangedIsTargetedAlter is the regression guard
+// for RFC audit item #56: previously zero code anywhere, so an enable-state
+// change either had no effect or (worse) would have needed to be excluded
+// from the generic field-comparison recreate condition, which this test
+// also proves — a change in isolation must not drop+recreate the trigger.
+func TestDiffTriggerEnableStateChangedIsTargetedAlter(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.t", &snapshot.SnapObject{
+		Kind: "table",
+		Table: &snapshot.SnapTable{
+			Schema:  "public",
+			Name:    "t",
+			Columns: []snapshot.SnapColumn{{Name: "id", Type: "bigint"}},
+			Triggers: []snapshot.SnapTrigger{
+				{Name: "trg_a", When: "AFTER", Events: "INSERT", ForEach: "ROW", Function: "public.trg_touch"},
+			},
+		},
+	})
+	desired := []pipeline.IRObject{
+		&ir.Table{
+			Schema:  "public",
+			Name:    "t",
+			Columns: []*ir.Column{{Name: "id", Type: ir.TypeRef{Name: "bigint"}}},
+			Triggers: []*ir.Trigger{
+				{Name: "trg_a", When: "AFTER", Events: []string{"INSERT"}, ForEach: "ROW", Function: "trg_touch", EnableState: "ENABLE REPLICA"},
+			},
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsSQL(ops, `ALTER TABLE "public"."t" ENABLE REPLICA TRIGGER "trg_a";`) {
+		t.Errorf("expected targeted ENABLE REPLICA TRIGGER, got: %v", sqlList(ops))
+	}
+	if containsSQL(ops, "DROP TRIGGER") {
+		t.Errorf("an enable-state-only change must not drop+recreate the trigger, got: %v", sqlList(ops))
+	}
+}
+
+func TestDiffTriggerEnableStateDisabledEmitsDisable(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.t", &snapshot.SnapObject{
+		Kind: "table",
+		Table: &snapshot.SnapTable{
+			Schema:  "public",
+			Name:    "t",
+			Columns: []snapshot.SnapColumn{{Name: "id", Type: "bigint"}},
+			Triggers: []snapshot.SnapTrigger{
+				{Name: "trg_a", When: "AFTER", Events: "INSERT", ForEach: "ROW", Function: "public.trg_touch"},
+			},
+		},
+	})
+	desired := []pipeline.IRObject{
+		&ir.Table{
+			Schema:  "public",
+			Name:    "t",
+			Columns: []*ir.Column{{Name: "id", Type: ir.TypeRef{Name: "bigint"}}},
+			Triggers: []*ir.Trigger{
+				{Name: "trg_a", When: "AFTER", Events: []string{"INSERT"}, ForEach: "ROW", Function: "trg_touch", EnableState: "DISABLED"},
+			},
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsSQL(ops, `ALTER TABLE "public"."t" DISABLE TRIGGER "trg_a";`) {
+		t.Errorf("expected DISABLE TRIGGER, got: %v", sqlList(ops))
+	}
+}
+
+// TestCreateTriggerWithEnableState proves a brand-new trigger applies its
+// declared enable-state at creation time.
+func TestCreateTriggerWithEnableState(t *testing.T) {
+	d := New()
+	desired := []pipeline.IRObject{
+		&ir.Table{
+			Schema:  "public",
+			Name:    "t",
+			Columns: []*ir.Column{{Name: "id", Type: ir.TypeRef{Name: "bigint"}}},
+			Triggers: []*ir.Trigger{
+				{Name: "trg_a", When: "AFTER", Events: []string{"INSERT"}, ForEach: "ROW", Function: "trg_touch", EnableState: "DISABLED"},
+			},
+		},
+	}
+	ops, err := d.Diff(desired, &pipeline.Snapshot{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsSQL(ops, "CREATE TRIGGER") {
+		t.Fatalf("expected a CREATE TRIGGER op, got: %v", sqlList(ops))
+	}
+	if !containsSQL(ops, `ALTER TABLE "public"."t" DISABLE TRIGGER "trg_a";`) {
+		t.Errorf("expected the enable-state to be applied at creation, got: %v", sqlList(ops))
+	}
+}
+
 func TestDiffTriggerDependsOnExtension(t *testing.T) {
 	d := New()
 	snap := &pipeline.Snapshot{}

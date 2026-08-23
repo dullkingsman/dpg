@@ -1355,7 +1355,11 @@ SELECT n.nspname, c.relname,
           FROM pg_depend d
           JOIN pg_extension e ON e.oid = d.refobjid
           WHERE d.classid = 'pg_trigger'::regclass AND d.objid = t.oid AND d.deptype = 'x'
-       ) AS depends_on_extensions
+       ) AS depends_on_extensions,
+       -- trigger-enable-state (Section 7.9, audit item #56): tgenabled
+       -- 'O' (origin, the default) means ENABLED; 'D' DISABLED; 'R'
+       -- ENABLE REPLICA; 'A' ENABLE ALWAYS.
+       t.tgenabled::text
 FROM   pg_trigger t
 JOIN   pg_class c     ON c.oid = t.tgrelid
 JOIN   pg_namespace n ON n.oid = c.relnamespace
@@ -1372,12 +1376,21 @@ ORDER  BY n.nspname, c.relname, t.tgname`
 	defer rs.Close()
 
 	for rs.Next() {
-		var schema, table, name, when, forEach, events, funcName, funcSchema, triggerDef string
+		var schema, table, name, when, forEach, events, funcName, funcSchema, triggerDef, tgenabled string
 		var comment *string
 		var updateOfColumns, dependsOnExtensions []string
 		var oldTransitionName, newTransitionName *string
-		if err := rs.Scan(&schema, &table, &name, &when, &forEach, &events, &funcName, &funcSchema, &triggerDef, &comment, &oldTransitionName, &newTransitionName, &updateOfColumns, &dependsOnExtensions); err != nil {
+		if err := rs.Scan(&schema, &table, &name, &when, &forEach, &events, &funcName, &funcSchema, &triggerDef, &comment, &oldTransitionName, &newTransitionName, &updateOfColumns, &dependsOnExtensions, &tgenabled); err != nil {
 			return err
+		}
+		var enableState string
+		switch tgenabled {
+		case "D":
+			enableState = "DISABLED"
+		case "R":
+			enableState = "ENABLE REPLICA"
+		case "A":
+			enableState = "ENABLE ALWAYS"
 		}
 		condition := extractTriggerWhenCondition(triggerDef)
 		t, ok := idx[schema+"."+table]
@@ -1405,6 +1418,7 @@ ORDER  BY n.nspname, c.relname, t.tgname`
 			Function:            fn,
 			Condition:           condition,
 			Comment:             comment,
+			EnableState:         enableState,
 			DependsOnExtensions: dependsOnExtensions,
 		})
 	}

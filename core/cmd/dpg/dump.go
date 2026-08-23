@@ -2126,6 +2126,18 @@ func renderTrigger(b *strings.Builder, trg *ir.Trigger, fmtOpts format.Options) 
 		fmt.Fprintf(b, " %s (%s)", kw("WHEN"), *trg.Condition)
 	}
 	fmt.Fprintf(b, " %s %s %s(%s)", kw("EXECUTE"), kw("FUNCTION"), trg.Function, strings.Join(trg.Args, ", "))
+	// trigger-enable-state (Section 7.9, audit item #56): "" means
+	// ENABLED, PostgreSQL's own default — rendered only when non-default,
+	// same convention used throughout dump for every other always-has-a-
+	// concrete-value catalog field.
+	if trg.EnableState != "" {
+		words := strings.Fields(trg.EnableState)
+		kwWords := make([]string, len(words))
+		for i, w := range words {
+			kwWords[i] = kw(w)
+		}
+		fmt.Fprintf(b, " %s", strings.Join(kwWords, " "))
+	}
 	// DEPENDS ON EXTENSION (Section 9.1, reused for triggers — Section
 	// 7.9, audit item #75): the grammar allows at most one, unlike
 	// Function/Procedure's repeatable func-block form.

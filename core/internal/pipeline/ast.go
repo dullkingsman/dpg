@@ -118,6 +118,13 @@ type TriggerDef struct {
 	Condition *RawExpr
 	Function  Identifier
 	Args      []string
+	// EnableState is Section 7.9's trigger-enable-state — "DISABLED",
+	// "ENABLE REPLICA", "ENABLE ALWAYS", or "" (omitted, meaning ENABLED —
+	// PostgreSQL's own default for a newly-created trigger). Real
+	// PostgreSQL has no such clause on CREATE TRIGGER itself (ALTER-only,
+	// confirmed empirically); DPG models it declaratively anyway, the
+	// same reasoning as RLS's enable-dir/force-dir (Section 7.8).
+	EnableState string
 	// DependsOnExtensions is Section 9.1's `DEPENDS ON EXTENSION ext`
 	// directive reused verbatim for triggers (Section 7.9, audit item
 	// #75) — the complete desired set, same shape as Function/Procedure's
