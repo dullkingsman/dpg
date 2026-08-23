@@ -2594,6 +2594,7 @@ trigger-decl = trigger-name WSP timing WSP event-list
                [ WSP "WHEN" WSP "(" expr ")" ]
                WSP "EXECUTE FUNCTION" WSP func-ref "(" arg-list ")"
                [ WSP trigger-enable-state ]
+               [ WSP depends-on-extension-dir ]
                ";"
 
 timing       = "BEFORE" / "AFTER" / "INSTEAD OF"
@@ -2621,9 +2622,14 @@ trigger-enable-state = "DISABLED" / "ENABLE REPLICA" / "ENABLE ALWAYS"
    | New trigger | `CREATE [CONSTRAINT] TRIGGER name ... ON t ...` | `SAFE` |
    | Trigger changed | `DROP TRIGGER name ON t; CREATE TRIGGER ...` | `SAFE` |
    | Enable state changed only (`trigger-enable-state`) | `ALTER TABLE t ENABLE/DISABLE TRIGGER name` or `ALTER TABLE t ENABLE REPLICA/ALWAYS TRIGGER name` | `SAFE` |
+   | `[NO] DEPENDS ON EXTENSION` changed (`depends-on-extension-dir`, §9.1) | `ALTER TRIGGER name ON t [NO] DEPENDS ON EXTENSION ext` | `SAFE` |
    | Trigger removed | `DROP TRIGGER name ON t` | `SAFE` |
 
-   Trigger identity is `(schema, table, trigger_name)`.
+   Trigger identity is `(schema, table, trigger_name)`.  `depends-on-
+   extension-dir` reuses the same production Function/Procedure already
+   define (§9.1) — real PostgreSQL's `ALTER TRIGGER ... DEPENDS ON
+   EXTENSION` has identical grammar to the function form, just a
+   different target object.
 
    **`RULE` has no DPG equivalent** — PostgreSQL's `CREATE RULE` is out
    of scope entirely (§23), so the `ENABLE`/`DISABLE RULE` half of real
@@ -2694,18 +2700,36 @@ revocations-block = "REVOCATIONS" WSP "{" *( revoke-entry ";" ) "}"
 
 grant-entry  = privilege-list WSP "TO" WSP role-list
                [ WSP "WITH GRANT OPTION" ]
+               [ WSP "GRANTED BY" WSP role-spec ]
 revoke-entry = ( privilege-list / "ALL PRIVILEGES" ) WSP
                "FROM" WSP role-list
+               [ WSP "GRANTED BY" WSP role-spec ]
                [ WSP "CASCADE" ]
 
 privilege-list = privilege *( "," privilege )
 privilege      = "SELECT" / "INSERT" / "UPDATE" / "DELETE" /
                  "TRUNCATE" / "REFERENCES" / "TRIGGER" /
                  "USAGE" / "EXECUTE" / "CREATE" / "CONNECT" /
-                 "TEMPORARY" / "ALL" / "ALL PRIVILEGES"
+                 "TEMPORARY" / "MAINTAIN" / "ALL" / "ALL PRIVILEGES"
 ```
 
    Grants follow the additive model (Section 11.2).
+
+   **`MAINTAIN`** (PostgreSQL 17+): controls `VACUUM`/`ANALYZE`/
+   `CLUSTER`/`REINDEX`/`REFRESH MATERIALIZED VIEW` access to the table
+   without granting broader privileges — real PostgreSQL's own
+   `privilege` production accepts it only for tables/matviews/indexes;
+   `USAGE`/`EXECUTE`-only object kinds reusing this same shared
+   `privilege` production (§11.2) would have it rejected by
+   PostgreSQL's own parser, the same passthrough-validation principle
+   already applied throughout this document.
+
+   **`GRANTED BY role`** (both `grant-entry` and `revoke-entry`):
+   real PostgreSQL accepts this clause but restricts the effective
+   grantor to `current_user` in practice — a SQL-standard-compatibility
+   clause with limited real-world effect, included here purely to close
+   the Tenet-1 expressiveness gap (the RFC's own text sets no "practical
+   impact" threshold for what counts as a gap).
 
 ### 7.11. Table Lifecycle Directives
 
@@ -3723,11 +3747,35 @@ role-option = "LOGIN" / "NOLOGIN"
             / "CONNECTION" WSP "LIMIT" WSP integer
             / "PASSWORD" WSP SQUOTE password-literal SQUOTE
             / "VALID" WSP "UNTIL" WSP SQUOTE timestamp SQUOTE
-            / "IN" WSP "ROLE" WSP role-list
-            / "ROLE" WSP role-list
-            / "ADMIN" WSP role-list
+            / "IN" WSP "ROLE" WSP membership-list
+            / "ROLE" WSP membership-list
+            / "ADMIN" WSP membership-list
 
-role-block  = *( comment-dir ";" )
+; PostgreSQL 16+ per-membership modifiers — previously only WITH ADMIN
+; OPTION (the legacy pre-16 boolean-flag spelling) was representable at
+; all; INHERIT/SET govern whether the member actually inherits the
+; granted role's privileges and whether it may SET ROLE to it,
+; independently of ADMIN (delegation-of-grant) — not cosmetic.
+membership-list = membership-item *( "," WSP membership-item )
+membership-item = identifier *( WSP "WITH" WSP membership-opt )
+membership-opt  = "ADMIN" WSP ( "OPTION" / boolean )
+                 / "INHERIT" WSP boolean
+                 / "SET" WSP boolean
+
+role-block  = *( ( comment-dir / renamed-from-dir
+                  / role-config-dir ) ";" )
+
+; ALTER ROLE ... [IN DATABASE db] SET param {TO|=} value / SET param
+; FROM CURRENT / RESET param / RESET ALL — a real, common need (e.g.
+; per-role statement_timeout) with no prior grammar slot at all.
+role-config-dir = "SET" WSP identifier WSP ( "TO" / "=" ) WSP config-value
+                    [ WSP "IN DATABASE" WSP identifier ]
+                / "SET" WSP identifier WSP "FROM CURRENT"
+                    [ WSP "IN DATABASE" WSP identifier ]
+                / "RESET" WSP ( identifier / "ALL" )
+                    [ WSP "IN DATABASE" WSP identifier ]
+
+config-value = string-literal / integer / boolean / identifier
 ```
 
    Any option a declaration omits is simply not managed by DPG for that
@@ -3806,9 +3854,21 @@ ROLE app_admin
    | New role | `CREATE ROLE name <options>` | `SAFE` |
    | `LOGIN`/`SUPERUSER`/`CREATEDB`/`CREATEROLE`/`INHERIT`/`REPLICATION`/`BYPASSRLS`/`CONNECTION LIMIT`/`VALID UNTIL` changed | `ALTER ROLE name <changed-options>` | `SAFE` |
    | `PASSWORD` changed | `ALTER ROLE name PASSWORD '<resolved>'` | `CAUTION` (invalidates existing sessions/connections relying on the old password) |
-   | `IN ROLE`/`ROLE`/`ADMIN` membership added | `GRANT role TO member [WITH ADMIN OPTION]` | `SAFE` |
+   | `IN ROLE`/`ROLE`/`ADMIN` membership added | `GRANT role TO member [WITH ADMIN OPTION] [WITH INHERIT bool] [WITH SET bool]` | `SAFE` |
+   | Membership `WITH` option changed, membership itself unchanged | `GRANT role TO member WITH <changed-option>` (PostgreSQL treats a repeated `GRANT` as updating the option) | `SAFE` |
    | `IN ROLE`/`ROLE`/`ADMIN` membership removed | `REVOKE role FROM member` | `CAUTION` (may remove access something else depends on) |
+   | `SET`/`RESET` config parameter changed (`role-config-dir`) | `ALTER ROLE name [IN DATABASE db] SET param {TO\|=} value` / `RESET param` / `RESET ALL` | `SAFE` |
+   | Renamed (`RENAMED FROM`) | `ALTER ROLE old RENAME TO new` | `CAUTION` |
    | Role removed | `DROP ROLE name` | `DESTRUCTIVE` |
+
+   **`RENAMED FROM` on a role** is schema-agnostic — roles are cluster-
+   level, not schema-scoped, so `renamed-from-dir`'s schema-qualification
+   extension (§7.6) never applies here; only the bare `RENAME TO` form
+   is meaningful.  This closes a gap that could otherwise be genuinely
+   **impossible** to work around: PostgreSQL refuses to `DROP ROLE` a
+   role that still owns any object, so the drop-and-recreate fallback
+   this document uses for kinds without a rename mechanism cannot
+   substitute for a real rename here the way it can elsewhere.
 
    `IN ROLE`/`ROLE`/`ADMIN` are create-time-only PostgreSQL grammar — a
    later membership change has no `ALTER ROLE` equivalent, so it's diffed
@@ -3970,6 +4030,69 @@ RESET ROLE;
    migration, naming every role that failed the check in a single error
    — not a bare PostgreSQL "permission denied to set role" surfacing
    mid-transaction on whichever object happens to hit it first.
+
+### 11.6. Parameter Privileges
+
+   PostgreSQL 15+ has a distinct grantable-privilege object type for
+   individual GUC configuration parameters, letting an admin delegate
+   the ability to change a specific setting without granting broader
+   (superuser-adjacent) rights. This is a separate concern from `ALTER
+   SYSTEM` the *command* remaining out of scope (§23): DPG never emits
+   `ALTER SYSTEM` itself, but the *privilege* to run it on a named
+   parameter is an ordinary grantable object like any other, and this
+   document's own reasoning for excluding `ALTER SYSTEM` (a cluster-
+   configuration action, not a schema object) does not extend to who is
+   *permitted* to run it — that permission is exactly the kind of
+   access-control fact this section already manages for every other
+   object kind.
+
+   **PG equivalent:**
+   `GRANT {SET | ALTER SYSTEM} ON PARAMETER param_name [, ...] TO role [, ...] [WITH GRANT OPTION]`
+
+```abnf
+parameter-privileges-decl =
+    "PARAMETER PRIVILEGES"
+    "{" pp-block "}"
+
+pp-block = *( ( pp-grants-block / pp-revocations-block ) ";" )
+
+pp-grants-block      = "GRANTS" WSP "{" *( pp-grant-entry ";" ) "}"
+pp-revocations-block = "REVOCATIONS" WSP "{" *( pp-revoke-entry ";" ) "}"
+
+pp-grant-entry  = pp-privilege-list WSP "ON PARAMETER" WSP identifier-list
+                  WSP "TO" WSP role-list
+                  [ WSP "WITH GRANT OPTION" ]
+pp-revoke-entry = ( pp-privilege-list / "ALL PRIVILEGES" ) WSP
+                  "ON PARAMETER" WSP identifier-list
+                  WSP "FROM" WSP role-list
+                  [ WSP "CASCADE" ]
+
+pp-privilege-list = pp-privilege *( "," WSP pp-privilege )
+pp-privilege      = "SET" / "ALTER SYSTEM" / "ALL" / "ALL PRIVILEGES"
+```
+
+   A top-level (cluster-scoped, not schema-scoped) block — configuration
+   parameters have no schema.
+
+```sql
+-- production/cluster/parameter_privileges.dpg
+
+PARAMETER PRIVILEGES {
+    GRANTS {
+        SET ON PARAMETER work_mem, statement_timeout TO app_admin;
+    }
+}
+```
+
+   Emits `GRANT SET ON PARAMETER work_mem, statement_timeout TO
+   app_admin`.
+
+   **Diffing semantics:** Same additive model as Table-level grants
+   (§11.2) — a declared grant emits `GRANT`; removing the declaration
+   emits nothing (an explicit `REVOCATIONS { }` entry is required to
+   actually `REVOKE`). Safety `SAFE` for both directions — this is
+   metadata governing who *may* run a command, not an object with data
+   of its own.
 
 ---
 
@@ -4283,10 +4406,20 @@ event-trigger-decl = "EVENT TRIGGER" WSP identifier
                      WSP "ON" WSP event-type
                      [ WSP "WHEN TAG IN" WSP "(" tag-list ")" ]
                      WSP "EXECUTE FUNCTION" WSP func-ref "()"
+                     [ WSP trigger-enable-state ]
                      ";"
+                     [ "{" event-trigger-block "}" ]
 
 event-type = "ddl_command_start" / "ddl_command_end" /
              "table_rewrite" / "sql_drop"
+
+; trigger-enable-state (DISABLED/ENABLE REPLICA/ENABLE ALWAYS, §7.9) is
+; reused verbatim — real PostgreSQL's ALTER EVENT TRIGGER enable-state
+; grammar is identical to ALTER TABLE ... ENABLE/DISABLE TRIGGER's,
+; just against a different target object (no table name, since event
+; triggers are database-level, not per-table).
+
+event-trigger-block = *( ( comment-dir / owner-dir / renamed-from-dir ) ";" )
 ```
 
    Example:
@@ -4296,10 +4429,31 @@ EVENT TRIGGER prevent_drop_table
     ON sql_drop
     WHEN TAG IN ('DROP TABLE', 'DROP SCHEMA')
     EXECUTE FUNCTION abort_drop();
+
+EVENT TRIGGER audit_ddl
+    ON ddl_command_end
+    EXECUTE FUNCTION log_ddl_command()
+    ENABLE REPLICA
+    {
+        OWNER "audit_admin";
+    }
 ```
 
-   **Diffing semantics:** Any change requires `DROP EVENT TRIGGER` +
-   `CREATE EVENT TRIGGER` (`SAFE`; no data involved).
+   **Diffing semantics:**
+
+   | Change | DDL emitted | Safety |
+   |--------|-------------|--------|
+   | New event trigger | `CREATE EVENT TRIGGER ...` | `SAFE` |
+   | Event/`WHEN TAG IN`/function changed | `DROP EVENT TRIGGER` + `CREATE EVENT TRIGGER` | `SAFE` (no data involved) |
+   | Enable state changed only (`trigger-enable-state`) | `ALTER EVENT TRIGGER name ENABLE/DISABLE` (or `ENABLE REPLICA`/`ENABLE ALWAYS`) | `SAFE` |
+   | Owner changed | `ALTER EVENT TRIGGER name OWNER TO role` | `SAFE` |
+   | Renamed (`RENAMED FROM`) | `ALTER EVENT TRIGGER old RENAME TO new` | `CAUTION` |
+   | Event trigger dropped | `DROP EVENT TRIGGER name` | `SAFE` |
+
+   Event triggers are database-level, not schema-scoped — `renamed-
+   from-dir`'s generic cross-schema `SET SCHEMA` extension (§7.6) never
+   applies here, since there is no schema to move between; only the
+   bare (unqualified) rename form is meaningful, same as Role (§11.1).
 
 ### 14.2. Collations
 
@@ -6160,7 +6314,22 @@ serial_sequence_declared      = "off"
    |--------|-----|--------|
    | New role | `CREATE ROLE name WITH ...` | `SAFE` |
    | Any option changed | `ALTER ROLE name WITH [options]` | `SAFE` |
+   | Membership added/changed (`WITH ADMIN`/`INHERIT`/`SET`, §11.1) | `GRANT role TO member [WITH ...]` | `SAFE` |
+   | Membership removed | `REVOKE role FROM member` | `CAUTION` |
+   | `SET`/`RESET` config param changed (§11.1) | `ALTER ROLE name [IN DATABASE db] SET/RESET ...` | `SAFE` |
+   | Renamed (`RENAMED FROM`, §11.1) | `ALTER ROLE old RENAME TO new` | `CAUTION` |
    | Role dropped | `DROP ROLE name` | `DESTRUCTIVE` |
+
+   **EVENT TRIGGER:**
+
+   | Change | DDL | Safety |
+   |--------|-----|--------|
+   | New event trigger | `CREATE EVENT TRIGGER ...` | `SAFE` |
+   | Event/tags/function changed | `DROP EVENT TRIGGER` + `CREATE EVENT TRIGGER` | `SAFE` |
+   | Enable state changed only (§14.1) | `ALTER EVENT TRIGGER name ENABLE/DISABLE [REPLICA/ALWAYS]` | `SAFE` |
+   | Owner changed | `ALTER EVENT TRIGGER name OWNER TO role` | `SAFE` |
+   | Renamed (`RENAMED FROM`) | `ALTER EVENT TRIGGER old RENAME TO new` | `CAUTION` |
+   | Event trigger dropped | `DROP EVENT TRIGGER name` | `SAFE` |
 
 ---
 
@@ -6515,12 +6684,13 @@ serial_sequence_declared      = "off"
    | Window functions | Declared, Passthrough body | |
    | Row Level Security | Declared, Diffed | |
    | Triggers | Declared, Diffed | |
-   | Event triggers | Declared, Passthrough | Reconstructed from catalog; hash-diffed |
+   | Event triggers | Declared, Passthrough | Reconstructed from catalog; hash-diffed. Enable-state (`DISABLED`/`ENABLE REPLICA`/`ENABLE ALWAYS`), `OWNER`, `RENAMED FROM` diffed structurally, not part of the hash (§14.1) |
    | Sequences | Declared, Diffed | `UNLOGGED`, `OWNED BY NONE`, `REVOCATIONS`, `RESTART [WITH n]` (§10) |
    | Schemas | Declared, Diffed | |
    | Extensions | Declared, Diffed | |
-   | Roles | Declared, Diffed | Cluster-level; `PASSWORD` (§11.1) never live-introspected (superuser-only in PG), diffed offline via a hash of the declared text. No `RENAME TO` (can be genuinely impossible via DROP+CREATE, since PostgreSQL refuses to drop a role that owns objects) and no `SET`/`RESET` session-config-parameter grammar |
-   | Table-level grants | Declared, Diffed | Additive model |
+   | Roles | Declared, Diffed | Cluster-level; `PASSWORD` (§11.1) never live-introspected (superuser-only in PG), diffed offline via a hash of the declared text. `RENAMED FROM`/`RENAME TO` and `SET`/`RESET` session-config-parameter grammar now supported (§11.1); membership `WITH ADMIN`/`INHERIT`/`SET` options (PG16+) also supported |
+   | Table-level grants | Declared, Diffed | Additive model; `MAINTAIN` privilege (PG17) and `GRANTED BY role` (§7.10) also supported |
+   | Parameter Privileges (§11.6) | Declared, Diffed | Cluster-level; `GRANT {SET\|ALTER SYSTEM} ON PARAMETER`, additive model like Table-level grants |
    | Column-level grants | Declared, Diffed | Additive model |
    | Explicit revocations | Declared, Diffed | |
    | Default Privileges | Declared, Diffed | |
@@ -6589,6 +6759,7 @@ top-level-decl = schema-decl
                / subscription-decl
                / event-trigger-decl
                / default-privileges-decl
+               / parameter-privileges-decl
                / opaque-object-decl
                / nested-object
 
@@ -6750,13 +6921,20 @@ grants-block      = "GRANTS" WSP "{" *( grant-entry ";" ) "}"
 revocations-block = "REVOCATIONS" WSP "{" *( revoke-entry ";" ) "}"
 grant-entry  = privilege-list WSP "TO" WSP role-list
                [ WSP "WITH GRANT OPTION" ]
+               [ WSP "GRANTED BY" WSP role-spec ]
 revoke-entry = ( privilege-list / "ALL PRIVILEGES" ) WSP
-               "FROM" WSP role-list [ WSP "CASCADE" ]
+               "FROM" WSP role-list
+               [ WSP "GRANTED BY" WSP role-spec ]
+               [ WSP "CASCADE" ]
 privilege-list = privilege *( "," WSP privilege )
 privilege = "SELECT" / "INSERT" / "UPDATE" / "DELETE" / "TRUNCATE" /
             "REFERENCES" / "TRIGGER" / "USAGE" / "EXECUTE" / "CREATE" /
-            "CONNECT" / "TEMPORARY" / "ALL" / "ALL PRIVILEGES"
+            "CONNECT" / "TEMPORARY" / "MAINTAIN" / "ALL" / "ALL PRIVILEGES"
 role-list  = identifier *( "," WSP identifier )
+; role-spec is defined locally at its first use (§14.7, Tablespace
+; OWNER) and reused verbatim by GRANTED BY above and by Role membership
+; WITH clauses (§11.1) — not redefined per site.
+role-spec  = identifier / "CURRENT_ROLE" / "CURRENT_USER" / "SESSION_USER"
 
 ; Macro preprocessor
 macro-decl  = "MACRO" WSP identifier WSP ( paren-body / brace-body )
