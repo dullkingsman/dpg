@@ -15006,6 +15006,61 @@ func TestDiffPublicationStaleSnapshotDoesNotRecreate(t *testing.T) {
 	}
 }
 
+// TestDiffPublicationRenamedFromEmitsAlterRename guards RFC audit item #78:
+// Publication had no RenamedFrom field at all, so a renamed publication
+// could only ever be matched as an unrelated drop+create pair.
+func TestDiffPublicationRenamedFromEmitsAlterRename(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("p_old", &snapshot.SnapObject{
+		Kind: "publication",
+		Opaque: &snapshot.SnapOpaque{
+			Kind: "publication", Name: "p_old", PublicationStructured: true, PublicationAllTables: true,
+			PublicationInsert: true, PublicationUpdate: true, PublicationDelete: true, PublicationTruncate: true,
+		},
+	})
+	old := "p_old"
+	desired := []pipeline.IRObject{
+		&ir.Publication{
+			Name: "p_new", AllTables: true, Insert: true, Update: true, Delete: true, Truncate: true,
+			Body: "CREATE PUBLICATION p_new FOR ALL TABLES", RenamedFrom: &old,
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if containsSQL(ops, "DROP PUBLICATION") || containsSQL(ops, "CREATE PUBLICATION") {
+		t.Fatalf("renamed publication should match by RENAMED FROM, not drop+create, got: %v", sqlList(ops))
+	}
+	want := `ALTER PUBLICATION "p_old" RENAME TO "p_new";`
+	if !containsSQL(ops, want) {
+		t.Errorf("expected %q, got: %v", want, sqlList(ops))
+	}
+	for _, o := range ops {
+		if strings.Contains(o.SQL(), "RENAME TO") && o.Safety() != pipeline.Caution {
+			t.Errorf("expected CAUTION safety for ALTER PUBLICATION RENAME TO, got %v", o.Safety())
+		}
+	}
+}
+
+// TestDiffPublicationRenamedFromStaleErrors mirrors every other kind's
+// identical stale-RENAMED-FROM validation (Differ.Diff's shared Pass 1).
+func TestDiffPublicationRenamedFromStaleErrors(t *testing.T) {
+	d := New()
+	old := "nonexistent_old_publication"
+	desired := []pipeline.IRObject{
+		&ir.Publication{
+			Name: "p", AllTables: true, Insert: true, Update: true, Delete: true, Truncate: true,
+			Body: "CREATE PUBLICATION p FOR ALL TABLES", RenamedFrom: &old,
+		},
+	}
+	_, err := d.Diff(desired, &pipeline.Snapshot{})
+	if err == nil {
+		t.Fatal("expected an error for a stale RENAMED FROM matching no snapshot publication")
+	}
+}
+
 // TestDiffPublicationFilteredTableChangeFallsBackToDropCreate is a
 // correctness regression guard, not just a G-live proof: a Tables-set
 // change on a publication using a column-list/WHERE filter (real syntax:

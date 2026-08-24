@@ -412,6 +412,11 @@ func renamedFromKey(obj pipeline.IRObject) string {
 		if o.RenamedFrom != nil {
 			return *o.RenamedFrom
 		}
+	case *ir.Publication:
+		// Bare, like *ir.Role above (RFC audit item #78).
+		if o.RenamedFrom != nil {
+			return *o.RenamedFrom
+		}
 	case *ir.TSDict:
 		if o.RenamedFrom != nil {
 			return qualKey(oldSchema(o.Schema, o.RenamedFromSchema), *o.RenamedFrom)
@@ -510,6 +515,8 @@ func describeKind(obj pipeline.IRObject) string {
 		return "collation"
 	case *ir.Role:
 		return "role"
+	case *ir.Publication:
+		return "publication"
 	case *ir.TSDict:
 		return "text search dictionary"
 	case *ir.TSParser:
@@ -2283,10 +2290,21 @@ func publishClause(o *ir.Publication) string {
 func diffPublication(o *ir.Publication, snap *snapshot.SnapOpaque) ([]pipeline.DiffOp, error) {
 	pos := o.SrcPos
 	ident := quoteIdent(o.Name)
+	// RENAMED FROM on a publication is bare, like Role's identical
+	// mechanism (RFC audit item #78) — publications are cluster-level, not
+	// schema-scoped. Applies regardless of which branch below handles the
+	// rest of the diff, same as diffCollation's renameOps.
+	var renameOps []pipeline.DiffOp
+	if snap.Name != o.Name {
+		renameOps = append(renameOps, cautionOp(
+			fmt.Sprintf("ALTER PUBLICATION %s RENAME TO %s;", quoteIdent(snap.Name), ident),
+			pos,
+		))
+	}
 	if !snap.PublicationStructured {
 		// Stale snapshot predating these structured fields — same
 		// self-healing pattern as diffFDW/diffForeignServer.
-		var ops []pipeline.DiffOp
+		ops := renameOps
 		if !ptrEq(o.Owner, snap.PublicationOwner) && o.Owner != nil {
 			ops = append(ops, safeOp(fmt.Sprintf("ALTER PUBLICATION %s OWNER TO %s;", ident, quoteIdent(*o.Owner)), pos))
 		}
@@ -2318,7 +2336,7 @@ func diffPublication(o *ir.Publication, snap *snapshot.SnapOpaque) ([]pipeline.D
 		ops = append(ops, createSecurityLabelOps(o.SecurityLabels, "PUBLICATION "+ident, pos)...)
 		return ops, nil
 	}
-	var ops []pipeline.DiffOp
+	ops := renameOps
 	if !o.AllTables {
 		desiredKeys := publicationTableKeys(o.Tables)
 		normDesired := make([]string, len(desiredKeys))

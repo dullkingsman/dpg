@@ -1000,6 +1000,10 @@ type Publication struct {
 	// regression it introduces.
 	AllTables                        bool
 	Insert, Update, Delete, Truncate bool
+	// RenamedFrom is RFC audit item #78's RENAMED FROM support — bare, like
+	// Role's identical field: publications are cluster-level, not
+	// schema-scoped, so there is no RenamedFromSchema counterpart.
+	RenamedFrom *string
 	// HasFilteredTables is true when any FOR TABLE entry carries an
 	// explicit column list or WHERE row-filter (real PostgreSQL syntax:
 	// FOR TABLE t (col1, col2) WHERE (expr)) — neither is captured by

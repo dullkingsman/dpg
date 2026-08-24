@@ -2709,6 +2709,9 @@ func (b *Builder) buildOpaque(node *pg_query.Node, block pipeline.BlockAST, pos 
 			}
 		}
 		pub.SecurityLabels = block.SecurityLabels
+		if block.RenamedFrom != nil {
+			pub.RenamedFrom = &block.RenamedFrom.Name
+		}
 		return pub, nil
 	case *pg_query.Node_CreateSubscriptionStmt:
 		return b.buildSubscription(n.CreateSubscriptionStmt, block, pos, sql)

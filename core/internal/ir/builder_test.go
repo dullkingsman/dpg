@@ -447,6 +447,21 @@ func TestBuildPublicationOwner(t *testing.T) {
 	}
 }
 
+// TestBuildPublicationRenamedFrom guards RFC audit item #78.
+func TestBuildPublicationRenamedFrom(t *testing.T) {
+	obj := buildObject(t, pipeline.KindPublication,
+		`pub_new FOR ALL TABLES`,
+		`RENAMED FROM pub_old;`,
+	)
+	pub, ok := obj.(*ir.Publication)
+	if !ok {
+		t.Fatalf("expected *ir.Publication, got %T", obj)
+	}
+	if pub.RenamedFrom == nil || *pub.RenamedFrom != "pub_old" {
+		t.Errorf("RenamedFrom: got %v, want pub_old", pub.RenamedFrom)
+	}
+}
+
 func TestBuildMaterializedView(t *testing.T) {
 	obj := buildObject(t, pipeline.KindMaterializedView,
 		`order_status_summary AS SELECT status, count(*) AS order_count FROM orders GROUP BY status`,
