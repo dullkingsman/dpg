@@ -15356,6 +15356,55 @@ func TestDiffCollationUnchangedIsNoop(t *testing.T) {
 	}
 }
 
+// TestDiffCollationOwnerChanged guards RFC audit item #81: Collation had no
+// Owner field at all.
+func TestDiffCollationOwnerChanged(t *testing.T) {
+	d := New()
+	oldOwner := "app_admin"
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.c", &snapshot.SnapObject{
+		Kind: "collation",
+		Opaque: &snapshot.SnapOpaque{
+			Kind: "collation", Schema: "public", Name: "c", CollationStructured: true,
+			CollationProvider: "c", CollationCollate: strPtr("C"), CollationCtype: strPtr("C"), CollationDeterministic: true,
+			CollationOwner: &oldOwner,
+		},
+	})
+	newOwner := "app_readonly"
+	desired := []pipeline.IRObject{
+		&ir.Collation{
+			Schema: "public", Name: "c", Provider: "c", Collate: strPtr("C"), Ctype: strPtr("C"), Deterministic: true,
+			Body: "CREATE COLLATION public.c (LOCALE = 'C')", Owner: &newOwner,
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsSQL(ops, `ALTER COLLATION "public"."c" OWNER TO "app_readonly";`) {
+		t.Errorf("expected ALTER COLLATION ... OWNER TO, got: %v", sqlList(ops))
+	}
+}
+
+// TestCreateCollationWithOwner proves a brand-new collation declared with
+// OWNER creates directly as that role (SET ROLE/RESET ROLE wrapping).
+func TestCreateCollationWithOwner(t *testing.T) {
+	owner := "audit_admin"
+	desired := []pipeline.IRObject{
+		&ir.Collation{
+			Schema: "public", Name: "c", Provider: "c", Collate: strPtr("C"), Ctype: strPtr("C"), Deterministic: true,
+			Body: "CREATE COLLATION public.c (LOCALE = 'C')", Owner: &owner,
+		},
+	}
+	ops, err := New().Diff(desired, &pipeline.Snapshot{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsSQL(ops, `SET ROLE "audit_admin"`) {
+		t.Errorf("expected creation wrapped in SET ROLE audit_admin, got: %v", sqlList(ops))
+	}
+}
+
 // TestDiffCollationRefreshVersionEmittedEveryPlan guards RFC audit item
 // #84: REFRESH VERSION is an imperative action with no persisted state to
 // diff against, so it must be unconditionally re-emitted on every plan for

@@ -1264,7 +1264,7 @@ func renderObjectDPG(b *strings.Builder, obj pipeline.IRObject, fmtOpts format.O
 	// Publication have no Comment field (COMMENT ON doesn't apply to either
 	// in PostgreSQL), so they pass nil.
 	case *ir.Collation:
-		renderOpaqueBody(b, ind, fmtOpts, o.Body, o.Comment)
+		renderCollationBody(b, ind, fmtOpts, o)
 	case *ir.StatisticsObject:
 		renderOpaqueBody(b, ind, fmtOpts, o.Body, o.Comment)
 	case *ir.DefaultPrivileges:
@@ -1796,6 +1796,37 @@ func renderEventTriggerBody(b *strings.Builder, ind string, fmtOpts format.Optio
 // callers (TSParser/TSTemplate, which real PostgreSQL has no OWNER concept
 // for at all) — same reasoning as renderPublicationBody/
 // renderEventTriggerBody.
+// renderCollationBody is renderOpaqueBody's Collation-specific variant,
+// adding Owner (RFC audit item #81) — a normal block-only directive, unlike
+// Tablespace's inline OWNER (see ir.Tablespace.Owner's doc comment).
+// RefreshVersion is deliberately never rendered here, same reasoning as
+// Sequence.Restart: it's a one-shot migration directive with no persisted
+// live-catalog state for introspection to reconstruct.
+func renderCollationBody(b *strings.Builder, ind string, fmtOpts format.Options, o *ir.Collation) {
+	kw := fmtOpts.Keyword
+	body := strings.TrimSpace(o.Body)
+	const createPrefix = "CREATE "
+	if len(body) >= len(createPrefix) && strings.EqualFold(body[:len(createPrefix)], createPrefix) {
+		body = strings.TrimSpace(body[len(createPrefix):])
+	}
+	if body == "" {
+		return
+	}
+	fmt.Fprintf(b, "\n%s", body)
+	if o.Owner == nil && o.Comment == nil {
+		b.WriteString(";\n")
+		return
+	}
+	b.WriteString(" {\n")
+	if o.Owner != nil {
+		fmt.Fprintf(b, "%s%s %s;\n", ind, kw("OWNER"), quoteIdentIfNeeded(*o.Owner))
+	}
+	if o.Comment != nil {
+		fmt.Fprintf(b, "%s%s %s;\n", ind, kw("COMMENT"), sqlStringLit(*o.Comment))
+	}
+	b.WriteString("}\n")
+}
+
 func renderTSDictBody(b *strings.Builder, ind string, fmtOpts format.Options, o *ir.TSDict) {
 	kw := fmtOpts.Keyword
 	body := strings.TrimSpace(o.Body)

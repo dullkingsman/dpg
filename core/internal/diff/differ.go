@@ -1247,6 +1247,9 @@ func createObject(obj pipeline.IRObject, vtypes map[string]string) ([]pipeline.D
 		return appendSecurityLabelOps(ops, err, "event_trigger", "", o.Name, "", "", o.SecurityLabels, o.SrcPos)
 	case *ir.Collation:
 		ops, err := createOpaque(o.QualifiedName(), o.Body, "COLLATION", o.Schema, o.SrcPos)
+		if err == nil && o.Owner != nil && len(ops) > 0 {
+			ops = append(wrapCreateWithOwner(ops[0], o.Owner, o.SrcPos), ops[1:]...)
+		}
 		ops, err = appendCommentOp(ops, err, "collation", o.Schema, o.Name, "", "", o.Comment, o.SrcPos)
 		if err == nil && o.RefreshVersion {
 			ops = append(ops, collationRefreshVersionOp(o))
@@ -2087,6 +2090,9 @@ func diffCollation(o *ir.Collation, snap *snapshot.SnapOpaque) ([]pipeline.DiffO
 
 	if !snap.CollationStructured {
 		ops := renameOps
+		if !ptrEq(o.Owner, snap.CollationOwner) && o.Owner != nil {
+			ops = append(ops, safeOp(fmt.Sprintf("ALTER COLLATION %s OWNER TO %s;", ident, quoteIdent(*o.Owner)), pos))
+		}
 		if !ptrEq(o.Comment, snap.Comment) {
 			if sql := commentOnOpaqueSQL("collation", o.Schema, o.Name, "", "", o.Comment); sql != "" {
 				ops = append(ops, safeOp(sql, pos))
@@ -2108,6 +2114,9 @@ func diffCollation(o *ir.Collation, snap *snapshot.SnapOpaque) ([]pipeline.DiffO
 		if err != nil {
 			return nil, err
 		}
+		if o.Owner != nil && len(createOps) > 0 {
+			createOps = append(wrapCreateWithOwner(createOps[0], o.Owner, pos), createOps[1:]...)
+		}
 		ops = append(ops, createOps...)
 		ops, err = appendCommentOp(ops, nil, "collation", o.Schema, o.Name, "", "", o.Comment, pos)
 		if err == nil && o.RefreshVersion {
@@ -2116,6 +2125,9 @@ func diffCollation(o *ir.Collation, snap *snapshot.SnapOpaque) ([]pipeline.DiffO
 		return ops, err
 	}
 	ops := renameOps
+	if !ptrEq(o.Owner, snap.CollationOwner) && o.Owner != nil {
+		ops = append(ops, safeOp(fmt.Sprintf("ALTER COLLATION %s OWNER TO %s;", ident, quoteIdent(*o.Owner)), pos))
+	}
 	if !ptrEq(o.Comment, snap.Comment) {
 		if sql := commentOnOpaqueSQL("collation", o.Schema, o.Name, "", "", o.Comment); sql != "" {
 			ops = append(ops, safeOp(sql, pos))

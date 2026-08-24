@@ -1171,10 +1171,12 @@ type Collation struct {
 	Comment        *string // see EventTrigger.Comment
 	// RenamedFrom/RenamedFromSchema — see Table's identical doc comments;
 	// reuses the same generic cross-schema RENAME TO/SET SCHEMA mechanism.
-	// Owner (Section 14.2's other ALTER COLLATION capability) is a
-	// separate, not-yet-implemented gap — out of scope here.
 	RenamedFrom       *string
 	RenamedFromSchema *string
+	// Owner is RFC audit item #81's ALTER COLLATION ... OWNER TO diffing
+	// input — a normal block-only directive, unlike Tablespace's inline
+	// OWNER (see ir.Tablespace.Owner's doc comment for that contrast).
+	Owner *string
 	// RefreshVersion — see pipeline.BlockAST.RefreshVersion's identical
 	// doc comment (RFC audit item #84).
 	RefreshVersion bool

@@ -2449,6 +2449,9 @@ func (b *Builder) buildDefineStmt(ds *pg_query.DefineStmt, block pipeline.BlockA
 			col.RenamedFrom = &block.RenamedFrom.Name
 			col.RenamedFromSchema = renamedFromSchema(block.RenamedFrom)
 		}
+		if block.Owner != nil {
+			col.Owner = &block.Owner.Name
+		}
 		col.RefreshVersion = block.RefreshVersion
 		return col, nil
 

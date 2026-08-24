@@ -3078,6 +3078,16 @@ func TestBuildCollationLocaleShorthandResolvesCollateAndCtype(t *testing.T) {
 	}
 }
 
+// TestBuildCollationOwner guards RFC audit item #81: Collation had no Owner
+// field at all.
+func TestBuildCollationOwner(t *testing.T) {
+	obj := buildObject(t, pipeline.KindCollation, `c1 (LOCALE = 'en_US.utf8')`, `OWNER app_admin;`)
+	col := obj.(*ir.Collation)
+	if col.Owner == nil || *col.Owner != "app_admin" {
+		t.Errorf("Owner: got %v, want app_admin", col.Owner)
+	}
+}
+
 func TestBuildCollationExplicitLcCollateCtypeMatchesLocaleShorthand(t *testing.T) {
 	shorthand := buildObject(t, pipeline.KindCollation, `c1 (LOCALE = 'en_US.utf8')`, ``).(*ir.Collation)
 	explicit := buildObject(t, pipeline.KindCollation, `c2 (LC_COLLATE = 'en_US.utf8', LC_CTYPE = 'en_US.utf8')`, ``).(*ir.Collation)

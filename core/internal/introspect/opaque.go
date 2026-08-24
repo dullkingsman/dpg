@@ -1027,9 +1027,10 @@ func introspectCollations(ctx context.Context, conn pipeline.Querier) ([]pipelin
 	q := `
 SELECT n.nspname, c.collname, c.collprovider,
        c.collcollate, c.collctype, c.collisdeterministic, ` + icuLocaleCol + `,
-       obj_description(c.oid, 'pg_collation') AS comment
+       obj_description(c.oid, 'pg_collation') AS comment, r.rolname AS owner
 FROM   pg_collation c
 JOIN   pg_namespace n ON n.oid = c.collnamespace
+JOIN   pg_roles r ON r.oid = c.collowner
 WHERE  c.oid >= $1
 AND    n.nspname NOT IN ('pg_catalog', 'information_schema', 'pg_toast')
 AND    ` + notExtensionOwned("pg_collation", "c.oid") + `
@@ -1043,11 +1044,11 @@ ORDER  BY n.nspname, c.collname`
 
 	var out []pipeline.IRObject
 	for rs.Next() {
-		var schema, name string
+		var schema, name, owner string
 		var provider byte
 		var collate, ctype, icuLocale, comment *string
 		var deterministic bool
-		if err := rs.Scan(&schema, &name, &provider, &collate, &ctype, &deterministic, &icuLocale, &comment); err != nil {
+		if err := rs.Scan(&schema, &name, &provider, &collate, &ctype, &deterministic, &icuLocale, &comment, &owner); err != nil {
 			return nil, err
 		}
 		var attrs []string
@@ -1082,7 +1083,7 @@ ORDER  BY n.nspname, c.collname`
 		out = append(out, &ir.Collation{
 			Schema: schema, Name: name,
 			Provider: string(provider), Collate: collate, Ctype: ctype, ICULocale: icuLocale, Deterministic: deterministic,
-			Body: canonicalDDL(body), Comment: comment, Reconstructed: true,
+			Body: canonicalDDL(body), Comment: comment, Reconstructed: true, Owner: &owner,
 		})
 	}
 	return out, rs.Err()
