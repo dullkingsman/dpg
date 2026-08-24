@@ -84,6 +84,8 @@ func ApplyRuleSeverityOverrides(diags []pipeline.LintDiagnostic, rules map[strin
 func checkObject(obj pipeline.IRObject, cfg pipeline.LinterConfig) []pipeline.LintDiagnostic {
 	var diags []pipeline.LintDiagnostic
 
+	diags = append(diags, checkMinPGVersion(obj, cfg)...)
+
 	switch o := obj.(type) {
 	case *ir.Table:
 		diags = append(diags, checkTable(o, cfg)...)
@@ -102,6 +104,102 @@ func checkObject(obj pipeline.IRObject, cfg pipeline.LinterConfig) []pipeline.Li
 	}
 
 	return diags
+}
+
+// ── min_pg_version gating ────────────────────────────────────────────────────
+
+// checkMinPGVersion implements the min-pg-version rule (the min_pg_version
+// project-gating feature): warns — or errors under --strict, per the
+// existing IsError convention every other rule here uses — when a declared
+// construct requires a PostgreSQL major version newer than
+// cfg.MinPGVersion, the effective floor cmd/dpg already resolved per
+// cluster/database before building this LinterConfig (database override,
+// else cluster, else project root; see project.Database.
+// EffectiveMinPGVersion/project.Cluster.EffectiveMinPGVersion).
+// cfg.MinPGVersion == 0 means no floor is configured anywhere — a no-op,
+// matching every optional rule's own "cfg flag off" early-return shape.
+//
+// DPG always parses against its newest supported grammar (PostgreSQL's SQL
+// grammar is overwhelmingly additive across versions) — this rule is a
+// purely semantic check, not a parser gate: it only fires for constructs
+// DPG can already build into IR.
+//
+// v1 catalog only (.dpg-notes/min-pg-version-gating-scope-2026-08-23.md):
+// constructs whose IR already has a concrete field to check, unblocked by
+// core-fix-order-2026-08-23.md's own unfinished work. Deliberately NOT
+// gated yet, and why:
+//   - FK column-scoped ON DELETE/UPDATE SET NULL/SET DEFAULT (col-list),
+//     PG15 — no structured IR field exists for the column list yet.
+//   - Role membership WITH INHERIT/WITH SET, PG16 — ir.Role has no
+//     membership-modifier field yet (that fix-order backlog item is
+//     unstarted).
+//   - SET STATISTICS DEFAULT vs. -1, PG17 — ir.Column.Statistics is *int
+//     with nil meaning BOTH "explicitly reset to DEFAULT" and "never
+//     declared" (parseStatisticsValue parses the DEFAULT keyword to nil,
+//     the same value an untouched column already has) — genuinely
+//     indistinguishable in the current IR, not just unwired.
+//   - Every PG18 construct (VIRTUAL, ENFORCED, WITHOUT OVERLAPS/PERIOD,
+//     table-level named NOT NULL, ALTER COLUMN SET EXPRESSION) — moot: the
+//     vendored parser can't parse PG18 grammar at all yet, so there is
+//     nothing for this rule to see in the IR regardless of version floor.
+func checkMinPGVersion(obj pipeline.IRObject, cfg pipeline.LinterConfig) []pipeline.LintDiagnostic {
+	if cfg.MinPGVersion == 0 {
+		return nil
+	}
+
+	var diags []pipeline.LintDiagnostic
+	need := func(pos pipeline.SourcePos, construct string, minVersion int, section string) {
+		if minVersion <= cfg.MinPGVersion {
+			return
+		}
+		diags = append(diags, pipeline.LintDiagnostic{
+			Pos:  pos,
+			Rule: "min-pg-version",
+			Message: fmt.Sprintf("%s requires PostgreSQL %d+ (RFC Section %s), but this project's min_pg_version is %d",
+				construct, minVersion, section, cfg.MinPGVersion),
+		})
+	}
+
+	switch o := obj.(type) {
+	case *ir.Collation:
+		if o.RefreshVersion {
+			need(o.SrcPos, "COLLATION REFRESH VERSION", 15, "14.2")
+		}
+		if o.Rules != nil {
+			need(o.SrcPos, "COLLATION RULES (ICU tailoring)", 16, "14.2")
+		}
+	case *ir.ParameterPrivileges:
+		need(o.SrcPos, "PARAMETER PRIVILEGES", 15, "11.6")
+	case *ir.EventTrigger:
+		if strings.EqualFold(o.Event, "login") {
+			need(o.SrcPos, "EVENT TRIGGER ON login", 17, "14.1")
+		}
+	case *ir.Table:
+		if hasPrivilege(o.Grants, o.Revocations, "MAINTAIN") {
+			need(o.SrcPos, "MAINTAIN privilege", 17, "11.2")
+		}
+	}
+	return diags
+}
+
+// hasPrivilege reports whether priv (case-insensitive) appears in any grant
+// or revocation entry's privilege list.
+func hasPrivilege(grants []ir.Grant, revocations []ir.Revocation, priv string) bool {
+	for _, g := range grants {
+		for _, p := range g.Privileges {
+			if strings.EqualFold(p, priv) {
+				return true
+			}
+		}
+	}
+	for _, r := range revocations {
+		for _, p := range r.Privileges {
+			if strings.EqualFold(p, priv) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // ── Table rules ───────────────────────────────────────────────────────────────

@@ -143,7 +143,9 @@ func newPlanCmd() *cobra.Command {
 						return fmt.Errorf("%s (cluster): snapshot: %w", cl.Name(), err)
 					}
 				}
-				m, err := buildClusterPlan(cl, clusterSnap, differ, emitter, lintCfg, format)
+				clusterLintCfg := lintCfg
+				clusterLintCfg.MinPGVersion = cl.EffectiveMinPGVersion(proj.RootConfig)
+				m, err := buildClusterPlan(cl, clusterSnap, differ, emitter, clusterLintCfg, format)
 				if err != nil {
 					return fmt.Errorf("%s (cluster): %w", cl.Name(), err)
 				}
@@ -169,7 +171,9 @@ func newPlanCmd() *cobra.Command {
 						return fmt.Errorf("%s/%s: snapshot: %w", cl.Name(), db.Name(), err)
 					}
 				}
-				m, err := buildPlan(cl, db, snap, differ, emitter, lintCfg, format)
+				dbLintCfg := lintCfg
+				dbLintCfg.MinPGVersion = db.EffectiveMinPGVersion(cl, proj.RootConfig)
+				m, err := buildPlan(cl, db, snap, differ, emitter, dbLintCfg, format)
 				if err != nil {
 					return fmt.Errorf("%s/%s: %w", cl.Name(), db.Name(), err)
 				}

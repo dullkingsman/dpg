@@ -93,7 +93,9 @@ With --strict, lint warnings are promoted to errors and block the apply.`,
 			for _, cl := range clusters {
 				// Apply cluster-level objects (roles) before databases.
 				if len(cl.SourceFiles) > 0 {
-					if err := runClusterApply(cl, store, differ, emitter, applyExec, secretResolver, opts); err != nil {
+					clusterOpts := opts
+					clusterOpts.lintCfg.MinPGVersion = cl.EffectiveMinPGVersion(proj.RootConfig)
+					if err := runClusterApply(cl, store, differ, emitter, applyExec, secretResolver, clusterOpts); err != nil {
 						return fmt.Errorf("%s (cluster): %w", cl.Name(), err)
 					}
 				}
@@ -103,7 +105,9 @@ With --strict, lint warnings are promoted to errors and block the apply.`,
 					return err
 				}
 				for _, db := range databases {
-					if err := runApply(cl, db, store, differ, emitter, applyExec, secretResolver, opts); err != nil {
+					dbOpts := opts
+					dbOpts.lintCfg.MinPGVersion = db.EffectiveMinPGVersion(cl, proj.RootConfig)
+					if err := runApply(cl, db, store, differ, emitter, applyExec, secretResolver, dbOpts); err != nil {
 						return fmt.Errorf("%s/%s: %w", cl.Name(), db.Name(), err)
 					}
 				}

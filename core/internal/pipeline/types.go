@@ -320,6 +320,17 @@ type LinterConfig struct {
 	// "error", "warning", or "off". A rule ID absent from this map keeps
 	// its own default severity. Nil/empty is equivalent to no overrides.
 	Rules map[string]string
+	// MinPGVersion is the effective min_pg_version floor already resolved
+	// for the specific cluster/database being linted (database override,
+	// else cluster override, else project root, most specific wins — see
+	// project.Cluster.EffectiveMinPGVersion/project.Database.
+	// EffectiveMinPGVersion). 0 means no floor is configured anywhere — the
+	// min-pg-version rule is a no-op. Unlike every other LinterConfig field,
+	// this is NOT sourced from a single dpg.toml's [compiler] section — the
+	// caller (cmd/dpg) must resolve it per cluster/database before building
+	// this struct, since the same LinterConfig otherwise gets reused across
+	// every cluster/database in a project.
+	MinPGVersion int
 }
 
 // Conn abstracts a database connection so the pipeline package does not import pgx.

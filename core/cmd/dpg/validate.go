@@ -68,7 +68,9 @@ Use --format json for machine-readable output.`,
 			hasError := false
 			for _, cl := range clusters {
 				if len(cl.SourceFiles) > 0 {
-					errored, err := runValidate(cl.Name(), "(cluster)", cl.SourceFiles, cl.ObjectsDir, linter, lintCfg, format, strict)
+					clusterLintCfg := lintCfg
+					clusterLintCfg.MinPGVersion = cl.EffectiveMinPGVersion(proj.RootConfig)
+					errored, err := runValidate(cl.Name(), "(cluster)", cl.SourceFiles, cl.ObjectsDir, linter, clusterLintCfg, format, strict)
 					if err != nil {
 						return err
 					}
@@ -82,7 +84,9 @@ Use --format json for machine-readable output.`,
 					return err
 				}
 				for _, db := range databases {
-					errored, err := runValidate(cl.Name(), db.Name(), db.SourceFiles, db.Dir, linter, lintCfg, format, strict)
+					dbLintCfg := lintCfg
+					dbLintCfg.MinPGVersion = db.EffectiveMinPGVersion(cl, proj.RootConfig)
+					errored, err := runValidate(cl.Name(), db.Name(), db.SourceFiles, db.Dir, linter, dbLintCfg, format, strict)
 					if err != nil {
 						return err
 					}

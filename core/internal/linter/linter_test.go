@@ -557,3 +557,181 @@ func TestLintRegistration(t *testing.T) {
 		t.Fatal("registered Linter is nil")
 	}
 }
+
+// ── min-pg-version ────────────────────────────────────────────────────────────
+
+func TestLintMinPGVersionDisabledByDefault(t *testing.T) {
+	l := New()
+	objects := []pipeline.IRObject{
+		&ir.Collation{Schema: "public", Name: "c", RefreshVersion: true},
+	}
+	// MinPGVersion left at its zero value (0) — no floor configured anywhere.
+	diags, err := l.Lint(objects, pipeline.LinterConfig{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(diags) != 0 {
+		t.Errorf("expected no diags when MinPGVersion is unset (0), got %v", diags)
+	}
+}
+
+func TestLintMinPGVersionCollationRefreshVersion(t *testing.T) {
+	l := New()
+	objects := []pipeline.IRObject{
+		&ir.Collation{Schema: "public", Name: "c", RefreshVersion: true},
+	}
+	diags, err := l.Lint(objects, pipeline.LinterConfig{MinPGVersion: 14})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(diags) != 1 || diags[0].Rule != "min-pg-version" {
+		t.Fatalf("expected 1 min-pg-version diag, got %v", diags)
+	}
+}
+
+func TestLintMinPGVersionCollationRefreshVersionSatisfiedOK(t *testing.T) {
+	l := New()
+	objects := []pipeline.IRObject{
+		&ir.Collation{Schema: "public", Name: "c", RefreshVersion: true},
+	}
+	diags, err := l.Lint(objects, pipeline.LinterConfig{MinPGVersion: 15})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(diags) != 0 {
+		t.Errorf("expected no diags when the floor already satisfies REFRESH VERSION's PG15 requirement, got %v", diags)
+	}
+}
+
+// TestLintMinPGVersionCollationRules guards the RULES (ICU tailoring)
+// half of Collation's two independently-gated properties — REFRESH
+// VERSION is PG15, RULES is PG16, and a floor of 15 must catch RULES while
+// leaving REFRESH VERSION alone.
+func TestLintMinPGVersionCollationRules(t *testing.T) {
+	l := New()
+	rules := "&a < b"
+	objects := []pipeline.IRObject{
+		&ir.Collation{Schema: "public", Name: "c", Rules: &rules},
+	}
+	diags, err := l.Lint(objects, pipeline.LinterConfig{MinPGVersion: 15})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(diags) != 1 || diags[0].Rule != "min-pg-version" {
+		t.Fatalf("expected 1 min-pg-version diag for RULES against a PG15 floor, got %v", diags)
+	}
+}
+
+func TestLintMinPGVersionParameterPrivileges(t *testing.T) {
+	l := New()
+	objects := []pipeline.IRObject{
+		&ir.ParameterPrivileges{
+			Grants: []ir.ParameterGrant{{Privileges: []string{"SET"}, Parameters: []string{"work_mem"}, Roles: []string{"app_admin"}}},
+		},
+	}
+	diags, err := l.Lint(objects, pipeline.LinterConfig{MinPGVersion: 14})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(diags) != 1 || diags[0].Rule != "min-pg-version" {
+		t.Fatalf("expected 1 min-pg-version diag for PARAMETER PRIVILEGES against a PG14 floor, got %v", diags)
+	}
+}
+
+func TestLintMinPGVersionEventTriggerLogin(t *testing.T) {
+	l := New()
+	objects := []pipeline.IRObject{
+		&ir.EventTrigger{Name: "audit_login", Event: "login", Function: "public.f"},
+	}
+	diags, err := l.Lint(objects, pipeline.LinterConfig{MinPGVersion: 16})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(diags) != 1 || diags[0].Rule != "min-pg-version" {
+		t.Fatalf("expected 1 min-pg-version diag for the login event trigger against a PG16 floor, got %v", diags)
+	}
+}
+
+// TestLintMinPGVersionEventTriggerNonLoginOK guards that only the "login"
+// event value is gated — every other event trigger event name (ddl_command_start
+// etc.) is standard across every supported PG version.
+func TestLintMinPGVersionEventTriggerNonLoginOK(t *testing.T) {
+	l := New()
+	objects := []pipeline.IRObject{
+		&ir.EventTrigger{Name: "audit_ddl", Event: "ddl_command_start", Function: "public.f"},
+	}
+	diags, err := l.Lint(objects, pipeline.LinterConfig{MinPGVersion: 14})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(diags) != 0 {
+		t.Errorf("expected no diags for a non-login event trigger, got %v", diags)
+	}
+}
+
+func TestLintMinPGVersionTableMaintainPrivilege(t *testing.T) {
+	l := New()
+	objects := []pipeline.IRObject{
+		&ir.Table{Schema: "public", Name: "t", Grants: []ir.Grant{
+			{Privileges: []string{"MAINTAIN"}, Roles: []string{"app_admin"}},
+		}},
+	}
+	diags, err := l.Lint(objects, pipeline.LinterConfig{MinPGVersion: 16})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(diags) != 1 || diags[0].Rule != "min-pg-version" {
+		t.Fatalf("expected 1 min-pg-version diag for MAINTAIN against a PG16 floor, got %v", diags)
+	}
+}
+
+// TestLintMinPGVersionTableMaintainPrivilegeViaRevocation guards that the
+// check also scans REVOCATIONS, not just GRANTS. The fixture's revocation
+// has no matching grant, so unnecessary-revocation also legitimately fires
+// alongside it (an unrelated, correct rule) — this only asserts
+// min-pg-version is among the diagnostics, not that it's the sole one.
+func TestLintMinPGVersionTableMaintainPrivilegeViaRevocation(t *testing.T) {
+	l := New()
+	objects := []pipeline.IRObject{
+		&ir.Table{Schema: "public", Name: "t", Revocations: []ir.Revocation{
+			{Privileges: []string{"maintain"}, Roles: []string{"PUBLIC"}},
+		}},
+	}
+	diags, err := l.Lint(objects, pipeline.LinterConfig{MinPGVersion: 15})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var found bool
+	for _, d := range diags {
+		if d.Rule == "min-pg-version" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("expected a min-pg-version diag (case-insensitive MAINTAIN match via revocation), got %v", diags)
+	}
+}
+
+// TestLintMinPGVersionStrictPromotesToError guards that --strict's existing
+// blanket IsError-promotion loop (cmd/dpg, applied to every diagnostic
+// uniformly) covers min-pg-version like any other rule — no special-casing
+// needed in the linter itself, since that promotion happens at the CLI
+// layer, not here. This test documents the expectation at the LintDiagnostic
+// level: IsError is false by default (warning), matching every other
+// non-hardcoded-credential rule's convention.
+func TestLintMinPGVersionStrictPromotesToError(t *testing.T) {
+	l := New()
+	objects := []pipeline.IRObject{
+		&ir.Collation{Schema: "public", Name: "c", RefreshVersion: true},
+	}
+	diags, err := l.Lint(objects, pipeline.LinterConfig{MinPGVersion: 14})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(diags) != 1 {
+		t.Fatalf("expected 1 diag, got %d", len(diags))
+	}
+	if diags[0].IsError {
+		t.Error("min-pg-version should be a warning (IsError=false) by default — --strict promotion happens at the CLI layer")
+	}
+}

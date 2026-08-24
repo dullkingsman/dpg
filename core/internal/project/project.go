@@ -69,6 +69,20 @@ func (c *Cluster) IsLink() bool {
 	return c.Config.Cluster.Link != "" && c.Config.Cluster.URL == ""
 }
 
+// EffectiveMinPGVersion resolves the min_pg_version floor for this cluster's
+// own linting (cluster-level objects: roles, tablespaces, PARAMETER
+// PRIVILEGES): this cluster's own override, else the project root's, else 0
+// (no floor configured anywhere — the min-pg-version lint rule is a no-op).
+func (c *Cluster) EffectiveMinPGVersion(root config.RootConfig) int {
+	if c.Config.Compiler.MinPGVersion != nil {
+		return *c.Config.Compiler.MinPGVersion
+	}
+	if root.Compiler.MinPGVersion != nil {
+		return *root.Compiler.MinPGVersion
+	}
+	return 0
+}
+
 // Database represents a single PostgreSQL database within a cluster.
 type Database struct {
 	// Dir is the absolute path to the database source directory.
@@ -81,6 +95,17 @@ type Database struct {
 
 // Name returns the database name from config.
 func (d *Database) Name() string { return d.Config.Database.Name }
+
+// EffectiveMinPGVersion resolves the min_pg_version floor for this
+// database's own linting: this database's own override, else its cluster's
+// (via Cluster.EffectiveMinPGVersion), else the project root's, else 0 (no
+// gating). cl must be this database's own owning cluster.
+func (d *Database) EffectiveMinPGVersion(cl *Cluster, root config.RootConfig) int {
+	if d.Config.Compiler.MinPGVersion != nil {
+		return *d.Config.Compiler.MinPGVersion
+	}
+	return cl.EffectiveMinPGVersion(root)
+}
 
 // Discover walks up from startDir until it finds a dpg.toml, then builds
 // and returns the full Project. Returns an error if no dpg.toml is found or

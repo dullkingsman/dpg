@@ -147,6 +147,109 @@ func TestRunValidatePrintsScalarMergeConflict(t *testing.T) {
 	}
 }
 
+// TestRunValidateMinPGVersion proves the min_pg_version project-gating
+// feature is actually wired through the real `dpg validate` CLI path, not
+// just internal/linter's own isolated unit tests: real .dpg source
+// declaring a PG15+ construct (PARAMETER PRIVILEGES), the real registered
+// Linter (pipeline.Resolve, no stub), and a LinterConfig.MinPGVersion set
+// the same way newValidateCmd's RunE resolves it per cluster/database
+// (project.Database.EffectiveMinPGVersion) before calling runValidate.
+func TestRunValidateMinPGVersion(t *testing.T) {
+	l, ok := pipeline.Resolve[pipeline.Linter](pipeline.Default, pipeline.KeyLinter)
+	if !ok {
+		t.Fatal("Linter not registered")
+	}
+
+	file, dir := dpgTempFile(t, `PARAMETER PRIVILEGES {
+	GRANTS { SET ON PARAMETER work_mem TO app_admin; }
+}`)
+
+	r, w, _ := os.Pipe()
+	orig := os.Stdout
+	os.Stdout = w
+
+	_, err := runValidate("cl", "db", []string{file}, dir, l,
+		pipeline.LinterConfig{MinPGVersion: 14}, "json", false)
+
+	w.Close()
+	os.Stdout = orig
+
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var out strings.Builder
+	buf := make([]byte, 4096)
+	for {
+		n, _ := r.Read(buf)
+		if n == 0 {
+			break
+		}
+		out.Write(buf[:n])
+	}
+
+	var parsed validateJSON
+	if jsonErr := json.Unmarshal([]byte(strings.TrimSpace(out.String())), &parsed); jsonErr != nil {
+		t.Fatalf("output is not valid JSON: %v\noutput: %s", jsonErr, out.String())
+	}
+	var found bool
+	for _, w := range parsed.Warnings {
+		if w.Rule == "min-pg-version" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected a min-pg-version warning for PARAMETER PRIVILEGES against a PG14 floor, got: %+v", parsed.Warnings)
+	}
+}
+
+// TestRunValidateMinPGVersionSatisfiedOK proves the inverse: a floor that
+// already meets the construct's requirement produces no warning.
+func TestRunValidateMinPGVersionSatisfiedOK(t *testing.T) {
+	l, ok := pipeline.Resolve[pipeline.Linter](pipeline.Default, pipeline.KeyLinter)
+	if !ok {
+		t.Fatal("Linter not registered")
+	}
+
+	file, dir := dpgTempFile(t, `PARAMETER PRIVILEGES {
+	GRANTS { SET ON PARAMETER work_mem TO app_admin; }
+}`)
+
+	r, w, _ := os.Pipe()
+	orig := os.Stdout
+	os.Stdout = w
+
+	_, err := runValidate("cl", "db", []string{file}, dir, l,
+		pipeline.LinterConfig{MinPGVersion: 15}, "json", false)
+
+	w.Close()
+	os.Stdout = orig
+
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var out strings.Builder
+	buf := make([]byte, 4096)
+	for {
+		n, _ := r.Read(buf)
+		if n == 0 {
+			break
+		}
+		out.Write(buf[:n])
+	}
+
+	var parsed validateJSON
+	if jsonErr := json.Unmarshal([]byte(strings.TrimSpace(out.String())), &parsed); jsonErr != nil {
+		t.Fatalf("output is not valid JSON: %v\noutput: %s", jsonErr, out.String())
+	}
+	for _, w := range parsed.Warnings {
+		if w.Rule == "min-pg-version" {
+			t.Errorf("expected no min-pg-version warning when min_pg_version already satisfies the construct's requirement, got: %+v", parsed.Warnings)
+		}
+	}
+}
+
 func TestRunValidateJSONFormat(t *testing.T) {
 	file, dir := dpgTempFile(t, "")
 	stub := &stubLinter{diags: []pipeline.LintDiagnostic{

@@ -376,3 +376,122 @@ name = "bare"
 		t.Errorf("DefaultSchema should default to 'public', got %q", cfg.Database.DefaultSchema)
 	}
 }
+
+// ── min_pg_version ────────────────────────────────────────────────────────────
+
+func TestLoadRoot_MinPGVersionUnset(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, dir, "dpg.toml", `
+[compiler]
+default_drop_behavior = "restrict"
+`)
+	cfg, err := config.LoadRoot(dir)
+	if err != nil {
+		t.Fatalf("LoadRoot: %v", err)
+	}
+	if cfg.Compiler.MinPGVersion != nil {
+		t.Errorf("MinPGVersion: expected nil (unset), got %v", *cfg.Compiler.MinPGVersion)
+	}
+}
+
+func TestLoadRoot_MinPGVersionSet(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, dir, "dpg.toml", `
+[compiler]
+min_pg_version = 16
+`)
+	cfg, err := config.LoadRoot(dir)
+	if err != nil {
+		t.Fatalf("LoadRoot: %v", err)
+	}
+	if cfg.Compiler.MinPGVersion == nil || *cfg.Compiler.MinPGVersion != 16 {
+		t.Errorf("MinPGVersion: got %v, want 16", cfg.Compiler.MinPGVersion)
+	}
+}
+
+// TestLoadRoot_MinPGVersionBelowFloorErrors guards the RFC's own supported
+// floor (Tenet 1.4: "floor 14, no ceiling") — a project can't target a PG
+// version older than DPG itself supports.
+func TestLoadRoot_MinPGVersionBelowFloorErrors(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, dir, "dpg.toml", `
+[compiler]
+min_pg_version = 13
+`)
+	_, err := config.LoadRoot(dir)
+	if err == nil {
+		t.Fatal("expected error for min_pg_version below the floor of 14")
+	}
+}
+
+// TestLoadCluster_MinPGVersion guards that a cluster-level dpg.toml can
+// declare its own min_pg_version override, independent of DefaultDropBehavior
+// (which stays root-only — ClusterConfig.Compiler is not validated for it).
+func TestLoadCluster_MinPGVersion(t *testing.T) {
+	dir := t.TempDir()
+	path := writeFile(t, dir, "dpg.toml", `
+[cluster]
+name = "prod"
+
+[compiler]
+min_pg_version = 17
+`)
+	cfg, err := config.LoadCluster(path)
+	if err != nil {
+		t.Fatalf("LoadCluster: %v", err)
+	}
+	if cfg.Compiler.MinPGVersion == nil || *cfg.Compiler.MinPGVersion != 17 {
+		t.Errorf("MinPGVersion: got %v, want 17", cfg.Compiler.MinPGVersion)
+	}
+}
+
+func TestLoadCluster_MinPGVersionBelowFloorErrors(t *testing.T) {
+	dir := t.TempDir()
+	path := writeFile(t, dir, "dpg.toml", `
+[cluster]
+name = "prod"
+
+[compiler]
+min_pg_version = 10
+`)
+	_, err := config.LoadCluster(path)
+	if err == nil {
+		t.Fatal("expected error for min_pg_version below the floor of 14")
+	}
+}
+
+// TestLoadDatabase_MinPGVersion guards the database-level override — the
+// most specific level in the database > cluster > root resolution order
+// (project.Database.EffectiveMinPGVersion).
+func TestLoadDatabase_MinPGVersion(t *testing.T) {
+	dir := t.TempDir()
+	path := writeFile(t, dir, "dpg.toml", `
+[database]
+name = "mydb"
+
+[compiler]
+min_pg_version = 15
+`)
+	cfg, err := config.LoadDatabase(path)
+	if err != nil {
+		t.Fatalf("LoadDatabase: %v", err)
+	}
+	if cfg.Compiler.MinPGVersion == nil || *cfg.Compiler.MinPGVersion != 15 {
+		t.Errorf("MinPGVersion: got %v, want 15", cfg.Compiler.MinPGVersion)
+	}
+}
+
+func TestLoadDatabase_MinPGVersionBelowFloorErrors(t *testing.T) {
+	dir := t.TempDir()
+	path := writeFile(t, dir, "dpg.toml", `
+[database]
+name = "mydb"
+
+[compiler]
+min_pg_version = 9
+`)
+	_, err := config.LoadDatabase(path)
+	if err == nil {
+		t.Fatal("expected error for min_pg_version below the floor of 14")
+	}
+}

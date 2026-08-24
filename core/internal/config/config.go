@@ -79,11 +79,28 @@ type FmtConfig struct {
 	KeywordCase string `toml:"keyword_case"`
 }
 
-// CompilerConfig holds compiler-wide defaults.
+// CompilerConfig holds compiler-wide defaults. At the cluster/database level
+// (ClusterConfig.Compiler/DatabaseConfig.Compiler) only MinPGVersion is
+// recognized — DefaultDropBehavior stays root-only (RFC's original "global
+// compiler ... behaviour" framing; no override mechanism was requested for
+// it, unlike MinPGVersion).
 type CompilerConfig struct {
 	// DefaultDropBehavior controls whether DROPs cascade or restrict.
-	// Valid values: "restrict" (default), "cascade".
+	// Valid values: "restrict" (default), "cascade". Root-level only.
 	DefaultDropBehavior string `toml:"default_drop_behavior"`
+	// MinPGVersion is the minimum PostgreSQL major version this project (or
+	// this cluster/database, when set at that level) targets. DPG always
+	// parses against its newest supported grammar — PostgreSQL's own SQL
+	// grammar is overwhelmingly additive across versions — so this gates
+	// *semantically* instead: a declared construct that requires a newer PG
+	// version than the effective floor is flagged by the linter's
+	// min-pg-version rule (warning by default, error under --strict). nil =
+	// unset at this level (falls through to the next level up; unset
+	// everywhere = no gating at all). Overridable at the cluster and
+	// database level, most specific wins: database > cluster > root — see
+	// project.Cluster.EffectiveMinPGVersion/project.Database.
+	// EffectiveMinPGVersion.
+	MinPGVersion *int `toml:"min_pg_version"`
 }
 
 // LinterConfig holds the linter rule settings.
@@ -159,16 +176,36 @@ func LoadRoot(dir string) (RootConfig, error) {
 func (c CompilerConfig) validate() error {
 	switch c.DefaultDropBehavior {
 	case "restrict", "cascade":
-		return nil
 	default:
 		return fmt.Errorf("default_drop_behavior must be \"restrict\" or \"cascade\", got %q", c.DefaultDropBehavior)
 	}
+	return validateMinPGVersion(c.MinPGVersion)
+}
+
+// validateMinPGVersion rejects a min_pg_version below the RFC's own
+// supported floor (Tenet 1.4: "floor 14, no ceiling") — used at every level
+// (root/cluster/database) a [compiler] section can appear, unlike
+// DefaultDropBehavior's validation above which is root-only.
+func validateMinPGVersion(v *int) error {
+	if v == nil {
+		return nil
+	}
+	if *v < 14 {
+		return fmt.Errorf("min_pg_version must be >= 14 (this project's own supported floor), got %d", *v)
+	}
+	return nil
 }
 
 // ClusterConfig represents the dpg.toml file inside a cluster directory.
 type ClusterConfig struct {
 	Cluster  ClusterDef     `toml:"cluster"`
 	NameMaps NameMapsConfig `toml:"namemaps"`
+	// Compiler holds this cluster's compiler overrides — only MinPGVersion
+	// is meaningful here (see CompilerConfig's doc comment). A stray
+	// default_drop_behavior declared at this level is silently ignored
+	// rather than rejected — this codebase has no DPG-E001 unknown-key
+	// enforcement anywhere yet, a pre-existing gap, not introduced here.
+	Compiler CompilerConfig `toml:"compiler"`
 }
 
 // ClusterDef holds the cluster connection and options.
@@ -220,6 +257,9 @@ func LoadCluster(path string) (ClusterConfig, error) {
 	if err := cfg.Cluster.validate(path); err != nil {
 		return ClusterConfig{}, err
 	}
+	if err := validateMinPGVersion(cfg.Compiler.MinPGVersion); err != nil {
+		return ClusterConfig{}, fmt.Errorf("%s: [compiler]: %w", path, err)
+	}
 	return cfg, nil
 }
 
@@ -237,6 +277,9 @@ func (c ClusterDef) validate(path string) error {
 type DatabaseConfig struct {
 	Database DatabaseDef    `toml:"database"`
 	NameMaps NameMapsConfig `toml:"namemaps"`
+	// Compiler holds this database's compiler overrides — see
+	// ClusterConfig.Compiler's identical doc comment.
+	Compiler CompilerConfig `toml:"compiler"`
 }
 
 // DatabaseDef holds per-database settings.
@@ -262,6 +305,9 @@ func LoadDatabase(path string) (DatabaseConfig, error) {
 	}
 	if err := cfg.Database.validate(path); err != nil {
 		return DatabaseConfig{}, err
+	}
+	if err := validateMinPGVersion(cfg.Compiler.MinPGVersion); err != nil {
+		return DatabaseConfig{}, fmt.Errorf("%s: [compiler]: %w", path, err)
 	}
 	return cfg, nil
 }

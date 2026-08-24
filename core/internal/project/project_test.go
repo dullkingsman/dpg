@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/dullkingsman/dpg/internal/config"
 	"github.com/dullkingsman/dpg/internal/project"
 )
 
@@ -319,5 +320,75 @@ func TestDiscover_DatabaseNamedLikeClusterObjectsDirErrors(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "cluster") {
 		t.Errorf("expected error to mention the conflicting directory name, got: %v", err)
+	}
+}
+
+// ── EffectiveMinPGVersion ─────────────────────────────────────────────────────
+
+func intPtr(n int) *int { return &n }
+
+func TestCluster_EffectiveMinPGVersion_Unset(t *testing.T) {
+	cl := &project.Cluster{}
+	if got := cl.EffectiveMinPGVersion(config.RootConfig{}); got != 0 {
+		t.Errorf("expected 0 (no gating) when unset everywhere, got %d", got)
+	}
+}
+
+func TestCluster_EffectiveMinPGVersion_RootOnly(t *testing.T) {
+	cl := &project.Cluster{}
+	root := config.RootConfig{Compiler: config.CompilerConfig{MinPGVersion: intPtr(15)}}
+	if got := cl.EffectiveMinPGVersion(root); got != 15 {
+		t.Errorf("expected root's 15, got %d", got)
+	}
+}
+
+// TestCluster_EffectiveMinPGVersion_ClusterOverridesRoot guards the
+// database > cluster > root precedence's cluster half: a cluster-level
+// override must win over the root's own value, not merely supplement it.
+func TestCluster_EffectiveMinPGVersion_ClusterOverridesRoot(t *testing.T) {
+	cl := &project.Cluster{Config: config.ClusterConfig{
+		Compiler: config.CompilerConfig{MinPGVersion: intPtr(17)},
+	}}
+	root := config.RootConfig{Compiler: config.CompilerConfig{MinPGVersion: intPtr(15)}}
+	if got := cl.EffectiveMinPGVersion(root); got != 17 {
+		t.Errorf("expected cluster's 17 to override root's 15, got %d", got)
+	}
+}
+
+func TestDatabase_EffectiveMinPGVersion_Unset(t *testing.T) {
+	cl := &project.Cluster{}
+	db := &project.Database{}
+	if got := db.EffectiveMinPGVersion(cl, config.RootConfig{}); got != 0 {
+		t.Errorf("expected 0 (no gating) when unset everywhere, got %d", got)
+	}
+}
+
+// TestDatabase_EffectiveMinPGVersion_DatabaseOverridesClusterAndRoot guards
+// the full 3-level precedence: the most specific level set wins.
+func TestDatabase_EffectiveMinPGVersion_DatabaseOverridesClusterAndRoot(t *testing.T) {
+	cl := &project.Cluster{Config: config.ClusterConfig{
+		Compiler: config.CompilerConfig{MinPGVersion: intPtr(16)},
+	}}
+	db := &project.Database{Config: config.DatabaseConfig{
+		Compiler: config.CompilerConfig{MinPGVersion: intPtr(18)},
+	}}
+	root := config.RootConfig{Compiler: config.CompilerConfig{MinPGVersion: intPtr(15)}}
+	if got := db.EffectiveMinPGVersion(cl, root); got != 18 {
+		t.Errorf("expected database's 18 to override cluster's 16 and root's 15, got %d", got)
+	}
+}
+
+// TestDatabase_EffectiveMinPGVersion_FallsThroughToCluster guards that an
+// unset database level correctly falls through to its cluster's own
+// resolution (which itself may fall through to root) rather than skipping
+// straight to root.
+func TestDatabase_EffectiveMinPGVersion_FallsThroughToCluster(t *testing.T) {
+	cl := &project.Cluster{Config: config.ClusterConfig{
+		Compiler: config.CompilerConfig{MinPGVersion: intPtr(16)},
+	}}
+	db := &project.Database{} // unset
+	root := config.RootConfig{Compiler: config.CompilerConfig{MinPGVersion: intPtr(15)}}
+	if got := db.EffectiveMinPGVersion(cl, root); got != 16 {
+		t.Errorf("expected fall-through to cluster's 16 (not root's 15), got %d", got)
 	}
 }
