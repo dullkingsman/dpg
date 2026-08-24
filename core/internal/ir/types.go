@@ -281,9 +281,9 @@ type Trigger struct {
 	// pattern above.
 	OldTransitionName *string
 	NewTransitionName *string
-	Condition *string
-	Function  string // qualified function name
-	Args      []string
+	Condition         *string
+	Function          string // qualified function name
+	Args              []string
 	// EnableState — see pipeline.TriggerDef.EnableState's identical doc
 	// comment.
 	EnableState string
@@ -1198,8 +1198,8 @@ type Collation struct {
 	// doc comment (RFC audit item #84).
 	RefreshVersion bool
 	Body           string
-	Reconstructed     bool // Body rebuilt from the catalog; see Tablespace.Reconstructed
-	SrcPos            pipeline.SourcePos
+	Reconstructed  bool // Body rebuilt from the catalog; see Tablespace.Reconstructed
+	SrcPos         pipeline.SourcePos
 }
 
 func (c *Collation) QualifiedName() string   { return qualName(c.Schema, c.Name) }
@@ -1651,6 +1651,43 @@ func (d *DefaultPrivileges) QualifiedName() string {
 }
 func (d *DefaultPrivileges) Pos() pipeline.SourcePos { return d.SrcPos }
 func (d *DefaultPrivileges) irObject()               {}
+
+// ParameterGrant is one grant entry within a PARAMETER PRIVILEGES declaration
+// (RFC Section 11.6, PG15+): "GRANT {SET|ALTER SYSTEM} ON PARAMETER
+// param[, ...] TO role[, ...] [WITH GRANT OPTION]".
+type ParameterGrant struct {
+	Privileges []string // "SET" / "ALTER SYSTEM"; nil = ALL
+	Parameters []string
+	Roles      []string
+	WithGrant  bool
+	Pos        pipeline.SourcePos
+}
+
+// ParameterRevocation is a PARAMETER PRIVILEGES REVOCATIONS { } entry.
+type ParameterRevocation struct {
+	Privileges []string
+	Parameters []string
+	Roles      []string
+	Cascade    bool
+	Pos        pipeline.SourcePos
+}
+
+// ParameterPrivileges is a PARAMETER PRIVILEGES declaration (RFC Section
+// 11.6, PG15+). Cluster-scoped singleton: unlike DefaultPrivileges, which
+// splits into one *DefaultPrivileges per (role, schema, object type) tuple
+// matching pg_default_acl's own catalog model, PostgreSQL's pg_parameter_acl
+// has one row per parameter with no role/schema/type dimension to split on,
+// and a DPG project declares at most one PARAMETER PRIVILEGES block — so
+// QualifiedName is a fixed constant.
+type ParameterPrivileges struct {
+	Grants      []ParameterGrant
+	Revocations []ParameterRevocation
+	SrcPos      pipeline.SourcePos
+}
+
+func (p *ParameterPrivileges) QualifiedName() string   { return "PARAMETER PRIVILEGES" }
+func (p *ParameterPrivileges) Pos() pipeline.SourcePos { return p.SrcPos }
+func (p *ParameterPrivileges) irObject()               {}
 
 // ── helpers ───────────────────────────────────────────────────────────────────
 

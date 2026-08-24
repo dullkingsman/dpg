@@ -9100,6 +9100,190 @@ func TestDiffDefaultPrivilegesForRole(t *testing.T) {
 	}
 }
 
+// ── ParameterPrivileges diffing (RFC Section 11.6, PG15+) ───────────────────────
+
+func TestDiffParameterPrivilegesCreate(t *testing.T) {
+	d := New()
+	desired := []pipeline.IRObject{
+		&ir.ParameterPrivileges{
+			Grants: []ir.ParameterGrant{{
+				Privileges: []string{"SET"},
+				Parameters: []string{"work_mem", "statement_timeout"},
+				Roles:      []string{"app_admin"},
+			}},
+		},
+	}
+	ops, err := d.Diff(desired, &pipeline.Snapshot{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsSQL(ops, "GRANT SET ON PARAMETER") || !containsSQL(ops, "work_mem, statement_timeout") || !containsSQL(ops, "app_admin") {
+		t.Errorf("expected GRANT SET ON PARAMETER, got: %v", sqlList(ops))
+	}
+}
+
+func TestDiffParameterPrivilegesGrantAdded(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	pp := &snapshot.SnapParameterPrivileges{
+		Grants: []snapshot.SnapParamGrant{{Privileges: []string{"SET"}, Parameters: []string{"work_mem"}, Roles: []string{"app_admin"}}},
+	}
+	_ = snap.SetObject("PARAMETER PRIVILEGES", &snapshot.SnapObject{
+		Kind:                "parameter_privileges",
+		ParameterPrivileges: pp,
+	})
+	desired := []pipeline.IRObject{
+		&ir.ParameterPrivileges{
+			Grants: []ir.ParameterGrant{
+				{Privileges: []string{"SET"}, Parameters: []string{"work_mem"}, Roles: []string{"app_admin"}},
+				{Privileges: []string{"ALTER SYSTEM"}, Parameters: []string{"shared_preload_libraries"}, Roles: []string{"dba"}},
+			},
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsSQL(ops, "GRANT ALTER SYSTEM") || !containsSQL(ops, "shared_preload_libraries") || !containsSQL(ops, "dba") {
+		t.Errorf("expected GRANT for new privilege, got: %v", sqlList(ops))
+	}
+	if containsSQL(ops, "REVOKE") {
+		t.Errorf("expected no REVOKE for unchanged grant, got: %v", sqlList(ops))
+	}
+}
+
+// TestDiffParameterPrivilegesGrantRemovedEmitsNothing guards RFC Section
+// 11.6's literal additive-model text: removing a GRANTS { } entry from
+// source (while the PARAMETER PRIVILEGES block itself remains) must not
+// emit any REVOKE — a deliberate departure from diffDefaultPrivileges'
+// current implicit-revoke behavior (see diffParameterPrivileges' doc
+// comment). Only an explicit REVOCATIONS entry actually revokes.
+func TestDiffParameterPrivilegesGrantRemovedEmitsNothing(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	pp := &snapshot.SnapParameterPrivileges{
+		Grants: []snapshot.SnapParamGrant{
+			{Privileges: []string{"SET"}, Parameters: []string{"work_mem"}, Roles: []string{"app_admin"}},
+			{Privileges: []string{"ALTER SYSTEM"}, Parameters: []string{"shared_preload_libraries"}, Roles: []string{"dba"}},
+		},
+	}
+	_ = snap.SetObject("PARAMETER PRIVILEGES", &snapshot.SnapObject{
+		Kind:                "parameter_privileges",
+		ParameterPrivileges: pp,
+	})
+	desired := []pipeline.IRObject{
+		&ir.ParameterPrivileges{
+			Grants: []ir.ParameterGrant{
+				{Privileges: []string{"SET"}, Parameters: []string{"work_mem"}, Roles: []string{"app_admin"}},
+			},
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ops) != 0 {
+		t.Errorf("removing a grant declaration alone should emit nothing (additive model), got: %v", sqlList(ops))
+	}
+}
+
+func TestDiffParameterPrivilegesUnchangedIsNoop(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	pp := &snapshot.SnapParameterPrivileges{
+		Grants: []snapshot.SnapParamGrant{{Privileges: []string{"SET"}, Parameters: []string{"work_mem"}, Roles: []string{"app_admin"}}},
+	}
+	_ = snap.SetObject("PARAMETER PRIVILEGES", &snapshot.SnapObject{
+		Kind:                "parameter_privileges",
+		ParameterPrivileges: pp,
+	})
+	desired := []pipeline.IRObject{
+		&ir.ParameterPrivileges{
+			Grants: []ir.ParameterGrant{{Privileges: []string{"SET"}, Parameters: []string{"work_mem"}, Roles: []string{"app_admin"}}},
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ops) != 0 {
+		t.Errorf("expected no ops for unchanged parameter privileges, got: %v", sqlList(ops))
+	}
+}
+
+// TestDiffParameterPrivilegesStaleSnapshotDoesNotRecreate guards
+// diffObject's nil-ParameterPrivileges guard: a snapshot entry found under
+// the "PARAMETER PRIVILEGES" key (so found == true, no CREATE path taken)
+// but with a nil ParameterPrivileges sub-struct — e.g. a hand-edited or
+// legacy snapshot where Kind is set but the payload isn't — must fall back
+// to a safe no-op rather than either crashing or (worse) silently treating
+// every desired grant as brand new and re-issuing it. Mirrors
+// DefaultPrivileges' identical "if snap.DefaultPrivileges == nil" guard.
+func TestDiffParameterPrivilegesStaleSnapshotDoesNotRecreate(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("PARAMETER PRIVILEGES", &snapshot.SnapObject{
+		Kind: "parameter_privileges",
+		// ParameterPrivileges intentionally left nil.
+	})
+	desired := []pipeline.IRObject{
+		&ir.ParameterPrivileges{
+			Grants: []ir.ParameterGrant{{Privileges: []string{"SET"}, Parameters: []string{"work_mem"}, Roles: []string{"app_admin"}}},
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ops) != 0 {
+		t.Errorf("expected no ops for a stale/nil ParameterPrivileges snapshot entry, got: %v", sqlList(ops))
+	}
+}
+
+// TestDiffParameterPrivilegesDeclarationRemovedEmitsNothing guards that
+// deleting the entire PARAMETER PRIVILEGES block from source — not just one
+// grant within it — is still governed by the additive model: it's the union
+// of removing every one of its individual grant declarations, each of which
+// emits nothing (see dropObject's "parameter_privileges" case and
+// diffParameterPrivileges' doc comment).
+func TestDiffParameterPrivilegesDeclarationRemovedEmitsNothing(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	pp := &snapshot.SnapParameterPrivileges{
+		Grants: []snapshot.SnapParamGrant{{Privileges: []string{"SET"}, Parameters: []string{"work_mem"}, Roles: []string{"app_admin"}}},
+	}
+	_ = snap.SetObject("PARAMETER PRIVILEGES", &snapshot.SnapObject{
+		Kind:                "parameter_privileges",
+		ParameterPrivileges: pp,
+	})
+	// desired has no ParameterPrivileges — the whole declaration was removed.
+	ops, err := d.Diff([]pipeline.IRObject{}, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ops) != 0 {
+		t.Errorf("removing the entire declaration should emit nothing (additive model), got: %v", sqlList(ops))
+	}
+}
+
+func TestDiffParameterPrivilegesExplicitRevocation(t *testing.T) {
+	d := New()
+	desired := []pipeline.IRObject{
+		&ir.ParameterPrivileges{
+			Revocations: []ir.ParameterRevocation{
+				{Privileges: []string{"SET"}, Parameters: []string{"work_mem"}, Roles: []string{"app_readonly"}, Cascade: true},
+			},
+		},
+	}
+	ops, err := d.Diff(desired, &pipeline.Snapshot{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsSQL(ops, "REVOKE SET ON PARAMETER work_mem FROM") || !containsSQL(ops, "app_readonly") || !containsSQL(ops, "CASCADE") {
+		t.Errorf("expected explicit REVOKE with CASCADE, got: %v", sqlList(ops))
+	}
+}
+
 // ── Operator class/family DROP access method (regression: hardcoded btree) ─────
 
 func TestDiffDropOperatorClassUsesRecordedAccessMethod(t *testing.T) {

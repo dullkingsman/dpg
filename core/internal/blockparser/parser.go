@@ -43,6 +43,11 @@ func (p *Parser) ParseDefaultPrivileges(header, body string, pos pipeline.Source
 	return ParseDefaultPrivileges(header, body, pos)
 }
 
+// ParseParameterPrivileges implements pipeline.BlockParser.
+func (p *Parser) ParseParameterPrivileges(header, body string, pos pipeline.SourcePos) (pipeline.ParameterPrivilegesBlock, error) {
+	return ParseParameterPrivileges(header, body, pos)
+}
+
 // ── internal parser ───────────────────────────────────────────────────────────
 
 type blockParser struct {
@@ -2645,6 +2650,290 @@ func (b *blockParser) parseOneDefaultPrivilegeRevocation(pos pipeline.SourcePos)
 	}
 	b.skipWS()
 	c = b.cur()
+	if strings.ToUpper(b.peekWord()) == "CASCADE" {
+		b.readWord()
+		r.Cascade = true
+	} else {
+		b.restore(c)
+	}
+	b.skipWS()
+	if b.peek() == ';' {
+		b.advance()
+	}
+	return r, nil
+}
+
+// ── PARAMETER PRIVILEGES ──────────────────────────────────────────────────────
+
+// ParseParameterPrivileges is the top-level entry point for a PARAMETER
+// PRIVILEGES declaration (RFC Section 11.6, PG15+). header is the raw text
+// between "PARAMETER PRIVILEGES" and the opening '{' — always empty for
+// valid source, since unlike DEFAULT PRIVILEGES this kind has no FOR
+// ROLE/IN SCHEMA clause (parameters have no schema and the grant targets a
+// role directly); body is the text inside that '{ }' (braces excluded,
+// matching pipeline.BlockParser.Parse's own part2 convention).
+func ParseParameterPrivileges(header, body string, pos pipeline.SourcePos) (pipeline.ParameterPrivilegesBlock, error) {
+	if h := strings.TrimSpace(header); h != "" {
+		return pipeline.ParameterPrivilegesBlock{}, fmt.Errorf("%s: unexpected %q before '{' in PARAMETER PRIVILEGES declaration", pos, h)
+	}
+	pp := pipeline.ParameterPrivilegesBlock{Pos: pos}
+	bp := &blockParser{src: []byte(body), file: pos.File, line: pos.Line, col: pos.Col}
+	if err := bp.parseParameterPrivilegesEntries(&pp); err != nil {
+		return pp, err
+	}
+	return pp, nil
+}
+
+// parseParameterPrivilegesEntries parses zero or more GRANTS/REVOCATIONS
+// blocks until EOF or an unconsumed '}'. Unlike DEFAULT PRIVILEGES' pp-block
+// grammar, RFC Section 11.6 defines only the block forms (pp-grants-block /
+// pp-revocations-block) — no singular Mode B "GRANT"/"REVOCATION" directive.
+func (b *blockParser) parseParameterPrivilegesEntries(pp *pipeline.ParameterPrivilegesBlock) error {
+	for {
+		b.skipWS()
+		if b.eof() || b.peek() == '}' {
+			return nil
+		}
+		dirPos := b.srcPos()
+		word := strings.ToUpper(b.readWord())
+		switch word {
+		case "GRANTS":
+			grants, err := b.parseParameterGrantsBlock(dirPos)
+			if err != nil {
+				return err
+			}
+			pp.Grants = append(pp.Grants, grants...)
+		case "REVOCATIONS":
+			revs, err := b.parseParameterRevocationsBlock(dirPos)
+			if err != nil {
+				return err
+			}
+			pp.Revocations = append(pp.Revocations, revs...)
+		default:
+			return fmt.Errorf("%s: unexpected directive %q in PARAMETER PRIVILEGES block", dirPos, word)
+		}
+	}
+}
+
+func (b *blockParser) parseParameterGrantsBlock(pos pipeline.SourcePos) ([]pipeline.ParameterGrant, error) {
+	if err := b.consumeBrace(); err != nil {
+		return nil, err
+	}
+	var grants []pipeline.ParameterGrant
+	for {
+		b.skipWS()
+		if b.eof() || b.peek() == '}' {
+			break
+		}
+		g, err := b.parseOneParameterGrant(b.srcPos())
+		if err != nil {
+			return nil, err
+		}
+		grants = append(grants, g)
+	}
+	b.skipWS()
+	if b.peek() != '}' {
+		return nil, b.errorf("expected '}' to close GRANTS block")
+	}
+	b.advance()
+	return grants, nil
+}
+
+// parsePPPrivilegeList parses a comma-separated pp-privilege-list: "SET" /
+// "ALTER SYSTEM" / "ALL" / "ALL PRIVILEGES" (RFC Section 11.6's pp-privilege
+// production). "ALTER SYSTEM" is the one two-word privilege token in this
+// grammar — every other GRANTS/REVOCATIONS block in DPG has single-word
+// privileges only. "ALL"/"ALL PRIVILEGES" is represented as nil, matching
+// every other privilege list's ALL convention (privStr renders nil back to
+// "ALL").
+func (b *blockParser) parsePPPrivilegeList() ([]string, error) {
+	b.skipWS()
+	c := b.cur()
+	first := strings.ToUpper(b.readWord())
+	if first == "ALL" {
+		b.skipWS()
+		c2 := b.cur()
+		if strings.ToUpper(b.peekWord()) == "PRIVILEGES" {
+			b.readWord()
+		} else {
+			b.restore(c2)
+		}
+		return nil, nil
+	}
+	b.restore(c)
+	var privs []string
+	for {
+		b.skipWS()
+		word := strings.ToUpper(b.readWord())
+		if word == "" {
+			return nil, b.errorf("expected a privilege (SET/ALTER SYSTEM/ALL) in PARAMETER PRIVILEGES entry")
+		}
+		if word == "ALTER" {
+			b.skipWS()
+			if strings.ToUpper(b.peekWord()) != "SYSTEM" {
+				return nil, b.errorf("expected SYSTEM after ALTER in PARAMETER PRIVILEGES entry")
+			}
+			b.readWord()
+			word = "ALTER SYSTEM"
+		}
+		privs = append(privs, word)
+		b.skipWS()
+		if b.peek() != ',' {
+			break
+		}
+		b.advance()
+	}
+	return privs, nil
+}
+
+// parseOneParameterGrant parses "pp-privilege-list ON PARAMETER
+// identifier-list TO role-list [WITH GRANT OPTION];" (RFC Section 11.6's
+// pp-grant-entry) — real PostgreSQL's own GRANT ... ON PARAMETER grammar
+// (confirmed live), just with "ON PARAMETER" as two fixed words rather than
+// DefaultPrivilegeGrant's single-word "ON <object-type>" clause.
+func (b *blockParser) parseOneParameterGrant(pos pipeline.SourcePos) (pipeline.ParameterGrant, error) {
+	g := pipeline.ParameterGrant{Pos: pos}
+	privs, err := b.parsePPPrivilegeList()
+	if err != nil {
+		return g, err
+	}
+	g.Privileges = privs
+	if err := b.expect("ON"); err != nil {
+		return g, err
+	}
+	if err := b.expect("PARAMETER"); err != nil {
+		return g, err
+	}
+	for {
+		b.skipWS()
+		p, err := b.readIdentifier()
+		if err != nil {
+			return g, err
+		}
+		g.Parameters = append(g.Parameters, p)
+		b.skipWS()
+		if b.peek() != ',' {
+			break
+		}
+		b.advance()
+	}
+	if err := b.expect("TO"); err != nil {
+		return g, err
+	}
+	for {
+		b.skipWS()
+		r, err := b.readIdentifier()
+		if err != nil {
+			return g, err
+		}
+		g.Roles = append(g.Roles, r)
+		b.skipWS()
+		if b.peek() != ',' {
+			break
+		}
+		b.advance()
+		b.skipWS()
+		if strings.ToUpper(b.peekWord()) == "WITH" {
+			break
+		}
+	}
+	b.skipWS()
+	c := b.cur()
+	if strings.ToUpper(b.peekWord()) == "WITH" {
+		b.readWord()
+		b.skipWS()
+		if strings.ToUpper(b.peekWord()) == "GRANT" {
+			b.readWord()
+			if err := b.expect("OPTION"); err != nil {
+				return g, err
+			}
+			g.WithGrant = true
+		} else {
+			b.restore(c)
+		}
+	}
+	b.skipWS()
+	if b.peek() == ';' {
+		b.advance()
+	}
+	return g, nil
+}
+
+func (b *blockParser) parseParameterRevocationsBlock(pos pipeline.SourcePos) ([]pipeline.ParameterRevocation, error) {
+	if err := b.consumeBrace(); err != nil {
+		return nil, err
+	}
+	var revs []pipeline.ParameterRevocation
+	for {
+		b.skipWS()
+		if b.eof() || b.peek() == '}' {
+			break
+		}
+		r, err := b.parseOneParameterRevocation(b.srcPos())
+		if err != nil {
+			return nil, err
+		}
+		revs = append(revs, r)
+	}
+	b.skipWS()
+	if b.peek() != '}' {
+		return nil, b.errorf("expected '}' to close REVOCATIONS block")
+	}
+	b.advance()
+	return revs, nil
+}
+
+// parseOneParameterRevocation mirrors parseOneParameterGrant — RFC Section
+// 11.6's pp-revoke-entry: "(pp-privilege-list / ALL PRIVILEGES) ON PARAMETER
+// identifier-list FROM role-list [CASCADE];".
+func (b *blockParser) parseOneParameterRevocation(pos pipeline.SourcePos) (pipeline.ParameterRevocation, error) {
+	r := pipeline.ParameterRevocation{Pos: pos}
+	privs, err := b.parsePPPrivilegeList()
+	if err != nil {
+		return r, err
+	}
+	r.Privileges = privs
+	if err := b.expect("ON"); err != nil {
+		return r, err
+	}
+	if err := b.expect("PARAMETER"); err != nil {
+		return r, err
+	}
+	for {
+		b.skipWS()
+		p, err := b.readIdentifier()
+		if err != nil {
+			return r, err
+		}
+		r.Parameters = append(r.Parameters, p)
+		b.skipWS()
+		if b.peek() != ',' {
+			break
+		}
+		b.advance()
+	}
+	if err := b.expect("FROM"); err != nil {
+		return r, err
+	}
+	for {
+		b.skipWS()
+		role, err := b.readIdentifier()
+		if err != nil {
+			return r, err
+		}
+		r.Roles = append(r.Roles, role)
+		b.skipWS()
+		if b.peek() != ',' {
+			break
+		}
+		b.advance()
+		b.skipWS()
+		if strings.ToUpper(b.peekWord()) == "CASCADE" {
+			break
+		}
+	}
+	b.skipWS()
+	c := b.cur()
 	if strings.ToUpper(b.peekWord()) == "CASCADE" {
 		b.readWord()
 		r.Cascade = true

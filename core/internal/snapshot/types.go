@@ -15,17 +15,18 @@ type SnapNameMapEntry struct {
 type SnapObject struct {
 	Kind string `json:"kind"`
 	// One of the following is populated, depending on Kind.
-	Table             *SnapTable             `json:"table,omitempty"`
-	View              *SnapView              `json:"view,omitempty"`
-	Function          *SnapFunction          `json:"function,omitempty"`
-	Type              *SnapType              `json:"type,omitempty"`
-	Schema            *SnapSchema            `json:"schema,omitempty"`
-	Extension         *SnapExtension         `json:"extension,omitempty"`
-	Sequence          *SnapSequence          `json:"sequence,omitempty"`
-	Role              *SnapRole              `json:"role,omitempty"`
-	VirtualType       *SnapVirtualType       `json:"virtual_type,omitempty"`
-	DefaultPrivileges *SnapDefaultPrivileges `json:"default_privileges,omitempty"`
-	Opaque            *SnapOpaque            `json:"opaque,omitempty"`
+	Table               *SnapTable               `json:"table,omitempty"`
+	View                *SnapView                `json:"view,omitempty"`
+	Function            *SnapFunction            `json:"function,omitempty"`
+	Type                *SnapType                `json:"type,omitempty"`
+	Schema              *SnapSchema              `json:"schema,omitempty"`
+	Extension           *SnapExtension           `json:"extension,omitempty"`
+	Sequence            *SnapSequence            `json:"sequence,omitempty"`
+	Role                *SnapRole                `json:"role,omitempty"`
+	VirtualType         *SnapVirtualType         `json:"virtual_type,omitempty"`
+	DefaultPrivileges   *SnapDefaultPrivileges   `json:"default_privileges,omitempty"`
+	ParameterPrivileges *SnapParameterPrivileges `json:"parameter_privileges,omitempty"`
+	Opaque              *SnapOpaque              `json:"opaque,omitempty"`
 }
 
 // SnapOpaque covers body-based objects: Procedure, Aggregate, Tablespace, FDW,
@@ -63,10 +64,10 @@ type SnapOpaque struct {
 	// Method/ir.EventTrigger.Event's doc comments for why BodyHash alone
 	// was insufficient (it goes unset, via Reconstructed, on every live
 	// path, so a live-catalog-only change was silently invisible).
-	TablespaceLocation   string   `json:"tablespace_location,omitempty"`
+	TablespaceLocation string `json:"tablespace_location,omitempty"`
 	// TablespaceOwner is RFC audit item #80's inline `OWNER` diffing input
 	// — see ir.Tablespace.Owner's doc comment.
-	TablespaceOwner *string `json:"tablespace_owner,omitempty"`
+	TablespaceOwner      *string  `json:"tablespace_owner,omitempty"`
 	CastMethod           string   `json:"cast_method,omitempty"`
 	CastContext          string   `json:"cast_context,omitempty"`
 	CastFunction         string   `json:"cast_function,omitempty"`
@@ -105,14 +106,14 @@ type SnapOpaque struct {
 	// stale snapshot" guard doesn't work here — OptionsStructured is an
 	// explicit sentinel instead, set true only by current code, so its
 	// absence unambiguously means "snapshot predates this feature."
-	OptionsStructured  bool           `json:"options_structured,omitempty"`
-	FDWHandler         string         `json:"fdw_handler,omitempty"`
-	FDWValidator       string         `json:"fdw_validator,omitempty"`
-	FDWOptions         []SnapOptionKV `json:"fdw_options,omitempty"`
-	ServerFDWName      string         `json:"server_fdw_name,omitempty"`
-	ServerType         *string        `json:"server_type,omitempty"`
-	ServerVersion      *string        `json:"server_version,omitempty"`
-	ServerOptions      []SnapOptionKV `json:"server_options,omitempty"`
+	OptionsStructured bool           `json:"options_structured,omitempty"`
+	FDWHandler        string         `json:"fdw_handler,omitempty"`
+	FDWValidator      string         `json:"fdw_validator,omitempty"`
+	FDWOptions        []SnapOptionKV `json:"fdw_options,omitempty"`
+	ServerFDWName     string         `json:"server_fdw_name,omitempty"`
+	ServerType        *string        `json:"server_type,omitempty"`
+	ServerVersion     *string        `json:"server_version,omitempty"`
+	ServerOptions     []SnapOptionKV `json:"server_options,omitempty"`
 	// ServerOwner is RFC audit item #79's ALTER SERVER ... OWNER TO diffing
 	// input — same shape as PublicationOwner/EventTriggerOwner/TSDictOwner
 	// above.
@@ -394,9 +395,9 @@ type SnapTrigger struct {
 	// empty-means-unspecified convention as Condition below.
 	OldTransitionName string `json:"old_transition_name,omitempty"`
 	NewTransitionName string `json:"new_transition_name,omitempty"`
-	Function  string `json:"function"`
-	Condition string `json:"condition,omitempty"`
-	Comment   string `json:"comment,omitempty"`
+	Function          string `json:"function"`
+	Condition         string `json:"condition,omitempty"`
+	Comment           string `json:"comment,omitempty"`
 	// EnableState — see ir.Trigger.EnableState's identical doc comment.
 	EnableState string `json:"enable_state,omitempty"`
 	// DependsOnExtensions is Section 9.1's `[NO] DEPENDS ON EXTENSION`
@@ -605,4 +606,28 @@ type SnapDefaultPrivileges struct {
 	ObjectType  string      `json:"object_type"`
 	Grants      []SnapGrant `json:"grants,omitempty"`
 	Revocations []SnapGrant `json:"revocations,omitempty"`
+}
+
+// SnapParameterPrivileges is the snapshot form of a PARAMETER PRIVILEGES
+// declaration (RFC Section 11.6, PG15+). Cluster-scoped singleton — one per
+// project, unlike SnapDefaultPrivileges which splits per (role, schema,
+// object type).
+type SnapParameterPrivileges struct {
+	Grants      []SnapParamGrant `json:"grants,omitempty"`
+	Revocations []SnapParamGrant `json:"revocations,omitempty"`
+}
+
+// SnapParamGrant is one grant/revocation entry within a PARAMETER PRIVILEGES
+// declaration. A dedicated type rather than reusing SnapGrant: a PARAMETER
+// PRIVILEGES grant targets a set of named parameters, unlike every other
+// GRANTS block where the object is either implicit (a single enclosing
+// object) or a single ON <type> keyword (SnapDefaultPrivileges) — Parameters
+// plays that role here. Cascade is intentionally not stored, matching
+// toSnapRevocation's identical DefaultPrivileges precedent (a revocation is
+// matched for diffing purposes by privileges+parameters+roles only).
+type SnapParamGrant struct {
+	Privileges []string `json:"privileges,omitempty"` // nil = ALL
+	Parameters []string `json:"parameters"`
+	Roles      []string `json:"roles"`
+	WithGrant  bool     `json:"with_grant,omitempty"`
 }

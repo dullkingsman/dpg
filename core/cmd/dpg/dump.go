@@ -409,12 +409,15 @@ func mergeExistingVirtualTypes(db *project.Database) []pipeline.IRObject {
 }
 
 // isClusterScoped reports whether obj lives at the cluster level (shared across
-// every database) rather than inside one database. Only roles and tablespaces
-// qualify; all other schemaless objects (FDWs, servers, user mappings,
-// publications, event triggers, casts) are database-scoped.
+// every database) rather than inside one database. Roles, tablespaces, and
+// PARAMETER PRIVILEGES (RFC Section 11.6 — configuration parameters have no
+// schema and no per-database identity; the RFC's own worked example shows it
+// living at "production/cluster/parameter_privileges.dpg") qualify; all other
+// schemaless objects (FDWs, servers, user mappings, publications, event
+// triggers, casts) are database-scoped.
 func isClusterScoped(obj pipeline.IRObject) bool {
 	switch obj.(type) {
-	case *ir.Role, *ir.Tablespace:
+	case *ir.Role, *ir.Tablespace, *ir.ParameterPrivileges:
 		return true
 	}
 	return false
@@ -1276,6 +1279,8 @@ func renderObjectDPG(b *strings.Builder, obj pipeline.IRObject, fmtOpts format.O
 		renderOpaqueBody(b, ind, fmtOpts, o.Body, o.Comment)
 	case *ir.DefaultPrivileges:
 		renderDefaultPrivileges(b, ind, fmtOpts, o)
+	case *ir.ParameterPrivileges:
+		renderParameterPrivileges(b, ind, fmtOpts, o)
 	case *ir.Cast:
 		renderOpaqueBody(b, ind, fmtOpts, o.Body, o.Comment)
 	case *ir.EventTrigger:
@@ -1658,6 +1663,51 @@ func renderDefaultPrivileges(b *strings.Builder, ind string, fmtOpts format.Opti
 				priv = strings.Join(r.Privileges, ", ")
 			}
 			fmt.Fprintf(b, "%s%s %s %s %s %s", entryInd, priv, kw("ON"), kw(o.ObjectType), kw("FROM"), strings.Join(r.Roles, ", "))
+			if r.Cascade {
+				fmt.Fprintf(b, " %s", kw("CASCADE"))
+			}
+			b.WriteString(";\n")
+		}
+		fmt.Fprintf(b, "%s}\n", ind)
+	}
+	b.WriteString("}\n")
+}
+
+// renderParameterPrivileges writes one "PARAMETER PRIVILEGES { GRANTS { ... }
+// REVOCATIONS { ... } }" declaration (RFC Section 11.6, PG15+). Unlike
+// renderDefaultPrivileges there is no FOR ROLE/IN SCHEMA header and no
+// per-object-type split: every grant carries its own PARAMETER identifier
+// list directly, and introspectParameterPrivileges always produces exactly
+// one *ir.ParameterPrivileges.
+func renderParameterPrivileges(b *strings.Builder, ind string, fmtOpts format.Options, o *ir.ParameterPrivileges) {
+	kw := fmtOpts.Keyword
+	entryInd := ind + ind
+	fmt.Fprintf(b, "\n%s %s {\n", kw("PARAMETER"), kw("PRIVILEGES"))
+	if len(o.Grants) > 0 {
+		fmt.Fprintf(b, "%s%s {\n", ind, kw("GRANTS"))
+		for _, g := range o.Grants {
+			priv := "ALL"
+			if len(g.Privileges) > 0 {
+				priv = strings.Join(g.Privileges, ", ")
+			}
+			fmt.Fprintf(b, "%s%s %s %s %s %s %s", entryInd, priv, kw("ON"), kw("PARAMETER"),
+				strings.Join(g.Parameters, ", "), kw("TO"), strings.Join(g.Roles, ", "))
+			if g.WithGrant {
+				fmt.Fprintf(b, " %s %s %s", kw("WITH"), kw("GRANT"), kw("OPTION"))
+			}
+			b.WriteString(";\n")
+		}
+		fmt.Fprintf(b, "%s}\n", ind)
+	}
+	if len(o.Revocations) > 0 {
+		fmt.Fprintf(b, "%s%s {\n", ind, kw("REVOCATIONS"))
+		for _, r := range o.Revocations {
+			priv := "ALL"
+			if len(r.Privileges) > 0 {
+				priv = strings.Join(r.Privileges, ", ")
+			}
+			fmt.Fprintf(b, "%s%s %s %s %s %s %s", entryInd, priv, kw("ON"), kw("PARAMETER"),
+				strings.Join(r.Parameters, ", "), kw("FROM"), strings.Join(r.Roles, ", "))
 			if r.Cascade {
 				fmt.Fprintf(b, " %s", kw("CASCADE"))
 			}

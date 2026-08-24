@@ -39,6 +39,14 @@ type BlockParser interface {
 	// requires its GRANT/REVOKE action inline, so the header alone is never
 	// valid standalone PG SQL — see DefaultPrivilegesBlock.
 	ParseDefaultPrivileges(header, body string, pos SourcePos) (DefaultPrivilegesBlock, error)
+
+	// ParseParameterPrivileges parses a top-level PARAMETER PRIVILEGES
+	// declaration's header (the text between "PARAMETER PRIVILEGES" and the
+	// opening '{' — always empty in valid source, since this kind has no
+	// FOR ROLE/IN SCHEMA clause) and body (the '{ }' content, braces
+	// excluded). Like DEFAULT PRIVILEGES, this bypasses PGSQLParser
+	// entirely — see ParameterPrivilegesBlock.
+	ParseParameterPrivileges(header, body string, pos SourcePos) (ParameterPrivilegesBlock, error)
 }
 
 // IRBuilder converts a (PGParseResult, BlockAST) pair into a fully-resolved
@@ -54,6 +62,13 @@ type IRBuilder interface {
 	// declaration naming TABLES, FUNCTIONS, and SEQUENCES together, per the
 	// RFC's own example, splits into three independently-diffable objects).
 	BuildDefaultPrivileges(block DefaultPrivilegesBlock) ([]IRObject, error)
+
+	// BuildParameterPrivileges converts a parsed PARAMETER PRIVILEGES
+	// declaration into its single IRObject. Unlike DEFAULT PRIVILEGES there
+	// is no per-object-type split — PostgreSQL's pg_parameter_acl catalog
+	// has one row per parameter, not per (role, schema, type) tuple, and a
+	// DPG project has at most one PARAMETER PRIVILEGES block.
+	BuildParameterPrivileges(block ParameterPrivilegesBlock) ([]IRObject, error)
 
 	// ResolveLikeClauses resolves every Table's pending `LIKE source_table`
 	// column-list entries (Section 7.1) into concrete columns/constraints,

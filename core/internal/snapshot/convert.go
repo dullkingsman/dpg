@@ -305,7 +305,7 @@ func toSnapObject(obj pipeline.IRObject) *SnapObject {
 			CollationStructured: true, CollationProvider: o.Provider,
 			CollationCollate: o.Collate, CollationCtype: o.Ctype, CollationICULocale: o.ICULocale,
 			CollationDeterministic: o.Deterministic, CollationOwner: o.Owner, CollationRules: o.Rules,
-			BodyHash:               sourceBodyHash(o.Body, o.Reconstructed), Comment: o.Comment,
+			BodyHash: sourceBodyHash(o.Body, o.Reconstructed), Comment: o.Comment,
 		}}
 	case *ir.Operator:
 		return &SnapObject{Kind: "operator", Opaque: &SnapOpaque{
@@ -391,6 +391,15 @@ func toSnapObject(obj pipeline.IRObject) *SnapObject {
 			sdp.Revocations = append(sdp.Revocations, toSnapRevocation(r))
 		}
 		return &SnapObject{Kind: "default_privileges", DefaultPrivileges: sdp}
+	case *ir.ParameterPrivileges:
+		spp := &SnapParameterPrivileges{}
+		for _, g := range o.Grants {
+			spp.Grants = append(spp.Grants, toSnapParamGrant(g))
+		}
+		for _, r := range o.Revocations {
+			spp.Revocations = append(spp.Revocations, toSnapParamRevocation(r))
+		}
+		return &SnapObject{Kind: "parameter_privileges", ParameterPrivileges: spp}
 	case *ir.VirtualType:
 		return &SnapObject{Kind: "virtual_type", VirtualType: &SnapVirtualType{
 			Schema:     o.Schema,
@@ -666,10 +675,10 @@ func toSnapPolicy(pol *ir.Policy) SnapPolicy {
 
 func toSnapTrigger(trg *ir.Trigger) SnapTrigger {
 	st := SnapTrigger{
-		Name:            trg.Name,
-		When:            trg.When,
-		Events:          strings.Join(trg.Events, ", "),
-		ForEach:         trg.ForEach,
+		Name:                trg.Name,
+		When:                trg.When,
+		Events:              strings.Join(trg.Events, ", "),
+		ForEach:             trg.ForEach,
 		UpdateOfColumns:     strings.Join(trg.UpdateOfColumns, ", "),
 		Function:            trg.Function,
 		EnableState:         trg.EnableState,
@@ -706,6 +715,25 @@ func toSnapGrant(g ir.Grant) SnapGrant {
 func toSnapRevocation(r ir.Revocation) SnapGrant {
 	return SnapGrant{
 		Privileges: r.Privileges,
+		Roles:      r.Roles,
+	}
+}
+
+func toSnapParamGrant(g ir.ParameterGrant) SnapParamGrant {
+	return SnapParamGrant{
+		Privileges: g.Privileges,
+		Parameters: g.Parameters,
+		Roles:      g.Roles,
+		WithGrant:  g.WithGrant,
+	}
+}
+
+// toSnapParamRevocation mirrors toSnapRevocation — Cascade is intentionally
+// not stored, same as that precedent.
+func toSnapParamRevocation(r ir.ParameterRevocation) SnapParamGrant {
+	return SnapParamGrant{
+		Privileges: r.Privileges,
+		Parameters: r.Parameters,
 		Roles:      r.Roles,
 	}
 }

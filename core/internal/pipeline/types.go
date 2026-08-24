@@ -63,6 +63,7 @@ const (
 	KindTSParser
 	KindTSTemplate
 	KindDefaultPrivileges
+	KindParameterPrivileges
 	KindVirtualType
 	KindMacro
 )
@@ -141,6 +142,8 @@ func (k ObjectKind) String() string {
 		return "TEXT SEARCH TEMPLATE"
 	case KindDefaultPrivileges:
 		return "DEFAULT PRIVILEGES"
+	case KindParameterPrivileges:
+		return "PARAMETER PRIVILEGES"
 	case KindVirtualType:
 		return "VIRTUAL TYPE"
 	case KindMacro:

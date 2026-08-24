@@ -115,9 +115,9 @@ type TriggerDef struct {
 	// scoped to the trigger's execution), unlike Function below.
 	OldTransitionName *string
 	NewTransitionName *string
-	Condition *RawExpr
-	Function  Identifier
-	Args      []string
+	Condition         *RawExpr
+	Function          Identifier
+	Args              []string
 	// EnableState is Section 7.9's trigger-enable-state — "DISABLED",
 	// "ENABLE REPLICA", "ENABLE ALWAYS", or "" (omitted, meaning ENABLED —
 	// PostgreSQL's own default for a newly-created trigger). Real
@@ -248,6 +248,44 @@ type DefaultPrivilegesBlock struct {
 	ForRole     *Identifier
 	Grants      []DefaultPrivilegeGrant
 	Revocations []DefaultPrivilegeRevocation
+	Pos         SourcePos
+}
+
+// ParameterGrant is one GRANTS { } entry inside a PARAMETER PRIVILEGES block
+// (RFC Section 11.6, PG15+). Unlike DefaultPrivilegeGrant, there is no
+// "ON <object-type>" clause — PostgreSQL's grantable parameter-ACL object
+// type is always PARAMETER; Parameters (the list of GUC names after
+// "ON PARAMETER") plays the role ObjectType plays there.
+type ParameterGrant struct {
+	Privileges []string // "SET" / "ALTER SYSTEM"; nil = ALL
+	Parameters []Identifier
+	Roles      []Identifier
+	WithGrant  bool
+	Pos        SourcePos
+}
+
+// ParameterRevocation is REVOCATIONS { } entry's ParameterPrivileges sibling.
+type ParameterRevocation struct {
+	Privileges []string
+	Parameters []Identifier
+	Roles      []Identifier
+	Cascade    bool
+	Pos        SourcePos
+}
+
+// ParameterPrivilegesBlock is a PARAMETER PRIVILEGES { } declaration (RFC
+// Section 11.6). A top-level, cluster-scoped singleton — configuration
+// parameters have no schema, and unlike DEFAULT PRIVILEGES there is no FOR
+// ROLE/IN SCHEMA header to split on. Real PostgreSQL's GRANT {SET|ALTER
+// SYSTEM} ON PARAMETER ... statement (confirmed live) genuinely parses via
+// pg_query as an ordinary GrantStmt, unlike ALTER DEFAULT PRIVILEGES — but
+// the DPG "PARAMETER PRIVILEGES { GRANTS { ... } }" wrapper block itself
+// still has no single native PG statement it corresponds to as a whole, so
+// it is parsed here the same bypass way as DefaultPrivilegesBlock. See
+// blockparser.Parser.ParseParameterPrivileges.
+type ParameterPrivilegesBlock struct {
+	Grants      []ParameterGrant
+	Revocations []ParameterRevocation
 	Pos         SourcePos
 }
 

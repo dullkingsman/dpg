@@ -3523,3 +3523,93 @@ func TestTypeRefStringWithoutTimeZoneModPosition(t *testing.T) {
 		t.Errorf("got %q, want %q", got, "timestamp(3) without time zone")
 	}
 }
+
+// ── ParameterPrivileges (RFC Section 11.6, PG15+) ────────────────────────────
+
+// buildParameterPrivileges mirrors buildObject but for the compiler's
+// PARAMETER PRIVILEGES bypass path (KindParameterPrivileges never goes
+// through pgparser — see compiler.Compile's identical DEFAULT PRIVILEGES
+// bypass), matching exactly what compiler.Compile itself does: parse via
+// blockparser.ParseParameterPrivileges, then build via
+// Builder.BuildParameterPrivileges.
+func buildParameterPrivileges(t *testing.T, header, body string) *ir.ParameterPrivileges {
+	t.Helper()
+	block, err := blockparser.ParseParameterPrivileges(header, body, zeroPos)
+	if err != nil {
+		t.Fatalf("ParseParameterPrivileges: %v", err)
+	}
+	builder := ir.NewBuilder()
+	objs, err := builder.BuildParameterPrivileges(block)
+	if err != nil {
+		t.Fatalf("BuildParameterPrivileges: %v", err)
+	}
+	if len(objs) != 1 {
+		t.Fatalf("expected exactly 1 IRObject, got %d", len(objs))
+	}
+	pp, ok := objs[0].(*ir.ParameterPrivileges)
+	if !ok {
+		t.Fatalf("expected *ir.ParameterPrivileges, got %T", objs[0])
+	}
+	return pp
+}
+
+// TestBuildParameterPrivileges guards the RFC's own worked example (Section
+// 11.6): a GRANTS-only block with two parameters granted together to one role.
+func TestBuildParameterPrivileges(t *testing.T) {
+	pp := buildParameterPrivileges(t, "", `
+		GRANTS {
+			SET ON PARAMETER work_mem, statement_timeout TO app_admin;
+		}
+	`)
+	if len(pp.Grants) != 1 {
+		t.Fatalf("expected 1 grant, got %d", len(pp.Grants))
+	}
+	g := pp.Grants[0]
+	if !slices.Equal(g.Privileges, []string{"SET"}) {
+		t.Errorf("Privileges: got %v", g.Privileges)
+	}
+	if !slices.Equal(g.Parameters, []string{"work_mem", "statement_timeout"}) {
+		t.Errorf("Parameters: got %v", g.Parameters)
+	}
+	if !slices.Equal(g.Roles, []string{"app_admin"}) {
+		t.Errorf("Roles: got %v", g.Roles)
+	}
+	if g.WithGrant {
+		t.Error("WithGrant should be false")
+	}
+}
+
+// TestBuildParameterPrivilegesQualifiedNameIsConstant guards that
+// ParameterPrivileges.QualifiedName is a fixed singleton key — unlike
+// DefaultPrivileges, which splits per (role, schema, object type), a DPG
+// project declares at most one PARAMETER PRIVILEGES block and
+// pg_parameter_acl has no role/schema/type dimension to key on.
+func TestBuildParameterPrivilegesQualifiedNameIsConstant(t *testing.T) {
+	pp := buildParameterPrivileges(t, "", `GRANTS { SET ON PARAMETER work_mem TO app_admin; }`)
+	if got := pp.QualifiedName(); got != "PARAMETER PRIVILEGES" {
+		t.Errorf("QualifiedName: got %q, want %q", got, "PARAMETER PRIVILEGES")
+	}
+}
+
+// TestBuildParameterPrivilegesRevocation guards Revocations conversion,
+// including Cascade.
+func TestBuildParameterPrivilegesRevocation(t *testing.T) {
+	pp := buildParameterPrivileges(t, "", `
+		REVOCATIONS {
+			ALTER SYSTEM ON PARAMETER shared_preload_libraries FROM app_readonly CASCADE;
+		}
+	`)
+	if len(pp.Revocations) != 1 {
+		t.Fatalf("expected 1 revocation, got %d", len(pp.Revocations))
+	}
+	r := pp.Revocations[0]
+	if !slices.Equal(r.Privileges, []string{"ALTER SYSTEM"}) {
+		t.Errorf("Privileges: got %v", r.Privileges)
+	}
+	if !slices.Equal(r.Parameters, []string{"shared_preload_libraries"}) {
+		t.Errorf("Parameters: got %v", r.Parameters)
+	}
+	if !r.Cascade {
+		t.Error("Cascade did not propagate")
+	}
+}

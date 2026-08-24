@@ -100,6 +100,12 @@ func (ci *CatalogIntrospector) Introspect(ctx context.Context, conn pipeline.Que
 	}
 	all = append(all, defaultPrivs...)
 
+	paramPrivs, err := introspectParameterPrivileges(ctx, conn)
+	if err != nil {
+		return nil, err
+	}
+	all = append(all, paramPrivs...)
+
 	// Reliable-tier opaque objects: reconstructed CREATE DDL, canonicalised
 	// through pg_query so the body hash matches the compiler's. See opaque.go.
 	for _, step := range []func(context.Context, pipeline.Querier) ([]pipeline.IRObject, error){
@@ -567,6 +573,40 @@ ORDER  BY r.rolname, n.nspname, d.defaclobjtype, grantee, a.privilege_type`
 		})
 	}
 	return out, nil
+}
+
+// introspectParameterPrivileges reads pg_parameter_acl (RFC Section 11.6,
+// PG15+ — pg_parameter_acl doesn't exist on older servers, hence the
+// version guard), returning a single *ir.ParameterPrivileges — PostgreSQL's
+// pg_parameter_acl has one row per parameter, with no role/schema/type
+// dimension to split multiple IRObjects on, matching
+// Builder.BuildParameterPrivileges's identical singleton model.
+// introspectSimpleGrants' addGrant callback fires once per (parameter,
+// grantee) pair, so it can't recover DPG source's own "SET ON PARAMETER a, b
+// TO role" multi-parameter grouping — dump necessarily re-expands each into
+// its own single-parameter GRANT statement, semantically equivalent but less
+// compact than hand-authored source (the same "dump doesn't reconstruct the
+// exact original syntactic shape" limitation every other simple-grant kind
+// already has).
+func introspectParameterPrivileges(ctx context.Context, conn pipeline.Querier) ([]pipeline.IRObject, error) {
+	if serverVersionNum(ctx, conn) < 150000 {
+		return nil, nil
+	}
+	pp := &ir.ParameterPrivileges{}
+	if err := introspectSimpleGrants(ctx, conn, "pg_parameter_acl", "parname", "paracl", func(name string, g ir.Grant) {
+		pp.Grants = append(pp.Grants, ir.ParameterGrant{
+			Privileges: g.Privileges,
+			Parameters: []string{name},
+			Roles:      g.Roles,
+			WithGrant:  g.WithGrant,
+		})
+	}); err != nil {
+		return nil, err
+	}
+	if len(pp.Grants) == 0 {
+		return nil, nil
+	}
+	return []pipeline.IRObject{pp}, nil
 }
 
 // ── schemas ───────────────────────────────────────────────────────────────────

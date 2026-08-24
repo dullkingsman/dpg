@@ -82,6 +82,8 @@ func kindKeyword(k pipeline.ObjectKind) string {
 		return "TEXT SEARCH TEMPLATE"
 	case pipeline.KindDefaultPrivileges:
 		return "DEFAULT PRIVILEGES"
+	case pipeline.KindParameterPrivileges:
+		return "PARAMETER PRIVILEGES"
 	default:
 		return ""
 	}

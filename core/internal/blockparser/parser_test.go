@@ -718,6 +718,130 @@ func TestParseDefaultPrivilegesTopLevelNoHeader(t *testing.T) {
 	}
 }
 
+// ── PARAMETER PRIVILEGES (RFC Section 11.6, PG15+) ──────────────────────────────
+
+// TestParseParameterPrivilegesTopLevel guards the top-level entry point used
+// by the compiler's PARAMETER PRIVILEGES bypass, mirroring
+// TestParseDefaultPrivilegesTopLevel: header text (always empty for this
+// kind — no FOR ROLE/IN SCHEMA clause) and body text are parsed from two
+// separate strings, matching raw.Part1/raw.Part2.
+func TestParseParameterPrivilegesTopLevel(t *testing.T) {
+	pp, err := blockparser.ParseParameterPrivileges(
+		"",
+		`GRANTS { SET ON PARAMETER work_mem, statement_timeout TO app_admin; }`,
+		zeroPos,
+	)
+	if err != nil {
+		t.Fatalf("ParseParameterPrivileges: %v", err)
+	}
+	if len(pp.Grants) != 1 {
+		t.Fatalf("expected 1 grant, got %d", len(pp.Grants))
+	}
+	g := pp.Grants[0]
+	if len(g.Privileges) != 1 || g.Privileges[0] != "SET" {
+		t.Errorf("Privileges: got %v", g.Privileges)
+	}
+	if len(g.Parameters) != 2 || g.Parameters[0].Name != "work_mem" || g.Parameters[1].Name != "statement_timeout" {
+		t.Errorf("Parameters: got %v", g.Parameters)
+	}
+	if len(g.Roles) != 1 || g.Roles[0].Name != "app_admin" {
+		t.Errorf("Roles: got %v", g.Roles)
+	}
+}
+
+// TestParseParameterPrivilegesNonEmptyHeaderErrors guards that a non-blank
+// header (text between "PARAMETER PRIVILEGES" and '{') is rejected —
+// unlike DEFAULT PRIVILEGES, this kind has no FOR ROLE/IN SCHEMA clause at
+// all (RFC Section 11.6: cluster-scoped, parameters have no schema).
+func TestParseParameterPrivilegesNonEmptyHeaderErrors(t *testing.T) {
+	_, err := blockparser.ParseParameterPrivileges("FOR ROLE app_admin", `GRANTS { SET ON PARAMETER work_mem TO app_admin; }`, zeroPos)
+	if err == nil {
+		t.Fatal("expected an error for a non-empty PARAMETER PRIVILEGES header")
+	}
+}
+
+// TestParameterPrivilegesAlterSystemPrivilege guards the ALTER SYSTEM
+// two-word privilege token, the one privilege of pp-privilege's four
+// alternatives that spans two words.
+func TestParameterPrivilegesAlterSystemPrivilege(t *testing.T) {
+	pp, err := blockparser.ParseParameterPrivileges(
+		"",
+		`GRANTS { ALTER SYSTEM ON PARAMETER shared_preload_libraries TO app_admin; }`,
+		zeroPos,
+	)
+	if err != nil {
+		t.Fatalf("ParseParameterPrivileges: %v", err)
+	}
+	g := pp.Grants[0]
+	if len(g.Privileges) != 1 || g.Privileges[0] != "ALTER SYSTEM" {
+		t.Errorf("Privileges: got %v", g.Privileges)
+	}
+}
+
+// TestParameterPrivilegesMultiplePrivileges guards a comma-separated
+// privilege list mixing the single-word and two-word forms.
+func TestParameterPrivilegesMultiplePrivileges(t *testing.T) {
+	pp, err := blockparser.ParseParameterPrivileges(
+		"",
+		`GRANTS { SET, ALTER SYSTEM ON PARAMETER work_mem TO app_admin; }`,
+		zeroPos,
+	)
+	if err != nil {
+		t.Fatalf("ParseParameterPrivileges: %v", err)
+	}
+	g := pp.Grants[0]
+	if len(g.Privileges) != 2 || g.Privileges[0] != "SET" || g.Privileges[1] != "ALTER SYSTEM" {
+		t.Errorf("Privileges: got %v", g.Privileges)
+	}
+}
+
+// TestParameterPrivilegesWithGrantOptionAndAllPrivileges guards WITH GRANT
+// OPTION on a grant and ALL/CASCADE on a revocation, mirroring
+// TestDefaultPrivilegesWithGrantOptionAndAllPrivileges.
+func TestParameterPrivilegesWithGrantOptionAndAllPrivileges(t *testing.T) {
+	pp, err := blockparser.ParseParameterPrivileges("", `
+		GRANTS { ALL PRIVILEGES ON PARAMETER work_mem TO app_admin WITH GRANT OPTION; }
+		REVOCATIONS { ALL ON PARAMETER work_mem FROM app_readonly CASCADE; }
+	`, zeroPos)
+	if err != nil {
+		t.Fatalf("ParseParameterPrivileges: %v", err)
+	}
+	if pp.Grants[0].Privileges != nil {
+		t.Errorf("ALL PRIVILEGES should leave Privileges nil, got %v", pp.Grants[0].Privileges)
+	}
+	if !pp.Grants[0].WithGrant {
+		t.Error("WITH GRANT OPTION did not parse")
+	}
+	if pp.Revocations[0].Privileges != nil {
+		t.Errorf("ALL should leave Privileges nil, got %v", pp.Revocations[0].Privileges)
+	}
+	if !pp.Revocations[0].Cascade {
+		t.Error("CASCADE did not parse")
+	}
+}
+
+// TestParameterPrivilegesRevocation guards a plain REVOCATIONS entry.
+func TestParameterPrivilegesRevocation(t *testing.T) {
+	pp, err := blockparser.ParseParameterPrivileges(
+		"",
+		`REVOCATIONS { SET ON PARAMETER statement_timeout FROM app_readonly; }`,
+		zeroPos,
+	)
+	if err != nil {
+		t.Fatalf("ParseParameterPrivileges: %v", err)
+	}
+	if len(pp.Revocations) != 1 {
+		t.Fatalf("expected 1 revocation, got %d", len(pp.Revocations))
+	}
+	r := pp.Revocations[0]
+	if len(r.Parameters) != 1 || r.Parameters[0].Name != "statement_timeout" {
+		t.Errorf("Parameters: got %v", r.Parameters)
+	}
+	if len(r.Roles) != 1 || r.Roles[0].Name != "app_readonly" {
+		t.Errorf("Roles: got %v", r.Roles)
+	}
+}
+
 // ── POLICIES ─────────────────────────────────────────────────────────────────
 
 func TestSimplePolicy(t *testing.T) {

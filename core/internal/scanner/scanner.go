@@ -638,6 +638,13 @@ func (s *state) detectKind(pos pipeline.SourcePos) (pipeline.ObjectKind, error) 
 		}
 		return pipeline.KindDefaultPrivileges, nil
 
+	case "PARAMETER":
+		s.skipWS()
+		if w := s.readWord(); strings.ToUpper(w) != "PRIVILEGES" {
+			return pipeline.KindUnknown, pipeline.Errorf(pos, "expected PRIVILEGES after PARAMETER, got %q", w)
+		}
+		return pipeline.KindParameterPrivileges, nil
+
 	case "VIRTUAL":
 		s.skipWS()
 		if w := s.readWord(); strings.ToUpper(w) != "TYPE" {
@@ -980,6 +987,7 @@ func KindNames() []string {
 		pipeline.KindTSParser.String(),
 		pipeline.KindTSTemplate.String(),
 		pipeline.KindDefaultPrivileges.String(),
+		pipeline.KindParameterPrivileges.String(),
 		pipeline.KindVirtualType.String(),
 	}
 	sort.Strings(names)

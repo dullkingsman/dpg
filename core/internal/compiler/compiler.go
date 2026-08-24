@@ -178,6 +178,32 @@ func Compile(files []string, dbDir string, reg *pipeline.Registry) ([]pipeline.I
 			continue
 		}
 
+		// PARAMETER PRIVILEGES never goes through PGSQLParser either — see
+		// pipeline.ParameterPrivilegesBlock. Unlike DEFAULT PRIVILEGES it is
+		// never nested inside a SCHEMA block (RFC Section 11.6: cluster-scoped,
+		// configuration parameters have no schema), so there is no raw.Schema
+		// fallback to apply here.
+		if raw.Kind == pipeline.KindParameterPrivileges {
+			ppBlock, ppErr := blockParser.ParseParameterPrivileges(raw.Part1, raw.Part2, raw.Pos)
+			if ppErr != nil {
+				if ce, ok := ppErr.(*pipeline.CompilerError); ok {
+					diags = append(diags, ce)
+					continue
+				}
+				return nil, nil, ppErr
+			}
+			objs, buildErr := irBuilder.BuildParameterPrivileges(ppBlock)
+			if buildErr != nil {
+				if ce, ok := buildErr.(*pipeline.CompilerError); ok {
+					diags = append(diags, ce)
+					continue
+				}
+				return nil, nil, buildErr
+			}
+			irObjects = append(irObjects, objs...)
+			continue
+		}
+
 		pgResult, pgErr := pgParser.Parse(raw.Kind, raw.Part1, raw.Pos)
 		pgResult.SchemaContext = raw.Schema
 		if pgErr != nil {

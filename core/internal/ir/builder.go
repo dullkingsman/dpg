@@ -2598,6 +2598,32 @@ func (b *Builder) BuildDefaultPrivileges(block pipeline.DefaultPrivilegesBlock) 
 	return objs, nil
 }
 
+// BuildParameterPrivileges converts a parsed PARAMETER PRIVILEGES block into
+// its single IRObject. See ParameterPrivileges's doc comment for why this,
+// unlike BuildDefaultPrivileges, never splits into multiple objects.
+func (b *Builder) BuildParameterPrivileges(block pipeline.ParameterPrivilegesBlock) ([]pipeline.IRObject, error) {
+	pp := &ParameterPrivileges{SrcPos: block.Pos}
+	for _, g := range block.Grants {
+		pp.Grants = append(pp.Grants, ParameterGrant{
+			Privileges: g.Privileges,
+			Parameters: identifierStrings(g.Parameters),
+			Roles:      identifierStrings(g.Roles),
+			WithGrant:  g.WithGrant,
+			Pos:        g.Pos,
+		})
+	}
+	for _, r := range block.Revocations {
+		pp.Revocations = append(pp.Revocations, ParameterRevocation{
+			Privileges: r.Privileges,
+			Parameters: identifierStrings(r.Parameters),
+			Roles:      identifierStrings(r.Roles),
+			Cascade:    r.Cascade,
+			Pos:        r.Pos,
+		})
+	}
+	return []pipeline.IRObject{pp}, nil
+}
+
 func identifierStrings(ids []pipeline.Identifier) []string {
 	if len(ids) == 0 {
 		return nil
@@ -3211,13 +3237,13 @@ func blockPolicyToIR(pol pipeline.PolicyDef) *Policy {
 
 func blockTriggerToIR(tr pipeline.TriggerDef) *Trigger {
 	t := &Trigger{
-		Name:              tr.Name.Name,
-		When:              tr.When,
-		Events:            tr.Events,
-		ForEach:           tr.ForEach,
-		UpdateOfColumns:   tr.UpdateOfColumns,
-		OldTransitionName: tr.OldTransitionName,
-		NewTransitionName: tr.NewTransitionName,
+		Name:                tr.Name.Name,
+		When:                tr.When,
+		Events:              tr.Events,
+		ForEach:             tr.ForEach,
+		UpdateOfColumns:     tr.UpdateOfColumns,
+		OldTransitionName:   tr.OldTransitionName,
+		NewTransitionName:   tr.NewTransitionName,
 		Args:                tr.Args,
 		EnableState:         tr.EnableState,
 		DependsOnExtensions: tr.DependsOnExtensions,

@@ -36,43 +36,44 @@ type ObjectKind = pipeline.ObjectKind
 
 // ObjectKind constants — one per supported PostgreSQL object type.
 const (
-	KindUnknown           = pipeline.KindUnknown
-	KindSchema            = pipeline.KindSchema
-	KindExtension         = pipeline.KindExtension
-	KindTable             = pipeline.KindTable
-	KindUnloggedTable     = pipeline.KindUnloggedTable
-	KindForeignTable      = pipeline.KindForeignTable
-	KindView              = pipeline.KindView
-	KindMaterializedView  = pipeline.KindMaterializedView
-	KindRecursiveView     = pipeline.KindRecursiveView
-	KindFunction          = pipeline.KindFunction
-	KindProcedure         = pipeline.KindProcedure
-	KindAggregate         = pipeline.KindAggregate
-	KindEnum              = pipeline.KindEnum
-	KindCompositeType     = pipeline.KindCompositeType
-	KindRangeType         = pipeline.KindRangeType
-	KindDomainType        = pipeline.KindDomainType
-	KindBaseType          = pipeline.KindBaseType
-	KindSequence          = pipeline.KindSequence
-	KindRole              = pipeline.KindRole
-	KindTablespace        = pipeline.KindTablespace
-	KindFDW               = pipeline.KindFDW
-	KindServer            = pipeline.KindServer
-	KindUserMapping       = pipeline.KindUserMapping
-	KindPublication       = pipeline.KindPublication
-	KindSubscription      = pipeline.KindSubscription
-	KindEventTrigger      = pipeline.KindEventTrigger
-	KindCollation         = pipeline.KindCollation
-	KindOperator          = pipeline.KindOperator
-	KindOperatorClass     = pipeline.KindOperatorClass
-	KindOperatorFamily    = pipeline.KindOperatorFamily
-	KindCast              = pipeline.KindCast
-	KindStatisticsObject  = pipeline.KindStatisticsObject
-	KindTSConfig          = pipeline.KindTSConfig
-	KindTSDict            = pipeline.KindTSDict
-	KindTSParser          = pipeline.KindTSParser
-	KindTSTemplate        = pipeline.KindTSTemplate
-	KindDefaultPrivileges = pipeline.KindDefaultPrivileges
+	KindUnknown             = pipeline.KindUnknown
+	KindSchema              = pipeline.KindSchema
+	KindExtension           = pipeline.KindExtension
+	KindTable               = pipeline.KindTable
+	KindUnloggedTable       = pipeline.KindUnloggedTable
+	KindForeignTable        = pipeline.KindForeignTable
+	KindView                = pipeline.KindView
+	KindMaterializedView    = pipeline.KindMaterializedView
+	KindRecursiveView       = pipeline.KindRecursiveView
+	KindFunction            = pipeline.KindFunction
+	KindProcedure           = pipeline.KindProcedure
+	KindAggregate           = pipeline.KindAggregate
+	KindEnum                = pipeline.KindEnum
+	KindCompositeType       = pipeline.KindCompositeType
+	KindRangeType           = pipeline.KindRangeType
+	KindDomainType          = pipeline.KindDomainType
+	KindBaseType            = pipeline.KindBaseType
+	KindSequence            = pipeline.KindSequence
+	KindRole                = pipeline.KindRole
+	KindTablespace          = pipeline.KindTablespace
+	KindFDW                 = pipeline.KindFDW
+	KindServer              = pipeline.KindServer
+	KindUserMapping         = pipeline.KindUserMapping
+	KindPublication         = pipeline.KindPublication
+	KindSubscription        = pipeline.KindSubscription
+	KindEventTrigger        = pipeline.KindEventTrigger
+	KindCollation           = pipeline.KindCollation
+	KindOperator            = pipeline.KindOperator
+	KindOperatorClass       = pipeline.KindOperatorClass
+	KindOperatorFamily      = pipeline.KindOperatorFamily
+	KindCast                = pipeline.KindCast
+	KindStatisticsObject    = pipeline.KindStatisticsObject
+	KindTSConfig            = pipeline.KindTSConfig
+	KindTSDict              = pipeline.KindTSDict
+	KindTSParser            = pipeline.KindTSParser
+	KindTSTemplate          = pipeline.KindTSTemplate
+	KindDefaultPrivileges   = pipeline.KindDefaultPrivileges
+	KindParameterPrivileges = pipeline.KindParameterPrivileges
 )
 
 // ── Concrete IR object types ──────────────────────────────────────────────────
@@ -178,6 +179,10 @@ type TSTemplate = ir.TSTemplate
 // DefaultPrivileges is a compiled DEFAULT PRIVILEGES declaration (ALTER
 // DEFAULT PRIVILEGES FOR ROLE ...).
 type DefaultPrivileges = ir.DefaultPrivileges
+
+// ParameterPrivileges is a compiled PARAMETER PRIVILEGES declaration (RFC
+// Section 11.6, PG15+ — GRANT {SET|ALTER SYSTEM} ON PARAMETER ...).
+type ParameterPrivileges = ir.ParameterPrivileges
 
 // VirtualType is a VIRTUAL TYPE declaration — a DPG-native type annotation
 // with no backing PostgreSQL DDL. It is stored in the snapshot for downstream

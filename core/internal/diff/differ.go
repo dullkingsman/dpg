@@ -1174,6 +1174,13 @@ func dropObject(so *snapshot.SnapObject) []pipeline.DiffOp {
 			}
 			return ops
 		}
+	case "parameter_privileges":
+		// Unlike default_privileges (whose drop handler revokes every
+		// grant), removing the entire PARAMETER PRIVILEGES declaration is
+		// just the union of removing each of its individual grant
+		// declarations — the additive model's "emits nothing" applies the
+		// same way here (see diffParameterPrivileges' doc comment).
+		return nil
 	case "virtual_type":
 		// Virtual types have no SQL backing — nothing to drop.
 		return nil
@@ -1302,6 +1309,8 @@ func createObject(obj pipeline.IRObject, vtypes map[string]string) ([]pipeline.D
 		return appendCommentOp(ops, err, "ts_template", o.Schema, o.Name, "", "", o.Comment, o.SrcPos)
 	case *ir.DefaultPrivileges:
 		return createDefaultPrivileges(o), nil
+	case *ir.ParameterPrivileges:
+		return createParameterPrivileges(o), nil
 	case *ir.VirtualType:
 		// Virtual types exist in the snapshot for downstream consumers but
 		// generate no SQL — they have no backing PostgreSQL object.
@@ -2767,6 +2776,130 @@ func diffDefaultPrivileges(o *ir.DefaultPrivileges, snap *snapshot.SnapDefaultPr
 	return ops
 }
 
+// paramList quotes/joins a PARAMETER PRIVILEGES parameter-name list. Unlike
+// roleList, parameter names are GUC names (not SQL identifiers to be
+// escaped) — real PostgreSQL's GRANT ... ON PARAMETER grammar takes them as
+// plain name tokens, dotted namespaced GUCs (e.g.
+// "pg_stat_statements.max") included.
+func paramList(params []string) string {
+	return strings.Join(params, ", ")
+}
+
+// paramGrantKey extends grantKey with a sorted parameter list. Every other
+// use of grantKey compares grants scoped to one implicit "on" object (a
+// single table, or one DefaultPrivileges' fixed ObjectType); PARAMETER
+// PRIVILEGES has no such implicit scope — each grant entry carries its own
+// parameter list — so that list is part of the entry's identity here.
+func paramGrantKey(privs, params, roles []string, withGrant bool) string {
+	p := append([]string(nil), params...)
+	sort.Strings(p)
+	return grantKey(privs, roles, withGrant) + "|" + strings.Join(p, ",")
+}
+
+// createParameterPrivileges emits GRANT/REVOKE ops for a brand-new PARAMETER
+// PRIVILEGES declaration (RFC Section 11.6, PG15+). Safety SAFE for both
+// directions per the RFC — this is metadata governing who may run a command,
+// not an object with data of its own.
+func createParameterPrivileges(o *ir.ParameterPrivileges) []pipeline.DiffOp {
+	var ops []pipeline.DiffOp
+	pos := o.SrcPos
+	for _, g := range o.Grants {
+		sql := fmt.Sprintf("GRANT %s ON PARAMETER %s TO %s",
+			privStr(g.Privileges), paramList(g.Parameters), roleList(g.Roles))
+		if g.WithGrant {
+			sql += " WITH GRANT OPTION"
+		}
+		ops = append(ops, safeOp(sql+";", pos))
+	}
+	for _, r := range o.Revocations {
+		cascade := ""
+		if r.Cascade {
+			cascade = " CASCADE"
+		}
+		sql := fmt.Sprintf("REVOKE %s ON PARAMETER %s FROM %s%s",
+			privStr(r.Privileges), paramList(r.Parameters), roleList(r.Roles), cascade)
+		ops = append(ops, safeOp(sql+";", pos))
+	}
+	return ops
+}
+
+// diffParameterPrivileges diffs a PARAMETER PRIVILEGES declaration against
+// its snapshot. Unlike diffGrantSet/diffDefaultPrivileges (which, per RFC
+// audit item #25, emit an implicit REVOKE — cautionOp — when a grant is
+// removed from desired), PARAMETER PRIVILEGES follows RFC Section 11.6's
+// literal text: "removing the declaration emits nothing (an explicit
+// REVOCATIONS { } entry is required to actually REVOKE)". This is a
+// deliberate departure from the other grant kinds' current behavior, not an
+// oversight — Section 11.6 restates Section 11.2's original "emits nothing"
+// model verbatim for this brand-new kind, so it is implemented as written
+// here rather than silently inheriting #25's since-diverged precedent.
+// Explicit revocations are still tracked as persistent declarations exactly
+// like diffDefaultPrivileges' revocation-diffing (RFC Section 11.3).
+func diffParameterPrivileges(o *ir.ParameterPrivileges, snap *snapshot.SnapParameterPrivileges) []pipeline.DiffOp {
+	var ops []pipeline.DiffOp
+	pos := o.SrcPos
+
+	snapGrantsByKey := make(map[string]snapshot.SnapParamGrant, len(snap.Grants))
+	for _, g := range snap.Grants {
+		snapGrantsByKey[paramGrantKey(g.Privileges, g.Parameters, g.Roles, g.WithGrant)] = g
+	}
+	desiredGrantsByKey := make(map[string]ir.ParameterGrant, len(o.Grants))
+	for _, g := range o.Grants {
+		desiredGrantsByKey[paramGrantKey(g.Privileges, g.Parameters, g.Roles, g.WithGrant)] = g
+	}
+
+	// No pass over snapGrantsByKey for "removed from desired" here — the
+	// additive model's deliberate no-op (RFC Section 11.6/11.2): DPG only
+	// ensures declared grants are present, it never revokes one just because
+	// its declaration was deleted.
+	for k, g := range desiredGrantsByKey {
+		if _, ok := snapGrantsByKey[k]; !ok {
+			sql := fmt.Sprintf("GRANT %s ON PARAMETER %s TO %s",
+				privStr(g.Privileges), paramList(g.Parameters), roleList(g.Roles))
+			if g.WithGrant {
+				sql += " WITH GRANT OPTION"
+			}
+			ops = append(ops, safeOp(sql+";", pos))
+		}
+	}
+
+	// Diff explicit revocations.
+	snapRevsByKey := make(map[string]snapshot.SnapParamGrant, len(snap.Revocations))
+	for _, r := range snap.Revocations {
+		snapRevsByKey[paramGrantKey(r.Privileges, r.Parameters, r.Roles, false)] = r
+	}
+	desiredRevsByKey := make(map[string]ir.ParameterRevocation, len(o.Revocations))
+	for _, r := range o.Revocations {
+		desiredRevsByKey[paramGrantKey(r.Privileges, r.Parameters, r.Roles, false)] = r
+	}
+
+	for k, sr := range snapRevsByKey {
+		if _, ok := desiredRevsByKey[k]; !ok {
+			// Revocation removed from desired: re-grant to restore.
+			ops = append(ops, safeOp(
+				fmt.Sprintf("GRANT %s ON PARAMETER %s TO %s;",
+					privStr(sr.Privileges), paramList(sr.Parameters), roleList(sr.Roles)),
+				pos,
+			))
+		}
+	}
+	for k, r := range desiredRevsByKey {
+		if _, ok := snapRevsByKey[k]; !ok {
+			cascade := ""
+			if r.Cascade {
+				cascade = " CASCADE"
+			}
+			ops = append(ops, cautionOp(
+				fmt.Sprintf("REVOKE %s ON PARAMETER %s FROM %s%s;",
+					privStr(r.Privileges), paramList(r.Parameters), roleList(r.Roles), cascade),
+				pos,
+			))
+		}
+	}
+
+	return ops
+}
+
 // buildDefaultPrivPrefix builds the "ALTER DEFAULT PRIVILEGES [FOR ROLE x] [IN SCHEMA y]" prefix.
 func buildDefaultPrivPrefix(forRole, inSchema *string) string {
 	var b strings.Builder
@@ -4138,6 +4271,11 @@ func diffObject(desired pipeline.IRObject, snap *snapshot.SnapObject, fullSnap *
 			return nil, nil
 		}
 		return diffDefaultPrivileges(o, snap.DefaultPrivileges), nil
+	case *ir.ParameterPrivileges:
+		if snap.ParameterPrivileges == nil {
+			return nil, nil
+		}
+		return diffParameterPrivileges(o, snap.ParameterPrivileges), nil
 	case *ir.VirtualType:
 		// Virtual types are DPG-only annotations; no SQL is generated on change.
 		return nil, nil
