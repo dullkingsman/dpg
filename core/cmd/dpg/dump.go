@@ -939,7 +939,14 @@ func renderObjectDPG(b *strings.Builder, obj pipeline.IRObject, fmtOpts format.O
 			if i > 0 {
 				b.WriteString(", ")
 			}
-			fmt.Fprintf(b, "%s = %s", kw(strings.ToUpper(p.Key)), p.Value)
+			if p.Value == "" {
+				// RFC audit item #29: FINALFUNC_EXTRA/MFINALFUNC_EXTRA/
+				// HYPOTHETICAL are bare presence flags with no "= value"
+				// part — see buildAggregateOptions' identical doc comment.
+				b.WriteString(kw(strings.ToUpper(p.Key)))
+			} else {
+				fmt.Fprintf(b, "%s = %s", kw(strings.ToUpper(p.Key)), p.Value)
+			}
 		}
 		b.WriteString(")")
 		writeFuncBlockWithOwnerAndLabels(b, ind, fmtOpts, o.Owner, o.Comment, o.Grants, o.Revocations, o.SecurityLabels)

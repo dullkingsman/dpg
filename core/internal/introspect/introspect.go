@@ -133,6 +133,34 @@ func (ci *CatalogIntrospector) Introspect(ctx context.Context, conn pipeline.Que
 
 // ── aggregates ────────────────────────────────────────────────────────────────
 
+// aggModifyModeKeyword maps pg_aggregate's aggfinalmodify/aggmfinalmodify
+// "char" catalog encoding to the RFC's modify-mode keyword (Section 9.4) —
+// confirmed live: 'r' (the RFC's own default, READ_ONLY) is what a plain
+// aggregate with no FINALFUNC_MODIFY declared reports.
+func aggModifyModeKeyword(c string) string {
+	switch c {
+	case "s":
+		return "SHAREABLE"
+	case "w":
+		return "READ_WRITE"
+	default:
+		return "READ_ONLY"
+	}
+}
+
+// introspectAggregates reads every real CREATE AGGREGATE option (RFC audit
+// item #29) from pg_aggregate, not just the six originally handled here
+// (SFUNC/STYPE/INITCOND/FINALFUNC/COMBINEFUNC/SERIALFUNC) — every other
+// field is only surfaced when it differs from PostgreSQL's own default (all
+// confirmed live, not assumed), matching the "don't render noise"
+// convention already used for function COST/ROWS. HYPOTHETICAL aggregates
+// (aggkind = 'h', confirmed live via the built-in `rank`/`dense_rank`
+// hypothetical-set aggregates) are a distinct, separate PostgreSQL grammar
+// form (direct-args ORDER BY agg-args) that ir.Aggregate.Args doesn't model
+// at all — a pre-existing gap, out of this fix's scope — so HYPOTHETICAL's
+// bare flag is still surfaced here for round-trip completeness on the
+// option itself, but reconstructing such an aggregate's full declaration
+// may remain incomplete for that separate reason.
 func introspectAggregates(ctx context.Context, conn pipeline.Querier) ([]pipeline.IRObject, error) {
 	const q = `
 SELECT n.nspname, p.proname,
@@ -145,11 +173,27 @@ SELECT n.nspname, p.proname,
        NULLIF(a.aggfinalfn::text, '-')   AS finalfunc,
        NULLIF(a.aggcombinefn::text, '-') AS combinefunc,
        NULLIF(a.aggserialfn::text, '-')  AS serialfunc,
+       NULLIF(a.aggdeserialfn::text, '-')  AS deserialfunc,
+       NULLIF(a.aggmtransfn::text, '-')    AS msfunc,
+       NULLIF(a.aggminvtransfn::text, '-') AS minvfunc,
+       NULLIF(a.aggmtranstype::regtype::text, '-') AS mstype,
+       NULLIF(a.aggmfinalfn::text, '-')    AS mfinalfunc,
+       a.aggminitval                       AS minitcond,
+       a.aggkind::text                     AS aggkind,
+       a.aggfinalextra,
+       a.aggmfinalextra,
+       a.aggfinalmodify::text  AS finalmodify,
+       a.aggmfinalmodify::text AS mfinalmodify,
+       a.aggtransspace,
+       a.aggmtransspace,
+       o.oprname AS sortop,
+       CASE p.proparallel WHEN 'r' THEN 'RESTRICTED' WHEN 's' THEN 'SAFE' ELSE 'UNSAFE' END AS parallel,
        r.rolname                         AS owner
 FROM   pg_proc p
 JOIN   pg_namespace n ON n.oid = p.pronamespace
 JOIN   pg_aggregate a ON a.aggfnoid = p.oid
 JOIN   pg_roles r ON r.oid = p.proowner
+LEFT JOIN pg_operator o ON o.oid = a.aggsortop
 WHERE  p.prokind = 'a'
 AND    n.nspname NOT IN ('pg_catalog','information_schema','pg_toast')
 AND    NOT EXISTS (SELECT 1 FROM pg_depend d WHERE d.classid = 'pg_proc'::regclass AND d.objid = p.oid AND d.deptype = 'e')
@@ -164,10 +208,15 @@ ORDER  BY n.nspname, p.proname, args`
 	aggIdx := make(map[string]*ir.Aggregate)
 	var out []pipeline.IRObject
 	for rs.Next() {
-		var schema, name, args, argTypes, sfunc, stype, owner string
-		var comment, initcond, finalfunc, combinefunc, serialfunc *string
+		var schema, name, args, argTypes, sfunc, stype, aggkind, finalmodify, mfinalmodify, parallel, owner string
+		var comment, initcond, finalfunc, combinefunc, serialfunc, deserialfunc, msfunc, minvfunc, mstype, mfinalfunc, minitcond, sortop *string
+		var finalextra, mfinalextra bool
+		var transspace, mtransspace int
 		if err := rs.Scan(&schema, &name, &args, &argTypes, &comment,
-			&sfunc, &stype, &initcond, &finalfunc, &combinefunc, &serialfunc, &owner); err != nil {
+			&sfunc, &stype, &initcond, &finalfunc, &combinefunc, &serialfunc,
+			&deserialfunc, &msfunc, &minvfunc, &mstype, &mfinalfunc, &minitcond,
+			&aggkind, &finalextra, &mfinalextra, &finalmodify, &mfinalmodify,
+			&transspace, &mtransspace, &sortop, &parallel, &owner); err != nil {
 			return nil, err
 		}
 		agg := &ir.Aggregate{
@@ -191,15 +240,64 @@ ORDER  BY n.nspname, p.proname, args`
 		if finalfunc != nil {
 			agg.Options = append(agg.Options, pipeline.StorageParam{Key: "finalfunc", Value: *finalfunc})
 		}
+		if finalextra {
+			agg.Options = append(agg.Options, pipeline.StorageParam{Key: "finalfunc_extra"})
+		}
+		if finalmodify != "r" {
+			agg.Options = append(agg.Options, pipeline.StorageParam{Key: "finalfunc_modify", Value: aggModifyModeKeyword(finalmodify)})
+		}
 		if combinefunc != nil {
 			agg.Options = append(agg.Options, pipeline.StorageParam{Key: "combinefunc", Value: *combinefunc})
 		}
 		if serialfunc != nil {
 			agg.Options = append(agg.Options, pipeline.StorageParam{Key: "serialfunc", Value: *serialfunc})
 		}
+		if deserialfunc != nil {
+			agg.Options = append(agg.Options, pipeline.StorageParam{Key: "deserialfunc", Value: *deserialfunc})
+		}
+		if transspace != 0 {
+			agg.Options = append(agg.Options, pipeline.StorageParam{Key: "sspace", Value: fmt.Sprintf("%d", transspace)})
+		}
+		if msfunc != nil {
+			agg.Options = append(agg.Options, pipeline.StorageParam{Key: "msfunc", Value: *msfunc})
+		}
+		if minvfunc != nil {
+			agg.Options = append(agg.Options, pipeline.StorageParam{Key: "minvfunc", Value: *minvfunc})
+		}
+		if mstype != nil {
+			agg.Options = append(agg.Options, pipeline.StorageParam{Key: "mstype", Value: *mstype})
+		}
+		if mtransspace != 0 {
+			agg.Options = append(agg.Options, pipeline.StorageParam{Key: "msspace", Value: fmt.Sprintf("%d", mtransspace)})
+		}
+		if mfinalfunc != nil {
+			agg.Options = append(agg.Options, pipeline.StorageParam{Key: "mfinalfunc", Value: *mfinalfunc})
+		}
+		if mfinalextra {
+			agg.Options = append(agg.Options, pipeline.StorageParam{Key: "mfinalfunc_extra"})
+		}
+		if mfinalmodify != "r" {
+			agg.Options = append(agg.Options, pipeline.StorageParam{Key: "mfinalfunc_modify", Value: aggModifyModeKeyword(mfinalmodify)})
+		}
+		if minitcond != nil {
+			agg.Options = append(agg.Options, pipeline.StorageParam{Key: "minitcond", Value: quoteLit(*minitcond)})
+		}
+		if sortop != nil {
+			agg.Options = append(agg.Options, pipeline.StorageParam{Key: "sortop", Value: *sortop})
+		}
+		if parallel != "UNSAFE" {
+			agg.Options = append(agg.Options, pipeline.StorageParam{Key: "parallel", Value: parallel})
+		}
+		if aggkind == "h" {
+			agg.Options = append(agg.Options, pipeline.StorageParam{Key: "hypothetical"})
+		}
 		optParts := make([]string, len(agg.Options))
 		for i, p := range agg.Options {
-			optParts[i] = p.Key + " = " + p.Value
+			if p.Value == "" {
+				optParts[i] = strings.ToUpper(p.Key)
+			} else {
+				optParts[i] = p.Key + " = " + p.Value
+			}
 		}
 		argParts := make([]string, len(agg.Args))
 		for i, a := range agg.Args {

@@ -862,7 +862,19 @@ func buildAggregateOptions(definition []*pg_query.Node) []pipeline.StorageParam 
 	var params []pipeline.StorageParam
 	for _, opt := range definition {
 		de := opt.GetDefElem()
-		if de == nil || de.Arg == nil {
+		if de == nil {
+			continue
+		}
+		if de.Arg == nil {
+			// RFC audit item #29: FINALFUNC_EXTRA/MFINALFUNC_EXTRA/
+			// HYPOTHETICAL are bare presence flags with no "= value" part
+			// (confirmed via pg_query.Parse probe: their DefElem.Arg is
+			// nil) — previously silently dropped here entirely, which both
+			// hid a change to any of them from diffAggregate's structured
+			// comparison (undetected drift, since real PostgreSQL's
+			// ALTER AGGREGATE has no in-place path for them either) and
+			// made dpg dump discard them from the regenerated declaration.
+			params = append(params, pipeline.StorageParam{Key: de.Defname})
 			continue
 		}
 		var val string

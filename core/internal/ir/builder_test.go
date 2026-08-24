@@ -1051,6 +1051,32 @@ func TestBuildProcedureOwner(t *testing.T) {
 	}
 }
 
+// TestBuildAggregateBareFlagOptions guards RFC audit item #29:
+// FINALFUNC_EXTRA/MFINALFUNC_EXTRA/HYPOTHETICAL are bare presence flags with
+// no "= value" part — buildAggregateOptions previously required a non-nil
+// DefElem.Arg for every option, silently dropping all three (a real
+// data-loss bug on both diffing and dpg dump, not just an omission).
+func TestBuildAggregateBareFlagOptions(t *testing.T) {
+	obj := buildObject(t, pipeline.KindAggregate,
+		`myrank (numeric) (SFUNC = numeric_add, STYPE = numeric, FINALFUNC_EXTRA, HYPOTHETICAL, PARALLEL = SAFE)`,
+		``,
+	)
+	agg := obj.(*ir.Aggregate)
+	keys := make(map[string]string, len(agg.Options))
+	for _, p := range agg.Options {
+		keys[p.Key] = p.Value
+	}
+	if v, ok := keys["finalfunc_extra"]; !ok || v != "" {
+		t.Errorf("expected finalfunc_extra present with empty value, got ok=%v value=%q, options=%v", ok, v, agg.Options)
+	}
+	if v, ok := keys["hypothetical"]; !ok || v != "" {
+		t.Errorf("expected hypothetical present with empty value, got ok=%v value=%q, options=%v", ok, v, agg.Options)
+	}
+	if v, ok := keys["parallel"]; !ok || v != "safe" {
+		t.Errorf("expected parallel = safe, got ok=%v value=%q, options=%v", ok, v, agg.Options)
+	}
+}
+
 // TestBuildAggregateOwner is TestBuildFunctionOwner's AGGREGATE counterpart.
 func TestBuildAggregateOwner(t *testing.T) {
 	obj := buildObject(t, pipeline.KindAggregate,

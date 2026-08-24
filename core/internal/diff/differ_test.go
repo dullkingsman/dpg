@@ -12500,6 +12500,42 @@ func TestDiffCreateAggregateEmitsDeprecatedComment(t *testing.T) {
 
 // TestDiffAggregateOwnerChanged guards RFC audit item #70: Aggregate had no
 // Owner field at all.
+// TestDiffAggregateBareFlagOptionChangeRecreates guards RFC audit item #29:
+// FINALFUNC_EXTRA/MFINALFUNC_EXTRA/HYPOTHETICAL are bare presence flags —
+// before the buildAggregateOptions fix, they never reached o.Options at
+// all, so adding/removing one was completely undetected drift here too
+// (not merely an unoptimized DROP+CREATE — real PostgreSQL has no in-place
+// ALTER for any agg-option).
+func TestDiffAggregateBareFlagOptionChangeRecreates(t *testing.T) {
+	d := New()
+	options := []pipeline.StorageParam{{Key: "sfunc", Value: "numeric_add"}, {Key: "stype", Value: "numeric"}}
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.amount_sum(numeric)", &snapshot.SnapObject{
+		Kind: "aggregate",
+		Opaque: &snapshot.SnapOpaque{
+			Kind: "aggregate", Schema: "public", Name: "amount_sum", Args: "numeric",
+			AggregateOptionsStructured: true,
+			AggregateOptions:           toComparableOptions(options, false),
+		},
+	})
+	desiredOptions := append(append([]pipeline.StorageParam{}, options...), pipeline.StorageParam{Key: "finalfunc_extra"})
+	desired := []pipeline.IRObject{
+		&ir.Aggregate{
+			Schema: "public", Name: "amount_sum",
+			Args:    []ir.FuncArg{{Type: ir.TypeRef{Name: "numeric"}}},
+			Body:    "CREATE AGGREGATE public.amount_sum (numeric) (SFUNC = numeric_add, STYPE = numeric, FINALFUNC_EXTRA)",
+			Options: desiredOptions,
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsSQL(ops, `DROP AGGREGATE IF EXISTS "public"."amount_sum"(numeric);`) {
+		t.Errorf("expected a bare-flag-only option change to be detected as a DROP+CREATE (bug #29 regressed: undetected drift), got: %v", sqlList(ops))
+	}
+}
+
 func TestDiffAggregateOwnerChanged(t *testing.T) {
 	d := New()
 	options := []pipeline.StorageParam{{Key: "SFUNC", Value: "numeric_add"}, {Key: "STYPE", Value: "numeric"}}
