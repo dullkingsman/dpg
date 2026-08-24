@@ -460,6 +460,18 @@ func (b *blockParser) parseBlock(pos pipeline.SourcePos) (pipeline.BlockAST, err
 			ast.ReplicaIdentity, err = b.parseReplicaIdentity(dirPos)
 		case "CLUSTER":
 			ast.ClusterOn, err = b.parseClusterOn(dirPos)
+		case "REFRESH":
+			// RFC audit item #84: Collation-only REFRESH VERSION, a bare
+			// presence keyword with no argument.
+			b.skipWS()
+			c := b.cur()
+			w2 := strings.ToUpper(b.readWord())
+			if w2 != "VERSION" {
+				b.restore(c)
+				return ast, b.errorf("expected VERSION after REFRESH, got %q", w2)
+			}
+			ast.RefreshVersion = true
+			err = b.expectSemi()
 		case "INDICES":
 			var indices []pipeline.IndexDef
 			indices, err = b.parseIndices(dirPos)

@@ -52,6 +52,17 @@ func manualOp(sql string, pos pipeline.SourcePos) *op {
 	return &op{sql: sql, safety: pipeline.Manual, pos: pos, txn: false}
 }
 
+// manualTransactionalOp is Manual-safety (flags the statement for human
+// attention in plan/apply output) without manualOp's non-transactional
+// execution, which is a separate concern (statements PostgreSQL itself
+// refuses to run inside a transaction block, like CREATE TABLESPACE or
+// CREATE INDEX CONCURRENTLY). ALTER SEQUENCE RESTART has no such
+// restriction — treating it as non-transactional would let it commit and
+// persist even if the rest of the migration rolls back on a later failure.
+func manualTransactionalOp(sql string, pos pipeline.SourcePos) *op {
+	return &op{sql: sql, safety: pipeline.Manual, pos: pos, txn: true}
+}
+
 // wrapCreateWithOwner wraps createOp in SET ROLE/RESET ROLE when owner is
 // declared (RFC §11.5, audit item #28). PostgreSQL attributes default-
 // privilege eligibility (§11.4) to whichever role actually executed CREATE,
@@ -1212,7 +1223,11 @@ func createObject(obj pipeline.IRObject, vtypes map[string]string) ([]pipeline.D
 		return appendSecurityLabelOps(ops, err, "event_trigger", "", o.Name, "", "", o.SecurityLabels, o.SrcPos)
 	case *ir.Collation:
 		ops, err := createOpaque(o.QualifiedName(), o.Body, "COLLATION", o.Schema, o.SrcPos)
-		return appendCommentOp(ops, err, "collation", o.Schema, o.Name, "", "", o.Comment, o.SrcPos)
+		ops, err = appendCommentOp(ops, err, "collation", o.Schema, o.Name, "", "", o.Comment, o.SrcPos)
+		if err == nil && o.RefreshVersion {
+			ops = append(ops, collationRefreshVersionOp(o))
+		}
+		return ops, err
 	case *ir.Operator:
 		ops, err := createOpaque(o.QualifiedName(), o.Body, "OPERATOR", o.Schema, o.SrcPos)
 		return appendCommentOp(ops, err, "operator", o.Schema, o.Name, ir.OperandsKey(o.LeftType, o.RightType), "", o.Comment, o.SrcPos)
@@ -1989,6 +2004,18 @@ func diffStatisticsObject(o *ir.StatisticsObject, snap *snapshot.SnapOpaque) ([]
 	return ops, nil
 }
 
+// collationRefreshVersionOp builds the imperative, non-persisted REFRESH
+// VERSION op — see ir.Collation.RefreshVersion's doc comment. Manual but
+// transactional, same reasoning as sequenceRestartOp: real PostgreSQL's
+// ALTER COLLATION ... REFRESH VERSION has no restriction against running
+// inside a transaction.
+func collationRefreshVersionOp(o *ir.Collation) pipeline.DiffOp {
+	return manualTransactionalOp(
+		fmt.Sprintf("ALTER COLLATION %s REFRESH VERSION;", qualIdent(o.Schema, o.Name)),
+		o.SrcPos,
+	)
+}
+
 func diffCollation(o *ir.Collation, snap *snapshot.SnapOpaque) ([]pipeline.DiffOp, error) {
 	pos := o.SrcPos
 	ident := qualIdent(o.Schema, o.Name)
@@ -2023,6 +2050,9 @@ func diffCollation(o *ir.Collation, snap *snapshot.SnapOpaque) ([]pipeline.DiffO
 				ops = append(ops, safeOp(sql, pos))
 			}
 		}
+		if o.RefreshVersion {
+			ops = append(ops, collationRefreshVersionOp(o))
+		}
 		if len(ops) == 0 {
 			ops = append(ops, safeOp(fmt.Sprintf("-- refresh snapshot metadata for collation %s", ident), pos))
 		}
@@ -2037,13 +2067,20 @@ func diffCollation(o *ir.Collation, snap *snapshot.SnapOpaque) ([]pipeline.DiffO
 			return nil, err
 		}
 		ops = append(ops, createOps...)
-		return appendCommentOp(ops, nil, "collation", o.Schema, o.Name, "", "", o.Comment, pos)
+		ops, err = appendCommentOp(ops, nil, "collation", o.Schema, o.Name, "", "", o.Comment, pos)
+		if err == nil && o.RefreshVersion {
+			ops = append(ops, collationRefreshVersionOp(o))
+		}
+		return ops, err
 	}
 	ops := renameOps
 	if !ptrEq(o.Comment, snap.Comment) {
 		if sql := commentOnOpaqueSQL("collation", o.Schema, o.Name, "", "", o.Comment); sql != "" {
 			ops = append(ops, safeOp(sql, pos))
 		}
+	}
+	if o.RefreshVersion {
+		ops = append(ops, collationRefreshVersionOp(o))
 	}
 	return ops, nil
 }
@@ -3666,7 +3703,22 @@ func createSequence(o *ir.Sequence) []pipeline.DiffOp {
 		ops = append(ops, explicitRevokeOp(r, "SEQUENCE "+ident, o.SrcPos))
 	}
 	ops = append(ops, createSecurityLabelOps(o.SecurityLabels, "SEQUENCE "+ident, o.SrcPos)...)
+	if o.Restart {
+		ops = append(ops, sequenceRestartOp(ident, o))
+	}
 	return ops
+}
+
+// sequenceRestartOp builds the imperative, non-persisted RESTART op — see
+// Sequence.Restart's doc comment. Manual since it's a one-shot action
+// PostgreSQL itself recommends removing from source after applying, not a
+// steady-state property like every other sequence option.
+func sequenceRestartOp(ident string, o *ir.Sequence) pipeline.DiffOp {
+	sql := fmt.Sprintf("ALTER SEQUENCE %s RESTART", ident)
+	if o.RestartWith != nil {
+		sql += fmt.Sprintf(" WITH %d", *o.RestartWith)
+	}
+	return manualTransactionalOp(sql+";", o.SrcPos)
 }
 
 // writeSeqParams appends explicit sequence parameters to b for any non-nil fields.
@@ -4799,6 +4851,13 @@ func diffSequence(o *ir.Sequence, snap *snapshot.SnapSequence) []pipeline.DiffOp
 	ops = append(ops, diffGrantSet(snap.Grants, o.Grants, "SEQUENCE "+ident, pos)...)
 	ops = append(ops, diffRevocationSet(snap.Revocations, o.Revocations, "SEQUENCE "+ident, pos)...)
 	ops = append(ops, diffSecurityLabelSet(snap.SecurityLabels, o.SecurityLabels, "SEQUENCE "+ident, pos)...)
+	if o.Restart {
+		// Unconditional, every plan/apply while declared — see
+		// Sequence.Restart's doc comment. Not gated on any snapshot
+		// comparison, deliberately: there is no persisted "current RESTART
+		// value" to compare against.
+		ops = append(ops, sequenceRestartOp(ident, o))
+	}
 	return ops
 }
 

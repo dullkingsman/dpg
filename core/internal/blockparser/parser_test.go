@@ -142,6 +142,28 @@ func TestClusterOn(t *testing.T) {
 	}
 }
 
+// TestRefreshVersion guards RFC audit item #84: Collation's REFRESH VERSION
+// block directive, a bare presence keyword with no argument.
+func TestRefreshVersion(t *testing.T) {
+	ast := parse(t, `REFRESH VERSION;`)
+	if !ast.RefreshVersion {
+		t.Fatal("expected RefreshVersion true")
+	}
+}
+
+func TestRefreshVersionMissingVersionErrors(t *testing.T) {
+	if err := parseErr(t, `REFRESH;`); err == nil {
+		t.Fatal("expected an error for REFRESH without VERSION")
+	}
+}
+
+func TestRefreshVersionUnspecifiedIsFalse(t *testing.T) {
+	ast := parse(t, `COMMENT 'x';`)
+	if ast.RefreshVersion {
+		t.Fatal("expected RefreshVersion false when never declared")
+	}
+}
+
 // ── INDICES ───────────────────────────────────────────────────────────────────
 
 func TestSimpleIndex(t *testing.T) {

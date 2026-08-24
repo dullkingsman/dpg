@@ -1754,6 +1754,12 @@ func (b *Builder) buildSequence(cs *pg_query.CreateSeqStmt, block pipeline.Block
 					s.OwnedBy = &owned
 				}
 			}
+		case "restart":
+			// RFC audit item #68: RESTART [WITH n]. See Sequence.Restart's
+			// doc comment for why this isn't persisted like the options
+			// above.
+			s.Restart = true
+			s.RestartWith = v
 		}
 	}
 	return s, nil
@@ -2430,6 +2436,7 @@ func (b *Builder) buildDefineStmt(ds *pg_query.DefineStmt, block pipeline.BlockA
 			col.RenamedFrom = &block.RenamedFrom.Name
 			col.RenamedFromSchema = renamedFromSchema(block.RenamedFrom)
 		}
+		col.RefreshVersion = block.RefreshVersion
 		return col, nil
 
 	case pg_query.ObjectType_OBJECT_TSCONFIGURATION:

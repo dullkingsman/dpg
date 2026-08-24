@@ -404,6 +404,15 @@ type BlockAST struct {
 	// nil means not declared; removing a previously-declared value emits
 	// ALTER TABLE ... SET WITHOUT CLUSTER.
 	ClusterOn *Identifier
+	// RefreshVersion is Section 14.2's Collation-only `REFRESH VERSION`
+	// block directive (RFC audit item #84) — a bare presence keyword with
+	// no argument, describing an imperative action (re-read the OS/ICU
+	// library's current collation version into the catalog) rather than
+	// comparable target state, the same non-persistent shape as Sequence's
+	// RESTART (Section 10). Its mere presence unconditionally re-emits
+	// ALTER COLLATION ... REFRESH VERSION on every plan/apply for as long
+	// as it remains declared.
+	RefreshVersion bool
 }
 
 // ReplicaIdentityDir is Section 7.11's REPLICA IDENTITY block directive.

@@ -762,7 +762,22 @@ type Sequence struct {
 	// "schema.table.column") text as written. Per the RFC's diffing table,
 	// an OWNED BY change is SAFE (ALTER SEQUENCE ... OWNED BY ...).
 	OwnedBy *string
-	SrcPos  pipeline.SourcePos
+	// Restart/RestartWith are RFC audit item #68's imperative "RESTART
+	// [WITH n]" directive. Unlike every other option above, this does not
+	// describe persistent, comparable state — real PostgreSQL's RESTART
+	// resets the sequence's *current* value now, and nextval() calls
+	// immediately begin moving it away from n again, leaving no queryable
+	// "current RESTART value" for a later plan to diff against. So this is
+	// deliberately NOT snapshotted the way StartValue etc. are: Restart's
+	// mere presence in the desired source unconditionally re-emits
+	// ALTER SEQUENCE ... RESTART [WITH n] on every plan/apply for as long
+	// as it remains declared (Safety Manual), matching real PostgreSQL's
+	// own documented recommendation to remove the directive from source
+	// once the reset has been applied. RestartWith is nil for a bare
+	// RESTART (PostgreSQL resets to the sequence's START value then).
+	Restart     bool
+	RestartWith *int64
+	SrcPos      pipeline.SourcePos
 }
 
 func (s *Sequence) QualifiedName() string   { return qualName(s.Schema, s.Name) }
@@ -1131,12 +1146,14 @@ type Collation struct {
 	Comment        *string // see EventTrigger.Comment
 	// RenamedFrom/RenamedFromSchema — see Table's identical doc comments;
 	// reuses the same generic cross-schema RENAME TO/SET SCHEMA mechanism.
-	// Owner and REFRESH VERSION (Section 14.2's other two ALTER COLLATION
-	// capabilities) are separate, not-yet-implemented gaps — out of scope
-	// here.
+	// Owner (Section 14.2's other ALTER COLLATION capability) is a
+	// separate, not-yet-implemented gap — out of scope here.
 	RenamedFrom       *string
 	RenamedFromSchema *string
-	Body              string
+	// RefreshVersion — see pipeline.BlockAST.RefreshVersion's identical
+	// doc comment (RFC audit item #84).
+	RefreshVersion bool
+	Body           string
 	Reconstructed     bool // Body rebuilt from the catalog; see Tablespace.Reconstructed
 	SrcPos            pipeline.SourcePos
 }

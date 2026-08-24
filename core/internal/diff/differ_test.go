@@ -8388,6 +8388,113 @@ func TestDiffSequenceOwnedByNoneChangedIsSafeAlter(t *testing.T) {
 	}
 }
 
+// TestDiffSequenceRestartWithValueEmittedEveryPlan guards RFC audit item
+// #68: RESTART [WITH n] is an imperative action with no persisted state to
+// diff against, so it must be unconditionally re-emitted on every plan for
+// as long as it remains declared, Safety Manual, but still transactional
+// (unlike CREATE TABLESPACE-style non-transactional Manual ops — real
+// PostgreSQL's ALTER SEQUENCE RESTART has no such restriction).
+func TestDiffSequenceRestartWithValueEmittedEveryPlan(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.seq_id", &snapshot.SnapObject{
+		Kind:     "sequence",
+		Sequence: &snapshot.SnapSequence{Schema: "public", Name: "seq_id"},
+	})
+	restartWith := int64(1000)
+	desired := []pipeline.IRObject{
+		&ir.Sequence{Schema: "public", Name: "seq_id", Restart: true, RestartWith: &restartWith},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	op := findOpSQL(ops, `ALTER SEQUENCE "public"."seq_id" RESTART WITH 1000;`)
+	if op == nil {
+		t.Fatalf("expected ALTER SEQUENCE ... RESTART WITH 1000, got: %v", sqlList(ops))
+	}
+	if op.Safety() != pipeline.Manual {
+		t.Errorf("expected RESTART to be Manual safety, got %s", op.Safety())
+	}
+	if !op.Transactional() {
+		t.Error("expected RESTART to still run inside the migration's transaction, got Transactional() == false")
+	}
+
+	// Re-diffing against a snapshot that reflects the previous apply (no
+	// persisted RESTART field to compare) must still re-emit it, not treat
+	// it as already-applied drift.
+	ops2, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if findOpSQL(ops2, `ALTER SEQUENCE "public"."seq_id" RESTART WITH 1000;`) == nil {
+		t.Fatalf("expected RESTART to be re-emitted on a second plan while still declared, got: %v", sqlList(ops2))
+	}
+}
+
+// TestDiffSequenceRestartBareOmitsWith proves a bare RESTART (no WITH n)
+// omits the WITH clause, matching real PostgreSQL's "reset to START value"
+// semantics for that form.
+func TestDiffSequenceRestartBareOmitsWith(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.seq_id", &snapshot.SnapObject{
+		Kind:     "sequence",
+		Sequence: &snapshot.SnapSequence{Schema: "public", Name: "seq_id"},
+	})
+	desired := []pipeline.IRObject{
+		&ir.Sequence{Schema: "public", Name: "seq_id", Restart: true},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if findOpSQL(ops, `ALTER SEQUENCE "public"."seq_id" RESTART;`) == nil {
+		t.Fatalf("expected bare ALTER SEQUENCE ... RESTART with no WITH clause, got: %v", sqlList(ops))
+	}
+}
+
+// TestDiffSequenceRestartUnspecifiedIsNoop proves a source that never
+// mentions RESTART never emits it.
+func TestDiffSequenceRestartUnspecifiedIsNoop(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.seq_id", &snapshot.SnapObject{
+		Kind:     "sequence",
+		Sequence: &snapshot.SnapSequence{Schema: "public", Name: "seq_id"},
+	})
+	desired := []pipeline.IRObject{
+		&ir.Sequence{Schema: "public", Name: "seq_id"},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if containsSQL(ops, "RESTART") {
+		t.Errorf("expected no RESTART when never declared, got: %v", sqlList(ops))
+	}
+}
+
+// TestCreateSequenceWithRestart proves a brand-new sequence declared with
+// RESTART emits the follow-up ALTER right after CREATE (CREATE SEQUENCE has
+// no meaningful use for RESTART — see Sequence.Restart's doc comment).
+func TestCreateSequenceWithRestart(t *testing.T) {
+	restartWith := int64(500)
+	desired := []pipeline.IRObject{
+		&ir.Sequence{Schema: "public", Name: "seq_id", Restart: true, RestartWith: &restartWith},
+	}
+	ops, err := New().Diff(desired, &pipeline.Snapshot{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsSQL(ops, "CREATE SEQUENCE") {
+		t.Fatalf("expected CREATE SEQUENCE, got: %v", sqlList(ops))
+	}
+	if findOpSQL(ops, `ALTER SEQUENCE "public"."seq_id" RESTART WITH 500;`) == nil {
+		t.Fatalf("expected a follow-up ALTER SEQUENCE ... RESTART WITH 500 after CREATE, got: %v", sqlList(ops))
+	}
+}
+
 // TestDiffSequenceAsTypeOwnedByUnspecifiedIsNoop proves the nil-means-
 // unspecified convention: a source that never mentions AS/OWNED BY must not
 // touch an existing sequence's type or ownership either way.
@@ -15029,6 +15136,103 @@ func TestDiffCollationUnchangedIsNoop(t *testing.T) {
 	}
 	if len(ops) != 0 {
 		t.Errorf("expected zero ops for an unchanged collation, got: %v", sqlList(ops))
+	}
+}
+
+// TestDiffCollationRefreshVersionEmittedEveryPlan guards RFC audit item
+// #84: REFRESH VERSION is an imperative action with no persisted state to
+// diff against, so it must be unconditionally re-emitted on every plan for
+// as long as it remains declared, Safety Manual but still transactional
+// (real PostgreSQL's ALTER COLLATION REFRESH VERSION has no restriction
+// against running inside a transaction).
+func TestDiffCollationRefreshVersionEmittedEveryPlan(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.c", &snapshot.SnapObject{
+		Kind: "collation",
+		Opaque: &snapshot.SnapOpaque{
+			Kind: "collation", Schema: "public", Name: "c", CollationStructured: true,
+			CollationProvider: "c", CollationCollate: strPtr("C"), CollationCtype: strPtr("C"), CollationDeterministic: true,
+		},
+	})
+	desired := []pipeline.IRObject{
+		&ir.Collation{
+			Schema: "public", Name: "c", Provider: "c", Collate: strPtr("C"), Ctype: strPtr("C"), Deterministic: true,
+			Body: "CREATE COLLATION public.c (LOCALE = 'C')", RefreshVersion: true,
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	op := findOpSQL(ops, `ALTER COLLATION "public"."c" REFRESH VERSION;`)
+	if op == nil {
+		t.Fatalf("expected ALTER COLLATION ... REFRESH VERSION, got: %v", sqlList(ops))
+	}
+	if op.Safety() != pipeline.Manual {
+		t.Errorf("expected REFRESH VERSION to be Manual safety, got %s", op.Safety())
+	}
+	if !op.Transactional() {
+		t.Error("expected REFRESH VERSION to still run inside the migration's transaction")
+	}
+
+	// Re-diffing while still declared must re-emit it, not treat it as
+	// already-applied drift — there is no persisted value to compare.
+	ops2, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if findOpSQL(ops2, `ALTER COLLATION "public"."c" REFRESH VERSION;`) == nil {
+		t.Fatalf("expected REFRESH VERSION to be re-emitted on a second plan while still declared, got: %v", sqlList(ops2))
+	}
+}
+
+// TestDiffCollationRefreshVersionUnspecifiedIsNoop proves a source that
+// never mentions REFRESH VERSION never emits it.
+func TestDiffCollationRefreshVersionUnspecifiedIsNoop(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.c", &snapshot.SnapObject{
+		Kind: "collation",
+		Opaque: &snapshot.SnapOpaque{
+			Kind: "collation", Schema: "public", Name: "c", CollationStructured: true,
+			CollationProvider: "c", CollationCollate: strPtr("C"), CollationCtype: strPtr("C"), CollationDeterministic: true,
+		},
+	})
+	desired := []pipeline.IRObject{
+		&ir.Collation{
+			Schema: "public", Name: "c", Provider: "c", Collate: strPtr("C"), Ctype: strPtr("C"), Deterministic: true,
+			Body: "CREATE COLLATION public.c (LOCALE = 'C')",
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if containsSQL(ops, "REFRESH VERSION") {
+		t.Errorf("expected no REFRESH VERSION when never declared, got: %v", sqlList(ops))
+	}
+}
+
+// TestCreateCollationWithRefreshVersion proves a brand-new collation
+// declared with REFRESH VERSION emits the follow-up ALTER right after
+// CREATE.
+func TestCreateCollationWithRefreshVersion(t *testing.T) {
+	desired := []pipeline.IRObject{
+		&ir.Collation{
+			Schema: "public", Name: "c", Provider: "c", Collate: strPtr("C"), Ctype: strPtr("C"), Deterministic: true,
+			Body: "CREATE COLLATION public.c (LOCALE = 'C')", RefreshVersion: true,
+		},
+	}
+	ops, err := New().Diff(desired, &pipeline.Snapshot{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsSQL(ops, "CREATE COLLATION") {
+		t.Fatalf("expected CREATE COLLATION, got: %v", sqlList(ops))
+	}
+	if findOpSQL(ops, `ALTER COLLATION "public"."c" REFRESH VERSION;`) == nil {
+		t.Fatalf("expected a follow-up ALTER COLLATION ... REFRESH VERSION after CREATE, got: %v", sqlList(ops))
 	}
 }
 

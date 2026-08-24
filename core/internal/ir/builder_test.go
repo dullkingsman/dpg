@@ -1516,6 +1516,42 @@ func TestBuildSequenceOwnedByNone(t *testing.T) {
 	}
 }
 
+// TestBuildSequenceRestartWith proves RESTART WITH n parses into Restart
+// (true) and RestartWith (RFC audit item #68).
+func TestBuildSequenceRestartWith(t *testing.T) {
+	obj := buildObject(t, pipeline.KindSequence, `seq_id RESTART WITH 1000`, ``)
+	s := obj.(*ir.Sequence)
+	if !s.Restart {
+		t.Error("Restart: got false, want true")
+	}
+	if s.RestartWith == nil || *s.RestartWith != 1000 {
+		t.Errorf("RestartWith: got %v, want 1000", s.RestartWith)
+	}
+}
+
+// TestBuildSequenceRestartBare proves a bare RESTART (no WITH n) sets
+// Restart true with RestartWith left nil.
+func TestBuildSequenceRestartBare(t *testing.T) {
+	obj := buildObject(t, pipeline.KindSequence, `seq_id RESTART`, ``)
+	s := obj.(*ir.Sequence)
+	if !s.Restart {
+		t.Error("Restart: got false, want true")
+	}
+	if s.RestartWith != nil {
+		t.Errorf("RestartWith: got %v, want nil", s.RestartWith)
+	}
+}
+
+// TestBuildSequenceRestartUnspecified proves Restart stays false when the
+// source never mentions RESTART.
+func TestBuildSequenceRestartUnspecified(t *testing.T) {
+	obj := buildObject(t, pipeline.KindSequence, `seq_id INCREMENT BY 1`, ``)
+	s := obj.(*ir.Sequence)
+	if s.Restart {
+		t.Error("Restart: got true, want false")
+	}
+}
+
 // TestBuildSequenceAsTypeOwnedByUnspecified proves both fields stay nil
 // when the source doesn't mention AS/OWNED BY at all.
 func TestBuildSequenceAsTypeOwnedByUnspecified(t *testing.T) {
