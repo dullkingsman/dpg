@@ -64,6 +64,9 @@ type SnapOpaque struct {
 	// was insufficient (it goes unset, via Reconstructed, on every live
 	// path, so a live-catalog-only change was silently invisible).
 	TablespaceLocation   string   `json:"tablespace_location,omitempty"`
+	// TablespaceOwner is RFC audit item #80's inline `OWNER` diffing input
+	// — see ir.Tablespace.Owner's doc comment.
+	TablespaceOwner *string `json:"tablespace_owner,omitempty"`
 	CastMethod           string   `json:"cast_method,omitempty"`
 	CastContext          string   `json:"cast_context,omitempty"`
 	CastFunction         string   `json:"cast_function,omitempty"`
@@ -103,6 +106,10 @@ type SnapOpaque struct {
 	ServerType         *string        `json:"server_type,omitempty"`
 	ServerVersion      *string        `json:"server_version,omitempty"`
 	ServerOptions      []SnapOptionKV `json:"server_options,omitempty"`
+	// ServerOwner is RFC audit item #79's ALTER SERVER ... OWNER TO diffing
+	// input — same shape as PublicationOwner/EventTriggerOwner/TSDictOwner
+	// above.
+	ServerOwner        *string        `json:"server_owner,omitempty"`
 	UserMappingOptions []SnapOptionKV `json:"user_mapping_options,omitempty"`
 	// PublicationStructured/PublicationAllTables/PublicationTables/
 	// PublicationInsert/Update/Delete/Truncate are RFC §13.1's structured

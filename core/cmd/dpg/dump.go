@@ -1276,7 +1276,7 @@ func renderObjectDPG(b *strings.Builder, obj pipeline.IRObject, fmtOpts format.O
 	case *ir.ForeignDataWrapper:
 		renderOpaqueBodyWithGrants(b, ind, fmtOpts, o.Body, o.Comment, o.Grants, o.Revocations)
 	case *ir.ForeignServer:
-		renderOpaqueBodyWithGrants(b, ind, fmtOpts, o.Body, o.Comment, o.Grants, o.Revocations)
+		renderForeignServerBody(b, ind, fmtOpts, o)
 	case *ir.UserMapping:
 		renderOpaqueBody(b, ind, fmtOpts, o.Body, nil)
 	case *ir.Publication:
@@ -1627,6 +1627,57 @@ func renderOpaqueBodyWithGrants(b *strings.Builder, ind string, fmtOpts format.O
 	}
 	fmt.Fprintf(b, "\n%s", body)
 	writeFuncBlock(b, ind, fmtOpts, comment, grants, revocations)
+}
+
+// renderForeignServerBody is renderOpaqueBodyWithGrants plus Owner (RFC
+// audit item #79) — kept as its own function, like renderEventTriggerBody/
+// renderTSDictBody, rather than adding an Owner parameter to writeFuncBlock
+// and touching every other call site.
+func renderForeignServerBody(b *strings.Builder, ind string, fmtOpts format.Options, o *ir.ForeignServer) {
+	kw := fmtOpts.Keyword
+	body := strings.TrimSpace(o.Body)
+	const createPrefix = "CREATE "
+	if len(body) >= len(createPrefix) && strings.EqualFold(body[:len(createPrefix)], createPrefix) {
+		body = strings.TrimSpace(body[len(createPrefix):])
+	}
+	if body == "" {
+		return
+	}
+	fmt.Fprintf(b, "\n%s", body)
+	if o.Owner == nil && o.Comment == nil && len(o.Grants) == 0 && len(o.Revocations) == 0 {
+		b.WriteString(";\n")
+		return
+	}
+	b.WriteString(" {\n")
+	if o.Owner != nil {
+		fmt.Fprintf(b, "%s%s %s;\n", ind, kw("OWNER"), quoteIdentIfNeeded(*o.Owner))
+	}
+	if o.Comment != nil {
+		fmt.Fprintf(b, "%s%s %s;\n", ind, kw("COMMENT"), sqlStringLit(*o.Comment))
+	}
+	for _, g := range o.Grants {
+		priv := "ALL"
+		if len(g.Privileges) > 0 {
+			priv = strings.Join(g.Privileges, ", ")
+		}
+		fmt.Fprintf(b, "%s%s %s %s %s", ind, kw("GRANT"), priv, kw("TO"), strings.Join(g.Roles, ", "))
+		if g.WithGrant {
+			fmt.Fprintf(b, " %s %s %s", kw("WITH"), kw("GRANT"), kw("OPTION"))
+		}
+		b.WriteString(";\n")
+	}
+	for _, r := range o.Revocations {
+		priv := "ALL"
+		if len(r.Privileges) > 0 {
+			priv = strings.Join(r.Privileges, ", ")
+		}
+		fmt.Fprintf(b, "%s%s %s %s %s", ind, kw("REVOCATION"), priv, kw("FROM"), strings.Join(r.Roles, ", "))
+		if r.Cascade {
+			fmt.Fprintf(b, " %s", kw("CASCADE"))
+		}
+		b.WriteString(";\n")
+	}
+	b.WriteString("}\n")
 }
 
 // renderOpaqueBodyWithGrantsAndLabels is renderOpaqueBodyWithGrants plus

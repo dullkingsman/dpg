@@ -849,7 +849,21 @@ type Tablespace struct {
 	Grants         []Grant
 	Revocations    []Revocation
 	SecurityLabels []pipeline.SecurityLabel
-	SrcPos         pipeline.SourcePos
+	// Owner is RFC audit item #80's Section 14.7 inline `OWNER` clause —
+	// unlike every block-directive Owner elsewhere in this file, real
+	// PostgreSQL's own CREATE TABLESPACE grammar accepts OWNER inline in
+	// Part 1 (matching Tenet 2/5, per the RFC's own explanation of why this
+	// one kind differs), so o.Body already contains it verbatim at create
+	// time — no SET ROLE/RESET ROLE creator-attribution wrapping needed,
+	// unlike Publication/EventTrigger/TSDict's block-only Owner. This field
+	// exists purely so a later change can be diffed and emitted as
+	// ALTER TABLESPACE ... OWNER TO.
+	Owner *string
+	// RenamedFrom is RFC audit item #80's RENAME TO support — bare, like
+	// Role/Publication/ForeignServer's identical field: tablespaces are
+	// cluster-level, not schema-scoped.
+	RenamedFrom *string
+	SrcPos      pipeline.SourcePos
 }
 
 func (ts *Tablespace) QualifiedName() string   { return ts.Name }
@@ -913,7 +927,14 @@ type ForeignServer struct {
 	Reconstructed bool // Body rebuilt from the catalog; see Tablespace.Reconstructed
 	// Grants/Revocations (RFC audit item #6) — see Tablespace.Grants' doc
 	// comment.
-	Grants      []Grant
+	Grants []Grant
+	// Owner is RFC audit item #79's ALTER SERVER ... OWNER TO diffing input
+	// — see ir.Publication.Owner's identical doc comment.
+	Owner *string
+	// RenamedFrom is RFC audit item #79's RENAME TO support — bare, like
+	// Role/Publication's identical field: foreign servers are
+	// cluster-level, not schema-scoped.
+	RenamedFrom *string
 	Revocations []Revocation
 	SrcPos      pipeline.SourcePos
 }

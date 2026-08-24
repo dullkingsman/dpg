@@ -210,9 +210,11 @@ func formatUserMappingOptions(opts []string) string {
 func introspectTablespaces(ctx context.Context, conn pipeline.Querier) ([]pipeline.IRObject, error) {
 	const q = `
 SELECT spcname,
-       pg_tablespace_location(oid)               AS location,
-       shobj_description(oid, 'pg_tablespace')    AS comment
-FROM   pg_tablespace
+       pg_tablespace_location(t.oid)               AS location,
+       shobj_description(t.oid, 'pg_tablespace')    AS comment,
+       r.rolname                                    AS owner
+FROM   pg_tablespace t
+JOIN   pg_roles r ON r.oid = t.spcowner
 WHERE  spcname NOT IN ('pg_default', 'pg_global')
 ORDER  BY spcname`
 
@@ -224,13 +226,13 @@ ORDER  BY spcname`
 
 	var out []pipeline.IRObject
 	for rs.Next() {
-		var name, location string
+		var name, location, owner string
 		var comment *string
-		if err := rs.Scan(&name, &location, &comment); err != nil {
+		if err := rs.Scan(&name, &location, &comment, &owner); err != nil {
 			return nil, err
 		}
-		body := fmt.Sprintf("CREATE TABLESPACE %s LOCATION %s", quoteIdent(name), quoteLit(location))
-		out = append(out, &ir.Tablespace{Name: name, Location: location, Body: canonicalDDL(body), Comment: comment, Reconstructed: true})
+		body := fmt.Sprintf("CREATE TABLESPACE %s OWNER %s LOCATION %s", quoteIdent(name), quoteIdent(owner), quoteLit(location))
+		out = append(out, &ir.Tablespace{Name: name, Location: location, Body: canonicalDDL(body), Comment: comment, Reconstructed: true, Owner: &owner})
 	}
 	if err := rs.Err(); err != nil {
 		return nil, err
@@ -385,9 +387,10 @@ ORDER  BY f.fdwname`
 func introspectForeignServers(ctx context.Context, conn pipeline.Querier) ([]pipeline.IRObject, error) {
 	q := `
 SELECT s.srvname, f.fdwname, s.srvtype, s.srvversion, s.srvoptions,
-       obj_description(s.oid, 'pg_foreign_server') AS comment
+       obj_description(s.oid, 'pg_foreign_server') AS comment, r.rolname AS owner
 FROM   pg_foreign_server s
 JOIN   pg_foreign_data_wrapper f ON f.oid = s.srvfdw
+JOIN   pg_roles r ON r.oid = s.srvowner
 WHERE  ` + notExtensionOwned("pg_foreign_server", "s.oid") + `
 ORDER  BY s.srvname`
 
@@ -399,11 +402,11 @@ ORDER  BY s.srvname`
 
 	var out []pipeline.IRObject
 	for rs.Next() {
-		var name, fdw string
+		var name, fdw, owner string
 		var srvType, srvVersion *string
 		var options []string
 		var comment *string
-		if err := rs.Scan(&name, &fdw, &srvType, &srvVersion, &options, &comment); err != nil {
+		if err := rs.Scan(&name, &fdw, &srvType, &srvVersion, &options, &comment, &owner); err != nil {
 			return nil, err
 		}
 		var sb strings.Builder
@@ -418,7 +421,7 @@ ORDER  BY s.srvname`
 		sb.WriteString(formatOptions(options))
 		srv := &ir.ForeignServer{
 			Name: name, FDWName: fdw, Options: optionsToStorageParams(options),
-			Body: canonicalDDL(sb.String()), Comment: comment, Reconstructed: true,
+			Body: canonicalDDL(sb.String()), Comment: comment, Reconstructed: true, Owner: &owner,
 		}
 		if srvType != nil && *srvType != "" {
 			t := *srvType

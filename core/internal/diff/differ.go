@@ -417,6 +417,16 @@ func renamedFromKey(obj pipeline.IRObject) string {
 		if o.RenamedFrom != nil {
 			return *o.RenamedFrom
 		}
+	case *ir.ForeignServer:
+		// Bare, like *ir.Role above (RFC audit item #79).
+		if o.RenamedFrom != nil {
+			return *o.RenamedFrom
+		}
+	case *ir.Tablespace:
+		// Bare, like *ir.Role above (RFC audit item #80).
+		if o.RenamedFrom != nil {
+			return *o.RenamedFrom
+		}
 	case *ir.TSDict:
 		if o.RenamedFrom != nil {
 			return qualKey(oldSchema(o.Schema, o.RenamedFromSchema), *o.RenamedFrom)
@@ -517,6 +527,10 @@ func describeKind(obj pipeline.IRObject) string {
 		return "role"
 	case *ir.Publication:
 		return "publication"
+	case *ir.ForeignServer:
+		return "foreign server"
+	case *ir.Tablespace:
+		return "tablespace"
 	case *ir.TSDict:
 		return "text search dictionary"
 	case *ir.TSParser:
@@ -1206,6 +1220,9 @@ func createObject(obj pipeline.IRObject, vtypes map[string]string) ([]pipeline.D
 		return appendCommentOp(ops, err, "fdw", "", o.Name, "", "", o.Comment, o.SrcPos)
 	case *ir.ForeignServer:
 		ops, err := createOpaque(o.Name, o.Body, "SERVER", "", o.SrcPos)
+		if err == nil && o.Owner != nil && len(ops) > 0 {
+			ops = append(wrapCreateWithOwner(ops[0], o.Owner, o.SrcPos), ops[1:]...)
+		}
 		if err == nil {
 			ops = append(ops, createSimpleGrantOps("FOREIGN SERVER", quoteIdent(o.Name), o.Grants, o.Revocations, o.SrcPos, false)...)
 		}
@@ -1655,7 +1672,19 @@ func createSubscription(o *ir.Subscription) ([]pipeline.DiffOp, error) {
 // same as every other opaque-tier kind.
 func diffTablespace(o *ir.Tablespace, snap *snapshot.SnapOpaque) ([]pipeline.DiffOp, error) {
 	pos := o.SrcPos
-	onClause := "TABLESPACE " + quoteIdent(o.Name)
+	ident := quoteIdent(o.Name)
+	onClause := "TABLESPACE " + ident
+	// RENAME TO is bare, like Role/Publication/ForeignServer's identical
+	// mechanism (RFC audit item #80) — tablespaces are cluster-level, not
+	// schema-scoped. Applies regardless of which branch below handles the
+	// rest of the diff, same as diffForeignServer's renameOps.
+	var renameOps []pipeline.DiffOp
+	if snap.Name != o.Name {
+		renameOps = append(renameOps, cautionOp(
+			fmt.Sprintf("ALTER TABLESPACE %s RENAME TO %s;", quoteIdent(snap.Name), ident),
+			pos,
+		))
+	}
 	// Stale snapshot predating this structured field: Go's zero value ""
 	// for TablespaceLocation, even though a real tablespace always has a
 	// non-empty LOCATION (required by CREATE TABLESPACE's grammar) — same
@@ -1665,7 +1694,10 @@ func diffTablespace(o *ir.Tablespace, snap *snapshot.SnapOpaque) ([]pipeline.Dif
 	// changed so the snapshot self-heals on the very next apply instead of
 	// staying stale forever.
 	if snap.TablespaceLocation == "" {
-		var ops []pipeline.DiffOp
+		ops := renameOps
+		if !ptrEq(o.Owner, snap.TablespaceOwner) && o.Owner != nil {
+			ops = append(ops, safeOp(fmt.Sprintf("ALTER TABLESPACE %s OWNER TO %s;", ident, quoteIdent(*o.Owner)), pos))
+		}
 		if !ptrEq(o.Comment, snap.Comment) {
 			if sql := commentOnOpaqueSQL("tablespace", "", o.Name, "", "", o.Comment); sql != "" {
 				ops = append(ops, safeOp(sql, pos))
@@ -1694,7 +1726,10 @@ func diffTablespace(o *ir.Tablespace, snap *snapshot.SnapOpaque) ([]pipeline.Dif
 		ops = append(ops, createSecurityLabelOps(o.SecurityLabels, onClause, pos)...)
 		return ops, nil
 	}
-	var ops []pipeline.DiffOp
+	ops := renameOps
+	if !ptrEq(o.Owner, snap.TablespaceOwner) && o.Owner != nil {
+		ops = append(ops, safeOp(fmt.Sprintf("ALTER TABLESPACE %s OWNER TO %s;", ident, quoteIdent(*o.Owner)), pos))
+	}
 	if !ptrEq(o.Comment, snap.Comment) {
 		if sql := commentOnOpaqueSQL("tablespace", "", o.Name, "", "", o.Comment); sql != "" {
 			ops = append(ops, safeOp(sql, pos))
@@ -2175,8 +2210,22 @@ func diffForeignServer(o *ir.ForeignServer, snap *snapshot.SnapOpaque) ([]pipeli
 	pos := o.SrcPos
 	ident := quoteIdent(o.Name)
 	onClause := "FOREIGN SERVER " + ident
+	// RENAME TO is bare, like Role/Publication's identical mechanism (RFC
+	// audit item #79) — foreign servers are cluster-level, not
+	// schema-scoped. Applies regardless of which branch below handles the
+	// rest of the diff, same as diffPublication's renameOps.
+	var renameOps []pipeline.DiffOp
+	if snap.Name != o.Name {
+		renameOps = append(renameOps, cautionOp(
+			fmt.Sprintf("ALTER SERVER %s RENAME TO %s;", quoteIdent(snap.Name), ident),
+			pos,
+		))
+	}
 	if !snap.OptionsStructured {
-		var ops []pipeline.DiffOp
+		ops := renameOps
+		if !ptrEq(o.Owner, snap.ServerOwner) && o.Owner != nil {
+			ops = append(ops, safeOp(fmt.Sprintf("ALTER SERVER %s OWNER TO %s;", ident, quoteIdent(*o.Owner)), pos))
+		}
 		if !ptrEq(o.Comment, snap.Comment) {
 			if sql := commentOnOpaqueSQL("server", "", o.Name, "", "", o.Comment); sql != "" {
 				ops = append(ops, safeOp(sql, pos))
@@ -2195,11 +2244,17 @@ func diffForeignServer(o *ir.ForeignServer, snap *snapshot.SnapOpaque) ([]pipeli
 		if err != nil {
 			return nil, err
 		}
+		if o.Owner != nil && len(createOps) > 0 {
+			createOps = append(wrapCreateWithOwner(createOps[0], o.Owner, pos), createOps[1:]...)
+		}
 		ops = append(ops, createOps...)
 		ops = append(ops, createSimpleGrantOps("FOREIGN SERVER", ident, o.Grants, o.Revocations, pos, false)...)
 		return appendCommentOp(ops, nil, "server", "", o.Name, "", "", o.Comment, pos)
 	}
-	var ops []pipeline.DiffOp
+	ops := renameOps
+	if !ptrEq(o.Owner, snap.ServerOwner) && o.Owner != nil {
+		ops = append(ops, safeOp(fmt.Sprintf("ALTER SERVER %s OWNER TO %s;", ident, quoteIdent(*o.Owner)), pos))
+	}
 	desiredOptions := toComparableOptions(o.Options, false)
 	versionChanged := !ptrEq(o.Version, snap.ServerVersion)
 	optionsChanged := !optionsEqual(desiredOptions, snap.ServerOptions)

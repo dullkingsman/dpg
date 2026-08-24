@@ -395,6 +395,54 @@ func TestBuildTablespaceGrantsAndRevocations(t *testing.T) {
 	}
 }
 
+// TestBuildTablespaceOwner guards RFC audit item #80: buildTablespace never
+// read the inline OWNER clause at all, discarding it at CREATE time even
+// though it's valid real PostgreSQL CREATE TABLESPACE grammar.
+func TestBuildTablespaceOwner(t *testing.T) {
+	obj := buildObject(t, pipeline.KindTablespace,
+		`gl_ts OWNER app_admin LOCATION '/var/lib/postgresql/ts1'`,
+		``,
+	)
+	ts, ok := obj.(*ir.Tablespace)
+	if !ok {
+		t.Fatalf("expected *ir.Tablespace, got %T", obj)
+	}
+	if ts.Owner == nil || *ts.Owner != "app_admin" {
+		t.Errorf("Owner: got %v, want app_admin", ts.Owner)
+	}
+}
+
+// TestBuildTablespaceRenamedFrom guards RFC audit item #80's other half.
+func TestBuildTablespaceRenamedFrom(t *testing.T) {
+	obj := buildObject(t, pipeline.KindTablespace,
+		`gl_ts_new LOCATION '/var/lib/postgresql/ts1'`,
+		`RENAMED FROM gl_ts_old;`,
+	)
+	ts, ok := obj.(*ir.Tablespace)
+	if !ok {
+		t.Fatalf("expected *ir.Tablespace, got %T", obj)
+	}
+	if ts.RenamedFrom == nil || *ts.RenamedFrom != "gl_ts_old" {
+		t.Errorf("RenamedFrom: got %v, want gl_ts_old", ts.RenamedFrom)
+	}
+}
+
+// TestBuildTablespaceOwnerUnspecified proves Owner stays nil when the
+// source never mentions OWNER.
+func TestBuildTablespaceOwnerUnspecified(t *testing.T) {
+	obj := buildObject(t, pipeline.KindTablespace,
+		`gl_ts LOCATION '/var/lib/postgresql/ts1'`,
+		``,
+	)
+	ts, ok := obj.(*ir.Tablespace)
+	if !ok {
+		t.Fatalf("expected *ir.Tablespace, got %T", obj)
+	}
+	if ts.Owner != nil {
+		t.Errorf("Owner: got %v, want nil", ts.Owner)
+	}
+}
+
 func TestBuildFDWGrantsAndRevocations(t *testing.T) {
 	obj := buildObject(t, pipeline.KindFDW,
 		`gl_fdw HANDLER file_fdw_handler`,
@@ -426,6 +474,25 @@ func TestBuildServerGrantsAndRevocations(t *testing.T) {
 	}
 	if len(s.Revocations) != 1 {
 		t.Fatalf("Revocations: got %d", len(s.Revocations))
+	}
+}
+
+// TestBuildServerOwnerAndRenamedFrom guards RFC audit item #79: ForeignServer
+// had no Owner or RenamedFrom field at all.
+func TestBuildServerOwnerAndRenamedFrom(t *testing.T) {
+	obj := buildObject(t, pipeline.KindServer,
+		`gl_srv FOREIGN DATA WRAPPER gl_fdw2`,
+		`OWNER app_admin; RENAMED FROM gl_srv_old;`,
+	)
+	s, ok := obj.(*ir.ForeignServer)
+	if !ok {
+		t.Fatalf("expected *ir.ForeignServer, got %T", obj)
+	}
+	if s.Owner == nil || *s.Owner != "app_admin" {
+		t.Errorf("Owner: got %v, want app_admin", s.Owner)
+	}
+	if s.RenamedFrom == nil || *s.RenamedFrom != "gl_srv_old" {
+		t.Errorf("RenamedFrom: got %v, want gl_srv_old", s.RenamedFrom)
 	}
 }
 

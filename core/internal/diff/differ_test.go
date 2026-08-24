@@ -13962,6 +13962,78 @@ func TestDiffTablespaceUnchangedIsNoop(t *testing.T) {
 	}
 }
 
+// TestDiffTablespaceOwnerChanged guards RFC audit item #80: Tablespace's
+// inline OWNER clause was discarded at build time and never diffed at all.
+func TestDiffTablespaceOwnerChanged(t *testing.T) {
+	d := New()
+	oldOwner := "app_admin"
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("ts", &snapshot.SnapObject{
+		Kind: "tablespace",
+		Opaque: &snapshot.SnapOpaque{
+			Kind: "tablespace", Name: "ts", TablespaceLocation: "/data/ts1", TablespaceOwner: &oldOwner,
+		},
+	})
+	newOwner := "app_readonly"
+	desired := []pipeline.IRObject{
+		&ir.Tablespace{Name: "ts", Location: "/data/ts1", Body: "CREATE TABLESPACE ts OWNER app_readonly LOCATION '/data/ts1'", Owner: &newOwner},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsSQL(ops, `ALTER TABLESPACE "ts" OWNER TO "app_readonly";`) {
+		t.Errorf("expected ALTER TABLESPACE ... OWNER TO, got: %v", sqlList(ops))
+	}
+}
+
+// TestDiffTablespaceRenamedFromEmitsAlterRename guards RFC audit item #80's
+// other half: Tablespace had no RenamedFrom field at all.
+func TestDiffTablespaceRenamedFromEmitsAlterRename(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("ts_old", &snapshot.SnapObject{
+		Kind: "tablespace",
+		Opaque: &snapshot.SnapOpaque{
+			Kind: "tablespace", Name: "ts_old", TablespaceLocation: "/data/ts1",
+		},
+	})
+	old := "ts_old"
+	desired := []pipeline.IRObject{
+		&ir.Tablespace{Name: "ts_new", Location: "/data/ts1", Body: "CREATE TABLESPACE ts_new LOCATION '/data/ts1'", RenamedFrom: &old},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if containsSQL(ops, "DROP TABLESPACE") || containsSQL(ops, "CREATE TABLESPACE") {
+		t.Fatalf("renamed tablespace should match by RENAMED FROM, not drop+create, got: %v", sqlList(ops))
+	}
+	want := `ALTER TABLESPACE "ts_old" RENAME TO "ts_new";`
+	if !containsSQL(ops, want) {
+		t.Errorf("expected %q, got: %v", want, sqlList(ops))
+	}
+	for _, o := range ops {
+		if strings.Contains(o.SQL(), "RENAME TO") && o.Safety() != pipeline.Caution {
+			t.Errorf("expected CAUTION safety for ALTER TABLESPACE RENAME TO, got %v", o.Safety())
+		}
+	}
+}
+
+// TestDiffTablespaceRenamedFromStaleErrors mirrors every other kind's
+// identical stale-RENAMED-FROM validation (Differ.Diff's shared Pass 1).
+func TestDiffTablespaceRenamedFromStaleErrors(t *testing.T) {
+	d := New()
+	old := "nonexistent_old_tablespace"
+	desired := []pipeline.IRObject{
+		&ir.Tablespace{Name: "ts", Location: "/data/ts1", Body: "CREATE TABLESPACE ts LOCATION '/data/ts1'", RenamedFrom: &old},
+	}
+	_, err := d.Diff(desired, &pipeline.Snapshot{})
+	if err == nil {
+		t.Fatal("expected an error for a stale RENAMED FROM matching no snapshot tablespace")
+	}
+}
+
 // TestDiffCreateTablespaceEmitsGrant and TestDiffTablespaceGrantAdded/Removed
 // guard RFC audit item #4 (ir.Tablespace had no Grants/Revocations field).
 func TestDiffCreateTablespaceEmitsGrant(t *testing.T) {
@@ -14740,6 +14812,96 @@ func TestDiffForeignServerStaleSnapshotDoesNotRecreate(t *testing.T) {
 	}
 	if containsSQL(ops, "DROP SERVER") {
 		t.Errorf("stale snapshot must not trigger DROP SERVER, got: %v", sqlList(ops))
+	}
+}
+
+// TestDiffForeignServerOwnerChanged guards RFC audit item #79: ForeignServer
+// had no Owner field at all.
+func TestDiffForeignServerOwnerChanged(t *testing.T) {
+	d := New()
+	oldOwner := "app_admin"
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("srv", &snapshot.SnapObject{
+		Kind: "server",
+		Opaque: &snapshot.SnapOpaque{
+			Kind: "server", Name: "srv", OptionsStructured: true, ServerFDWName: "myfdw",
+			ServerOwner: &oldOwner,
+		},
+	})
+	newOwner := "app_readonly"
+	desired := []pipeline.IRObject{
+		&ir.ForeignServer{Name: "srv", FDWName: "myfdw", Body: "CREATE SERVER srv FOREIGN DATA WRAPPER myfdw", Owner: &newOwner},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsSQL(ops, `ALTER SERVER "srv" OWNER TO "app_readonly";`) {
+		t.Errorf("expected ALTER SERVER ... OWNER TO, got: %v", sqlList(ops))
+	}
+}
+
+// TestCreateForeignServerWithOwner proves a brand-new server declared with
+// OWNER creates directly as that role (SET ROLE/RESET ROLE wrapping),
+// matching real PostgreSQL creator-attribution semantics.
+func TestCreateForeignServerWithOwner(t *testing.T) {
+	owner := "audit_admin"
+	desired := []pipeline.IRObject{
+		&ir.ForeignServer{Name: "srv", FDWName: "myfdw", Body: "CREATE SERVER srv FOREIGN DATA WRAPPER myfdw", Owner: &owner},
+	}
+	ops, err := New().Diff(desired, &pipeline.Snapshot{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsSQL(ops, `SET ROLE "audit_admin"`) {
+		t.Errorf("expected creation wrapped in SET ROLE audit_admin, got: %v", sqlList(ops))
+	}
+}
+
+// TestDiffForeignServerRenamedFromEmitsAlterRename guards RFC audit item
+// #79: ForeignServer had no RenamedFrom field at all.
+func TestDiffForeignServerRenamedFromEmitsAlterRename(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("srv_old", &snapshot.SnapObject{
+		Kind: "server",
+		Opaque: &snapshot.SnapOpaque{
+			Kind: "server", Name: "srv_old", OptionsStructured: true, ServerFDWName: "myfdw",
+		},
+	})
+	old := "srv_old"
+	desired := []pipeline.IRObject{
+		&ir.ForeignServer{Name: "srv_new", FDWName: "myfdw", Body: "CREATE SERVER srv_new FOREIGN DATA WRAPPER myfdw", RenamedFrom: &old},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if containsSQL(ops, "DROP SERVER") || containsSQL(ops, "CREATE SERVER") {
+		t.Fatalf("renamed server should match by RENAMED FROM, not drop+create, got: %v", sqlList(ops))
+	}
+	want := `ALTER SERVER "srv_old" RENAME TO "srv_new";`
+	if !containsSQL(ops, want) {
+		t.Errorf("expected %q, got: %v", want, sqlList(ops))
+	}
+	for _, o := range ops {
+		if strings.Contains(o.SQL(), "RENAME TO") && o.Safety() != pipeline.Caution {
+			t.Errorf("expected CAUTION safety for ALTER SERVER RENAME TO, got %v", o.Safety())
+		}
+	}
+}
+
+// TestDiffForeignServerRenamedFromStaleErrors mirrors every other kind's
+// identical stale-RENAMED-FROM validation (Differ.Diff's shared Pass 1).
+func TestDiffForeignServerRenamedFromStaleErrors(t *testing.T) {
+	d := New()
+	old := "nonexistent_old_server"
+	desired := []pipeline.IRObject{
+		&ir.ForeignServer{Name: "srv", FDWName: "myfdw", Body: "CREATE SERVER srv FOREIGN DATA WRAPPER myfdw", RenamedFrom: &old},
+	}
+	_, err := d.Diff(desired, &pipeline.Snapshot{})
+	if err == nil {
+		t.Fatal("expected an error for a stale RENAMED FROM matching no snapshot server")
 	}
 }
 

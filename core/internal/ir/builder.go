@@ -1869,8 +1869,15 @@ func (b *Builder) buildRole(cs *pg_query.CreateRoleStmt, block pipeline.BlockAST
 
 func (b *Builder) buildTablespace(cs *pg_query.CreateTableSpaceStmt, block pipeline.BlockAST, pos pipeline.SourcePos, body string) (pipeline.IRObject, error) {
 	ts := &Tablespace{Name: cs.Tablespacename, Location: cs.Location, Body: body, SrcPos: pos}
+	if cs.Owner != nil && cs.Owner.Rolename != "" {
+		owner := cs.Owner.Rolename
+		ts.Owner = &owner
+	}
 	if block.Comment != nil {
 		ts.Comment = &block.Comment.Value
+	}
+	if block.RenamedFrom != nil {
+		ts.RenamedFrom = &block.RenamedFrom.Name
 	}
 	for _, g := range block.Grants {
 		ts.Grants = append(ts.Grants, blockGrantToIR(g))
@@ -1969,6 +1976,12 @@ func (b *Builder) buildServer(cs *pg_query.CreateForeignServerStmt, block pipeli
 	}
 	if block.Comment != nil {
 		s.Comment = &block.Comment.Value
+	}
+	if block.Owner != nil {
+		s.Owner = &block.Owner.Name
+	}
+	if block.RenamedFrom != nil {
+		s.RenamedFrom = &block.RenamedFrom.Name
 	}
 	for _, g := range block.Grants {
 		s.Grants = append(s.Grants, blockGrantToIR(g))

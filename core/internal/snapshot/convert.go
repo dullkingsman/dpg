@@ -222,7 +222,7 @@ func toSnapObject(obj pipeline.IRObject) *SnapObject {
 	// verify/plan --live (which involve a reconstruction) skip the comparison.
 	case *ir.Tablespace:
 		so := &SnapOpaque{
-			Kind: "tablespace", Name: o.Name, TablespaceLocation: o.Location,
+			Kind: "tablespace", Name: o.Name, TablespaceLocation: o.Location, TablespaceOwner: o.Owner,
 			BodyHash: sourceBodyHash(o.Body, o.Reconstructed), Comment: o.Comment,
 			SecurityLabels: toSnapSecurityLabels(o.SecurityLabels),
 		}
@@ -250,7 +250,8 @@ func toSnapObject(obj pipeline.IRObject) *SnapObject {
 		so := &SnapOpaque{
 			Kind: "server", Name: o.Name,
 			OptionsStructured: true, ServerFDWName: o.FDWName, ServerType: o.Type, ServerVersion: o.Version, ServerOptions: toSnapOptions(o.Options),
-			BodyHash: sourceBodyHash(o.Body, o.Reconstructed), Comment: o.Comment,
+			ServerOwner: o.Owner,
+			BodyHash:    sourceBodyHash(o.Body, o.Reconstructed), Comment: o.Comment,
 		}
 		for _, g := range o.Grants {
 			so.Grants = append(so.Grants, toSnapGrant(g))
