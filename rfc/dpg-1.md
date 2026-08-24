@@ -75,6 +75,7 @@ Copyright Notice
     3.5.  Cluster-Level Objects Directory ..........................  9
     3.6.  Discovery Algorithm ......................................  9
     3.7.  Block Merge Conflict Resolution .......................... 10
+    3.8.  Minimum PostgreSQL Version Targeting .................... 10
 4.  Language Fundamentals .......................................... 11
     4.1.  Source File Format ....................................... 11
     4.2.  The Two-Part Syntax Model ................................ 11
@@ -347,10 +348,9 @@ Author's Address .................................................. 158
    construct requiring PostgreSQL 15+ is documented as such at its own
    point of use; nothing below PostgreSQL 14 is a supported target.
    This is distinct from the per-project, user-configurable
-   `MIN_PG_VERSION` gating feature (Section 23) — that's a future compiler
-   feature for warning a *user* about their own project's version
-   floor; this is the floor for what *this specification itself*
-   documents at all.
+   `min_pg_version` gating feature (Section 3.8) — that warns a *user*
+   about their own project's version floor; this is the floor for what
+   *this specification itself* documents at all.
 
    **Tenet 4 — Offline-first diffing.**
    DPG MUST NOT require a live database connection to generate a
@@ -520,6 +520,11 @@ Author's Address .................................................. 158
 # Per-object DROP CASCADE overrides this setting.
 default_drop_behavior = "restrict"
 
+# Minimum PostgreSQL major version this project targets (Section 3.8).
+# Unset (the default) means no version gating. Overridable per-cluster
+# and per-database (Sections 3.3/3.4); most specific wins.
+# min_pg_version = 15
+
 [linter]
 # Emit a warning when any DEPRECATED object or column is referenced.
 warn_on_deprecated = true
@@ -597,6 +602,13 @@ url = "postgresql://user@host:5432/postgres"
 # If true, the snapshot is updated atomically after every successful
 # dpg apply. Default: true.
 snapshot_on_apply = true
+
+[compiler]
+# Overrides the project root's min_pg_version (Section 3.2) for
+# every database in this cluster, and for this cluster's own
+# cluster-level objects (roles, tablespaces, PARAMETER PRIVILEGES).
+# OPTIONAL; unset falls through to the root's value. See Section 3.8.
+# min_pg_version = 16
 ```
 
    **Constraint:** `url` and `link` are mutually exclusive.  If both
@@ -622,6 +634,12 @@ name = "myapp"
 # The default schema for objects declared without an explicit schema
 # qualifier. REQUIRED.
 default_schema = "public"
+
+[compiler]
+# Overrides the cluster's (and, transitively, the project root's)
+# min_pg_version (Sections 3.2/3.3) for this database only. OPTIONAL;
+# unset falls through to the cluster's value. See Section 3.8.
+# min_pg_version = 17
 ```
 
    **Constraint:** if `name` is omitted or empty the compiler MUST
@@ -717,6 +735,58 @@ default_schema = "public"
    `LintDiagnostic` (not a hard error) whenever two files provide
    conflicting values for the same scalar property of the same object.
    The winning value (lexicographically last file) is used regardless.
+
+### 3.8. Minimum PostgreSQL Version Targeting
+
+   `min_pg_version` (`[compiler]`, Sections 3.2-3.4) declares the oldest
+   PostgreSQL major version a project — or one of its clusters or
+   databases — is deployed against.  This is a purely *semantic* gate,
+   not a parser restriction: the compiler always parses `.dpg` source
+   against its newest supported grammar, since PostgreSQL's own SQL
+   grammar is overwhelmingly additive across major versions and a
+   project's source is not expected to vary its own syntax by target
+   version.  What `min_pg_version` controls is whether the linter (Section
+   19) warns — or, under `--strict`, errors — when a construct the
+   compiler *did* successfully parse requires a PostgreSQL version newer
+   than the effective floor.  This lets a project declare "PARAMETER
+   PRIVILEGES on a PG14 target" and be told about the mismatch before
+   `dpg apply` fails against a real, older server, without DPG needing a
+   distinct parser build per PostgreSQL release.
+
+   **Resolution order:** `min_pg_version` MAY be set at the project root
+   (Section 3.2), overridden per-cluster (Section 3.3), and overridden
+   again per-database (Section 3.4).  The most specific level that sets
+   it wins; an unset level falls through to the next level up.
+   Unset at every level means no gating at all.  A cluster's own
+   cluster-level objects (roles, tablespaces, `PARAMETER PRIVILEGES`)
+   are gated by that cluster's own resolved value, since they have no
+   database of their own to resolve one from.
+
+   **Validation:** a declared `min_pg_version` below 14 (this
+   specification's own supported floor, Section 1.4) MUST be rejected
+   at config-load time as an error, at whichever level declared it.
+
+   **Enforcement:** implemented as the linter's `min-pg-version` rule
+   (Section 19.1, Appendix D.3) — a `LintDiagnostic` warning by default,
+   promoted to an error under `--strict` like any other rule, wired into
+   `dpg plan`/`dpg apply`/`dpg validate` (Section 18) the same way every
+   other linter rule already is; no separate CLI flag or command-specific
+   wiring is needed.  Every version-gated construct this specification
+   documents is catalogued in Appendix F's `Min PG Version` column — a
+   blank cell there means the construct has been available since this
+   specification's own floor (PostgreSQL 14) and is never gated,
+   regardless of `min_pg_version`.
+
+   **Coverage is incremental, by design:** the `min-pg-version` rule
+   only fires for a construct whose reference implementation has a
+   concrete IR representation to inspect — a construct DPG cannot yet
+   express in its internal representation at all has nothing for this
+   rule to see, independent of whether `min_pg_version` is configured.
+   This is consistent with every other linter rule in this
+   specification: the rule describes an intended check against
+   whatever the compiler has actually built, not a promise that every
+   documented construct is checked from day one of its own
+   specification.
 
 ---
 
@@ -6949,16 +7019,6 @@ serial_sequence_declared      = "off"
    of the specification.  They are documented here to establish the
    intended direction for future versions.
 
-   **Minimum PostgreSQL version targeting:**
-   Planned for v1.1.  The compiler's internal portability annotation
-   infrastructure is already in place.  Per-object version gating will
-   allow users to declare `MIN_PG_VERSION = 15` in their root
-   `dpg.toml` and have the compiler emit warnings (and optionally
-   errors) when a declared object uses a feature unavailable on older
-   servers.  The portability analyzer already classifies each IR object
-   as `Standard` or `PGSpecific`; version gating extends this with a
-   per-object minimum PG release map.
-
    **Rule (REWRITE) objects:**
    PostgreSQL `CREATE RULE` is a legacy feature superseded by triggers
    and updatable views.  DPG explicitly does not manage rules.
@@ -7917,6 +7977,7 @@ SCHEMA public {
    | `unnecessary-revocation` | A `REVOCATIONS` entry names a (role, privilege) pair with no matching `GRANTS` entry in the *same object's own declaration*. Renamed from Section 19.1's `unnecessary_revocation`; narrower in scope than that entry's wording — see the note below. | Warning |
    | `deprecated-reference` | A non-deprecated `FOREIGN KEY` references a deprecated table/column, or a non-deprecated column/function-parameter/function-return-type references a deprecated custom `TYPE`. Renamed from Section 19.1's `deprecated_reference`; deliberately narrower in scope than that entry's wording — see the note below. | Warning |
    | `scalar-merge-conflict` | Two files declare the same object and provide different values for the same scalar property (e.g. two files each set `TABLE t`'s `OWNER` to a different role). Renamed from Section 19.1's `scalar_merge_conflict`; the winning (alphabetically-last-file) value is applied regardless — this rule only adds visibility, per Section 3.7. See the note below for exact per-kind scope. | Warning |
+   | `min-pg-version` | A declared construct requires a PostgreSQL major version newer than the project's effective `min_pg_version` (Section 3.8). Not a rename or split of a Section 19.1 entry — a wholly new rule, added alongside `min_pg_version` itself, not present when Section 19.1 was first written. | Warning |
 
    **Implementation note on `hardcoded-password` vs. `hardcoded-role-password`:**
    the column rule checks a table column's `DEFAULT` expression: if the
@@ -8614,6 +8675,7 @@ ENUM user_status ('active', 'inactive', 'banned') {
    | E.17 | 2026-08-23 | Sections 5-7/11/14/21/25 updated: newer-PostgreSQL-version grammar (PG15-18), closing the RFC-completeness audit's last cluster. Generated-column `VIRTUAL` (PG18); `NOT NULL ... NO INHERIT`; `ENFORCED`/`NOT ENFORCED` on `CHECK`/`FOREIGN KEY` (PG18); `WITHOUT OVERLAPS`/`PERIOD` temporal keys (PG18, SQL:2011) with a new `PERIOD FOR` column-item production; table-level named `NOT NULL` constraint with its own `NOT VALID`/`VALIDATE CONSTRAINT`/`[NO] INHERIT` lifecycle (PG18); FK `ON DELETE`/`ON UPDATE SET NULL`/`SET DEFAULT (col-list)` (PG15); `SET STATISTICS DEFAULT` (PG17); Event Trigger `login` event (PG17, verified against PostgreSQL's own documentation). Confirmed (not gaps, no grammar change) that `EXCLUDE`/identity columns on partitioned tables (PG17), foreign-table `TRUNCATE` triggers (PG16) and `NOT NULL` (PG18), and `ALTER GROUP` role-membership syntax were all already covered by existing generic grammar. `DROP CONSTRAINT ... ONLY` on partitioned tables (PG18) documented as a known, narrow open gap rather than force-fitting unusable grammar. Fixed a factual error in Section 5.1.1: `ALTER TYPE ADD VALUE`'s transaction-block restriction was lifted in PostgreSQL 12, not 16 as previously stated (verified against PostgreSQL 12.0's release notes) — `core/`'s implementation has the identical error, not corrected as part of this (spec-only) revision. |
    | E.18 | 2026-08-23 | Closed the RFC-completeness audit's final mop-up items and a structural defect: Section 11.2 documents GRANT's untyped, cross-object-kind-shared privilege list as an accepted offline validation limitation (every real privilege word is expressible; nothing is unexpressable, but DPG performs no offline "wrong privilege for this object kind" check); Section 14.6 confirms Extended Statistics on an expression (not just plain columns, PG14+) passes through cleanly as `opaque-object-decl` Part 1 text; Sections 8.1/25 note temporary views are excluded on the same terms as temporary tables (Section 7.12). Also: this document's own physical section order was corrected to match its Table of Contents — Normative References/Informative References/Author's Address, previously sandwiched between Appendix C and Appendix D, now correctly follow Appendix F as the final sections (standard IETF convention), matching how every other RFC-style document in this family is laid out. |
    | E.19 | 2026-08-23 | Sections 7.8/7.9/7.13/12.1/25 updated, closing four gaps found during a full audit of `RENAMED FROM` coverage across every object kind DPG models (following that day's fix of the generic cross-schema rename mechanism in `core/`). Policy gains `RENAMED FROM` (`ALTER POLICY ... RENAME TO`, `SAFE`, matching Constraint/Index's sub-object precedent — not the `CAUTION` classification used for independently-referenceable top-level objects), with the real PostgreSQL restriction documented that `RENAME TO` cannot combine with a `TO`/`USING`/`WITH CHECK` change in one statement (two `ALTER POLICY` statements emitted when both differ). Trigger gains `RENAMED FROM` (`ALTER TRIGGER ... RENAME TO`, `SAFE`, same sub-object precedent), with the identical real-PostgreSQL restriction against `[NO] DEPENDS ON EXTENSION` documented. Partitioned Tables gain `RENAMED FROM` on a partition entry (`ALTER TABLE ... RENAME TO`, `CAUTION` — the same classification as a plain table rename, since a partition is an ordinary table under the hood); the previously example-only recursive sub-partitioning shape is also formalized in `partition-decl`'s own ABNF for the first time, so `RENAMED FROM` (and the grammar generally) is unambiguously available at any nesting depth. Text Search Configuration gains `RENAMED FROM`/`SET SCHEMA` (`renamed-from-dir`, `CAUTION`/`SAFE` matching Dictionary's existing precedent) — closing a spec-only inconsistency where Configuration was the only Full-Text-Search kind without it, despite Dictionary/Parser/Template all already having it. Section 7.6's cross-schema `renamed-from-dir` kind list corrected to include Section 12. All four additions verified against PostgreSQL's own official documentation before drafting, not assumed. |
+   | E.20 | 2026-08-24 | `min_pg_version` promoted out of Section 23 ("Deferred Features") now that the reference implementation has it working: new Section 3.8 (resolution order — database overrides cluster overrides project root, most specific wins; validation against this specification's own floor of 14; enforcement via the new `min-pg-version` linter rule) and matching `[compiler]` config additions to Sections 3.2-3.4. Section 1.4's Tenet 3 paragraph's forward reference to the old Section 23 placeholder corrected to point at Section 3.8. Appendix D.3 gains the `min-pg-version` rule entry. Appendix F refreshed: new `Min PG Version` column added across the entire table (blank = available since the floor of PostgreSQL 14, this specification's own supported minimum), and 14 rows added for constructs documented by E.13-E.19 that had never been given their own Tenet-3 classification at all — `PARAMETER PRIVILEGES` (Section 11.6), Collation `REFRESH VERSION`/`RULES` (Section 14.2), Event Trigger's `login` event (Section 14.1), `GRANTED BY role` (Section 7.10), table-level named `NOT NULL` and temporal keys (Section 7.3), `NOT NULL ... NO INHERIT`/`ENFORCED`/`NOT ENFORCED`/FK column-scoped `SET NULL`/`SET DEFAULT` (Section 7.2), and Column `STATISTICS DEFAULT` (Section 7.4); the pre-existing generated-columns row split into `STORED` (floor-14) and `VIRTUAL` (PG18) since the two variants now carry different version gates. This documentation-only revision intentionally lands after the reference implementation (`core/`, commit `56ae62e`) rather than before it — the user's own explicit sequencing choice for this feature, so the RFC describes proven behavior rather than a plan. |
 
 ---
 
@@ -8643,84 +8705,110 @@ ENUM user_status ('active', 'inactive', 'banned') {
    standard core and PostgreSQL-specific optional clauses is marked
    **Mixed**, with the PG-specific sub-clauses named in Notes.
 
-   | Section | Construct | Classification | Notes |
-   |---|---|---|---|
-   | Sections 4.1-4.6 | Basic lexical rules (identifiers, comments, dollar-quoting, statement terminators) | N/A | DPG source-file syntax, not PostgreSQL DDL. |
-   | Section 5.1 | `CREATE TYPE ... AS ENUM` | PGSpecific | ISO SQL has no enumerated type; closest standard analogue is a `CHECK` constraint or `DOMAIN`. |
-   | Section 5.2 | `CREATE TYPE ... AS (...)` (composite) | PGSpecific | Structured/row types exist in SQL:1999+ but with different syntax and semantics (`CREATE TYPE ... AS (...)` the PostgreSQL way is not the standard's `CREATE TYPE` for UDTs). |
-   | Section 5.3 | `CREATE TYPE ... AS RANGE` | PGSpecific | No standard range type. |
-   | Section 5.4 | `CREATE DOMAIN` core (name, base type) | Standard | SQL:1999+ `CREATE DOMAIN`. |
-   | Section 5.4 | Domain `DEFAULT`/`CONSTRAINT ... CHECK`/`NOT NULL` | Standard | Same standard `CREATE DOMAIN` clauses. |
-   | Section 5.4 | Domain `COLLATE` | PGSpecific | PostgreSQL-specific collation attachment syntax (the standard has collations, but not this clause shape). |
-   | Section 5.5 | `CREATE TYPE (...)` (base/shell type) | PGSpecific | C-level storage type definition; no standard equivalent. |
-   | Section 5.6 | `VIRTUAL TYPE` | N/A | DPG-native, generates no SQL. |
-   | Section 6 | `CREATE EXTENSION` | PGSpecific | PostgreSQL's own extension-packaging mechanism. |
-   | Sections 7.1-7.2 | `CREATE TABLE` core (columns, types, `PRIMARY KEY`/`UNIQUE`/`CHECK`/`FOREIGN KEY`) | Standard | Core relational DDL. |
-   | Section 7.1 | `WITH (storage_params)` | PGSpecific | PostgreSQL storage parameters. |
-   | Section 7.1 | `TABLESPACE` | PGSpecific | No standard tablespace concept. |
-   | Section 7.1 | `INHERITS` | PGSpecific | PostgreSQL table inheritance; not in the standard. |
-   | Section 7.1 | `UNLOGGED` | PGSpecific | PostgreSQL crash-safety trade-off, no standard equivalent. |
-   | Section 7.2 | Generated columns (`GENERATED ALWAYS AS ... STORED`) | Standard | SQL:2003 generated columns (PostgreSQL only implements the `STORED` variant; `VIRTUAL` is PostgreSQL 18+ and also standard). |
-   | Section 7.2 | Identity columns (`GENERATED ... AS IDENTITY`) | Standard | SQL:2003 identity columns. |
-   | Section 7.2 | `SERIAL`/`BIGSERIAL`/`SMALLSERIAL` | PGSpecific | Pre-standard PostgreSQL sequence sugar; `IDENTITY` is the standard-conformant replacement. |
-   | Section 7.2 | Column `COMPRESSION`/`STORAGE` | PGSpecific | PostgreSQL TOAST-related storage tuning. |
-   | Section 7.2 | `EXCLUDE` constraints | PGSpecific | No standard exclusion-constraint concept. |
-   | Section 7.2 | `NOT VALID`/`VALIDATE CONSTRAINT` | PGSpecific | PostgreSQL's incremental constraint-validation lifecycle. |
-   | Section 7.7 | `CREATE INDEX` core | Mixed | Indexes exist informally across all vendors but are not in ISO/IEC 9075 at all — classified PGSpecific as a whole (see next row), since "index" is not a standard DDL concept, only a near-universal vendor extension. |
-   | Section 7.7 | `CREATE INDEX` (all forms: access methods, partial, expression, covering, opclass) | PGSpecific | No SQL-standard `CREATE INDEX` statement exists; every vendor's index DDL is proprietary. |
-   | Section 7.8 | `ROW LEVEL SECURITY`/`CREATE POLICY` | PGSpecific | No standard row-security mechanism. |
-   | Section 7.9 | `CREATE TRIGGER` core (`BEFORE`/`AFTER`, events, `FOR EACH ROW`) | Standard | SQL:1999+ triggers. |
-   | Section 7.9 | `REFERENCING OLD/NEW TABLE` (transition tables) | Standard | SQL:1999+ triggers include transition tables. |
-   | Section 7.9 | `WHEN (condition)`, `EXECUTE FUNCTION` | PGSpecific | PostgreSQL trigger-function-calling model differs from the standard's inline trigger action. |
-   | Section 7.11 | `RENAMED FROM`, `PROTECTED`, `DEPRECATED`, `DROP CASCADE` (directives) | N/A | DPG-native lifecycle metadata. |
-   | Section 7.11 | `OWNER` | PGSpecific | PostgreSQL's object-ownership model (`ALTER ... OWNER TO`) has no standard equivalent (the standard ties privileges to the creating authorization identifier with no separate transferable "owner"). |
-   | Section 7.12 | `UNLOGGED TABLE` | PGSpecific | See Section 7.1 row. |
-   | Section 7.12 | `CREATE FOREIGN TABLE` | Standard | SQL/MED (ISO/IEC 9075-9) standardizes foreign tables; PostgreSQL's FDW mechanism implements it. |
-   | Section 7.13 | `PARTITION BY`/`PARTITION OF` | Standard | SQL:2016 adds declarative partitioning as a standard concept, though exact grammar varies by vendor; PostgreSQL's own syntax is a PG-specific dialect of a standardized concept — classified Mixed in spirit, PGSpecific in literal grammar. |
-   | Section 8 | `CREATE VIEW` | Standard | Core SQL. |
-   | Section 8 | `CREATE MATERIALIZED VIEW` | PGSpecific | Materialized views are a common vendor extension, not in ISO/IEC 9075. |
-   | Section 8 | `RECURSIVE VIEW`/`WITH RECURSIVE` | Standard | SQL:1999+ recursive query support. |
-   | Sections 9.1-9.2 | `CREATE FUNCTION` core (name, args, `RETURNS`, `LANGUAGE`) | Standard | SQL/PSM (ISO/IEC 9075-4) standardizes stored routines; PostgreSQL's concrete grammar and `LANGUAGE` mechanism are its own dialect of the standardized concept. |
-   | Section 9.1 | `LANGUAGE sql`/`plpgsql` dollar-quoted bodies | PGSpecific | Dollar-quoting itself, and `plpgsql`, are PostgreSQL-specific; SQL/PSM's own procedural language differs. |
-   | Section 9.1 | PG14+ `sql_body`/`BEGIN ATOMIC` form | Standard | The ISO-standard-conformant alternative to dollar-quoting for `LANGUAGE sql` functions. |
-   | Section 9.2 | `VOLATILE`/`STABLE`/`IMMUTABLE`, `PARALLEL SAFE`/etc., `COST`/`ROWS`, `SUPPORT` | PGSpecific | Query-planner hints with no standard equivalent. |
-   | Section 9.2 | `SECURITY DEFINER`/`SECURITY INVOKER` | Standard | SQL/PSM standardizes routine security characteristics (exact keyword differs by vendor, but the concept is standard). |
-   | Section 9.3 | `CREATE PROCEDURE` | Standard | SQL/PSM standardizes procedures distinct from functions. |
-   | Section 9.4 | `CREATE AGGREGATE` | PGSpecific | User-defined aggregates with this declaration shape (`SFUNC`/`STYPE`/etc.) are PostgreSQL-specific; the standard has no equivalent `CREATE AGGREGATE`. |
-   | Section 10 | `CREATE SEQUENCE` | Standard | SQL:2003+ standardizes sequences (`AS`/`INCREMENT`/`MINVALUE`/`MAXVALUE`/`START`/`CACHE`/`CYCLE` are all standard clauses). |
-   | Section 10 | `OWNED BY` | PGSpecific | PostgreSQL's sequence-to-column ownership link has no standard equivalent. |
-   | Section 11.1 | `CREATE ROLE`/`CREATE USER` core (`LOGIN`, `PASSWORD`) | Standard | SQL standardizes authorization identifiers, though PostgreSQL's unified role model (merging users and groups) is its own design. |
-   | Section 11.1 | `SUPERUSER`/`CREATEDB`/`CREATEROLE`/`REPLICATION`/`BYPASSRLS`/`CONNECTION LIMIT` | PGSpecific | PostgreSQL-specific role attributes. |
-   | Section 11.2 | `GRANT`/`REVOKE` core | Standard | Core SQL privilege model. |
-   | Section 11.2 | `MAINTAIN` privilege (PG17) | PGSpecific | PostgreSQL-specific privilege covering VACUUM/ANALYZE/CLUSTER/REINDEX. |
-   | Section 11.3 | Role membership (`GRANT role TO role`, `WITH ADMIN OPTION`/`WITH INHERIT`/`WITH SET`) | Mixed | Standard SQL has roles and role grants; `WITH ADMIN OPTION` is standard, `WITH INHERIT`/`WITH SET` (PG16+) are PostgreSQL-specific refinements of role-attribute inheritance. |
-   | Section 11.4 | `ALTER DEFAULT PRIVILEGES` | PGSpecific | No standard mechanism for privilege templates applied to not-yet-created objects. |
-   | Section 11.5 | Owner impersonation (`SET ROLE`/`RESET ROLE`) | Standard | SQL standardizes `SET ROLE`; PostgreSQL's specific creator-attribution semantics this section documents are PostgreSQL's own catalog behavior. |
-   | Section 12.1 | `CREATE TEXT SEARCH CONFIGURATION`/`MAPPING FOR ... WITH ...` | PGSpecific | PostgreSQL full-text search is entirely proprietary. |
-   | Sections 12.2-12.4 | Text Search Dictionary/Parser/Template | PGSpecific | Same as above. |
-   | Section 13.1 | `CREATE PUBLICATION` | PGSpecific | PostgreSQL's own logical-replication publish/subscribe model. |
-   | Section 13.2 | `CREATE SUBSCRIPTION` | PGSpecific | Same. |
-   | Section 14.1 | `CREATE EVENT TRIGGER` | PGSpecific | No standard DDL-event trigger mechanism. |
-   | Section 14.2 | `CREATE COLLATION` | Standard | SQL:2003+ standardizes collations; PostgreSQL's ICU/libc provider mechanism is its own extension of the standard concept. |
-   | Section 14.3 | `CREATE CAST` | Standard | SQL standardizes user-defined casts (`CREATE CAST`), though PostgreSQL's `WITH FUNCTION`/`WITHOUT FUNCTION`/`WITH INOUT` grammar has PostgreSQL-specific shorthand forms. |
-   | Section 14.4 | `CREATE OPERATOR`/`OPERATOR CLASS`/`OPERATOR FAMILY` | PGSpecific | User-defined operators and index access-method integration are PostgreSQL-specific; the standard has no equivalent. |
-   | Section 14.5 | (Cast — see Section 14.3) | — | Cross-reference; see Section 14.3 row. |
-   | Section 14.6 | `CREATE STATISTICS` (extended statistics objects) | PGSpecific | PostgreSQL planner-statistics extension. |
-   | Section 14.7 | `CREATE TABLESPACE` | PGSpecific | No standard physical-storage-location concept. |
-   | Section 14.8 | `CREATE FOREIGN DATA WRAPPER` | Standard | SQL/MED standardizes the FDW concept (`CREATE FOREIGN DATA WRAPPER`), though HANDLER/VALIDATOR functions are PostgreSQL's own extension mechanism. |
-   | Section 14.9 | `CREATE SERVER` | Standard | SQL/MED standardizes foreign servers. |
-   | Section 14.10 | `CREATE USER MAPPING` | Standard | SQL/MED standardizes user mappings for foreign servers. |
-   | Section 14.11 | `SECURITY LABEL` | PGSpecific | PostgreSQL's MAC/label-security integration point (SELinux/sepgsql etc.); no standard equivalent. |
-   | Sections 15-21 | Compilation pipeline, snapshot format, CLI, linter, safety classification, diffing semantics | N/A | DPG tooling, not PostgreSQL DDL. |
-   | Section 22 | Dependency graph / topological sort | N/A | DPG compiler internals. |
-   | Throughout | `COMMENT ON ...` | Standard | SQL:1999+ standardizes `COMMENT ON`, though PostgreSQL supports it on a broader set of object kinds than the standard requires. |
-   | Throughout | `{ }` block itself, Name Maps, macros | N/A | DPG-native source syntax; generates no SQL directly. |
+   **`Min PG Version`:** the version-gating input for `min_pg_version`
+   (Section 3.8) and its `min-pg-version` linter rule (Appendix D.3).
+   A blank cell means the construct has been available since this
+   specification's own supported floor, PostgreSQL 14 (Section 1.4),
+   and is never gated regardless of a project's configured
+   `min_pg_version`.  A value means the construct requires at least
+   that PostgreSQL major version; a value with a parenthetical
+   qualifies which part of a Mixed row's construct the gate applies to
+   when the row's other part is floor-14.
+
+   | Section | Construct | Classification | Min PG Version | Notes |
+   |---|---|---|---|---|
+   | Sections 4.1-4.6 | Basic lexical rules (identifiers, comments, dollar-quoting, statement terminators) | N/A | — | DPG source-file syntax, not PostgreSQL DDL. |
+   | Section 5.1 | `CREATE TYPE ... AS ENUM` | PGSpecific | — | ISO SQL has no enumerated type; closest standard analogue is a `CHECK` constraint or `DOMAIN`. |
+   | Section 5.2 | `CREATE TYPE ... AS (...)` (composite) | PGSpecific | — | Structured/row types exist in SQL:1999+ but with different syntax and semantics (`CREATE TYPE ... AS (...)` the PostgreSQL way is not the standard's `CREATE TYPE` for UDTs). |
+   | Section 5.3 | `CREATE TYPE ... AS RANGE` | PGSpecific | — | No standard range type. |
+   | Section 5.4 | `CREATE DOMAIN` core (name, base type) | Standard | — | SQL:1999+ `CREATE DOMAIN`. |
+   | Section 5.4 | Domain `DEFAULT`/`CONSTRAINT ... CHECK`/`NOT NULL` | Standard | — | Same standard `CREATE DOMAIN` clauses. |
+   | Section 5.4 | Domain `COLLATE` | PGSpecific | — | PostgreSQL-specific collation attachment syntax (the standard has collations, but not this clause shape). |
+   | Section 5.5 | `CREATE TYPE (...)` (base/shell type) | PGSpecific | — | C-level storage type definition; no standard equivalent. |
+   | Section 5.6 | `VIRTUAL TYPE` | N/A | — | DPG-native, generates no SQL. |
+   | Section 6 | `CREATE EXTENSION` | PGSpecific | — | PostgreSQL's own extension-packaging mechanism. |
+   | Sections 7.1-7.2 | `CREATE TABLE` core (columns, types, `PRIMARY KEY`/`UNIQUE`/`CHECK`/`FOREIGN KEY`) | Standard | — | Core relational DDL. |
+   | Section 7.1 | `WITH (storage_params)` | PGSpecific | — | PostgreSQL storage parameters. |
+   | Section 7.1 | `TABLESPACE` | PGSpecific | — | No standard tablespace concept. |
+   | Section 7.1 | `INHERITS` | PGSpecific | — | PostgreSQL table inheritance; not in the standard. |
+   | Section 7.1 | `UNLOGGED` | PGSpecific | — | PostgreSQL crash-safety trade-off, no standard equivalent. |
+   | Section 7.2 | Generated columns (`GENERATED ALWAYS AS ... STORED`) | Standard | — | SQL:2003 generated columns. |
+   | Section 7.2 | Generated columns (`GENERATED ALWAYS AS ... VIRTUAL`) | Standard | 18 | SQL:2003 generated columns also standardize `VIRTUAL`; PostgreSQL only implemented the `STORED` variant until PostgreSQL 18 added this one. |
+   | Section 7.2 | Identity columns (`GENERATED ... AS IDENTITY`) | Standard | — | SQL:2003 identity columns. |
+   | Section 7.2 | `SERIAL`/`BIGSERIAL`/`SMALLSERIAL` | PGSpecific | — | Pre-standard PostgreSQL sequence sugar; `IDENTITY` is the standard-conformant replacement. |
+   | Section 7.2 | Column `COMPRESSION`/`STORAGE` | PGSpecific | — | PostgreSQL TOAST-related storage tuning. |
+   | Section 7.2 | `EXCLUDE` constraints | PGSpecific | — | No standard exclusion-constraint concept. |
+   | Section 7.2 | `NOT VALID`/`VALIDATE CONSTRAINT` | PGSpecific | — | PostgreSQL's incremental constraint-validation lifecycle. |
+   | Section 7.2 | `NOT NULL ... NO INHERIT` | PGSpecific | 18 | Extends the pre-existing `CHECK ... NO INHERIT` modifier (floor-14 PGSpecific) to `NOT NULL` constraints for the first time. |
+   | Section 7.2 | `ENFORCED`/`NOT ENFORCED` (`CHECK`/`FOREIGN KEY`) | PGSpecific | 18 | PostgreSQL's own catalog-recorded-but-unchecked constraint mode; no SQL-standard citation for this exact clause. |
+   | Section 7.2 | FK `ON DELETE`/`ON UPDATE SET NULL`/`SET DEFAULT (col-list)` | PGSpecific | 15 | Column-scoped refinement of the standard bare `SET NULL`/`SET DEFAULT` form (the bare form is covered by the `CREATE TABLE` core row above); the column-list itself has no SQL-standard equivalent. |
+   | Section 7.3 | Table-level named `NOT NULL` constraint | Standard | 18 | PostgreSQL 18 gave `NOT NULL` the same named, catalogued constraint treatment `CHECK`/`PRIMARY KEY`/`UNIQUE`/`FOREIGN KEY` already had; additive to the pre-existing inline column-level form (Section 7.2 row above), not a replacement. |
+   | Section 7.3 | Temporal keys (`WITHOUT OVERLAPS`/`PERIOD FOR`, incl. temporal `FOREIGN KEY`) | Mixed | 18 | SQL:2011 standardizes temporal `PRIMARY KEY`/`UNIQUE`; PostgreSQL implements it as an exclusion constraint under the hood — the concept is standard, the grammar and mechanism are PostgreSQL's own dialect. |
+   | Section 7.4 | Column `STATISTICS n` / `STATISTICS DEFAULT` | PGSpecific | 17 (`DEFAULT` keyword only; numeric target is floor-14) | Planner statistics-target tuning; no standard equivalent. |
+   | Section 7.7 | `CREATE INDEX` core | Mixed | — | Indexes exist informally across all vendors but are not in ISO/IEC 9075 at all — classified PGSpecific as a whole (see next row), since "index" is not a standard DDL concept, only a near-universal vendor extension. |
+   | Section 7.7 | `CREATE INDEX` (all forms: access methods, partial, expression, covering, opclass) | PGSpecific | — | No SQL-standard `CREATE INDEX` statement exists; every vendor's index DDL is proprietary. |
+   | Section 7.8 | `ROW LEVEL SECURITY`/`CREATE POLICY` | PGSpecific | — | No standard row-security mechanism. |
+   | Section 7.9 | `CREATE TRIGGER` core (`BEFORE`/`AFTER`, events, `FOR EACH ROW`) | Standard | — | SQL:1999+ triggers. |
+   | Section 7.9 | `REFERENCING OLD/NEW TABLE` (transition tables) | Standard | — | SQL:1999+ triggers include transition tables. |
+   | Section 7.9 | `WHEN (condition)`, `EXECUTE FUNCTION` | PGSpecific | — | PostgreSQL trigger-function-calling model differs from the standard's inline trigger action. |
+   | Section 7.10 | `GRANTED BY role` | Standard | — | Real PostgreSQL accepts this SQL-standard-compatibility clause but restricts the effective grantor to `current_user` in practice. |
+   | Section 7.11 | `RENAMED FROM`, `PROTECTED`, `DEPRECATED`, `DROP CASCADE` (directives) | N/A | — | DPG-native lifecycle metadata. |
+   | Section 7.11 | `OWNER` | PGSpecific | — | PostgreSQL's object-ownership model (`ALTER ... OWNER TO`) has no standard equivalent (the standard ties privileges to the creating authorization identifier with no separate transferable "owner"). |
+   | Section 7.12 | `UNLOGGED TABLE` | PGSpecific | — | See Section 7.1 row. |
+   | Section 7.12 | `CREATE FOREIGN TABLE` | Standard | — | SQL/MED (ISO/IEC 9075-9) standardizes foreign tables; PostgreSQL's FDW mechanism implements it. |
+   | Section 7.13 | `PARTITION BY`/`PARTITION OF` | Standard | — | SQL:2016 adds declarative partitioning as a standard concept, though exact grammar varies by vendor; PostgreSQL's own syntax is a PG-specific dialect of a standardized concept — classified Mixed in spirit, PGSpecific in literal grammar. |
+   | Section 8 | `CREATE VIEW` | Standard | — | Core SQL. |
+   | Section 8 | `CREATE MATERIALIZED VIEW` | PGSpecific | — | Materialized views are a common vendor extension, not in ISO/IEC 9075. |
+   | Section 8 | `RECURSIVE VIEW`/`WITH RECURSIVE` | Standard | — | SQL:1999+ recursive query support. |
+   | Sections 9.1-9.2 | `CREATE FUNCTION` core (name, args, `RETURNS`, `LANGUAGE`) | Standard | — | SQL/PSM (ISO/IEC 9075-4) standardizes stored routines; PostgreSQL's concrete grammar and `LANGUAGE` mechanism are its own dialect of the standardized concept. |
+   | Section 9.1 | `LANGUAGE sql`/`plpgsql` dollar-quoted bodies | PGSpecific | — | Dollar-quoting itself, and `plpgsql`, are PostgreSQL-specific; SQL/PSM's own procedural language differs. |
+   | Section 9.1 | PG14+ `sql_body`/`BEGIN ATOMIC` form | Standard | — | The ISO-standard-conformant alternative to dollar-quoting for `LANGUAGE sql` functions; available since this specification's own floor, not a later gate. |
+   | Section 9.2 | `VOLATILE`/`STABLE`/`IMMUTABLE`, `PARALLEL SAFE`/etc., `COST`/`ROWS`, `SUPPORT` | PGSpecific | — | Query-planner hints with no standard equivalent. |
+   | Section 9.2 | `SECURITY DEFINER`/`SECURITY INVOKER` | Standard | — | SQL/PSM standardizes routine security characteristics (exact keyword differs by vendor, but the concept is standard). |
+   | Section 9.3 | `CREATE PROCEDURE` | Standard | — | SQL/PSM standardizes procedures distinct from functions. |
+   | Section 9.4 | `CREATE AGGREGATE` | PGSpecific | — | User-defined aggregates with this declaration shape (`SFUNC`/`STYPE`/etc.) are PostgreSQL-specific; the standard has no equivalent `CREATE AGGREGATE`. |
+   | Section 10 | `CREATE SEQUENCE` | Standard | — | SQL:2003+ standardizes sequences (`AS`/`INCREMENT`/`MINVALUE`/`MAXVALUE`/`START`/`CACHE`/`CYCLE` are all standard clauses). |
+   | Section 10 | `OWNED BY` | PGSpecific | — | PostgreSQL's sequence-to-column ownership link has no standard equivalent. |
+   | Section 11.1 | `CREATE ROLE`/`CREATE USER` core (`LOGIN`, `PASSWORD`) | Standard | — | SQL standardizes authorization identifiers, though PostgreSQL's unified role model (merging users and groups) is its own design. |
+   | Section 11.1 | `SUPERUSER`/`CREATEDB`/`CREATEROLE`/`REPLICATION`/`BYPASSRLS`/`CONNECTION LIMIT` | PGSpecific | — | PostgreSQL-specific role attributes. |
+   | Section 11.2 | `GRANT`/`REVOKE` core | Standard | — | Core SQL privilege model. |
+   | Section 11.2 | `MAINTAIN` privilege | PGSpecific | 17 | PostgreSQL-specific privilege covering VACUUM/ANALYZE/CLUSTER/REINDEX. |
+   | Section 11.3 | Role membership (`GRANT role TO role`, `WITH ADMIN OPTION`/`WITH INHERIT`/`WITH SET`) | Mixed | 16 (`WITH INHERIT`/`WITH SET` only) | Standard SQL has roles and role grants; `WITH ADMIN OPTION` is standard and floor-14, `WITH INHERIT`/`WITH SET` are PostgreSQL-specific refinements of role-attribute inheritance. |
+   | Section 11.4 | `ALTER DEFAULT PRIVILEGES` | PGSpecific | — | No standard mechanism for privilege templates applied to not-yet-created objects. |
+   | Section 11.5 | Owner impersonation (`SET ROLE`/`RESET ROLE`) | Standard | — | SQL standardizes `SET ROLE`; PostgreSQL's specific creator-attribution semantics this section documents are PostgreSQL's own catalog behavior. |
+   | Section 11.6 | `PARAMETER PRIVILEGES` (`GRANT {SET\|ALTER SYSTEM} ON PARAMETER`) | PGSpecific | 15 | PostgreSQL's grantable parameter-ACL object type; no standard equivalent. |
+   | Section 12.1 | `CREATE TEXT SEARCH CONFIGURATION`/`MAPPING FOR ... WITH ...` | PGSpecific | — | PostgreSQL full-text search is entirely proprietary. |
+   | Sections 12.2-12.4 | Text Search Dictionary/Parser/Template | PGSpecific | — | Same as above. |
+   | Section 13.1 | `CREATE PUBLICATION` | PGSpecific | — | PostgreSQL's own logical-replication publish/subscribe model. |
+   | Section 13.2 | `CREATE SUBSCRIPTION` | PGSpecific | — | Same. |
+   | Section 14.1 | `CREATE EVENT TRIGGER` | PGSpecific | — | No standard DDL-event trigger mechanism. |
+   | Section 14.1 | Event Trigger `login` event | PGSpecific | 17 | One value of the `ON <event>` clause's event-type enum; every other value (`ddl_command_start`/`ddl_command_end`/`table_rewrite`/`sql_drop`) is floor-14. |
+   | Section 14.2 | `CREATE COLLATION` | Standard | — | SQL:2003+ standardizes collations; PostgreSQL's ICU/libc provider mechanism is its own extension of the standard concept. |
+   | Section 14.2 | Collation `REFRESH VERSION` | PGSpecific | 15 | Updates the catalog's recorded collation-provider version; no standard equivalent. |
+   | Section 14.2 | Collation `RULES` (ICU tailoring) | PGSpecific | 16 | PostgreSQL's own ICU collation-tailoring integration; no standard equivalent. |
+   | Section 14.3 | `CREATE CAST` | Standard | — | SQL standardizes user-defined casts (`CREATE CAST`), though PostgreSQL's `WITH FUNCTION`/`WITHOUT FUNCTION`/`WITH INOUT` grammar has PostgreSQL-specific shorthand forms. |
+   | Section 14.4 | `CREATE OPERATOR`/`OPERATOR CLASS`/`OPERATOR FAMILY` | PGSpecific | — | User-defined operators and index access-method integration are PostgreSQL-specific; the standard has no equivalent. |
+   | Section 14.5 | (Cast — see Section 14.3) | — | — | Cross-reference; see Section 14.3 row. |
+   | Section 14.6 | `CREATE STATISTICS` (extended statistics objects) | PGSpecific | — | PostgreSQL planner-statistics extension; expression-based statistics (not just plain columns) are floor-14, passed through as opaque text. |
+   | Section 14.7 | `CREATE TABLESPACE` | PGSpecific | — | No standard physical-storage-location concept. |
+   | Section 14.8 | `CREATE FOREIGN DATA WRAPPER` | Standard | — | SQL/MED standardizes the FDW concept (`CREATE FOREIGN DATA WRAPPER`), though HANDLER/VALIDATOR functions are PostgreSQL's own extension mechanism. |
+   | Section 14.9 | `CREATE SERVER` | Standard | — | SQL/MED standardizes foreign servers. |
+   | Section 14.10 | `CREATE USER MAPPING` | Standard | — | SQL/MED standardizes user mappings for foreign servers. |
+   | Section 14.11 | `SECURITY LABEL` | PGSpecific | — | PostgreSQL's MAC/label-security integration point (SELinux/sepgsql etc.); no standard equivalent. |
+   | Sections 15-21 | Compilation pipeline, snapshot format, CLI, linter, safety classification, diffing semantics | N/A | — | DPG tooling, not PostgreSQL DDL. |
+   | Section 22 | Dependency graph / topological sort | N/A | — | DPG compiler internals. |
+   | Throughout | `COMMENT ON ...` | Standard | — | SQL:1999+ standardizes `COMMENT ON`, though PostgreSQL supports it on a broader set of object kinds than the standard requires. |
+   | Throughout | `{ }` block itself, Name Maps, macros | N/A | — | DPG-native source syntax; generates no SQL directly. |
 
    **How this table is maintained:** a construct newly documented by a
    future revision of this specification MUST be classified here in
    the same revision (Appendix E's entry for that revision should note
    the addition) — this is what keeps Tenet 3 checkable rather than
-   aspirational, the defect this appendix was added to close.
+   aspirational, the defect this appendix was added to close.  A
+   construct gated by `min_pg_version` above its own floor of
+   PostgreSQL 14 MUST have its `Min PG Version` cell populated in that
+   same revision, for the identical reason applied to Section 3.8's
+   `min-pg-version` rule.
 
 ---
 
