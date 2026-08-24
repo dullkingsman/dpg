@@ -152,6 +152,9 @@ type SnapOpaque struct {
 	// CollationOwner is RFC audit item #81's ALTER COLLATION ... OWNER TO
 	// diffing input — see ir.Collation.Owner's doc comment.
 	CollationOwner *string `json:"collation_owner,omitempty"`
+	// CollationRules is RFC audit item #111's PG16+ ICU RULES diffing
+	// input — see ir.Collation.Rules' doc comment.
+	CollationRules *string `json:"collation_rules,omitempty"`
 	// StatisticsStructured/StatisticsTable/StatisticsKinds/
 	// StatisticsColumns/StatisticsTarget are RFC §14.6's structured
 	// diffing inputs — see ir.StatisticsObject.Table's doc comment.

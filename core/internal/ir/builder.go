@@ -2436,6 +2436,13 @@ func (b *Builder) buildDefineStmt(ds *pg_query.DefineStmt, block pipeline.BlockA
 				if sv := de.GetArg().GetString_(); sv != nil {
 					col.Deterministic = sv.Sval == "true"
 				}
+			case "rules":
+				// RFC audit item #111: PG16+ ICU tailoring RULES, a plain
+				// string arg (confirmed via pg_query.Parse probe).
+				if sv := de.GetArg().GetString_(); sv != nil {
+					v := sv.Sval
+					col.Rules = &v
+				}
 			}
 		}
 		if locale != nil {

@@ -1018,15 +1018,23 @@ func introspectCollations(ctx context.Context, conn pipeline.Querier) ([]pipelin
 	// colliculocale (PG15–16); on older releases the locale lives in
 	// collcollate. Select the right column for the live server version.
 	icuLocaleCol := "NULL::text"
+	// collicurules (RFC audit item #111's RULES) was added in PG16 —
+	// confirmed against PostgreSQL's own catalog docs, same version-gating
+	// pattern as the ICU locale column above.
+	rulesCol := "NULL::text"
 	switch v := serverVersionNum(ctx, conn); {
 	case v >= 170000:
 		icuLocaleCol = "c.colllocale"
+		rulesCol = "c.collicurules"
+	case v >= 160000:
+		icuLocaleCol = "c.colliculocale"
+		rulesCol = "c.collicurules"
 	case v >= 150000:
 		icuLocaleCol = "c.colliculocale"
 	}
 	q := `
 SELECT n.nspname, c.collname, c.collprovider,
-       c.collcollate, c.collctype, c.collisdeterministic, ` + icuLocaleCol + `,
+       c.collcollate, c.collctype, c.collisdeterministic, ` + icuLocaleCol + `, ` + rulesCol + `,
        obj_description(c.oid, 'pg_collation') AS comment, r.rolname AS owner
 FROM   pg_collation c
 JOIN   pg_namespace n ON n.oid = c.collnamespace
@@ -1046,9 +1054,9 @@ ORDER  BY n.nspname, c.collname`
 	for rs.Next() {
 		var schema, name, owner string
 		var provider byte
-		var collate, ctype, icuLocale, comment *string
+		var collate, ctype, icuLocale, rules, comment *string
 		var deterministic bool
-		if err := rs.Scan(&schema, &name, &provider, &collate, &ctype, &deterministic, &icuLocale, &comment, &owner); err != nil {
+		if err := rs.Scan(&schema, &name, &provider, &collate, &ctype, &deterministic, &icuLocale, &rules, &comment, &owner); err != nil {
 			return nil, err
 		}
 		var attrs []string
@@ -1061,6 +1069,9 @@ ORDER  BY n.nspname, c.collname`
 				continue
 			}
 			attrs = append(attrs, "PROVIDER = icu", "LOCALE = "+quoteLit(loc))
+			if rules != nil && *rules != "" {
+				attrs = append(attrs, "RULES = "+quoteLit(*rules))
+			}
 		default: // 'c' (libc) / 'd' (database default) / 'b' (builtin)
 			if collate != nil && ctype != nil && *collate == *ctype {
 				attrs = append(attrs, "LOCALE = "+quoteLit(*collate))
@@ -1083,7 +1094,8 @@ ORDER  BY n.nspname, c.collname`
 		out = append(out, &ir.Collation{
 			Schema: schema, Name: name,
 			Provider: string(provider), Collate: collate, Ctype: ctype, ICULocale: icuLocale, Deterministic: deterministic,
-			Body: canonicalDDL(body), Comment: comment, Reconstructed: true, Owner: &owner,
+			Rules: rules,
+			Body:  canonicalDDL(body), Comment: comment, Reconstructed: true, Owner: &owner,
 		})
 	}
 	return out, rs.Err()

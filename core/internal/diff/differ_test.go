@@ -15431,6 +15431,70 @@ func TestDiffCollationDeterministicChangeRecreates(t *testing.T) {
 	}
 }
 
+// TestDiffCollationRulesChangeRecreates guards RFC audit item #111: RULES
+// was entirely absent from the significant-property comparison, so a
+// RULES-only change was undetected drift, not just an unoptimized
+// DROP+CREATE — real PostgreSQL's ALTER COLLATION has no way to alter RULES
+// in place.
+func TestDiffCollationRulesChangeRecreates(t *testing.T) {
+	d := New()
+	oldRules := "&a < b"
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.c", &snapshot.SnapObject{
+		Kind: "collation",
+		Opaque: &snapshot.SnapOpaque{
+			Kind: "collation", Schema: "public", Name: "c", CollationStructured: true,
+			CollationProvider: "i", CollationICULocale: strPtr("und"), CollationDeterministic: true,
+			CollationRules: &oldRules,
+		},
+	})
+	newRules := "&b < a"
+	desired := []pipeline.IRObject{
+		&ir.Collation{
+			Schema: "public", Name: "c", Provider: "i", ICULocale: strPtr("und"), Deterministic: true,
+			Rules: &newRules,
+			Body:  "CREATE COLLATION public.c (PROVIDER = icu, LOCALE = 'und', RULES = '&b < a')",
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsSQL(ops, `DROP COLLATION IF EXISTS "public"."c"`) {
+		t.Errorf("expected DROP COLLATION for a RULES change, got: %v", sqlList(ops))
+	}
+}
+
+// TestDiffCollationRulesUnspecifiedIsNoop proves a source that never
+// mentions RULES doesn't drift against a snapshot that has one recorded
+// (nil-means-unspecified, same convention as every other optional field).
+func TestDiffCollationRulesUnspecifiedIsNoop(t *testing.T) {
+	d := New()
+	rules := "&a < b"
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.c", &snapshot.SnapObject{
+		Kind: "collation",
+		Opaque: &snapshot.SnapOpaque{
+			Kind: "collation", Schema: "public", Name: "c", CollationStructured: true,
+			CollationProvider: "i", CollationICULocale: strPtr("und"), CollationDeterministic: true,
+			CollationRules: &rules,
+		},
+	})
+	desired := []pipeline.IRObject{
+		&ir.Collation{
+			Schema: "public", Name: "c", Provider: "i", ICULocale: strPtr("und"), Deterministic: true,
+			Body: "CREATE COLLATION public.c (PROVIDER = icu, LOCALE = 'und')",
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ops) != 0 {
+		t.Errorf("expected zero ops when RULES is unspecified in source, got: %v", sqlList(ops))
+	}
+}
+
 func TestDiffCollationUnchangedIsNoop(t *testing.T) {
 	d := New()
 	snap := &pipeline.Snapshot{}

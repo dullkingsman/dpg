@@ -2108,7 +2108,8 @@ func diffCollation(o *ir.Collation, snap *snapshot.SnapOpaque) ([]pipeline.DiffO
 	}
 	if o.Provider != snap.CollationProvider ||
 		!ptrEq(o.Collate, snap.CollationCollate) || !ptrEq(o.Ctype, snap.CollationCtype) || !ptrEq(o.ICULocale, snap.CollationICULocale) ||
-		o.Deterministic != snap.CollationDeterministic {
+		o.Deterministic != snap.CollationDeterministic ||
+		(o.Rules != nil && !ptrEq(o.Rules, snap.CollationRules)) {
 		ops := dropObject(&snapshot.SnapObject{Kind: snap.Kind, Opaque: snap})
 		createOps, err := createOpaque(o.QualifiedName(), o.Body, "COLLATION", o.Schema, pos)
 		if err != nil {

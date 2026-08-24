@@ -1177,7 +1177,15 @@ type Collation struct {
 	Collate, Ctype *string
 	ICULocale      *string
 	Deterministic  bool
-	Comment        *string // see EventTrigger.Comment
+	// Rules is RFC audit item #111's PG16+ ICU tailoring rules string
+	// (`RULES = 'rules'`) — nil when not declared. Part of the same
+	// significant-property set as Provider/Collate/Ctype/ICULocale/
+	// Deterministic above: any change decides DROP+CREATE (real
+	// PostgreSQL's ALTER COLLATION has no way to alter it in place), so a
+	// RULES-only change must be compared here too or it's undetected
+	// drift, not just an unoptimized DROP+CREATE.
+	Rules   *string
+	Comment *string // see EventTrigger.Comment
 	// RenamedFrom/RenamedFromSchema — see Table's identical doc comments;
 	// reuses the same generic cross-schema RENAME TO/SET SCHEMA mechanism.
 	RenamedFrom       *string

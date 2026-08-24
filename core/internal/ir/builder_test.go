@@ -3124,6 +3124,27 @@ func TestBuildCollationLocaleShorthandResolvesCollateAndCtype(t *testing.T) {
 	}
 }
 
+// TestBuildCollationRules guards RFC audit item #111: PG16+ ICU RULES was
+// entirely unparsed — buildCollation's DefElem switch had no "rules" case
+// at all.
+func TestBuildCollationRules(t *testing.T) {
+	obj := buildObject(t, pipeline.KindCollation, `c1 (PROVIDER = icu, LOCALE = 'und', RULES = '&a < b')`, ``)
+	col := obj.(*ir.Collation)
+	if col.Rules == nil || *col.Rules != "&a < b" {
+		t.Errorf("Rules: got %v, want \"&a < b\"", col.Rules)
+	}
+}
+
+// TestBuildCollationRulesUnspecified proves Rules stays nil when the source
+// never mentions RULES.
+func TestBuildCollationRulesUnspecified(t *testing.T) {
+	obj := buildObject(t, pipeline.KindCollation, `c1 (PROVIDER = icu, LOCALE = 'und')`, ``)
+	col := obj.(*ir.Collation)
+	if col.Rules != nil {
+		t.Errorf("Rules: got %v, want nil", col.Rules)
+	}
+}
+
 // TestBuildCollationOwner guards RFC audit item #81: Collation had no Owner
 // field at all.
 func TestBuildCollationOwner(t *testing.T) {

@@ -304,7 +304,7 @@ func toSnapObject(obj pipeline.IRObject) *SnapObject {
 			Kind: "collation", Schema: o.Schema, Name: o.Name,
 			CollationStructured: true, CollationProvider: o.Provider,
 			CollationCollate: o.Collate, CollationCtype: o.Ctype, CollationICULocale: o.ICULocale,
-			CollationDeterministic: o.Deterministic, CollationOwner: o.Owner,
+			CollationDeterministic: o.Deterministic, CollationOwner: o.Owner, CollationRules: o.Rules,
 			BodyHash:               sourceBodyHash(o.Body, o.Reconstructed), Comment: o.Comment,
 		}}
 	case *ir.Operator:
