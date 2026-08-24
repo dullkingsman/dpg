@@ -917,7 +917,7 @@ func renderObjectDPG(b *strings.Builder, obj pipeline.IRObject, fmtOpts format.O
 			fmt.Fprintf(b, " %s %v", kw("ROWS"), *o.Attrs.Rows)
 		}
 		fmt.Fprintf(b, " %s $$%s$$", kw("AS"), o.Attrs.Body)
-		writeFuncBlockWithDepends(b, ind, fmtOpts, o.Comment, o.Grants, o.Revocations, o.SecurityLabels, o.DependsOnExtensions)
+		writeFuncBlockWithDepends(b, ind, fmtOpts, o.Owner, o.Comment, o.Grants, o.Revocations, o.SecurityLabels, o.DependsOnExtensions)
 
 	case *ir.Aggregate:
 		// Previously had no case at all in this switch — an AGGREGATE
@@ -942,7 +942,7 @@ func renderObjectDPG(b *strings.Builder, obj pipeline.IRObject, fmtOpts format.O
 			fmt.Fprintf(b, "%s = %s", kw(strings.ToUpper(p.Key)), p.Value)
 		}
 		b.WriteString(")")
-		writeFuncBlockWithLabels(b, ind, fmtOpts, o.Comment, o.Grants, o.Revocations, o.SecurityLabels)
+		writeFuncBlockWithOwnerAndLabels(b, ind, fmtOpts, o.Owner, o.Comment, o.Grants, o.Revocations, o.SecurityLabels)
 
 	case *ir.Procedure:
 		b.WriteString("\n")
@@ -956,7 +956,7 @@ func renderObjectDPG(b *strings.Builder, obj pipeline.IRObject, fmtOpts format.O
 		b.WriteString(" ")
 		b.WriteString(o.Attrs.Language)
 		fmt.Fprintf(b, " %s $$%s$$", kw("AS"), o.Attrs.Body)
-		writeFuncBlockWithDepends(b, ind, fmtOpts, o.Comment, o.Grants, o.Revocations, o.SecurityLabels, o.DependsOnExtensions)
+		writeFuncBlockWithDepends(b, ind, fmtOpts, o.Owner, o.Comment, o.Grants, o.Revocations, o.SecurityLabels, o.DependsOnExtensions)
 
 	case *ir.Type:
 		switch o.Variant {
@@ -1482,22 +1482,72 @@ func writeFuncBlockWithLabels(b *strings.Builder, ind string, fmtOpts format.Opt
 	b.WriteString("}\n")
 }
 
-// writeFuncBlockWithDepends is writeFuncBlockWithLabels plus DEPENDS ON
-// EXTENSION (Section 9.1) — kept as a separate entry point rather than
-// adding a parameter to writeFuncBlockWithLabels itself, same reasoning as
-// that function's own doc comment: Aggregate shares writeFuncBlockWithLabels
-// too, but real PostgreSQL has no ALTER AGGREGATE ... DEPENDS ON EXTENSION
-// at all (passthrough principle — DPG doesn't reject it there, but Aggregate
-// should never actually render one), and every other unrelated caller would
-// need a trailing nil/empty slice for a directive that will never apply to
-// it either.
-func writeFuncBlockWithDepends(b *strings.Builder, ind string, fmtOpts format.Options, comment *string, grants []ir.Grant, revocations []ir.Revocation, securityLabels []pipeline.SecurityLabel, dependsOnExtensions []string) {
+// writeFuncBlockWithOwnerAndLabels is writeFuncBlockWithLabels plus Owner
+// (RFC audit item #70) — Aggregate's own entry point, kept separate from
+// writeFuncBlockWithDepends since real PostgreSQL has no
+// ALTER AGGREGATE ... DEPENDS ON EXTENSION (see that function's doc
+// comment), and separate from writeFuncBlockWithLabels itself so every
+// other unrelated caller doesn't need a trailing nil.
+func writeFuncBlockWithOwnerAndLabels(b *strings.Builder, ind string, fmtOpts format.Options, owner, comment *string, grants []ir.Grant, revocations []ir.Revocation, securityLabels []pipeline.SecurityLabel) {
 	kw := fmtOpts.Keyword
-	if comment == nil && len(grants) == 0 && len(revocations) == 0 && len(securityLabels) == 0 && len(dependsOnExtensions) == 0 {
+	if owner == nil && comment == nil && len(grants) == 0 && len(revocations) == 0 && len(securityLabels) == 0 {
 		b.WriteString(";\n")
 		return
 	}
 	b.WriteString(" {\n")
+	if owner != nil {
+		fmt.Fprintf(b, "%s%s %s;\n", ind, kw("OWNER"), quoteIdentIfNeeded(*owner))
+	}
+	if comment != nil {
+		fmt.Fprintf(b, "%s%s %s;\n", ind, kw("COMMENT"), sqlStringLit(*comment))
+	}
+	for _, g := range grants {
+		priv := "ALL"
+		if len(g.Privileges) > 0 {
+			priv = strings.Join(g.Privileges, ", ")
+		}
+		fmt.Fprintf(b, "%s%s %s %s %s", ind, kw("GRANT"), priv, kw("TO"), strings.Join(g.Roles, ", "))
+		if g.WithGrant {
+			fmt.Fprintf(b, " %s %s %s", kw("WITH"), kw("GRANT"), kw("OPTION"))
+		}
+		b.WriteString(";\n")
+	}
+	for _, r := range revocations {
+		priv := "ALL"
+		if len(r.Privileges) > 0 {
+			priv = strings.Join(r.Privileges, ", ")
+		}
+		fmt.Fprintf(b, "%s%s %s %s %s", ind, kw("REVOCATION"), priv, kw("FROM"), strings.Join(r.Roles, ", "))
+		if r.Cascade {
+			fmt.Fprintf(b, " %s", kw("CASCADE"))
+		}
+		b.WriteString(";\n")
+	}
+	writeSecurityLabels(b, ind, fmtOpts, securityLabels)
+	b.WriteString("}\n")
+}
+
+// writeFuncBlockWithDepends is writeFuncBlockWithLabels plus Owner (RFC
+// audit item #70) and DEPENDS ON EXTENSION (Section 9.1) — kept as a
+// separate entry point rather than adding parameters to
+// writeFuncBlockWithLabels itself, same reasoning as that function's own
+// doc comment: Aggregate shares writeFuncBlockWithLabels too, but real
+// PostgreSQL has no ALTER AGGREGATE ... DEPENDS ON EXTENSION at all
+// (passthrough principle — DPG doesn't reject it there, but Aggregate
+// should never actually render one), and every other unrelated caller would
+// need trailing nils for directives that will never apply to it either.
+// Aggregate's own Owner rendering goes through writeFuncBlockWithOwnerAndLabels
+// instead, since it needs Owner but not DEPENDS ON EXTENSION.
+func writeFuncBlockWithDepends(b *strings.Builder, ind string, fmtOpts format.Options, owner, comment *string, grants []ir.Grant, revocations []ir.Revocation, securityLabels []pipeline.SecurityLabel, dependsOnExtensions []string) {
+	kw := fmtOpts.Keyword
+	if owner == nil && comment == nil && len(grants) == 0 && len(revocations) == 0 && len(securityLabels) == 0 && len(dependsOnExtensions) == 0 {
+		b.WriteString(";\n")
+		return
+	}
+	b.WriteString(" {\n")
+	if owner != nil {
+		fmt.Fprintf(b, "%s%s %s;\n", ind, kw("OWNER"), quoteIdentIfNeeded(*owner))
+	}
 	if comment != nil {
 		fmt.Fprintf(b, "%s%s %s;\n", ind, kw("COMMENT"), sqlStringLit(*comment))
 	}

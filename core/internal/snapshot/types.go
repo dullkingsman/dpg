@@ -88,6 +88,13 @@ type SnapOpaque struct {
 	// since Procedure — unlike Function — routes through the generic
 	// SnapOpaque shape).
 	ProcedureDependsOnExtensions []string `json:"procedure_depends_on_extensions,omitempty"`
+	// ProcedureOwner/AggregateOwner are RFC audit item #70's
+	// ALTER PROCEDURE/AGGREGATE ... OWNER TO diffing inputs — see
+	// ir.Procedure.Owner/ir.Aggregate.Owner's doc comments. Function uses
+	// its own dedicated SnapFunction.Owner field instead, same reasoning as
+	// ProcedureDependsOnExtensions above.
+	ProcedureOwner *string `json:"procedure_owner,omitempty"`
+	AggregateOwner *string `json:"aggregate_owner,omitempty"`
 	// OptionsStructured/FDWHandler/FDWValidator/FDWOptions/ServerFDWName/
 	// ServerType/ServerVersion/ServerOptions/UserMappingOptions are RFC
 	// §14.8/§14.9/§14.10's structured diffing inputs for fdw/server/
@@ -452,6 +459,9 @@ type SnapFunction struct {
 	// DependsOnExtensions is Section 9.1's `[NO] DEPENDS ON EXTENSION`
 	// diffing input — see ir.Function.DependsOnExtensions' doc comment.
 	DependsOnExtensions []string `json:"depends_on_extensions,omitempty"`
+	// Owner is RFC audit item #70's ALTER FUNCTION ... OWNER TO diffing
+	// input — see ir.Function.Owner's doc comment.
+	Owner *string `json:"owner,omitempty"`
 }
 
 type SnapType struct {

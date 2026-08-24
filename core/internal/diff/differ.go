@@ -2557,7 +2557,12 @@ func createAggregate(o *ir.Aggregate) ([]pipeline.DiffOp, error) {
 		return nil, fmt.Errorf("aggregate %s: body not captured; define it explicitly in a .dpg source file", o.QualifiedName())
 	}
 	sig := buildAggregateSignature(o)
-	ops := []pipeline.DiffOp{safeOp(o.Body+";", o.SrcPos)}
+	var ops []pipeline.DiffOp
+	if o.Owner != nil {
+		ops = wrapCreateWithOwner(safeOp(o.Body+";", o.SrcPos), o.Owner, o.SrcPos)
+	} else {
+		ops = []pipeline.DiffOp{safeOp(o.Body+";", o.SrcPos)}
+	}
 	if txt := effectiveComment(o.Comment, o.Deprecated); txt != nil {
 		ops = append(ops, safeOp(
 			fmt.Sprintf("COMMENT ON AGGREGATE %s IS %s;", sig, quoteLit(*txt)),
@@ -2609,9 +2614,12 @@ func diffAggregate(o *ir.Aggregate, snap *snapshot.SnapOpaque) ([]pipeline.DiffO
 	}
 
 	if bodyChanged {
-		ops := []pipeline.DiffOp{
-			destructiveOp(fmt.Sprintf("DROP AGGREGATE IF EXISTS %s;", sig), pos),
-			safeOp(o.Body+";", pos),
+		createOp := safeOp(o.Body+";", pos)
+		ops := []pipeline.DiffOp{destructiveOp(fmt.Sprintf("DROP AGGREGATE IF EXISTS %s;", sig), pos)}
+		if o.Owner != nil {
+			ops = append(ops, wrapCreateWithOwner(createOp, o.Owner, pos)...)
+		} else {
+			ops = append(ops, createOp)
 		}
 		if txt := effectiveComment(o.Comment, o.Deprecated); txt != nil {
 			ops = append(ops, safeOp(
@@ -2649,6 +2657,9 @@ func diffAggregate(o *ir.Aggregate, snap *snapshot.SnapOpaque) ([]pipeline.DiffO
 				pos,
 			))
 		}
+	}
+	if !ptrEq(o.Owner, snap.AggregateOwner) && o.Owner != nil {
+		ops = append(ops, safeOp(fmt.Sprintf("ALTER AGGREGATE %s OWNER TO %s;", sig, quoteIdent(*o.Owner)), pos))
 	}
 	ops = append(ops, diffGrantSet(snap.Grants, o.Grants, "FUNCTION "+sig, pos)...)
 	ops = append(ops, diffRevocationSet(snap.Revocations, o.Revocations, "FUNCTION "+sig, pos)...)
@@ -3549,6 +3560,9 @@ func createView(o *ir.View) []pipeline.DiffOp {
 
 func createFunction(o *ir.Function) []pipeline.DiffOp {
 	ops := []pipeline.DiffOp{safeOp(buildFunctionSQL(o), o.SrcPos)}
+	if o.Owner != nil {
+		ops = wrapCreateWithOwner(ops[0], o.Owner, o.SrcPos)
+	}
 	sig := buildFuncSignature(o)
 	if txt := effectiveComment(o.Comment, o.Deprecated); txt != nil {
 		ops = append(ops, safeOp(
@@ -4832,6 +4846,9 @@ func diffProcedure(o *ir.Procedure, snap *snapshot.SnapOpaque) ([]pipeline.DiffO
 		oldSig := fmt.Sprintf("%s(%s)", qualIdent(o.Schema, snap.Name), ir.ArgsKey(o.Args))
 		ops = append(ops, cautionOp(fmt.Sprintf("ALTER PROCEDURE %s RENAME TO %s;", oldSig, quoteIdent(o.Name)), pos))
 	}
+	if !ptrEq(o.Owner, snap.ProcedureOwner) && o.Owner != nil {
+		ops = append(ops, safeOp(fmt.Sprintf("ALTER PROCEDURE %s OWNER TO %s;", sig, quoteIdent(*o.Owner)), pos))
+	}
 	if desiredTxt, snapTxt := effectiveComment(o.Comment, o.Deprecated), effectiveComment(snap.Comment, snap.Deprecated); !ptrEq(desiredTxt, snapTxt) {
 		if desiredTxt != nil {
 			ops = append(ops, safeOp(fmt.Sprintf("COMMENT ON PROCEDURE %s IS %s;", sig, quoteLit(*desiredTxt)), pos))
@@ -5467,6 +5484,9 @@ func diffFunction(o *ir.Function, snap *snapshot.SnapFunction) []pipeline.DiffOp
 		parallelChanged(o.Attrs.Parallel, snap.Parallel) ||
 		desiredFloatChanged(o.Attrs.Cost, snap.Cost) || desiredFloatChanged(o.Attrs.Rows, snap.Rows) {
 		ops = append(ops, safeOp(buildFunctionSQL(o), pos))
+	}
+	if !ptrEq(o.Owner, snap.Owner) && o.Owner != nil {
+		ops = append(ops, safeOp(fmt.Sprintf("ALTER FUNCTION %s OWNER TO %s;", sig, quoteIdent(*o.Owner)), pos))
 	}
 	if desiredTxt, snapTxt := effectiveComment(o.Comment, o.Deprecated), effectiveComment(snap.Comment, snap.Deprecated); !ptrEq(desiredTxt, snapTxt) {
 		if desiredTxt != nil {

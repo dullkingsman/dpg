@@ -12189,6 +12189,39 @@ func TestDiffCreateProcedureEmitsDeprecatedComment(t *testing.T) {
 // not DROP+CREATE'd) but diffFunction itself had no rename branch at all —
 // the live function was never actually renamed, a silent no-op unlike its
 // diffProcedure/diffAggregate siblings (RFC audit items #10/#11).
+// TestDiffFunctionOwnerChanged guards RFC audit item #70: Function had no
+// Owner field at all.
+func TestDiffFunctionOwnerChanged(t *testing.T) {
+	d := New()
+	oldOwner := "app_admin"
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.calc_total(integer)", &snapshot.SnapObject{
+		Kind: "function",
+		Function: &snapshot.SnapFunction{
+			Schema: "public", Name: "calc_total", Args: "integer",
+			ReturnType: "integer", Language: "plpgsql", Volatility: "VOLATILE",
+			BodyHash: "samehash", Owner: &oldOwner,
+		},
+	})
+	newOwner := "app_readonly"
+	desired := []pipeline.IRObject{
+		&ir.Function{
+			Schema: "public", Name: "calc_total",
+			Args:       []ir.FuncArg{{Type: ir.TypeRef{Name: "integer"}}},
+			ReturnType: ir.TypeRef{Name: "integer"},
+			Attrs:      ir.FuncAttrs{Language: "plpgsql", Volatility: "VOLATILE", Body: "BEGIN NULL; END;"},
+			BodyHash:   "samehash", Owner: &newOwner,
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsSQL(ops, `ALTER FUNCTION "public"."calc_total"(integer) OWNER TO "app_readonly";`) {
+		t.Errorf("expected ALTER FUNCTION ... OWNER TO, got: %v", sqlList(ops))
+	}
+}
+
 func TestDiffFunctionRenamedFromEmitsAlterRename(t *testing.T) {
 	d := New()
 	snap := &pipeline.Snapshot{}
@@ -12331,6 +12364,39 @@ func TestCreateFunctionWithDependsOnExtension(t *testing.T) {
 	}
 }
 
+// TestDiffProcedureOwnerChanged guards RFC audit item #70: Procedure had no
+// Owner field at all.
+func TestDiffProcedureOwnerChanged(t *testing.T) {
+	d := New()
+	body := "BEGIN NULL; END;"
+	hash := ir.HashBody(body)
+	oldOwner := "app_admin"
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.recalc_totals(integer)", &snapshot.SnapObject{
+		Kind: "procedure",
+		Opaque: &snapshot.SnapOpaque{
+			Kind: "procedure", Schema: "public", Name: "recalc_totals", Args: "integer", BodyHash: hash,
+			ProcedureOwner: &oldOwner,
+		},
+	})
+	newOwner := "app_readonly"
+	desired := []pipeline.IRObject{
+		&ir.Procedure{
+			Schema: "public", Name: "recalc_totals",
+			Args:     []ir.FuncArg{{Type: ir.TypeRef{Name: "integer"}}},
+			Attrs:    ir.FuncAttrs{Language: "plpgsql", Body: body},
+			BodyHash: hash, Owner: &newOwner,
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsSQL(ops, `ALTER PROCEDURE "public"."recalc_totals"(integer) OWNER TO "app_readonly";`) {
+		t.Errorf("expected ALTER PROCEDURE ... OWNER TO, got: %v", sqlList(ops))
+	}
+}
+
 // TestDiffProcedureRenamedFromEmitsAlterRename guards RFC audit item #10: a
 // procedure rename was treated as an unrelated DROP+CREATE instead of
 // ALTER PROCEDURE ... RENAME TO.
@@ -12429,6 +12495,40 @@ func TestDiffCreateAggregateEmitsDeprecatedComment(t *testing.T) {
 	}
 	if !containsSQL(ops, "[DEPRECATED] use amount_sum_v2 instead") {
 		t.Errorf("expected COMMENT with [DEPRECATED] marker, got: %v", sqlList(ops))
+	}
+}
+
+// TestDiffAggregateOwnerChanged guards RFC audit item #70: Aggregate had no
+// Owner field at all.
+func TestDiffAggregateOwnerChanged(t *testing.T) {
+	d := New()
+	options := []pipeline.StorageParam{{Key: "SFUNC", Value: "numeric_add"}, {Key: "STYPE", Value: "numeric"}}
+	oldOwner := "app_admin"
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.amount_sum(numeric)", &snapshot.SnapObject{
+		Kind: "aggregate",
+		Opaque: &snapshot.SnapOpaque{
+			Kind: "aggregate", Schema: "public", Name: "amount_sum", Args: "numeric",
+			AggregateOptionsStructured: true,
+			AggregateOptions:           toComparableOptions(options, false),
+			AggregateOwner:             &oldOwner,
+		},
+	})
+	newOwner := "app_readonly"
+	desired := []pipeline.IRObject{
+		&ir.Aggregate{
+			Schema: "public", Name: "amount_sum",
+			Args:    []ir.FuncArg{{Type: ir.TypeRef{Name: "numeric"}}},
+			Body:    "CREATE AGGREGATE public.amount_sum (numeric) (SFUNC = numeric_add, STYPE = numeric)",
+			Options: options, Owner: &newOwner,
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsSQL(ops, `ALTER AGGREGATE "public"."amount_sum"(numeric) OWNER TO "app_readonly";`) {
+		t.Errorf("expected ALTER AGGREGATE ... OWNER TO, got: %v", sqlList(ops))
 	}
 }
 

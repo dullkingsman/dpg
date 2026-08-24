@@ -187,6 +187,7 @@ func toSnapObject(obj pipeline.IRObject) *SnapObject {
 			Args: ir.ArgsKey(o.Args), BodyHash: o.BodyHash, Comment: o.Comment, Deprecated: o.Deprecated,
 			NameMaps:                     toSnapNameMaps(o.NameMaps),
 			ProcedureDependsOnExtensions: append([]string(nil), o.DependsOnExtensions...),
+			ProcedureOwner:               o.Owner,
 		}
 		for _, g := range o.Grants {
 			so.Grants = append(so.Grants, toSnapGrant(g))
@@ -206,6 +207,7 @@ func toSnapObject(obj pipeline.IRObject) *SnapObject {
 			// SnapOpaque.AggregateOptionsStructured's doc comment.
 			AggregateOptionsStructured: true,
 			AggregateOptions:           toSnapOptions(o.Options),
+			AggregateOwner:             o.Owner,
 		}
 		for _, g := range o.Grants {
 			so.Grants = append(so.Grants, toSnapGrant(g))
@@ -749,6 +751,7 @@ func toSnapFunction(o *ir.Function) *SnapFunction {
 		BodyHash:    o.BodyHash,
 		Comment:     o.Comment,
 		Deprecated:  o.Deprecated,
+		Owner:       o.Owner,
 	}
 	for _, g := range o.Grants {
 		sf.Grants = append(sf.Grants, toSnapGrant(g))

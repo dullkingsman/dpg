@@ -144,10 +144,12 @@ SELECT n.nspname, p.proname,
        a.agginitval                      AS initcond,
        NULLIF(a.aggfinalfn::text, '-')   AS finalfunc,
        NULLIF(a.aggcombinefn::text, '-') AS combinefunc,
-       NULLIF(a.aggserialfn::text, '-')  AS serialfunc
+       NULLIF(a.aggserialfn::text, '-')  AS serialfunc,
+       r.rolname                         AS owner
 FROM   pg_proc p
 JOIN   pg_namespace n ON n.oid = p.pronamespace
 JOIN   pg_aggregate a ON a.aggfnoid = p.oid
+JOIN   pg_roles r ON r.oid = p.proowner
 WHERE  p.prokind = 'a'
 AND    n.nspname NOT IN ('pg_catalog','information_schema','pg_toast')
 AND    NOT EXISTS (SELECT 1 FROM pg_depend d WHERE d.classid = 'pg_proc'::regclass AND d.objid = p.oid AND d.deptype = 'e')
@@ -162,16 +164,17 @@ ORDER  BY n.nspname, p.proname, args`
 	aggIdx := make(map[string]*ir.Aggregate)
 	var out []pipeline.IRObject
 	for rs.Next() {
-		var schema, name, args, argTypes, sfunc, stype string
+		var schema, name, args, argTypes, sfunc, stype, owner string
 		var comment, initcond, finalfunc, combinefunc, serialfunc *string
 		if err := rs.Scan(&schema, &name, &args, &argTypes, &comment,
-			&sfunc, &stype, &initcond, &finalfunc, &combinefunc, &serialfunc); err != nil {
+			&sfunc, &stype, &initcond, &finalfunc, &combinefunc, &serialfunc, &owner); err != nil {
 			return nil, err
 		}
 		agg := &ir.Aggregate{
 			Schema:  schema,
 			Name:    name,
 			Comment: comment,
+			Owner:   &owner,
 		}
 		// Use argTypes (type-only, from oidvectortypes) so QualifiedName matches
 		// ir.ArgsKey(). Keep args (with parameter names) for the grants index key.
@@ -1549,10 +1552,12 @@ SELECT n.nspname, p.proname,
        l.lanname IN ('c', 'internal') AS is_c_or_internal,
        obj_description(p.oid, 'pg_proc') AS comment,
        p.prokind::text,
-       p.prosrc
+       p.prosrc,
+       r.rolname AS owner
 FROM   pg_proc p
 JOIN   pg_namespace n ON n.oid = p.pronamespace
 JOIN   pg_language  l ON l.oid = p.prolang
+JOIN   pg_roles r ON r.oid = p.proowner
 WHERE  p.prokind IN ('f', 'p')
 AND    n.nspname NOT IN ('pg_catalog','information_schema','pg_toast')
 AND    NOT EXISTS (SELECT 1 FROM pg_depend d WHERE d.classid = 'pg_proc'::regclass AND d.objid = p.oid AND d.deptype = 'e')
@@ -1577,9 +1582,9 @@ ORDER  BY n.nspname, p.proname, args`
 		var cost, rows float64
 		var retset, isCOrInternal bool
 		var comment *string
-		var prokind, prosrc string
+		var prokind, prosrc, owner string
 		if err := rs.Scan(&schema, &name, &oid, &args, &argTypes, &retType, &lang, &volatility, &secDef, &strict,
-			&parallel, &cost, &rows, &retset, &isCOrInternal, &comment, &prokind, &prosrc); err != nil {
+			&parallel, &cost, &rows, &retset, &isCOrInternal, &comment, &prokind, &prosrc, &owner); err != nil {
 			return nil, err
 		}
 		if prokind == "p" {
@@ -1587,6 +1592,7 @@ ORDER  BY n.nspname, p.proname, args`
 				Schema:  schema,
 				Name:    name,
 				Comment: comment,
+				Owner:   &owner,
 				Attrs: ir.FuncAttrs{
 					Language: lang,
 					Body:     prosrc,
@@ -1642,6 +1648,7 @@ ORDER  BY n.nspname, p.proname, args`
 				Name:       name,
 				ReturnType: ir.TypeRef{Name: retType, SetOf: retset},
 				Comment:    comment,
+				Owner:      &owner,
 				Attrs:      attrs,
 			}
 			// Use argTypes (type-only) so QualifiedName matches argsKey() in IR builder.

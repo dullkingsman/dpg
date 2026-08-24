@@ -1253,6 +1253,9 @@ func (b *Builder) buildFunction(cfs *pg_query.CreateFunctionStmt, pg pipeline.PG
 		fn.RenamedFrom = &block.RenamedFrom.Name
 		fn.RenamedFromSchema = renamedFromSchema(block.RenamedFrom)
 	}
+	if block.Owner != nil {
+		fn.Owner = &block.Owner.Name
+	}
 	if block.Deprecated != nil {
 		fn.Deprecated = &block.Deprecated.Value
 	}
@@ -1286,6 +1289,9 @@ func (b *Builder) buildProcedure(cfs *pg_query.CreateFunctionStmt, pg pipeline.P
 	if block.RenamedFrom != nil {
 		proc.RenamedFrom = &block.RenamedFrom.Name
 		proc.RenamedFromSchema = renamedFromSchema(block.RenamedFrom)
+	}
+	if block.Owner != nil {
+		proc.Owner = &block.Owner.Name
 	}
 	if block.Deprecated != nil {
 		proc.Deprecated = &block.Deprecated.Value
@@ -2335,6 +2341,9 @@ func (b *Builder) buildDefineStmt(ds *pg_query.DefineStmt, block pipeline.BlockA
 		if block.RenamedFrom != nil {
 			agg.RenamedFrom = &block.RenamedFrom.Name
 			agg.RenamedFromSchema = renamedFromSchema(block.RenamedFrom)
+		}
+		if block.Owner != nil {
+			agg.Owner = &block.Owner.Name
 		}
 		if block.Deprecated != nil {
 			agg.Deprecated = &block.Deprecated.Value

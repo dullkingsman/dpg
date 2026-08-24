@@ -1020,6 +1020,52 @@ func TestBuildAggregateGrantsAndRevocations(t *testing.T) {
 	}
 }
 
+// TestBuildFunctionOwner guards RFC audit item #70: Function had no Owner
+// field at all.
+func TestBuildFunctionOwner(t *testing.T) {
+	obj := buildObject(t, pipeline.KindFunction,
+		`add(a INT, b INT) RETURNS INT LANGUAGE sql AS $$ SELECT a + b $$;`,
+		`OWNER app_admin;`,
+	)
+	fn, ok := obj.(*ir.Function)
+	if !ok {
+		t.Fatalf("expected *ir.Function, got %T", obj)
+	}
+	if fn.Owner == nil || *fn.Owner != "app_admin" {
+		t.Errorf("Owner: got %v, want app_admin", fn.Owner)
+	}
+}
+
+// TestBuildProcedureOwner is TestBuildFunctionOwner's PROCEDURE counterpart.
+func TestBuildProcedureOwner(t *testing.T) {
+	obj := buildObject(t, pipeline.KindProcedure,
+		`mark_order_paid(bigint) LANGUAGE plpgsql AS $$ BEGIN NULL; END; $$;`,
+		`OWNER app_admin;`,
+	)
+	proc, ok := obj.(*ir.Procedure)
+	if !ok {
+		t.Fatalf("expected *ir.Procedure, got %T", obj)
+	}
+	if proc.Owner == nil || *proc.Owner != "app_admin" {
+		t.Errorf("Owner: got %v, want app_admin", proc.Owner)
+	}
+}
+
+// TestBuildAggregateOwner is TestBuildFunctionOwner's AGGREGATE counterpart.
+func TestBuildAggregateOwner(t *testing.T) {
+	obj := buildObject(t, pipeline.KindAggregate,
+		`amount_product (numeric) (SFUNC = numeric_mul, STYPE = numeric, INITCOND = '1')`,
+		`OWNER app_admin;`,
+	)
+	agg, ok := obj.(*ir.Aggregate)
+	if !ok {
+		t.Fatalf("expected *ir.Aggregate, got %T", obj)
+	}
+	if agg.Owner == nil || *agg.Owner != "app_admin" {
+		t.Errorf("Owner: got %v, want app_admin", agg.Owner)
+	}
+}
+
 // TestBuildProcedureDeprecatedAndRenamedFrom guards RFC audit items #8/#10:
 // PROCEDURE never got Function's identical DEPRECATED/RENAMED FROM
 // func-block directive support despite sharing the same grammar (RFC

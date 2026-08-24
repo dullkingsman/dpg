@@ -564,7 +564,10 @@ type Function struct {
 	Revocations         []Revocation
 	SecurityLabels      []pipeline.SecurityLabel
 	NameMaps            []pipeline.NameMapEntry
-	SrcPos              pipeline.SourcePos
+	// Owner is RFC audit item #70's ALTER FUNCTION ... OWNER TO diffing
+	// input — see ir.Publication.Owner's identical doc comment.
+	Owner  *string
+	SrcPos pipeline.SourcePos
 }
 
 func (f *Function) QualifiedName() string {
@@ -598,7 +601,10 @@ type Procedure struct {
 	Revocations         []Revocation
 	SecurityLabels      []pipeline.SecurityLabel
 	NameMaps            []pipeline.NameMapEntry
-	SrcPos              pipeline.SourcePos
+	// Owner is RFC audit item #70's ALTER PROCEDURE ... OWNER TO diffing
+	// input — see ir.Function.Owner's identical doc comment.
+	Owner  *string
+	SrcPos pipeline.SourcePos
 }
 
 func (p *Procedure) QualifiedName() string {
@@ -628,7 +634,10 @@ type Aggregate struct {
 	Revocations       []Revocation
 	SecurityLabels    []pipeline.SecurityLabel
 	NameMaps          []pipeline.NameMapEntry
-	SrcPos            pipeline.SourcePos
+	// Owner is RFC audit item #70's ALTER AGGREGATE ... OWNER TO diffing
+	// input — see ir.Function.Owner's identical doc comment.
+	Owner  *string
+	SrcPos pipeline.SourcePos
 }
 
 func (a *Aggregate) QualifiedName() string {
