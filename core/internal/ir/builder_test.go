@@ -1138,6 +1138,31 @@ func TestBuildCompositeType(t *testing.T) {
 	}
 }
 
+// TestBuildCompositeTypeAttributeCollation guards RFC §5.2's attribute
+// COLLATE clause — real PG grammar on ColumnDef itself (CollClause), no
+// DPG-specific parsing needed, extracted via buildColumn (shared with table
+// columns, which never populate it since DPG has no table-column COLLATE
+// feature).
+func TestBuildCompositeTypeAttributeCollation(t *testing.T) {
+	obj := buildObject(t, pipeline.KindCompositeType,
+		`address AS (street text COLLATE "en_US", city text)`,
+		``,
+	)
+	tp, ok := obj.(*ir.Type)
+	if !ok {
+		t.Fatalf("expected *ir.Type, got %T", obj)
+	}
+	if len(tp.CompositeAttrs) != 2 {
+		t.Fatalf("CompositeAttrs: got %d, want 2", len(tp.CompositeAttrs))
+	}
+	if tp.CompositeAttrs[0].Collation != "en_US" {
+		t.Errorf("CompositeAttrs[0].Collation: got %q, want %q", tp.CompositeAttrs[0].Collation, "en_US")
+	}
+	if tp.CompositeAttrs[1].Collation != "" {
+		t.Errorf("CompositeAttrs[1].Collation: got %q, want empty (no COLLATE declared)", tp.CompositeAttrs[1].Collation)
+	}
+}
+
 // TestBuildCompositeTypeColumnBlockSetsRenamedFrom is the regression guard
 // for RFC audit item #12: buildCompositeType built CompositeAttrs purely
 // from the native CREATE TYPE ... AS ( ) coldeflist and never read
@@ -1290,6 +1315,23 @@ func TestBuildDomainInlineSyntax(t *testing.T) {
 	// case-insensitively, so this is cosmetic, not a bug.
 	if !strings.Contains(strings.ToLower(tp.DomainConstraints[0].Expr), "value > 0") {
 		t.Errorf("DomainConstraints[0].Expr: got %q", tp.DomainConstraints[0].Expr)
+	}
+}
+
+// TestBuildDomainCollation guards RFC §5.4's "AS base_type [COLLATE
+// collation]" clause — real PG grammar on CreateDomainStmt itself
+// (CollClause), no DPG-specific parsing needed.
+func TestBuildDomainCollation(t *testing.T) {
+	obj := buildObject(t, pipeline.KindDomainType,
+		`d AS text COLLATE "en_US"`,
+		``,
+	)
+	tp, ok := obj.(*ir.Type)
+	if !ok {
+		t.Fatalf("expected *ir.Type, got %T", obj)
+	}
+	if tp.DomainCollation != "en_US" {
+		t.Errorf("DomainCollation: got %q, want %q", tp.DomainCollation, "en_US")
 	}
 }
 

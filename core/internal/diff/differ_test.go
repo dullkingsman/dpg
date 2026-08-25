@@ -15146,6 +15146,32 @@ func TestDiffDomainBaseTypeChangedRecreates(t *testing.T) {
 	}
 }
 
+// TestDiffDomainCollationChangedRecreates proves RFC §5.4's "Changing the
+// base type or COLLATE" row applies to a COLLATE-only change too (same base
+// type): PostgreSQL has no ALTER DOMAIN for it, only DROP DOMAIN CASCADE +
+// CREATE DOMAIN, the same as a base-type change.
+func TestDiffDomainCollationChangedRecreates(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.d", &snapshot.SnapObject{
+		Kind: "type",
+		Type: &snapshot.SnapType{Schema: "public", Name: "d", Variant: "DOMAIN", DomainBaseType: "text", DomainCollation: "en_US"},
+	})
+	desired := []pipeline.IRObject{
+		&ir.Type{Schema: "public", Name: "d", Variant: "DOMAIN", DomainBaseType: ir.TypeRef{Name: "text"}, DomainCollation: "de_DE"},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsSQL(ops, `DROP DOMAIN IF EXISTS "public"."d" CASCADE;`) {
+		t.Errorf("expected DROP DOMAIN CASCADE, got: %v", sqlList(ops))
+	}
+	if !containsSQL(ops, `AS text COLLATE "de_DE"`) {
+		t.Errorf("expected recreated CREATE DOMAIN with new COLLATE, got: %v", sqlList(ops))
+	}
+}
+
 func TestDiffDomainUnchangedIsNoop(t *testing.T) {
 	d := New()
 	def := "1"
@@ -17986,6 +18012,55 @@ func TestDiffCompositeAttrRenamed(t *testing.T) {
 	}
 	if !containsSQL(ops, `ALTER TYPE "public"."addr" RENAME ATTRIBUTE "old_name" TO "new_name";`) {
 		t.Errorf("expected ALTER TYPE ... RENAME ATTRIBUTE, got: %v", sqlList(ops))
+	}
+}
+
+// TestDiffCompositeAttrAddedWithCollation proves RFC §5.2's attribute
+// COLLATE clause round-trips through ADD ATTRIBUTE as a trailing clause on
+// the type, not a separate statement.
+func TestDiffCompositeAttrAddedWithCollation(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.addr", compositeSnap("public", "addr"))
+	desired := []pipeline.IRObject{
+		compositeType("public", "addr",
+			&ir.Column{Name: "street", Type: ir.TypeRef{Name: "text"}, Collation: "en_US"},
+		),
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsSQL(ops, `ALTER TYPE "public"."addr" ADD ATTRIBUTE "street" text COLLATE "en_US";`) {
+		t.Errorf("expected ADD ATTRIBUTE with COLLATE, got: %v", sqlList(ops))
+	}
+}
+
+// TestDiffCompositeAttrCollationChanged proves a COLLATE-only change (same
+// type) is still DESTRUCTIVE via ALTER ATTRIBUTE TYPE, matching RFC §5.2's
+// diffing table, which groups "type or COLLATE" as one row.
+func TestDiffCompositeAttrCollationChanged(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.addr", compositeSnap("public", "addr",
+		snapshot.SnapColumn{Name: "street", Type: "text", Collation: "en_US"},
+	))
+	desired := []pipeline.IRObject{
+		compositeType("public", "addr",
+			&ir.Column{Name: "street", Type: ir.TypeRef{Name: "text"}, Collation: "de_DE"},
+		),
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsSQL(ops, `ALTER TYPE "public"."addr" ALTER ATTRIBUTE "street" TYPE text COLLATE "de_DE";`) {
+		t.Errorf("expected ALTER ATTRIBUTE ... TYPE ... COLLATE, got: %v", sqlList(ops))
+	}
+	for _, op := range ops {
+		if strings.Contains(op.SQL(), "ALTER ATTRIBUTE") && op.Safety() != pipeline.Destructive {
+			t.Errorf("ALTER ATTRIBUTE (collation-only change) safety = %v, want Destructive", op.Safety())
+		}
 	}
 }
 

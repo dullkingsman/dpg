@@ -339,6 +339,14 @@ func (b *Builder) buildColumn(cd *pg_query.ColumnDef, pos pipeline.SourcePos) (*
 			col.NotNull = true // SERIAL implies NOT NULL in PG, independent of PRIMARY KEY
 		}
 	}
+	// CollClause (RFC §5.2's composite attribute COLLATE) is real PG grammar
+	// on ColumnDef itself — no DPG-specific parsing needed. Harmless to
+	// extract unconditionally even for table columns (DPG has no
+	// table-column COLLATE feature): diffColumns never reads Collation,
+	// only diffCompositeAttrs does.
+	if cd.CollClause != nil {
+		col.Collation = qualifiedNameText(cd.CollClause.Collname)
+	}
 
 	var promoted []*Constraint
 	// lastPromoted tracks the most recently promoted table-level
@@ -2289,6 +2297,9 @@ func (b *Builder) buildDomain(cs *pg_query.CreateDomainStmt, block pipeline.Bloc
 		Body:           body,
 		DomainBaseType: typeNameToRef(cs.TypeName),
 		SrcPos:         pos,
+	}
+	if cs.CollClause != nil {
+		t.DomainCollation = qualifiedNameText(cs.CollClause.Collname)
 	}
 	for _, cn := range cs.Constraints {
 		c := cn.GetConstraint()

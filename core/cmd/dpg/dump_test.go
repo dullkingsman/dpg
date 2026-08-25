@@ -619,9 +619,10 @@ func TestRenderDomainCompiles(t *testing.T) {
 	comment := "must be positive"
 	dt := &ir.Type{
 		Schema: "public", Name: "positive_integer", Variant: "DOMAIN",
-		DomainBaseType: ir.TypeRef{Name: "integer"},
-		DomainDefault:  &def,
-		DomainNotNull:  true,
+		DomainBaseType:  ir.TypeRef{Name: "text"},
+		DomainCollation: "en_US",
+		DomainDefault:   &def,
+		DomainNotNull:   true,
 		DomainConstraints: []*ir.Constraint{
 			{Name: "positive_only", Type: "CHECK", Expr: "CHECK (VALUE > 0)"},
 		},
@@ -632,8 +633,8 @@ func TestRenderDomainCompiles(t *testing.T) {
 	renderObjectDPG(&b, dt, fmtOpts)
 	rendered := b.String()
 
-	if !strings.Contains(rendered, "DOMAIN positive_integer AS integer {") {
-		t.Errorf("expected DOMAIN ... AS integer { block, got:\n%s", rendered)
+	if !strings.Contains(rendered, `DOMAIN positive_integer AS text COLLATE "en_US" {`) {
+		t.Errorf("expected DOMAIN ... AS text COLLATE \"en_US\" { block, got:\n%s", rendered)
 	}
 	if !strings.Contains(rendered, "DEFAULT 1;") {
 		t.Errorf("expected DEFAULT directive, got:\n%s", rendered)
@@ -663,8 +664,11 @@ func TestRenderDomainCompiles(t *testing.T) {
 	if found == nil {
 		t.Fatalf("domain positive_integer missing after recompile\n---\n%s", rendered)
 	}
-	if found.DomainBaseType.Name != "integer" {
+	if found.DomainBaseType.Name != "text" {
 		t.Errorf("DomainBaseType did not round-trip: %v", found.DomainBaseType)
+	}
+	if found.DomainCollation != "en_US" {
+		t.Errorf("DomainCollation did not round-trip: %v", found.DomainCollation)
 	}
 	if found.DomainDefault == nil || *found.DomainDefault != "1" {
 		t.Errorf("DomainDefault did not round-trip: %v", found.DomainDefault)
@@ -1464,7 +1468,7 @@ func TestRenderCompositeAndRangeTypesCompile(t *testing.T) {
 		&ir.Type{
 			Schema: "public", Name: "address", Variant: "COMPOSITE",
 			CompositeAttrs: []*ir.Column{
-				{Name: "street", Type: ir.TypeRef{Name: "text"}},
+				{Name: "street", Type: ir.TypeRef{Name: "text"}, Collation: "en_US"},
 				{Name: "city", Type: ir.TypeRef{Name: "text"}},
 			},
 		},
@@ -1504,6 +1508,11 @@ func TestRenderCompositeAndRangeTypesCompile(t *testing.T) {
 		if tp, ok := o.(*ir.Type); ok {
 			if _, tracked := wantVariants[tp.Variant]; tracked {
 				wantVariants[tp.Variant] = true
+			}
+			if tp.Variant == "COMPOSITE" {
+				if len(tp.CompositeAttrs) == 0 || tp.CompositeAttrs[0].Collation != "en_US" {
+					t.Errorf("composite attribute COLLATE did not round-trip: %+v", tp.CompositeAttrs)
+				}
 			}
 		}
 	}

@@ -1019,6 +1019,9 @@ func renderObjectDPG(b *strings.Builder, obj pipeline.IRObject, fmtOpts format.O
 			// diff property-by-property (an inline blob round-trips back
 			// into Body, not into DomainDefault/DomainConstraints/etc.).
 			fmt.Fprintf(b, "\n%s %s %s %s", kw("DOMAIN"), quoteIdentIfNeeded(o.Name), kw("AS"), o.DomainBaseType.String())
+			if o.DomainCollation != "" {
+				fmt.Fprintf(b, " %s %s", kw("COLLATE"), quoteQualIdentIfNeeded(o.DomainCollation))
+			}
 			if o.DomainDefault != nil || o.DomainNotNull || len(o.DomainConstraints) > 0 || o.Comment != nil || o.Owner != nil ||
 				len(o.Grants) > 0 || len(o.Revocations) > 0 || len(o.SecurityLabels) > 0 {
 				b.WriteString(" {\n")
@@ -1077,6 +1080,9 @@ func renderObjectDPG(b *strings.Builder, obj pipeline.IRObject, fmtOpts format.O
 					b.WriteString(", ")
 				}
 				fmt.Fprintf(b, "%s %s", quoteIdentIfNeeded(attr.Name), attr.Type.String())
+				if attr.Collation != "" {
+					fmt.Fprintf(b, " %s %s", kw("COLLATE"), quoteQualIdentIfNeeded(attr.Collation))
+				}
 			}
 			b.WriteString(")")
 			writeTypeOwnerCommentBlock(b, ind, fmtOpts, o.Owner, o.Comment, o.Grants, o.Revocations, o.SecurityLabels)

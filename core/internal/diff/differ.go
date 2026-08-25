@@ -739,16 +739,23 @@ func diffCompositeAttrs(typeIdent string, attrs []*ir.Column, snap []snapshot.Sn
 		}
 		sc, exists := snapByName[snapAttrName]
 		resolvedType := resolveColType(a.Type, vtypes)
+		collateClause := ""
+		if a.Collation != "" {
+			collateClause = fmt.Sprintf(" COLLATE %s", quoteQualifiedIdent(a.Collation))
+		}
 		if !exists {
 			ops = append(ops, safeOp(
-				fmt.Sprintf("ALTER TYPE %s ADD ATTRIBUTE %s %s;", typeIdent, quoteIdent(a.Name), resolvedType),
+				fmt.Sprintf("ALTER TYPE %s ADD ATTRIBUTE %s %s%s;", typeIdent, quoteIdent(a.Name), resolvedType, collateClause),
 				a.SrcPos,
 			))
 			continue
 		}
-		if resolvedType != sc.Type {
+		// RFC §5.2: a type or COLLATE change are both DESTRUCTIVE, via the
+		// same ALTER ATTRIBUTE TYPE statement (COLLATE is an optional
+		// trailing clause on it, not a separate ALTER).
+		if resolvedType != sc.Type || a.Collation != sc.Collation {
 			ops = append(ops, destructiveOp(
-				fmt.Sprintf("ALTER TYPE %s ALTER ATTRIBUTE %s TYPE %s;", typeIdent, quoteIdent(a.Name), resolvedType),
+				fmt.Sprintf("ALTER TYPE %s ALTER ATTRIBUTE %s TYPE %s%s;", typeIdent, quoteIdent(a.Name), resolvedType, collateClause),
 				a.SrcPos,
 			))
 		}
@@ -3891,6 +3898,10 @@ func buildCompositeTypeSQL(o *ir.Type, vtypes map[string]string) string {
 		b.WriteString(quoteIdent(attr.Name))
 		b.WriteString(" ")
 		b.WriteString(resolveColType(attr.Type, vtypes))
+		if attr.Collation != "" {
+			b.WriteString(" COLLATE ")
+			b.WriteString(quoteQualifiedIdent(attr.Collation))
+		}
 	}
 	b.WriteString(");")
 	return b.String()
@@ -3909,6 +3920,10 @@ func buildDomainSQL(o *ir.Type) string {
 	b.WriteString(qualIdent(o.Schema, o.Name))
 	b.WriteString(" AS ")
 	b.WriteString(o.DomainBaseType.String())
+	if o.DomainCollation != "" {
+		b.WriteString(" COLLATE ")
+		b.WriteString(quoteQualifiedIdent(o.DomainCollation))
+	}
 	if o.DomainDefault != nil {
 		b.WriteString(" DEFAULT ")
 		b.WriteString(*o.DomainDefault)
@@ -5790,9 +5805,10 @@ func diffType(o *ir.Type, snap *snapshot.SnapType, fullSnap *pipeline.Snapshot, 
 			}
 			return ops, nil
 		}
-		if o.DomainBaseType.String() != snap.DomainBaseType {
-			// PG has no ALTER DOMAIN ... TYPE; the base type is fixed at
-			// creation. RFC §5.4 explicitly requires DROP DOMAIN CASCADE.
+		if o.DomainBaseType.String() != snap.DomainBaseType || o.DomainCollation != snap.DomainCollation {
+			// PG has no ALTER DOMAIN ... TYPE; the base type (and its
+			// COLLATE, RFC §5.4's own diffing table) is fixed at creation.
+			// RFC §5.4 explicitly requires DROP DOMAIN CASCADE for either.
 			ops = append(ops, destructiveOp(fmt.Sprintf("DROP DOMAIN IF EXISTS %s CASCADE;", typeIdent), pos))
 			ops = append(ops, createType(o, vtypes)...)
 			return ops, nil

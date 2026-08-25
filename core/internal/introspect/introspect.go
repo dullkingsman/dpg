@@ -2213,11 +2213,15 @@ func introspectCompositeAttrs(ctx context.Context, conn pipeline.Querier, types 
 	const q = `
 SELECT n.nspname, t.typname,
        a.attname,
-       pg_catalog.format_type(a.atttypid, a.atttypmod) AS attr_type
+       pg_catalog.format_type(a.atttypid, a.atttypmod) AS attr_type,
+       CASE WHEN a.attcollation <> 0 AND a.attcollation <> bt.typcollation
+            THEN co.collname END AS collation
 FROM   pg_type t
 JOIN   pg_namespace n   ON n.oid = t.typnamespace
 JOIN   pg_class c       ON c.oid = t.typrelid
 JOIN   pg_attribute a   ON a.attrelid = c.oid
+JOIN   pg_type bt       ON bt.oid = a.atttypid
+LEFT JOIN pg_collation co ON co.oid = a.attcollation
 WHERE  t.typtype = 'c'
 AND    c.relkind = 'c'
 AND    a.attnum > 0
@@ -2239,14 +2243,19 @@ ORDER  BY n.nspname, t.typname, a.attnum`
 	}
 	for rs.Next() {
 		var schema, name, attrName, attrType string
-		if err := rs.Scan(&schema, &name, &attrName, &attrType); err != nil {
+		var collation *string
+		if err := rs.Scan(&schema, &name, &attrName, &attrType, &collation); err != nil {
 			return err
 		}
 		if t, ok := typeIdx[schema+"."+name]; ok {
-			t.CompositeAttrs = append(t.CompositeAttrs, &ir.Column{
+			col := &ir.Column{
 				Name: attrName,
 				Type: ir.TypeRef{Name: attrType},
-			})
+			}
+			if collation != nil {
+				col.Collation = *collation
+			}
+			t.CompositeAttrs = append(t.CompositeAttrs, col)
 		}
 	}
 	return rs.Err()
@@ -2267,9 +2276,13 @@ func introspectDomainBodies(ctx context.Context, conn pipeline.Querier, types []
 SELECT n.nspname, t.typname,
        pg_catalog.format_type(t.typbasetype, t.typtypmod) AS base_type,
        t.typnotnull,
-       t.typdefault
+       t.typdefault,
+       CASE WHEN t.typcollation <> 0 AND t.typcollation <> bt.typcollation
+            THEN co.collname END AS collation
 FROM   pg_type t
 JOIN   pg_namespace n ON n.oid = t.typnamespace
+JOIN   pg_type bt     ON bt.oid = t.typbasetype
+LEFT JOIN pg_collation co ON co.oid = t.typcollation
 WHERE  t.typtype = 'd'
 AND    n.nspname NOT IN ('pg_catalog','information_schema','pg_toast')
 ORDER  BY n.nspname, t.typname`
@@ -2291,7 +2304,8 @@ ORDER  BY n.nspname, t.typname`
 		var schema, name, baseType string
 		var notNull bool
 		var defaultVal *string
-		if err := rs.Scan(&schema, &name, &baseType, &notNull, &defaultVal); err != nil {
+		var collation *string
+		if err := rs.Scan(&schema, &name, &baseType, &notNull, &defaultVal, &collation); err != nil {
 			return err
 		}
 		t, ok := domainIdx[schema+"."+name]
@@ -2301,6 +2315,9 @@ ORDER  BY n.nspname, t.typname`
 		t.DomainBaseType = ir.TypeRef{Name: baseType}
 		t.DomainNotNull = notNull
 		t.DomainDefault = defaultVal
+		if collation != nil {
+			t.DomainCollation = *collation
+		}
 	}
 	if err := rs.Err(); err != nil {
 		return err

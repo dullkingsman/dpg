@@ -339,6 +339,9 @@ type SnapColumn struct {
 	Storage        *string             `json:"storage,omitempty"`
 	Deprecated     *string             `json:"deprecated,omitempty"`
 	RenamedFrom    *string             `json:"renamed_from,omitempty"`
+	// Collation is a composite-type attribute's COLLATE target (RFC Section
+	// 5.2); "" for a table column, which has no such feature.
+	Collation      string              `json:"collation,omitempty"`
 	Grants         []SnapGrant         `json:"grants,omitempty"`
 	Revocations    []SnapGrant         `json:"revocations,omitempty"`
 	SecurityLabels []SnapSecurityLabel `json:"security_labels,omitempty"`
@@ -520,7 +523,12 @@ type SnapType struct {
 	// DOMAIN-only (RFC §5.4): structured diffing inputs, not just an opaque
 	// body hash, so property-level changes get their own targeted ALTER
 	// DOMAIN op instead of an unconditional DROP+CREATE.
-	DomainBaseType    string              `json:"domain_base_type,omitempty"`
+	DomainBaseType string `json:"domain_base_type,omitempty"`
+	// DomainCollation is RFC Section 5.4's "AS base_type [COLLATE
+	// collation]" clause; "" means unspecified. Compared alongside
+	// DomainBaseType since changing either requires DROP DOMAIN CASCADE +
+	// CREATE DOMAIN, not a targeted ALTER.
+	DomainCollation   string              `json:"domain_collation,omitempty"`
 	DomainDefault     *string             `json:"domain_default,omitempty"`
 	DomainNotNull     bool                `json:"domain_not_null,omitempty"`
 	DomainConstraints []SnapConstraint    `json:"domain_constraints,omitempty"`

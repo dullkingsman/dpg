@@ -111,6 +111,12 @@ type Column struct {
 	StorageIsTypeDefault bool
 	Deprecated           *string
 	Using                *string // USING expression for ALTER COLUMN TYPE
+	// Collation is a composite-type attribute's optional COLLATE target
+	// (RFC Section 5.2, "attribute type-ref [COLLATE collation-name]"); ""
+	// means unspecified/default. Table columns have no COLLATE feature in
+	// DPG's grammar, so this is always "" when Column represents one —
+	// diffColumns never reads it, only diffCompositeAttrs does.
+	Collation string
 	Grants               []Grant
 	Revocations          []Revocation
 	SecurityLabels       []pipeline.SecurityLabel
@@ -751,7 +757,16 @@ type Type struct {
 	// expr CONSTRAINT c CHECK (...)" syntax (parsed from Part 1 via
 	// pg_query), RFC §5.4's block-based "{ DEFAULT expr; CONSTRAINT c
 	// CHECK (...); }" form, or both merged together.
-	DomainBaseType    TypeRef
+	DomainBaseType TypeRef
+	// DomainCollation is RFC Section 5.4's "CREATE DOMAIN name AS base_type
+	// [COLLATE collation]" clause — valid only when base_type is itself
+	// collatable, left to PostgreSQL's own parser to enforce (same
+	// passthrough principle used throughout this codebase). "" means
+	// unspecified. Unlike DEFAULT/NOT NULL/CHECK, changing it always
+	// requires DROP DOMAIN CASCADE + CREATE DOMAIN (Section 5.4's own
+	// diffing table), so it's compared alongside DomainBaseType rather than
+	// getting its own ALTER DOMAIN branch.
+	DomainCollation   string
 	DomainDefault     *string
 	DomainNotNull     bool
 	DomainConstraints []*Constraint

@@ -554,6 +554,7 @@ func toSnapColumn(col *ir.Column) SnapColumn {
 		Deprecated:  col.Deprecated,
 		RenamedFrom: col.RenamedFrom,
 		Serial:      col.Serial,
+		Collation:   col.Collation,
 	}
 	if col.Identity != nil {
 		var s string
@@ -822,6 +823,7 @@ func toSnapType(o *ir.Type) *SnapType {
 	}
 	if o.Variant == "DOMAIN" {
 		st.DomainBaseType = o.DomainBaseType.String()
+		st.DomainCollation = o.DomainCollation
 		st.DomainDefault = o.DomainDefault
 		st.DomainNotNull = o.DomainNotNull
 		for _, cst := range o.DomainConstraints {
