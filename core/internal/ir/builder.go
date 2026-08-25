@@ -3117,6 +3117,7 @@ func (b *Builder) buildOpaque(node *pg_query.Node, block pipeline.BlockAST, pos 
 		if block.RenamedFrom != nil {
 			evt.RenamedFrom = &block.RenamedFrom.Name
 		}
+		evt.EnableState = block.TriggerEnableState
 		evt.SecurityLabels = block.SecurityLabels
 		return evt, nil
 	case *pg_query.Node_CreateOpClassStmt:

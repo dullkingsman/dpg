@@ -515,7 +515,8 @@ func introspectEventTriggers(ctx context.Context, conn pipeline.Querier) ([]pipe
 SELECT e.evtname, e.evtevent, e.evttags,
        n.nspname, p.proname,
        obj_description(e.oid, 'pg_event_trigger') AS comment,
-       r.rolname AS owner
+       r.rolname AS owner,
+       e.evtenabled::text
 FROM   pg_event_trigger e
 JOIN   pg_proc p      ON p.oid = e.evtfoid
 JOIN   pg_namespace n ON n.oid = p.pronamespace
@@ -531,11 +532,23 @@ ORDER  BY e.evtname`
 
 	var out []pipeline.IRObject
 	for rs.Next() {
-		var name, event, fnSchema, fnName, owner string
+		var name, event, fnSchema, fnName, owner, evtenabled string
 		var tags []string
 		var comment *string
-		if err := rs.Scan(&name, &event, &tags, &fnSchema, &fnName, &comment, &owner); err != nil {
+		if err := rs.Scan(&name, &event, &tags, &fnSchema, &fnName, &comment, &owner, &evtenabled); err != nil {
 			return nil, err
+		}
+		// trigger-enable-state (Section 14.1): evtenabled uses the same char
+		// codes as pg_trigger.tgenabled — see introspectTriggers' identical
+		// mapping.
+		var enableState string
+		switch evtenabled {
+		case "D":
+			enableState = "DISABLED"
+		case "R":
+			enableState = "ENABLE REPLICA"
+		case "A":
+			enableState = "ENABLE ALWAYS"
 		}
 		var sb strings.Builder
 		fmt.Fprintf(&sb, "CREATE EVENT TRIGGER %s ON %s", quoteIdent(name), event)
@@ -555,6 +568,7 @@ ORDER  BY e.evtname`
 			Body:          canonicalDDL(sb.String()),
 			Comment:       comment,
 			Owner:         &owner,
+			EnableState:   enableState,
 			Reconstructed: true,
 		})
 	}

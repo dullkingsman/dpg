@@ -94,6 +94,47 @@ func TestEnableRLS(t *testing.T) {
 	}
 }
 
+// TestEventTriggerBlockEnableState guards RFC Section 14.1's DISABLED/
+// ENABLE REPLICA/ENABLE ALWAYS block directive — parsed here as a plain
+// top-level block directive (BlockAST.TriggerEnableState) rather than an
+// inline Part-1 clause, since real CREATE EVENT TRIGGER has no such clause
+// at all (confirmed live).
+func TestEventTriggerBlockEnableState(t *testing.T) {
+	cases := map[string]string{
+		"DISABLED;":       "DISABLED",
+		"ENABLE REPLICA;": "ENABLE REPLICA",
+		"ENABLE ALWAYS;":  "ENABLE ALWAYS",
+	}
+	for src, want := range cases {
+		ast := parse(t, src)
+		if ast.TriggerEnableState != want {
+			t.Errorf("parse(%q).TriggerEnableState = %q, want %q", src, ast.TriggerEnableState, want)
+		}
+	}
+}
+
+// TestEventTriggerBlockBareEnableErrors proves a bare "ENABLE;" (no ROW,
+// REPLICA, or ALWAYS) is rejected — same as TriggerDef's identical parser —
+// rather than silently accepted as a redundant no-op directive.
+func TestEventTriggerBlockBareEnableErrors(t *testing.T) {
+	if err := parseErr(t, `ENABLE;`); err == nil {
+		t.Fatal("expected an error for bare ENABLE with no argument")
+	}
+}
+
+// TestEnableRLSStillWorksAfterTriggerStateDispatch guards the ENABLE
+// dispatch refactor that added trigger-enable-state routing: the original
+// "ENABLE ROW LEVEL SECURITY" path must still work unchanged.
+func TestEnableRLSStillWorksAfterTriggerStateDispatch(t *testing.T) {
+	ast := parse(t, `ENABLE ROW LEVEL SECURITY;`)
+	if !ast.EnableRLS {
+		t.Error("expected EnableRLS = true")
+	}
+	if ast.TriggerEnableState != "" {
+		t.Errorf("expected TriggerEnableState unset, got %q", ast.TriggerEnableState)
+	}
+}
+
 func TestForceRLS(t *testing.T) {
 	ast := parse(t, `FORCE ROW LEVEL SECURITY;`)
 	if !ast.ForceRLS {

@@ -80,6 +80,10 @@ type SnapOpaque struct {
 	// EventTriggerOwner is Section 14.1's ALTER EVENT TRIGGER ... OWNER TO
 	// diffing input — same shape as PublicationOwner above.
 	EventTriggerOwner *string `json:"event_trigger_owner,omitempty"`
+	// EventTriggerEnableState is Section 14.1's DISABLED/ENABLE REPLICA/
+	// ENABLE ALWAYS diffing input — see ir.EventTrigger.EnableState's doc
+	// comment.
+	EventTriggerEnableState string `json:"event_trigger_enable_state,omitempty"`
 	// TSDictOwner is Section 12.2's ALTER TEXT SEARCH DICTIONARY ... OWNER
 	// TO diffing input — same shape as PublicationOwner/EventTriggerOwner
 	// above. TSParser/TSTemplate have no OWNER concept in real PostgreSQL

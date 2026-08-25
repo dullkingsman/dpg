@@ -1256,20 +1256,22 @@ type EventTrigger struct {
 	// counterpart here.
 	RenamedFrom *string
 	Owner       *string
-	// ENABLE/DISABLE/ENABLE REPLICA/ENABLE ALWAYS (Section 14.1's other
-	// still-open ALTER EVENT TRIGGER capability) is deliberately NOT added
-	// here yet: confirmed empirically that real PostgreSQL's CREATE EVENT
+	// EnableState is Section 14.1's DISABLED/ENABLE REPLICA/ENABLE ALWAYS
+	// trigger-enable-state — "" (omitted) means ENABLED, PostgreSQL's own
+	// default. Confirmed empirically that real PostgreSQL's CREATE EVENT
 	// TRIGGER grammar has no inline enable-state clause at all (rejects
-	// "... EXECUTE FUNCTION f() DISABLE;" outright, "syntax error at or
-	// near DISABLE") despite RFC Section 14.1's own event-trigger-decl
+	// "... EXECUTE FUNCTION f() ENABLE REPLICA;" outright, "syntax error at
+	// or near ENABLE") despite RFC Section 14.1's own event-trigger-decl
 	// ABNF placing trigger-enable-state there — the same class of
 	// RFC-documents-unparseable-PG-syntax gap domain NOT VALID had. Unlike
-	// domain (which has a working { } block alternative), event-trigger-
-	// block's own grammar doesn't list an enable-state directive either,
-	// and the same underlying trigger-enable-state production is shared
-	// with the entirely separate table Trigger enable-state feature
-	// (Section 7.9, audit item #56) — bigger scope than a field addition,
-	// tracked there rather than half-added here with no parse path.
+	// domain's inline-only grammar, event-trigger-block DOES have a working
+	// { } block alternative, so — deviating from the RFC's literal Part-1
+	// placement — this is parsed as a block directive instead
+	// (pipeline.BlockAST.TriggerEnableState), reusing table Trigger's
+	// (Section 7.9, audit item #56) identical value set/emitted-SQL shape
+	// via triggerEnableStateSQL, just against a database-level target with
+	// no table name.
+	EnableState string
 	SecurityLabels []pipeline.SecurityLabel
 	SrcPos         pipeline.SourcePos
 }

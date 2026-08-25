@@ -1954,7 +1954,7 @@ func renderEventTriggerBody(b *strings.Builder, ind string, fmtOpts format.Optio
 		return
 	}
 	fmt.Fprintf(b, "\n%s", body)
-	if o.Owner == nil && o.Comment == nil && len(o.SecurityLabels) == 0 {
+	if o.Owner == nil && o.Comment == nil && o.EnableState == "" && len(o.SecurityLabels) == 0 {
 		b.WriteString(";\n")
 		return
 	}
@@ -1964,6 +1964,9 @@ func renderEventTriggerBody(b *strings.Builder, ind string, fmtOpts format.Optio
 	}
 	if o.Comment != nil {
 		fmt.Fprintf(b, "%s%s %s;\n", ind, kw("COMMENT"), sqlStringLit(*o.Comment))
+	}
+	if o.EnableState != "" {
+		fmt.Fprintf(b, "%s%s;\n", ind, kw(o.EnableState))
 	}
 	writeSecurityLabels(b, ind, fmtOpts, o.SecurityLabels)
 	b.WriteString("}\n")

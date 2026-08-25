@@ -1378,6 +1378,14 @@ func createObject(obj pipeline.IRObject, vtypes map[string]string) ([]pipeline.D
 			ops = append(wrapCreateWithOwner(ops[0], o.Owner, o.SrcPos), ops[1:]...)
 		}
 		ops, err = appendCommentOp(ops, err, "event_trigger", "", o.Name, "", "", o.Comment, o.SrcPos)
+		// trigger-enable-state (Section 14.1) has no inline CREATE EVENT
+		// TRIGGER form (confirmed empirically — a new event trigger is
+		// always ENABLED per real PostgreSQL's own grammar), only
+		// ALTER EVENT TRIGGER, even at initial creation — same reasoning as
+		// table Trigger's identical createTrigger follow-up.
+		if err == nil && o.EnableState != "" {
+			ops = append(ops, safeOp(eventTriggerEnableStateSQL(o.Name, o.EnableState), o.SrcPos))
+		}
 		return appendSecurityLabelOps(ops, err, "event_trigger", "", o.Name, "", "", o.SecurityLabels, o.SrcPos)
 	case *ir.Collation:
 		ops, err := createOpaque(o.QualifiedName(), o.Body, "COLLATION", o.Schema, o.SrcPos)
@@ -1971,6 +1979,9 @@ func diffEventTrigger(o *ir.EventTrigger, snap *snapshot.SnapOpaque) ([]pipeline
 		if !ptrEq(o.Owner, snap.EventTriggerOwner) && o.Owner != nil {
 			ops = append(ops, safeOp(fmt.Sprintf("ALTER EVENT TRIGGER %s OWNER TO %s;", quoteIdent(o.Name), quoteIdent(*o.Owner)), pos))
 		}
+		if o.EnableState != snap.EventTriggerEnableState {
+			ops = append(ops, safeOp(eventTriggerEnableStateSQL(o.Name, o.EnableState), pos))
+		}
 		ops = append(ops, diffSecurityLabelSet(snap.SecurityLabels, o.SecurityLabels, onClause, pos)...)
 		if len(ops) == 0 {
 			ops = append(ops, safeOp(fmt.Sprintf("-- refresh snapshot metadata for event trigger %s", quoteIdent(o.Name)), pos))
@@ -1993,6 +2004,9 @@ func diffEventTrigger(o *ir.EventTrigger, snap *snapshot.SnapOpaque) ([]pipeline
 		if err != nil {
 			return nil, err
 		}
+		if o.EnableState != "" {
+			ops = append(ops, safeOp(eventTriggerEnableStateSQL(o.Name, o.EnableState), pos))
+		}
 		ops = append(ops, createSecurityLabelOps(o.SecurityLabels, onClause, pos)...)
 		return ops, nil
 	}
@@ -2004,6 +2018,9 @@ func diffEventTrigger(o *ir.EventTrigger, snap *snapshot.SnapOpaque) ([]pipeline
 	}
 	if !ptrEq(o.Owner, snap.EventTriggerOwner) && o.Owner != nil {
 		ops = append(ops, safeOp(fmt.Sprintf("ALTER EVENT TRIGGER %s OWNER TO %s;", quoteIdent(o.Name), quoteIdent(*o.Owner)), pos))
+	}
+	if o.EnableState != snap.EventTriggerEnableState {
+		ops = append(ops, safeOp(eventTriggerEnableStateSQL(o.Name, o.EnableState), pos))
 	}
 	ops = append(ops, diffSecurityLabelSet(snap.SecurityLabels, o.SecurityLabels, onClause, pos)...)
 	return ops, nil
@@ -9255,20 +9272,36 @@ func diffTriggers(schema, table string, o *ir.Table, snap *snapshot.SnapTable) [
 // relying on the default "public" schema — the same convention DPG's own
 // objects get via applySchemaContext. Comparing raw strings treated every
 // unqualified trigger function as changed on every verify/plan --live.
-// triggerEnableStateSQL renders Section 7.9's trigger-enable-state as a
-// real PostgreSQL ALTER TABLE ... {ENABLE|DISABLE}[ REPLICA|ALWAYS] TRIGGER
-// statement. state is "" (ENABLED, PostgreSQL's own default), "DISABLED",
-// "ENABLE REPLICA", or "ENABLE ALWAYS" — ir.Trigger.EnableState's exact
-// value set.
-func triggerEnableStateSQL(tblIdent, triggerName, state string) string {
-	verb := "ENABLE"
+// triggerEnableStateVerb resolves Section 7.9/14.1's shared trigger-enable-
+// state value set ("" (ENABLED, PostgreSQL's own default), "DISABLED",
+// "ENABLE REPLICA", or "ENABLE ALWAYS" — ir.Trigger.EnableState/
+// ir.EventTrigger.EnableState's identical value set) to the verb an ALTER
+// statement actually uses ("ENABLE"/"DISABLE"/"ENABLE REPLICA"/
+// "ENABLE ALWAYS").
+func triggerEnableStateVerb(state string) string {
 	switch state {
 	case "DISABLED":
-		verb = "DISABLE"
+		return "DISABLE"
 	case "ENABLE REPLICA", "ENABLE ALWAYS":
-		verb = state
+		return state
+	default:
+		return "ENABLE"
 	}
-	return fmt.Sprintf("ALTER TABLE %s %s TRIGGER %s;", tblIdent, verb, quoteIdent(triggerName))
+}
+
+// triggerEnableStateSQL renders Section 7.9's trigger-enable-state as a
+// real PostgreSQL ALTER TABLE ... {ENABLE|DISABLE}[ REPLICA|ALWAYS] TRIGGER
+// statement.
+func triggerEnableStateSQL(tblIdent, triggerName, state string) string {
+	return fmt.Sprintf("ALTER TABLE %s %s TRIGGER %s;", tblIdent, triggerEnableStateVerb(state), quoteIdent(triggerName))
+}
+
+// eventTriggerEnableStateSQL is triggerEnableStateSQL's Section 14.1
+// counterpart: same value set and ALTER verb, but EVENT TRIGGER's own
+// grammar has no table name and no trailing "TRIGGER name" clause — the
+// event trigger name comes right after the ALTER EVENT TRIGGER keywords.
+func eventTriggerEnableStateSQL(name, state string) string {
+	return fmt.Sprintf("ALTER EVENT TRIGGER %s %s;", quoteIdent(name), triggerEnableStateVerb(state))
 }
 
 func qualifyFuncForCompare(f string) string {

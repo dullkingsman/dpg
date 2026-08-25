@@ -486,6 +486,19 @@ type BlockAST struct {
 	// would otherwise prescribe for "declared table disappeared from its
 	// parent's PARTITIONS { } block."
 	DetachedFrom *DetachedFromDirective
+	// TriggerEnableState is Section 14.1's DISABLED/ENABLE REPLICA/ENABLE
+	// ALWAYS block directive for an EVENT TRIGGER — "" (omitted) means
+	// ENABLED, PostgreSQL's own default. Same value set and vocabulary as
+	// TriggerDef.EnableState (RFC's own ABNF: "trigger-enable-state ...
+	// reused verbatim"), but a plain block directive here rather than an
+	// inline Part-1 clause: unlike table Trigger (parsed entirely through
+	// DPG's own custom grammar), EVENT TRIGGER's Part 1 is real PostgreSQL
+	// DDL round-tripped through pg_query, and real CREATE EVENT TRIGGER has
+	// no such inline clause at all (confirmed live: "... EXECUTE FUNCTION
+	// f() ENABLE REPLICA;" is a syntax error) — the RFC's own event-
+	// trigger-decl ABNF placement doesn't hold live, the same
+	// RFC-documents-unparseable-PG-syntax gap domain NOT VALID had.
+	TriggerEnableState string
 }
 
 // ReplicaIdentityDir is Section 7.11's REPLICA IDENTITY block directive.

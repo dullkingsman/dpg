@@ -458,7 +458,14 @@ func (b *blockParser) parseBlock(pos pipeline.SourcePos) (pipeline.BlockAST, err
 		case "DROP":
 			err = b.parseDrop(&ast)
 		case "ENABLE":
-			err = b.parseEnable(&ast, dirPos)
+			err = b.parseEnableOrTriggerState(&ast, dirPos)
+		case "DISABLED":
+			// Section 14.1's EVENT TRIGGER trigger-enable-state, bare form —
+			// same vocabulary as TriggerDef.EnableState, reused verbatim per
+			// the RFC's own ABNF, just as a block directive here (see
+			// BlockAST.TriggerEnableState's doc comment for why).
+			ast.TriggerEnableState = "DISABLED"
+			err = b.expectSemi()
 		case "FORCE":
 			err = b.parseForce(&ast, dirPos)
 		case "REPLICA":
@@ -759,8 +766,9 @@ func (b *blockParser) parseIdentDirective(pos pipeline.SourcePos) (*pipeline.Ide
 
 // parseSecurityLabel reads: LABEL [FOR provider] 'label'; (the "SECURITY"
 // directive keyword itself is consumed by the caller's dispatch, mirroring
-// how "ROW LEVEL SECURITY" splits ROW/LEVEL/SECURITY across parseEnable/
-// parseForce and their own ENABLE/FORCE dispatch keyword).
+// how "ROW LEVEL SECURITY" splits ROW/LEVEL/SECURITY across
+// parseEnableOrTriggerState/parseForce and their own ENABLE/FORCE dispatch
+// keyword).
 func (b *blockParser) parseSecurityLabel(pos pipeline.SourcePos) (pipeline.SecurityLabel, error) {
 	if err := b.expect("LABEL"); err != nil {
 		return pipeline.SecurityLabel{}, err
@@ -822,21 +830,41 @@ func (b *blockParser) parseDrop(ast *pipeline.BlockAST) error {
 	return b.expectSemi()
 }
 
-// parseEnable reads: ROW LEVEL SECURITY;
-func (b *blockParser) parseEnable(ast *pipeline.BlockAST, pos pipeline.SourcePos) error {
+// parseEnableOrTriggerState dispatches the bare "ENABLE" directive between
+// its two unrelated meanings sharing the same leading keyword: Table's
+// "ENABLE ROW LEVEL SECURITY" (Section 7.8) and EVENT TRIGGER's
+// trigger-enable-state "ENABLE [REPLICA|ALWAYS]" (Section 14.1,
+// BlockAST.TriggerEnableState's doc comment) — distinguished by peeking the
+// next word.
+func (b *blockParser) parseEnableOrTriggerState(ast *pipeline.BlockAST, pos pipeline.SourcePos) error {
 	b.skipWS()
+	c := b.cur()
 	w := strings.ToUpper(b.readWord())
-	if w != "ROW" {
-		return fmt.Errorf("%s: expected ROW LEVEL SECURITY after ENABLE, got %q", pos, w)
+	switch w {
+	case "ROW":
+		if err := b.expect("LEVEL"); err != nil {
+			return err
+		}
+		if err := b.expect("SECURITY"); err != nil {
+			return err
+		}
+		ast.EnableRLS = true
+		return b.expectSemi()
+	case "REPLICA":
+		ast.TriggerEnableState = "ENABLE REPLICA"
+		return b.expectSemi()
+	case "ALWAYS":
+		ast.TriggerEnableState = "ENABLE ALWAYS"
+		return b.expectSemi()
+	default:
+		// Bare "ENABLE" (no REPLICA/ALWAYS) is rejected, mirroring
+		// TriggerDef's identical parser exactly: it would be a redundant
+		// no-op directive (omitting trigger-enable-state entirely already
+		// means enabled, PostgreSQL's own default), not a distinct state to
+		// express.
+		b.restore(c)
+		return fmt.Errorf("%s: expected ROW LEVEL SECURITY, REPLICA, or ALWAYS after ENABLE, got %q", pos, w)
 	}
-	if err := b.expect("LEVEL"); err != nil {
-		return err
-	}
-	if err := b.expect("SECURITY"); err != nil {
-		return err
-	}
-	ast.EnableRLS = true
-	return b.expectSemi()
 }
 
 // parseForce reads: ROW LEVEL SECURITY;

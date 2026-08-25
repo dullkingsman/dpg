@@ -16594,6 +16594,114 @@ func TestCreateEventTriggerWithOwner(t *testing.T) {
 	}
 }
 
+// TestCreateEventTriggerWithEnableState proves a brand-new event trigger
+// with a declared trigger-enable-state applies it via a follow-up
+// ALTER EVENT TRIGGER (Section 14.1, audit item #76's remainder) — real
+// CREATE EVENT TRIGGER has no inline clause for it (confirmed live), same
+// reasoning as table Trigger's identical createTrigger follow-up.
+func TestCreateEventTriggerWithEnableState(t *testing.T) {
+	d := New()
+	desired := []pipeline.IRObject{
+		&ir.EventTrigger{
+			Name: "et", Event: "sql_drop", Tags: []string{"DROP TABLE"}, Function: "f1",
+			Body:        "CREATE EVENT TRIGGER et ON sql_drop WHEN TAG IN ('DROP TABLE') EXECUTE FUNCTION f1()",
+			EnableState: "ENABLE REPLICA",
+		},
+	}
+	ops, err := d.Diff(desired, &pipeline.Snapshot{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsSQL(ops, "CREATE EVENT TRIGGER") {
+		t.Fatalf("expected a CREATE EVENT TRIGGER op, got: %v", sqlList(ops))
+	}
+	if !containsSQL(ops, `ALTER EVENT TRIGGER "et" ENABLE REPLICA;`) {
+		t.Errorf("expected a follow-up ALTER EVENT TRIGGER ENABLE REPLICA, got: %v", sqlList(ops))
+	}
+}
+
+// TestDiffEventTriggerEnableStateChanged guards the ALTER-side diffing for
+// an already-applied event trigger's enable-state, covering all three real
+// PostgreSQL verbs plus transitioning back to the default (bare ENABLE).
+func TestDiffEventTriggerEnableStateChanged(t *testing.T) {
+	cases := []struct {
+		name       string
+		fromState  string
+		toState    string
+		wantSuffix string
+	}{
+		{"defaultToDisabled", "", "DISABLED", `ALTER EVENT TRIGGER "et" DISABLE;`},
+		{"defaultToReplica", "", "ENABLE REPLICA", `ALTER EVENT TRIGGER "et" ENABLE REPLICA;`},
+		{"defaultToAlways", "", "ENABLE ALWAYS", `ALTER EVENT TRIGGER "et" ENABLE ALWAYS;`},
+		{"disabledBackToDefault", "DISABLED", "", `ALTER EVENT TRIGGER "et" ENABLE;`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			d := New()
+			snap := &pipeline.Snapshot{}
+			_ = snap.SetObject("et", &snapshot.SnapObject{
+				Kind: "event_trigger",
+				Opaque: &snapshot.SnapOpaque{
+					Kind: "event_trigger", Name: "et",
+					EventTriggerEvent: "sql_drop", EventTriggerTags: []string{"DROP TABLE"}, EventTriggerFunction: "public.f1",
+					EventTriggerEnableState: tc.fromState,
+				},
+			})
+			desired := []pipeline.IRObject{
+				&ir.EventTrigger{
+					Name: "et", Event: "sql_drop", Tags: []string{"DROP TABLE"}, Function: "f1",
+					Body:        "CREATE EVENT TRIGGER et ON sql_drop WHEN TAG IN ('DROP TABLE') EXECUTE FUNCTION f1()",
+					EnableState: tc.toState,
+				},
+			}
+			ops, err := d.Diff(desired, snap)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !containsSQL(ops, tc.wantSuffix) {
+				t.Errorf("expected %q, got: %v", tc.wantSuffix, sqlList(ops))
+			}
+			if containsSQL(ops, "DROP EVENT TRIGGER") {
+				t.Errorf("enable-state-only change should not DROP+CREATE, got: %v", sqlList(ops))
+			}
+			for _, op := range ops {
+				if strings.Contains(op.SQL(), "ALTER EVENT TRIGGER") && op.Safety() != pipeline.Safe {
+					t.Errorf("enable-state op safety = %v, want Safe: %s", op.Safety(), op.SQL())
+				}
+			}
+		})
+	}
+}
+
+// TestDiffEventTriggerEnableStateUnchangedIsNoop proves an unchanged
+// enable-state produces no ALTER EVENT TRIGGER op at all.
+func TestDiffEventTriggerEnableStateUnchangedIsNoop(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("et", &snapshot.SnapObject{
+		Kind: "event_trigger",
+		Opaque: &snapshot.SnapOpaque{
+			Kind: "event_trigger", Name: "et",
+			EventTriggerEvent: "sql_drop", EventTriggerTags: []string{"DROP TABLE"}, EventTriggerFunction: "public.f1",
+			EventTriggerEnableState: "ENABLE ALWAYS",
+		},
+	})
+	desired := []pipeline.IRObject{
+		&ir.EventTrigger{
+			Name: "et", Event: "sql_drop", Tags: []string{"DROP TABLE"}, Function: "f1",
+			Body:        "CREATE EVENT TRIGGER et ON sql_drop WHEN TAG IN ('DROP TABLE') EXECUTE FUNCTION f1()",
+			EnableState: "ENABLE ALWAYS",
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ops) != 0 {
+		t.Errorf("expected no ops for unchanged enable-state, got: %v", sqlList(ops))
+	}
+}
+
 // TestDiffEventTriggerRenamedFromEmitsAlterRename is the regression guard
 // for EventTrigger rename detection: before this, ir.EventTrigger had no
 // RenamedFrom field at all — the struct's own doc comment explicitly said

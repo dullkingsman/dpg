@@ -2834,6 +2834,47 @@ func TestRenderPolicyRenamedFromRoundtrip(t *testing.T) {
 	}
 }
 
+// TestRenderEventTriggerEnableStateRoundtrip guards RFC Section 14.1's
+// DISABLED/ENABLE REPLICA/ENABLE ALWAYS block directive (audit item #76's
+// remainder) — renderEventTriggerBody previously never rendered it at all,
+// so a `dpg dump` of a disabled event trigger would have silently dropped
+// that state, and the trigger would come back enabled on the next apply.
+func TestRenderEventTriggerEnableStateRoundtrip(t *testing.T) {
+	fmtOpts := format.Options{IndentSize: 4, KeywordCase: "upper"}
+	evt := &ir.EventTrigger{
+		Name: "audit_ddl", Event: "ddl_command_end", Function: "public.log_ddl",
+		Body:        "CREATE EVENT TRIGGER audit_ddl ON ddl_command_end EXECUTE FUNCTION public.log_ddl()",
+		EnableState: "ENABLE REPLICA",
+	}
+
+	var b strings.Builder
+	renderObjectDPG(&b, evt, fmtOpts)
+	rendered := b.String()
+
+	if !strings.Contains(rendered, "ENABLE REPLICA;") {
+		t.Fatalf("expected ENABLE REPLICA, got:\n%s", rendered)
+	}
+
+	dir := t.TempDir()
+	f := filepath.Join(dir, "objects.dpg")
+	if err := os.WriteFile(f, []byte(rendered), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	compiled, _, err := compiler.Compile([]string{f}, dir, pipeline.Default)
+	if err != nil {
+		t.Fatalf("dumped event trigger failed to recompile: %v\n---\n%s", err, rendered)
+	}
+	var found *ir.EventTrigger
+	for _, o := range compiled {
+		if et, ok := o.(*ir.EventTrigger); ok && et.Name == "audit_ddl" {
+			found = et
+		}
+	}
+	if found == nil || found.EnableState != "ENABLE REPLICA" {
+		t.Errorf("EnableState did not round-trip: %+v", found)
+	}
+}
+
 // TestRenderExcludeConstraintRoundtrip proves dump can reconstruct a real
 // EXCLUDE constraint into valid, recompilable DPG source. EXCLUDE isn't in
 // isInlineable, so it must render via the generic table-level constraint

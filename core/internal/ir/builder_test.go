@@ -3801,6 +3801,24 @@ func TestBuildOpaqueCommentSupport(t *testing.T) {
 	}
 }
 
+// TestBuildEventTriggerEnableState guards RFC Section 14.1's DISABLED/
+// ENABLE REPLICA/ENABLE ALWAYS block directive (audit item #76's
+// remainder) reaching ir.EventTrigger — parsed as a block directive rather
+// than the RFC's literal (but PG-invalid) inline Part-1 placement.
+func TestBuildEventTriggerEnableState(t *testing.T) {
+	obj := buildObject(t, pipeline.KindEventTrigger,
+		`log_ddl ON ddl_command_end EXECUTE FUNCTION log_ddl_command()`,
+		`ENABLE REPLICA;`,
+	)
+	evt, ok := obj.(*ir.EventTrigger)
+	if !ok {
+		t.Fatalf("expected *ir.EventTrigger, got %T", obj)
+	}
+	if evt.EnableState != "ENABLE REPLICA" {
+		t.Errorf("EnableState: got %q, want %q", evt.EnableState, "ENABLE REPLICA")
+	}
+}
+
 // ── Collation structured diffing inputs (RFC §14.2) ────────────────────────────
 // Regression guards for diffCollation's actual risk (see its doc comment):
 // LOCALE and LC_COLLATE/LC_CTYPE are different DPG source spellings that
