@@ -17,6 +17,13 @@ func qualIdentQuoted(schema, name string) string {
 
 var dollarTagRe = regexp.MustCompile(`\$[A-Za-z0-9_]*\$`)
 
+// quoteLit single-quotes a SQL string literal — package ir's own copy of
+// internal/diff's identical helper (unexported, no shared package to pull
+// from without a larger refactor).
+func quoteLit(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", "''") + "'"
+}
+
 // safeDollarTag picks a dollar-quote tag guaranteed not to collide with any
 // $..$-shaped sequence already present in body (e.g. dynamic SQL that
 // itself uses dollar-quoted string literals). Falls back from the
@@ -90,9 +97,13 @@ func RenderCreateFunctionSQL(o *Function) string {
 	}
 	b.WriteString(" LANGUAGE ")
 	b.WriteString(o.Attrs.Language)
+	writeTransforms(&b, o.Attrs.Transforms)
 	if o.Attrs.Volatility != "" && o.Attrs.Volatility != "VOLATILE" {
 		b.WriteString(" ")
 		b.WriteString(o.Attrs.Volatility)
+	}
+	if o.Attrs.Leakproof {
+		b.WriteString(" LEAKPROOF")
 	}
 	if o.Attrs.Strict {
 		b.WriteString(" STRICT")
@@ -110,19 +121,64 @@ func RenderCreateFunctionSQL(o *Function) string {
 	if o.Attrs.Rows != nil {
 		fmt.Fprintf(&b, " ROWS %v", *o.Attrs.Rows)
 	}
-	tag := safeDollarTag(o.Attrs.Body)
-	b.WriteString(" AS ")
-	b.WriteString(tag)
-	b.WriteString(o.Attrs.Body)
-	b.WriteString(tag)
+	writeFuncBody(&b, o.Attrs)
 	b.WriteString(";")
 	return b.String()
 }
 
+// writeTransforms renders RFC audit item #26's `TRANSFORM FOR TYPE t [, FOR
+// TYPE t ...]` clause, shared by Function and Procedure (real PostgreSQL
+// accepts TRANSFORM on both). No-op when transforms is empty.
+func writeTransforms(b *strings.Builder, transforms []TypeRef) {
+	if len(transforms) == 0 {
+		return
+	}
+	b.WriteString(" TRANSFORM ")
+	for i, t := range transforms {
+		if i > 0 {
+			b.WriteString(", ")
+		}
+		b.WriteString("FOR TYPE ")
+		b.WriteString(t.String())
+	}
+}
+
+// writeFuncBody renders the trailing body clause shared by
+// RenderCreateFunctionSQL/RenderCreateProcedureSQL: RFC audit item #27's
+// `AS 'obj_file'[, 'link_symbol']` form when ObjFile is set (LANGUAGE C/
+// internal), item #28's `BEGIN ATOMIC ... END` form when AtomicBody is set
+// (LANGUAGE SQL only), or the ordinary dollar-quoted `AS $$...$$` body
+// otherwise. The caller appends the statement-terminating ";" itself — valid
+// after all three forms.
+func writeFuncBody(b *strings.Builder, attrs FuncAttrs) {
+	if attrs.ObjFile != nil {
+		b.WriteString(" AS ")
+		b.WriteString(quoteLit(*attrs.ObjFile))
+		if attrs.LinkSymbol != nil {
+			b.WriteString(", ")
+			b.WriteString(quoteLit(*attrs.LinkSymbol))
+		}
+		return
+	}
+	if attrs.AtomicBody {
+		b.WriteString(" BEGIN ATOMIC ")
+		b.WriteString(attrs.Body)
+		b.WriteString(" END")
+		return
+	}
+	tag := safeDollarTag(attrs.Body)
+	b.WriteString(" AS ")
+	b.WriteString(tag)
+	b.WriteString(attrs.Body)
+	b.WriteString(tag)
+}
+
 // RenderCreateProcedureSQL is RenderCreateFunctionSQL's PROCEDURE
 // counterpart. Procedures never take STRICT/SECURITY DEFINER/PARALLEL/COST/
-// ROWS in this codebase's existing emission (matches real PostgreSQL, which
-// doesn't accept most of those on a procedure).
+// ROWS/LEAKPROOF in this codebase's existing emission (matches real
+// PostgreSQL, which doesn't accept most of those on a procedure) but do
+// accept TRANSFORM and every func-body form (RFC audit items #26-#28),
+// confirmed live via pg_query.Parse.
 func RenderCreateProcedureSQL(o *Procedure) string {
 	var b strings.Builder
 	b.WriteString("CREATE OR REPLACE PROCEDURE ")
@@ -144,11 +200,8 @@ func RenderCreateProcedureSQL(o *Procedure) string {
 	}
 	b.WriteString(") LANGUAGE ")
 	b.WriteString(o.Attrs.Language)
-	tag := safeDollarTag(o.Attrs.Body)
-	b.WriteString(" AS ")
-	b.WriteString(tag)
-	b.WriteString(o.Attrs.Body)
-	b.WriteString(tag)
+	writeTransforms(&b, o.Attrs.Transforms)
+	writeFuncBody(&b, o.Attrs)
 	b.WriteString(";")
 	return b.String()
 }

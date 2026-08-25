@@ -1987,6 +1987,211 @@ func TestDiffFunctionParallelChanged(t *testing.T) {
 	}
 }
 
+// TestDiffFunctionLeakproofChanged guards RFC audit item #25: LEAKPROOF was
+// not part of FuncAttrs at all, so a LEAKPROOF-only source change against an
+// otherwise-identical snapshot would have produced zero diff ops.
+func TestDiffFunctionLeakproofChanged(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.f()", &snapshot.SnapObject{
+		Kind: "function",
+		Function: &snapshot.SnapFunction{
+			Schema: "public", Name: "f", ReturnType: "integer",
+			Language: "sql", Volatility: "VOLATILE", Parallel: "UNSAFE", BodyHash: "h",
+		},
+	})
+	desired := []pipeline.IRObject{
+		&ir.Function{
+			Schema: "public", Name: "f",
+			ReturnType: ir.TypeRef{Name: "integer"},
+			BodyHash:   "h",
+			Attrs:      ir.FuncAttrs{Language: "sql", Volatility: "VOLATILE", Parallel: "UNSAFE", Leakproof: true, Body: "SELECT 1"},
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ops) == 0 || !strings.Contains(ops[0].SQL(), "LEAKPROOF") {
+		t.Errorf("expected a recreate with LEAKPROOF, got: %v", sqlList(ops))
+	}
+}
+
+// TestDiffFunctionTransformsChanged guards RFC audit item #26: Transforms
+// was not compared at all, so a TRANSFORM-only source change would have
+// produced zero diff ops.
+func TestDiffFunctionTransformsChanged(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.f(hstore)", &snapshot.SnapObject{
+		Kind: "function",
+		Function: &snapshot.SnapFunction{
+			Schema: "public", Name: "f", Args: "hstore", ReturnType: "integer",
+			Language: "plpython3u", Volatility: "VOLATILE", Parallel: "UNSAFE", BodyHash: "h",
+		},
+	})
+	desired := []pipeline.IRObject{
+		&ir.Function{
+			Schema: "public", Name: "f",
+			Args:       []ir.FuncArg{{Type: ir.TypeRef{Name: "hstore"}}},
+			ReturnType: ir.TypeRef{Name: "integer"},
+			BodyHash:   "h",
+			Attrs: ir.FuncAttrs{
+				Language: "plpython3u", Volatility: "VOLATILE", Parallel: "UNSAFE",
+				Transforms: []ir.TypeRef{{Name: "hstore"}}, Body: "return 1",
+			},
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ops) == 0 || !strings.Contains(ops[0].SQL(), "TRANSFORM FOR TYPE hstore") {
+		t.Errorf("expected a recreate with TRANSFORM FOR TYPE hstore, got: %v", sqlList(ops))
+	}
+}
+
+// TestDiffFunctionObjFileChanged guards RFC audit item #27: a LANGUAGE C
+// function's shared-object path/symbol were not compared at all.
+func TestDiffFunctionObjFileChanged(t *testing.T) {
+	d := New()
+	oldObjFile, oldSymbol := "$libdir/old", "old_impl"
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.f(integer)", &snapshot.SnapObject{
+		Kind: "function",
+		Function: &snapshot.SnapFunction{
+			Schema: "public", Name: "f", Args: "integer", ReturnType: "integer",
+			Language: "c", Volatility: "VOLATILE", Parallel: "UNSAFE", BodyHash: "",
+			ObjFile: &oldObjFile, LinkSymbol: &oldSymbol,
+		},
+	})
+	newObjFile, newSymbol := "$libdir/new", "new_impl"
+	desired := []pipeline.IRObject{
+		&ir.Function{
+			Schema: "public", Name: "f",
+			Args:       []ir.FuncArg{{Type: ir.TypeRef{Name: "integer"}}},
+			ReturnType: ir.TypeRef{Name: "integer"},
+			Attrs: ir.FuncAttrs{
+				Language: "c", Volatility: "VOLATILE", Parallel: "UNSAFE",
+				ObjFile: &newObjFile, LinkSymbol: &newSymbol,
+			},
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ops) == 0 || !strings.Contains(ops[0].SQL(), "'$libdir/new'") || !strings.Contains(ops[0].SQL(), "'new_impl'") {
+		t.Errorf("expected a recreate with the new obj_file/link_symbol, got: %v", sqlList(ops))
+	}
+}
+
+// TestDiffFunctionObjFileUnchangedIsNoop is the no-op counterpart of
+// TestDiffFunctionObjFileChanged.
+func TestDiffFunctionObjFileUnchangedIsNoop(t *testing.T) {
+	d := New()
+	objFile, symbol := "$libdir/pgcrypto", "pg_digest"
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.f(integer)", &snapshot.SnapObject{
+		Kind: "function",
+		Function: &snapshot.SnapFunction{
+			Schema: "public", Name: "f", Args: "integer", ReturnType: "integer",
+			Language: "c", Volatility: "VOLATILE", Parallel: "UNSAFE", BodyHash: "",
+			ObjFile: &objFile, LinkSymbol: &symbol,
+		},
+	})
+	desired := []pipeline.IRObject{
+		&ir.Function{
+			Schema: "public", Name: "f",
+			Args:       []ir.FuncArg{{Type: ir.TypeRef{Name: "integer"}}},
+			ReturnType: ir.TypeRef{Name: "integer"},
+			Attrs: ir.FuncAttrs{
+				Language: "c", Volatility: "VOLATILE", Parallel: "UNSAFE",
+				ObjFile: &objFile, LinkSymbol: &symbol,
+			},
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ops) != 0 {
+		t.Errorf("expected no ops for unchanged obj_file/link_symbol, got: %v", sqlList(ops))
+	}
+}
+
+// TestDiffFunctionAtomicBodyChanged guards RFC audit item #28's diffing
+// half: AtomicBody-only drift (e.g. self-healing a function that was
+// created via a plain dollar-quoted body but is now declared BEGIN ATOMIC)
+// must trigger a recreate even when BodyHash alone doesn't move — a
+// dollar-quoted "SELECT x" and a BEGIN ATOMIC "SELECT x; END" body
+// canonicalise to the identical hash (same underlying SQL), so without
+// this the declared form would never actually be applied.
+func TestDiffFunctionAtomicBodyChanged(t *testing.T) {
+	d := New()
+	hash := ir.HashFunctionBody("sql", "SELECT x", "")
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.f(integer)", &snapshot.SnapObject{
+		Kind: "function",
+		Function: &snapshot.SnapFunction{
+			Schema: "public", Name: "f", Args: "integer", ReturnType: "integer",
+			Language: "sql", Volatility: "VOLATILE", Parallel: "UNSAFE", BodyHash: hash,
+			AtomicBody: false,
+		},
+	})
+	desired := []pipeline.IRObject{
+		&ir.Function{
+			Schema: "public", Name: "f",
+			Args:       []ir.FuncArg{{Type: ir.TypeRef{Name: "integer"}}},
+			ReturnType: ir.TypeRef{Name: "integer"},
+			BodyHash:   hash,
+			Attrs: ir.FuncAttrs{
+				Language: "sql", Volatility: "VOLATILE", Parallel: "UNSAFE",
+				AtomicBody: true, Body: "SELECT x",
+			},
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ops) == 0 || !strings.Contains(ops[0].SQL(), "BEGIN ATOMIC") {
+		t.Errorf("expected a recreate rendering BEGIN ATOMIC, got: %v", sqlList(ops))
+	}
+}
+
+// TestDiffProcedureTransformsChanged guards RFC audit item #26 for
+// Procedure specifically: diffProcedure previously compared BodyHash only,
+// so Transforms drift (which doesn't feed BodyHash at all) went completely
+// undiffed.
+func TestDiffProcedureTransformsChanged(t *testing.T) {
+	d := New()
+	body := "pass"
+	hash := ir.HashBody(body)
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.p(hstore)", &snapshot.SnapObject{
+		Kind: "procedure",
+		Opaque: &snapshot.SnapOpaque{
+			Kind: "procedure", Schema: "public", Name: "p", Args: "hstore", BodyHash: hash,
+		},
+	})
+	desired := []pipeline.IRObject{
+		&ir.Procedure{
+			Schema: "public", Name: "p",
+			Args:     []ir.FuncArg{{Type: ir.TypeRef{Name: "hstore"}}},
+			Attrs:    ir.FuncAttrs{Language: "plpython3u", Transforms: []ir.TypeRef{{Name: "hstore"}}, Body: body},
+			BodyHash: hash,
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ops) == 0 || !strings.Contains(ops[0].SQL(), "TRANSFORM FOR TYPE hstore") {
+		t.Errorf("expected a recreate with TRANSFORM FOR TYPE hstore, got: %v", sqlList(ops))
+	}
+}
+
 // TestDiffFunctionExplicitCostChanged proves an explicit COST change
 // against a snapshot with a different value triggers CREATE OR REPLACE.
 func TestDiffFunctionExplicitCostChanged(t *testing.T) {

@@ -961,9 +961,13 @@ func renderObjectDPG(b *strings.Builder, obj pipeline.IRObject, fmtOpts format.O
 		b.WriteString(kw("LANGUAGE"))
 		b.WriteString(" ")
 		b.WriteString(o.Attrs.Language)
+		writeFuncTransforms(b, fmtOpts, o.Attrs.Transforms)
 		if o.Attrs.Volatility != "" && o.Attrs.Volatility != "VOLATILE" {
 			b.WriteString(" ")
 			b.WriteString(kw(o.Attrs.Volatility))
+		}
+		if o.Attrs.Leakproof {
+			fmt.Fprintf(b, " %s", kw("LEAKPROOF"))
 		}
 		if o.Attrs.Strict {
 			fmt.Fprintf(b, " %s", kw("STRICT"))
@@ -980,7 +984,7 @@ func renderObjectDPG(b *strings.Builder, obj pipeline.IRObject, fmtOpts format.O
 		if o.Attrs.Rows != nil {
 			fmt.Fprintf(b, " %s %v", kw("ROWS"), *o.Attrs.Rows)
 		}
-		fmt.Fprintf(b, " %s $$%s$$", kw("AS"), o.Attrs.Body)
+		writeFuncBody(b, fmtOpts, o.Attrs)
 		writeFuncBlockWithDepends(b, ind, fmtOpts, o.Owner, o.Comment, o.Grants, o.Revocations, o.SecurityLabels, o.DependsOnExtensions)
 
 	case *ir.Aggregate:
@@ -1026,7 +1030,8 @@ func renderObjectDPG(b *strings.Builder, obj pipeline.IRObject, fmtOpts format.O
 		b.WriteString(kw("LANGUAGE"))
 		b.WriteString(" ")
 		b.WriteString(o.Attrs.Language)
-		fmt.Fprintf(b, " %s $$%s$$", kw("AS"), o.Attrs.Body)
+		writeFuncTransforms(b, fmtOpts, o.Attrs.Transforms)
+		writeFuncBody(b, fmtOpts, o.Attrs)
 		writeFuncBlockWithDepends(b, ind, fmtOpts, o.Owner, o.Comment, o.Grants, o.Revocations, o.SecurityLabels, o.DependsOnExtensions)
 
 	case *ir.Type:
@@ -1415,6 +1420,46 @@ func writeFuncArgs(b *strings.Builder, args []ir.FuncArg) {
 			b.WriteString(*a.Default)
 		}
 	}
+}
+
+// writeFuncTransforms renders RFC audit item #26's `TRANSFORM FOR TYPE t [,
+// FOR TYPE t ...]` clause, shared between FUNCTION/PROCEDURE — no-op when
+// transforms is empty.
+func writeFuncTransforms(b *strings.Builder, fmtOpts format.Options, transforms []ir.TypeRef) {
+	if len(transforms) == 0 {
+		return
+	}
+	kw := fmtOpts.Keyword
+	fmt.Fprintf(b, " %s ", kw("TRANSFORM"))
+	for i, t := range transforms {
+		if i > 0 {
+			b.WriteString(", ")
+		}
+		fmt.Fprintf(b, "%s %s %s", kw("FOR"), kw("TYPE"), t.String())
+	}
+}
+
+// writeFuncBody renders a FUNCTION/PROCEDURE's trailing body clause, shared
+// between the two: RFC audit item #27's `AS 'obj_file'[, 'link_symbol']`
+// form when ObjFile is set, item #28's `BEGIN ATOMIC ... END` form when
+// AtomicBody is set, or the ordinary dollar-quoted `AS $$...$$` body
+// otherwise — mirrors ir.RenderCreateFunctionSQL's identical three-way
+// choice (kept as a separate implementation since this one needs fmtOpts'
+// keyword casing, that one doesn't).
+func writeFuncBody(b *strings.Builder, fmtOpts format.Options, attrs ir.FuncAttrs) {
+	kw := fmtOpts.Keyword
+	if attrs.ObjFile != nil {
+		fmt.Fprintf(b, " %s %s", kw("AS"), sqlStringLit(*attrs.ObjFile))
+		if attrs.LinkSymbol != nil {
+			fmt.Fprintf(b, ", %s", sqlStringLit(*attrs.LinkSymbol))
+		}
+		return
+	}
+	if attrs.AtomicBody {
+		fmt.Fprintf(b, " %s %s %s %s", kw("BEGIN"), kw("ATOMIC"), attrs.Body, kw("END"))
+		return
+	}
+	fmt.Fprintf(b, " %s $$%s$$", kw("AS"), attrs.Body)
 }
 
 // writeViewBlock writes a VIEW/MATERIALIZED VIEW/RECURSIVE VIEW's { } block

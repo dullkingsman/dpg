@@ -126,6 +126,17 @@ type SnapOpaque struct {
 	// ProcedureDependsOnExtensions above.
 	ProcedureOwner *string `json:"procedure_owner,omitempty"`
 	AggregateOwner *string `json:"aggregate_owner,omitempty"`
+	// ProcedureTransforms/ProcedureObjFile/ProcedureLinkSymbol/
+	// ProcedureAtomicBody mirror SnapFunction's identical RFC audit items
+	// #26/#27/#28 diffing inputs — see ir.FuncAttrs' doc comments. Procedure
+	// uses these dedicated fields instead of SnapFunction's (same reasoning
+	// as ProcedureDependsOnExtensions above); Leakproof has no Procedure
+	// counterpart at all (real PostgreSQL rejects it there, confirmed live:
+	// "invalid attribute in procedure definition").
+	ProcedureTransforms []string `json:"procedure_transforms,omitempty"`
+	ProcedureObjFile    *string  `json:"procedure_obj_file,omitempty"`
+	ProcedureLinkSymbol *string  `json:"procedure_link_symbol,omitempty"`
+	ProcedureAtomicBody bool     `json:"procedure_atomic_body,omitempty"`
 	// OptionsStructured/FDWHandler/FDWValidator/FDWOptions/ServerFDWName/
 	// ServerType/ServerVersion/ServerOptions/UserMappingOptions are RFC
 	// §14.8/§14.9/§14.10's structured diffing inputs for fdw/server/
@@ -521,6 +532,23 @@ type SnapFunction struct {
 	// DependsOnExtensions is Section 9.1's `[NO] DEPENDS ON EXTENSION`
 	// diffing input — see ir.Function.DependsOnExtensions' doc comment.
 	DependsOnExtensions []string `json:"depends_on_extensions,omitempty"`
+	// Leakproof is RFC audit item #25's `[NOT] LEAKPROOF` diffing input —
+	// see ir.FuncAttrs.Leakproof's doc comment.
+	Leakproof bool `json:"leakproof,omitempty"`
+	// Transforms is RFC audit item #26's `TRANSFORM FOR TYPE` diffing
+	// input, flattened to type-name strings — see ir.FuncAttrs.Transforms'
+	// doc comment.
+	Transforms []string `json:"transforms,omitempty"`
+	// ObjFile/LinkSymbol are RFC audit item #27's `AS 'obj_file'[,
+	// 'link_symbol']` diffing input — see ir.FuncAttrs.ObjFile's doc
+	// comment.
+	ObjFile    *string `json:"obj_file,omitempty"`
+	LinkSymbol *string `json:"link_symbol,omitempty"`
+	// AtomicBody is RFC audit item #28's `BEGIN ATOMIC ... END` diffing
+	// input — see ir.FuncAttrs.AtomicBody's doc comment. Body content
+	// itself is still carried by BodyHash; this only distinguishes the
+	// recreate-time rendering form.
+	AtomicBody bool `json:"atomic_body,omitempty"`
 	// Owner is RFC audit item #70's ALTER FUNCTION ... OWNER TO diffing
 	// input — see ir.Function.Owner's doc comment.
 	Owner *string `json:"owner,omitempty"`

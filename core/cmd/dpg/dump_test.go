@@ -508,6 +508,157 @@ func TestRenderUnloggedSequenceCompiles(t *testing.T) {
 	}
 }
 
+// TestRenderFunctionLeakproofTransformCompiles guards RFC audit items
+// #25/#26's dump-and-recompile round trip: dump.go's Function case
+// previously had no LEAKPROOF/TRANSFORM rendering at all, so a live-
+// introspected function declaring either would dump into source that
+// silently dropped them (recompiling to something different from the live
+// object it was dumped from).
+func TestRenderFunctionLeakproofTransformCompiles(t *testing.T) {
+	fmtOpts := format.Options{IndentSize: 4, KeywordCase: "upper"}
+	fn := &ir.Function{
+		Schema: "public", Name: "f",
+		Args:       []ir.FuncArg{{Name: "x", Mode: "IN", Type: ir.TypeRef{Name: "hstore"}}},
+		ReturnType: ir.TypeRef{Name: "integer"},
+		Attrs: ir.FuncAttrs{
+			Language: "plpython3u", Leakproof: true,
+			Transforms: []ir.TypeRef{{Name: "hstore"}}, Body: "return 1",
+		},
+	}
+
+	var b strings.Builder
+	renderObjectDPG(&b, fn, fmtOpts)
+	rendered := b.String()
+
+	if !strings.Contains(rendered, "LEAKPROOF") {
+		t.Errorf("rendered function missing LEAKPROOF: %q", rendered)
+	}
+	if !strings.Contains(rendered, "TRANSFORM FOR TYPE hstore") {
+		t.Errorf("rendered function missing TRANSFORM FOR TYPE: %q", rendered)
+	}
+
+	dir := t.TempDir()
+	f := filepath.Join(dir, "objects.dpg")
+	if err := os.WriteFile(f, []byte(rendered), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	compiled, _, err := compiler.Compile([]string{f}, dir, pipeline.Default)
+	if err != nil {
+		t.Fatalf("dumped function failed to recompile: %v\n---\n%s", err, rendered)
+	}
+	var found *ir.Function
+	for _, o := range compiled {
+		if fo, ok := o.(*ir.Function); ok && fo.Name == "f" {
+			found = fo
+		}
+	}
+	if found == nil {
+		t.Fatal("f missing after recompile")
+	}
+	if !found.Attrs.Leakproof {
+		t.Error("Leakproof did not round-trip")
+	}
+	if len(found.Attrs.Transforms) != 1 || found.Attrs.Transforms[0].Name != "hstore" {
+		t.Errorf("Transforms did not round-trip: got %v", found.Attrs.Transforms)
+	}
+}
+
+// TestRenderFunctionObjFileCompiles guards RFC audit item #27's dump-and-
+// recompile round trip for LANGUAGE C's two-string AS form — dump.go
+// previously always rendered a single dollar-quoted body, which for a
+// LANGUAGE C function would drop the shared-object path (ObjFile) entirely
+// and misinterpret Body as an obj_file with an implicit default symbol.
+func TestRenderFunctionObjFileCompiles(t *testing.T) {
+	fmtOpts := format.Options{IndentSize: 4, KeywordCase: "upper"}
+	objFile, linkSymbol := "$libdir/pgcrypto", "pg_digest"
+	fn := &ir.Function{
+		Schema: "public", Name: "digest",
+		Args: []ir.FuncArg{
+			{Name: "data", Mode: "IN", Type: ir.TypeRef{Name: "text"}},
+			{Name: "typ", Mode: "IN", Type: ir.TypeRef{Name: "text"}},
+		},
+		ReturnType: ir.TypeRef{Name: "bytea"},
+		Attrs:      ir.FuncAttrs{Language: "c", ObjFile: &objFile, LinkSymbol: &linkSymbol},
+	}
+
+	var b strings.Builder
+	renderObjectDPG(&b, fn, fmtOpts)
+	rendered := b.String()
+
+	dir := t.TempDir()
+	f := filepath.Join(dir, "objects.dpg")
+	if err := os.WriteFile(f, []byte(rendered), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	compiled, _, err := compiler.Compile([]string{f}, dir, pipeline.Default)
+	if err != nil {
+		t.Fatalf("dumped function failed to recompile: %v\n---\n%s", err, rendered)
+	}
+	var found *ir.Function
+	for _, o := range compiled {
+		if fo, ok := o.(*ir.Function); ok && fo.Name == "digest" {
+			found = fo
+		}
+	}
+	if found == nil {
+		t.Fatal("digest missing after recompile")
+	}
+	if found.Attrs.ObjFile == nil || *found.Attrs.ObjFile != objFile {
+		t.Errorf("ObjFile did not round-trip: got %v", found.Attrs.ObjFile)
+	}
+	if found.Attrs.LinkSymbol == nil || *found.Attrs.LinkSymbol != linkSymbol {
+		t.Errorf("LinkSymbol did not round-trip: got %v", found.Attrs.LinkSymbol)
+	}
+}
+
+// TestRenderFunctionAtomicBodyCompiles guards RFC audit item #28's dump-
+// and-recompile round trip: dump.go previously always rendered "AS
+// $$...$$", so a live-introspected BEGIN ATOMIC function (whose Body was
+// silently empty before this batch) would dump into an empty-bodied
+// function that recompiles to something semantically different.
+func TestRenderFunctionAtomicBodyCompiles(t *testing.T) {
+	fmtOpts := format.Options{IndentSize: 4, KeywordCase: "upper"}
+	fn := &ir.Function{
+		Schema: "public", Name: "f",
+		Args:       []ir.FuncArg{{Name: "x", Mode: "IN", Type: ir.TypeRef{Name: "integer"}}},
+		ReturnType: ir.TypeRef{Name: "integer"},
+		Attrs:      ir.FuncAttrs{Language: "sql", AtomicBody: true, Body: "SELECT x + 1;"},
+	}
+
+	var b strings.Builder
+	renderObjectDPG(&b, fn, fmtOpts)
+	rendered := b.String()
+
+	if !strings.Contains(rendered, "BEGIN ATOMIC") {
+		t.Errorf("rendered function missing BEGIN ATOMIC: %q", rendered)
+	}
+
+	dir := t.TempDir()
+	f := filepath.Join(dir, "objects.dpg")
+	if err := os.WriteFile(f, []byte(rendered), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	compiled, _, err := compiler.Compile([]string{f}, dir, pipeline.Default)
+	if err != nil {
+		t.Fatalf("dumped function failed to recompile: %v\n---\n%s", err, rendered)
+	}
+	var found *ir.Function
+	for _, o := range compiled {
+		if fo, ok := o.(*ir.Function); ok && fo.Name == "f" {
+			found = fo
+		}
+	}
+	if found == nil {
+		t.Fatal("f missing after recompile")
+	}
+	if !found.Attrs.AtomicBody {
+		t.Error("AtomicBody did not round-trip")
+	}
+	if found.Attrs.Body == "" {
+		t.Error("Body did not round-trip (extracted empty)")
+	}
+}
+
 // TestRenderTypedTableCompiles guards RFC Section 7.1's "Form 2" typed
 // table (CREATE TABLE ... OF type_name) dump-and-recompile round trip, both
 // the bare form (no parenthesized list — real PostgreSQL rejects empty

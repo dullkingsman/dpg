@@ -1946,7 +1946,24 @@ SELECT n.nspname, p.proname,
        obj_description(p.oid, 'pg_proc') AS comment,
        p.prokind::text,
        p.prosrc,
-       r.rolname AS owner
+       r.rolname AS owner,
+       -- RFC audit item #25: [NOT] LEAKPROOF.
+       p.proleakproof,
+       -- RFC audit item #27: AS 'obj_file', 'link_symbol' (LANGUAGE C) —
+       -- probin is the shared-object path; prosrc holds the link_symbol in
+       -- this case (confirmed live: NULL/empty for every other language).
+       p.probin,
+       -- RFC audit item #26: TRANSFORM FOR TYPE t [, ...] — protrftypes is
+       -- an oid[], empty/NULL when no transform is declared.
+       (SELECT array_agg(pg_catalog.format_type(t, NULL) ORDER BY ord)
+          FROM unnest(p.protrftypes) WITH ORDINALITY AS u(t, ord)) AS transform_types,
+       -- RFC audit item #28: PG14+ BEGIN ATOMIC ... END. prosrc is empty
+       -- for this form (confirmed live) — the body lives in prosqlbody
+       -- instead, which pg_get_functiondef alone knows how to reconstruct
+       -- back into BEGIN ATOMIC ... END text; only called for rows that
+       -- actually need it.
+       p.prosqlbody IS NOT NULL AS has_sql_body,
+       CASE WHEN p.prosqlbody IS NOT NULL THEN pg_get_functiondef(p.oid) END AS funcdef
 FROM   pg_proc p
 JOIN   pg_namespace n ON n.oid = p.pronamespace
 JOIN   pg_language  l ON l.oid = p.prolang
@@ -1976,9 +1993,40 @@ ORDER  BY n.nspname, p.proname, args`
 		var retset, isCOrInternal bool
 		var comment *string
 		var prokind, prosrc, owner string
+		var leakproof bool
+		var probin *string
+		var transformTypes []string
+		var hasSQLBody bool
+		var funcdef *string
 		if err := rs.Scan(&schema, &name, &oid, &args, &argTypes, &retType, &lang, &volatility, &secDef, &strict,
-			&parallel, &cost, &rows, &retset, &isCOrInternal, &comment, &prokind, &prosrc, &owner); err != nil {
+			&parallel, &cost, &rows, &retset, &isCOrInternal, &comment, &prokind, &prosrc, &owner,
+			&leakproof, &probin, &transformTypes, &hasSQLBody, &funcdef); err != nil {
 			return nil, err
+		}
+		// RFC audit items #26/#27/#28: shared between Procedure and Function
+		// below. probin non-empty (LANGUAGE C) means prosrc actually holds
+		// the link_symbol, not a procedural body — confirmed live via
+		// pg_proc/pg_get_functiondef. hasSQLBody (BEGIN ATOMIC) means prosrc
+		// is empty and the real body only exists in prosqlbody, reconstructed
+		// via pg_get_functiondef and re-extracted the same way the builder
+		// side extracts it from source text.
+		body := prosrc
+		var objFile, linkSymbol *string
+		if probin != nil && *probin != "" {
+			ofile, lsym := *probin, prosrc
+			objFile, linkSymbol = &ofile, &lsym
+			body = ""
+		}
+		atomicBody := false
+		if hasSQLBody {
+			atomicBody = true
+			if funcdef != nil {
+				body = ir.ExtractAtomicBody(*funcdef)
+			}
+		}
+		var transforms []ir.TypeRef
+		for _, t := range transformTypes {
+			transforms = append(transforms, ir.TypeRef{Name: t})
 		}
 		if prokind == "p" {
 			proc := &ir.Procedure{
@@ -1987,8 +2035,12 @@ ORDER  BY n.nspname, p.proname, args`
 				Comment: comment,
 				Owner:   &owner,
 				Attrs: ir.FuncAttrs{
-					Language: lang,
-					Body:     prosrc,
+					Language:   lang,
+					Body:       body,
+					Transforms: transforms,
+					ObjFile:    objFile,
+					LinkSymbol: linkSymbol,
+					AtomicBody: atomicBody,
 				},
 			}
 			// Use argTypes (type-only, from oidvectortypes) to build Args so that
@@ -2025,8 +2077,13 @@ ORDER  BY n.nspname, p.proname, args`
 				Volatility:  volatility,
 				SecurityDef: secDef,
 				Strict:      strict,
+				Leakproof:   leakproof,
 				Parallel:    parallel,
-				Body:        prosrc,
+				Body:        body,
+				Transforms:  transforms,
+				ObjFile:     objFile,
+				LinkSymbol:  linkSymbol,
+				AtomicBody:  atomicBody,
 			}
 			if cost != defaultCost {
 				c := cost

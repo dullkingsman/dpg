@@ -1,6 +1,7 @@
 package ir_test
 
 import (
+	"strings"
 	"testing"
 
 	pg_query "github.com/pganalyze/pg_query_go/v6"
@@ -62,6 +63,97 @@ func TestRenderCreateFunctionSQLReturnsTable(t *testing.T) {
 	sql := ir.RenderCreateFunctionSQL(fn)
 	if _, err := pg_query.Parse(sql); err != nil {
 		t.Fatalf("rendered SQL with RETURNS TABLE failed to parse: %v\nSQL: %s", err, sql)
+	}
+}
+
+func TestRenderCreateFunctionSQLLeakproofAndTransform(t *testing.T) {
+	fn := &ir.Function{
+		Schema:     "public",
+		Name:       "f",
+		ReturnType: ir.TypeRef{Name: "integer"},
+		Args:       []ir.FuncArg{{Name: "x", Mode: "IN", Type: ir.TypeRef{Name: "hstore"}}},
+		Attrs: ir.FuncAttrs{
+			Language:   "sql",
+			Leakproof:  true,
+			Transforms: []ir.TypeRef{{Name: "hstore"}},
+			Body:       "SELECT 1",
+		},
+	}
+	sql := ir.RenderCreateFunctionSQL(fn)
+	if _, err := pg_query.Parse(sql); err != nil {
+		t.Fatalf("rendered SQL with LEAKPROOF/TRANSFORM failed to parse: %v\nSQL: %s", err, sql)
+	}
+	if !strings.Contains(sql, "LEAKPROOF") {
+		t.Errorf("expected LEAKPROOF in rendered SQL, got: %s", sql)
+	}
+	if !strings.Contains(sql, "TRANSFORM FOR TYPE hstore") {
+		t.Errorf("expected TRANSFORM FOR TYPE hstore in rendered SQL, got: %s", sql)
+	}
+}
+
+func TestRenderCreateFunctionSQLObjFileLinkSymbol(t *testing.T) {
+	objFile, linkSymbol := "$libdir/pgcrypto", "pg_digest"
+	fn := &ir.Function{
+		Schema:     "public",
+		Name:       "digest",
+		ReturnType: ir.TypeRef{Name: "bytea"},
+		Args: []ir.FuncArg{
+			{Name: "data", Mode: "IN", Type: ir.TypeRef{Name: "text"}},
+			{Name: "typ", Mode: "IN", Type: ir.TypeRef{Name: "text"}},
+		},
+		Attrs: ir.FuncAttrs{
+			Language:   "c",
+			ObjFile:    &objFile,
+			LinkSymbol: &linkSymbol,
+		},
+	}
+	sql := ir.RenderCreateFunctionSQL(fn)
+	if _, err := pg_query.Parse(sql); err != nil {
+		t.Fatalf("rendered SQL with AS 'obj_file', 'link_symbol' failed to parse: %v\nSQL: %s", err, sql)
+	}
+	if !strings.Contains(sql, "'$libdir/pgcrypto'") || !strings.Contains(sql, "'pg_digest'") {
+		t.Errorf("expected both obj_file and link_symbol string literals in rendered SQL, got: %s", sql)
+	}
+}
+
+func TestRenderCreateFunctionSQLAtomicBody(t *testing.T) {
+	fn := &ir.Function{
+		Schema:     "public",
+		Name:       "f",
+		ReturnType: ir.TypeRef{Name: "integer"},
+		Args:       []ir.FuncArg{{Name: "x", Mode: "IN", Type: ir.TypeRef{Name: "integer"}}},
+		Attrs: ir.FuncAttrs{
+			Language:   "sql",
+			AtomicBody: true,
+			Body:       "SELECT x + 1;",
+		},
+	}
+	sql := ir.RenderCreateFunctionSQL(fn)
+	if _, err := pg_query.Parse(sql); err != nil {
+		t.Fatalf("rendered SQL with BEGIN ATOMIC failed to parse: %v\nSQL: %s", err, sql)
+	}
+	if !strings.Contains(sql, "BEGIN ATOMIC") || !strings.Contains(sql, "END") {
+		t.Errorf("expected BEGIN ATOMIC ... END in rendered SQL, got: %s", sql)
+	}
+}
+
+func TestRenderCreateProcedureSQLAtomicBodyAndTransform(t *testing.T) {
+	proc := &ir.Procedure{
+		Schema: "public",
+		Name:   "p",
+		Args:   []ir.FuncArg{{Name: "x", Mode: "IN", Type: ir.TypeRef{Name: "integer"}}},
+		Attrs: ir.FuncAttrs{
+			Language:   "sql",
+			AtomicBody: true,
+			Body:       "SELECT x;",
+		},
+	}
+	sql := ir.RenderCreateProcedureSQL(proc)
+	if _, err := pg_query.Parse(sql); err != nil {
+		t.Fatalf("rendered PROCEDURE SQL with BEGIN ATOMIC failed to parse: %v\nSQL: %s", err, sql)
+	}
+	if !strings.Contains(sql, "BEGIN ATOMIC") {
+		t.Errorf("expected BEGIN ATOMIC in rendered SQL, got: %s", sql)
 	}
 }
 

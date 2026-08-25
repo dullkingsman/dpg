@@ -5398,8 +5398,18 @@ func diffProcedure(o *ir.Procedure, snap *snapshot.SnapOpaque) ([]pipeline.DiffO
 	sig := buildProcedureSignature(o)
 	pos := o.SrcPos
 
-	// Body changed: re-create via CREATE OR REPLACE (includes comment and grants).
-	if o.BodyHash != "" && snap.BodyHash != "" && o.BodyHash != snap.BodyHash {
+	// Body changed: re-create via CREATE OR REPLACE (includes comment and
+	// grants). Transforms/ObjFile/LinkSymbol/AtomicBody (RFC audit items
+	// #26-#28) join the same recreate trigger as BodyHash — none of them
+	// feed into BodyHash itself (Transforms isn't body text at all;
+	// AtomicBody's canonicalised text can hash identically to the same
+	// content declared via a plain dollar-quoted body), so without this
+	// they would never be diffed at all — the same "silently dropped"
+	// gap already confirmed for Function's identical fields.
+	if (o.BodyHash != "" && snap.BodyHash != "" && o.BodyHash != snap.BodyHash) ||
+		transformsChanged(o.Attrs.Transforms, snap.ProcedureTransforms) ||
+		!ptrEq(o.Attrs.ObjFile, snap.ProcedureObjFile) || !ptrEq(o.Attrs.LinkSymbol, snap.ProcedureLinkSymbol) ||
+		o.Attrs.AtomicBody != snap.ProcedureAtomicBody {
 		return createProcedure(o), nil
 	}
 
@@ -5597,6 +5607,21 @@ func parallelChanged(desired, snap string) bool {
 		return false
 	}
 	return desired != snap
+}
+
+// transformsChanged compares a desired TRANSFORM FOR TYPE list (RFC audit
+// item #26) against its flattened snapshot form, order-sensitive (matching
+// how writeTransforms/RenderCreateFunctionSQL re-emits the list).
+func transformsChanged(desired []ir.TypeRef, snap []string) bool {
+	if len(desired) != len(snap) {
+		return true
+	}
+	for i, t := range desired {
+		if t.String() != snap[i] {
+			return true
+		}
+	}
+	return false
 }
 
 func boolPtrEq(a, b *bool) bool {
@@ -6063,7 +6088,10 @@ func diffFunction(o *ir.Function, snap *snapshot.SnapFunction) []pipeline.DiffOp
 	if (o.BodyHash != "" && o.BodyHash != snap.BodyHash) ||
 		o.Attrs.Language != snap.Language || o.Attrs.Volatility != snap.Volatility ||
 		parallelChanged(o.Attrs.Parallel, snap.Parallel) ||
-		desiredFloatChanged(o.Attrs.Cost, snap.Cost) || desiredFloatChanged(o.Attrs.Rows, snap.Rows) {
+		desiredFloatChanged(o.Attrs.Cost, snap.Cost) || desiredFloatChanged(o.Attrs.Rows, snap.Rows) ||
+		o.Attrs.Leakproof != snap.Leakproof || transformsChanged(o.Attrs.Transforms, snap.Transforms) ||
+		!ptrEq(o.Attrs.ObjFile, snap.ObjFile) || !ptrEq(o.Attrs.LinkSymbol, snap.LinkSymbol) ||
+		o.Attrs.AtomicBody != snap.AtomicBody {
 		ops = append(ops, safeOp(buildFunctionSQL(o), pos))
 	}
 	if !ptrEq(o.Owner, snap.Owner) && o.Owner != nil {

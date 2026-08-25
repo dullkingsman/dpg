@@ -5,6 +5,8 @@ import (
 	"strings"
 	"testing"
 
+	pg_query "github.com/pganalyze/pg_query_go/v6"
+
 	"github.com/dullkingsman/dpg/internal/blockparser"
 	"github.com/dullkingsman/dpg/internal/ir"
 	"github.com/dullkingsman/dpg/internal/pgparser"
@@ -1625,6 +1627,114 @@ func TestBuildFunction(t *testing.T) {
 // all, so a declared REVOCATIONS block was parsed generically by the
 // blockparser but silently dropped by buildFunction — only the GRANT half of
 // the block ever reached the IR.
+// TestBuildFunctionLeakproofAndTransform guards RFC audit items #25/#26:
+// FuncAttrs previously had no Leakproof/Transforms fields at all, so both
+// were silently dropped on parse.
+func TestBuildFunctionLeakproofAndTransform(t *testing.T) {
+	obj := buildObject(t, pipeline.KindFunction,
+		`f(x hstore) RETURNS int LANGUAGE plpython3u TRANSFORM FOR TYPE hstore LEAKPROOF AS $$ return 1 $$;`,
+		``,
+	)
+	fn, ok := obj.(*ir.Function)
+	if !ok {
+		t.Fatalf("expected *ir.Function, got %T", obj)
+	}
+	if !fn.Attrs.Leakproof {
+		t.Error("expected Leakproof=true")
+	}
+	if len(fn.Attrs.Transforms) != 1 || fn.Attrs.Transforms[0].Name != "hstore" {
+		t.Errorf("Transforms: got %v", fn.Attrs.Transforms)
+	}
+}
+
+// TestBuildFunctionNotLeakproofExplicit guards NOT LEAKPROOF parsing as a
+// distinct, explicit false (not merely the zero-value default).
+func TestBuildFunctionNotLeakproofExplicit(t *testing.T) {
+	obj := buildObject(t, pipeline.KindFunction,
+		`f(x int) RETURNS int LANGUAGE sql NOT LEAKPROOF AS $$ SELECT x $$;`,
+		``,
+	)
+	fn, ok := obj.(*ir.Function)
+	if !ok {
+		t.Fatalf("expected *ir.Function, got %T", obj)
+	}
+	if fn.Attrs.Leakproof {
+		t.Error("expected Leakproof=false for NOT LEAKPROOF")
+	}
+}
+
+// TestBuildFunctionObjFileLinkSymbol guards RFC audit item #27: the 2-item
+// "AS 'obj_file', 'link_symbol'" form previously fed straight into the
+// dollar-quoted Body extraction, which only ever read list.Items[0] —
+// link_symbol was silently discarded, not merely undiffed.
+func TestBuildFunctionObjFileLinkSymbol(t *testing.T) {
+	obj := buildObject(t, pipeline.KindFunction,
+		`f(x int) RETURNS int LANGUAGE c AS 'MODULE_PATHNAME', 'f_impl';`,
+		``,
+	)
+	fn, ok := obj.(*ir.Function)
+	if !ok {
+		t.Fatalf("expected *ir.Function, got %T", obj)
+	}
+	if fn.Attrs.ObjFile == nil || *fn.Attrs.ObjFile != "MODULE_PATHNAME" {
+		t.Errorf("ObjFile: got %v", fn.Attrs.ObjFile)
+	}
+	if fn.Attrs.LinkSymbol == nil || *fn.Attrs.LinkSymbol != "f_impl" {
+		t.Errorf("LinkSymbol: got %v", fn.Attrs.LinkSymbol)
+	}
+	if fn.Attrs.Body != "" {
+		t.Errorf("expected empty Body when ObjFile is set, got %q", fn.Attrs.Body)
+	}
+}
+
+// TestBuildFunctionAtomicBody guards RFC audit item #28: BEGIN ATOMIC ...
+// END has no "as" DefElem at all (confirmed live via pg_query.Parse), so
+// without extracting from SqlBody the body was silently dropped entirely —
+// worse than undiffed, a diff-triggered recreate would emit an empty body.
+func TestBuildFunctionAtomicBody(t *testing.T) {
+	obj := buildObject(t, pipeline.KindFunction,
+		`f(x int) RETURNS int LANGUAGE sql BEGIN ATOMIC SELECT x + 1; END;`,
+		``,
+	)
+	fn, ok := obj.(*ir.Function)
+	if !ok {
+		t.Fatalf("expected *ir.Function, got %T", obj)
+	}
+	if !fn.Attrs.AtomicBody {
+		t.Error("expected AtomicBody=true")
+	}
+	if fn.Attrs.Body == "" {
+		t.Fatal("expected non-empty extracted Body")
+	}
+	if fn.BodyHash == "" {
+		t.Error("expected non-empty BodyHash")
+	}
+	// The extracted body must itself be valid SQL — canonicalizeSQLBody
+	// (invoked via HashFunctionBody) parses it, so a malformed extraction
+	// would already be caught by BodyHash falling back to a raw-text hash,
+	// but re-parsing here directly guards the extraction itself.
+	if _, err := pg_query.Parse(fn.Attrs.Body); err != nil {
+		t.Errorf("extracted atomic body is not valid SQL: %v (body: %q)", err, fn.Attrs.Body)
+	}
+}
+
+// TestBuildProcedureAtomicBodyAndTransform is TestBuildFunctionAtomicBody's
+// PROCEDURE counterpart (RFC audit items #26/#28) — Procedure shares the
+// identical func-body grammar and had the identical gap.
+func TestBuildProcedureAtomicBodyAndTransform(t *testing.T) {
+	obj := buildObject(t, pipeline.KindProcedure,
+		`p(x hstore) LANGUAGE plpython3u TRANSFORM FOR TYPE hstore AS $$ pass $$;`,
+		``,
+	)
+	proc, ok := obj.(*ir.Procedure)
+	if !ok {
+		t.Fatalf("expected *ir.Procedure, got %T", obj)
+	}
+	if len(proc.Attrs.Transforms) != 1 || proc.Attrs.Transforms[0].Name != "hstore" {
+		t.Errorf("Transforms: got %v", proc.Attrs.Transforms)
+	}
+}
+
 func TestBuildFunctionGrantsAndRevocations(t *testing.T) {
 	obj := buildObject(t, pipeline.KindFunction,
 		`add(a INT, b INT) RETURNS INT LANGUAGE sql AS $$ SELECT a + b $$;`,

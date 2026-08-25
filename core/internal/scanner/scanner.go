@@ -433,10 +433,19 @@ func (s *state) readBraceBlock() (string, error) {
 // ";;", worsening by one extra ';' every time `dpg fmt` ran.
 func (s *state) readFunctionPart1() (string, error) {
 	start := s.pos
+	// inAtomic/caseDepth track RFC audit item #28's "BEGIN ATOMIC ... END"
+	// form (PG14+, no dollar-quote at all — see the AS-string-literal/
+	// BEGIN-ATOMIC branches below). caseDepth counts nested CASE ... END
+	// expressions inside the atomic body's own SQL statements (real
+	// PostgreSQL SQL, not PL/pgSQL, so no nested BEGIN blocks are possible
+	// there) so the true closing END — the one at caseDepth 0 — isn't
+	// mistaken for one of those.
+	inAtomic := false
+	caseDepth := 0
 	for !s.eof() {
 		b := s.peek()
-		switch b {
-		case '$':
+		switch {
+		case b == '$':
 			if tag, ok := s.peekDollarTag(); ok {
 				if err := s.skipDollarQuoted(tag); err != nil {
 					return "", err
@@ -444,22 +453,55 @@ func (s *state) readFunctionPart1() (string, error) {
 				return strings.TrimSpace(string(s.src[start:s.pos])), nil
 			}
 			s.advance()
-		case '\'':
+		case b == '\'':
 			if err := s.skipSingleQuoted(); err != nil {
 				return "", err
 			}
-		case '-':
-			if s.peekAt(1) == '-' {
-				s.skipLineComment()
-			} else {
-				s.advance()
+		case b == '-' && s.peekAt(1) == '-':
+			s.skipLineComment()
+		case b == '/' && s.peekAt(1) == '*':
+			s.skipBlockComment()
+		case isWordStart(b):
+			switch strings.ToUpper(s.readWord()) {
+			case "BEGIN":
+				if !inAtomic {
+					c := s.cur()
+					s.skipWS()
+					if strings.EqualFold(s.peekWord(), "ATOMIC") {
+						s.readWord()
+						inAtomic = true
+					} else {
+						s.restore(c)
+					}
+				}
+			case "CASE":
+				if inAtomic {
+					caseDepth++
+				}
+			case "END":
+				if inAtomic {
+					if caseDepth > 0 {
+						caseDepth--
+					} else {
+						return strings.TrimSpace(string(s.src[start:s.pos])), nil
+					}
+				}
 			}
-		case '/':
-			if s.peekAt(1) == '*' {
-				s.skipBlockComment()
-			} else {
-				s.advance()
-			}
+		case (b == ';' || b == '{') && !inAtomic:
+			// RFC audit item #27: the "AS 'obj_file'[, 'link_symbol']" form
+			// (LANGUAGE C/internal) has no dollar-quote and no BEGIN
+			// ATOMIC body to bound it — its own trailing string literal(s)
+			// are already skipped whole by skipSingleQuoted above, so a
+			// bare top-level ';' or '{' genuinely marks the statement's
+			// natural end here, the same way the generic
+			// readRawUntil("{;") path every other object kind uses already
+			// treats it (any earlier single-quoted default-value literal
+			// containing either character is already protected by
+			// skipSingleQuoted above, so a raw, unquoted occurrence here
+			// can only be the real terminator). Left unconsumed, matching
+			// this function's existing "does NOT consume a following ';'
+			// or '{'" contract (see scanBody/readOptionalPart2).
+			return strings.TrimSpace(string(s.src[start:s.pos])), nil
 		default:
 			s.advance()
 		}

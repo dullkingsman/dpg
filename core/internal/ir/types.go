@@ -390,10 +390,34 @@ type FuncAttrs struct {
 	Volatility  string // "VOLATILE", "STABLE", "IMMUTABLE"
 	Strict      bool   // RETURNS NULL ON NULL INPUT
 	SecurityDef bool   // SECURITY DEFINER
-	Parallel    string // "UNSAFE", "RESTRICTED", "SAFE"
-	Cost        *float64
-	Rows        *float64
-	Body        string // raw dollar-quoted body text
+	// Leakproof is RFC audit item #25's `[NOT] LEAKPROOF` — real PostgreSQL
+	// defaults to NOT LEAKPROOF, so false is the ordinary case, the same
+	// bool-defaults-false convention Strict/SecurityDef already use.
+	Leakproof bool
+	Parallel  string // "UNSAFE", "RESTRICTED", "SAFE"
+	Cost      *float64
+	Rows      *float64
+	// Transforms is RFC audit item #26's `TRANSFORM FOR TYPE type_name
+	// [, FOR TYPE type_name ...]` — references to already-installed
+	// CREATE TRANSFORM pairs, not a declaration of one (Section 23 keeps
+	// CREATE TRANSFORM itself out of scope).
+	Transforms []TypeRef
+	// ObjFile/LinkSymbol are RFC audit item #27's `AS 'obj_file'[,
+	// 'link_symbol']` form (LANGUAGE C/internal): a shared-object path plus
+	// an optional symbol name, structurally distinct from Body's single
+	// dollar-quoted procedural-code string. When ObjFile != nil, Body is
+	// unused; LinkSymbol == nil means PostgreSQL defaults it to the SQL
+	// function's own name.
+	ObjFile    *string
+	LinkSymbol *string
+	// AtomicBody is RFC audit item #28's PG14+ `BEGIN ATOMIC ... END` form
+	// (LANGUAGE SQL only) — the standard-SQL-conformant alternative to a
+	// dollar-quoted AS body. When true, Body holds the raw semicolon-
+	// terminated statement-list text (no BEGIN ATOMIC/END keywords),
+	// canonicalised/hashed identically to a dollar-quoted LANGUAGE SQL body
+	// (RFC Section 9.1) — only the recreate-time rendering differs.
+	AtomicBody bool
+	Body       string // raw dollar-quoted body text (or BEGIN ATOMIC statement-list text when AtomicBody)
 }
 
 // PartitionSpec describes a table's partition strategy.
@@ -1274,7 +1298,7 @@ type EventTrigger struct {
 	// (Section 7.9, audit item #56) identical value set/emitted-SQL shape
 	// via triggerEnableStateSQL, just against a database-level target with
 	// no table name.
-	EnableState string
+	EnableState    string
 	SecurityLabels []pipeline.SecurityLabel
 	SrcPos         pipeline.SourcePos
 }
@@ -1610,11 +1634,11 @@ type TSConfig struct {
 	// ordering (see graph.go); the PARSER clause text itself always lives in
 	// Body already. ParserSchema empty means unqualified (the config's own
 	// schema).
-	ParserSchema  string
-	ParserName    string
-	Body          string
-	Mappings      []pipeline.TSMappingDef
-	Comment       *string
+	ParserSchema string
+	ParserName   string
+	Body         string
+	Mappings     []pipeline.TSMappingDef
+	Comment      *string
 	// Owner is Section 12.1's ALTER TEXT SEARCH CONFIGURATION ... OWNER TO
 	// diffing input — same shape as TSDict.Owner (real PostgreSQL has an
 	// OWNER concept for a config too, unlike TSParser/TSTemplate).
@@ -1648,7 +1672,7 @@ type TSDict struct {
 	Options       []pipeline.StorageParam
 	Comment       *string
 	Owner         *string
-	Reconstructed  bool // Body rebuilt from the catalog; see Tablespace.Reconstructed
+	Reconstructed bool // Body rebuilt from the catalog; see Tablespace.Reconstructed
 	// RenamedFrom/RenamedFromSchema — see Table's identical doc comments;
 	// real PostgreSQL supports ALTER TEXT SEARCH DICTIONARY ... RENAME TO/
 	// SET SCHEMA/OWNER TO, all three now modeled.

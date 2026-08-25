@@ -269,6 +269,62 @@ func TestFunctionExplicitEmptyBlockSetsHasPart2(t *testing.T) {
 	}
 }
 
+// TestFunctionObjFileLinkSymbolPart1 guards RFC audit item #27's scanner
+// support: the "AS 'obj_file', 'link_symbol'" form has no dollar-quote at
+// all, so readFunctionPart1 previously ran to EOF looking for one and
+// errored — this form was entirely unusable in a hand-written .dpg source
+// file before this fix, regardless of what any other layer did with it.
+func TestFunctionObjFileLinkSymbolPart1(t *testing.T) {
+	src := `FUNCTION f(x integer) RETURNS integer LANGUAGE c AS 'MODULE_PATHNAME', 'f_impl';
+FUNCTION g() RETURNS integer LANGUAGE sql AS $$SELECT 1$$;`
+	objs := scan(t, src)
+	if len(objs) != 2 {
+		t.Fatalf("expected 2 objects, got %d: %v", len(objs), objs)
+	}
+	assertKind(t, objs[0], pipeline.KindFunction)
+	assertPart1Contains(t, objs[0], "'MODULE_PATHNAME'")
+	assertPart1Contains(t, objs[0], "'f_impl'")
+	if strings.HasSuffix(strings.TrimSpace(objs[0].Part1), ";") {
+		t.Errorf("Part1 must not include the trailing ';': %q", objs[0].Part1)
+	}
+	// The second function proves the scanner correctly resumed scanning
+	// after the first statement's bare ';' instead of running past it.
+	assertKind(t, objs[1], pipeline.KindFunction)
+}
+
+// TestFunctionAtomicBodyPart1 guards RFC audit item #28's scanner support:
+// BEGIN ATOMIC ... END has no dollar-quote either, and its own statement
+// list can itself contain a "CASE ... END" expression — the scanner must
+// distinguish that from BEGIN ATOMIC's own closing END, not just stop at
+// the first "END" word it sees.
+func TestFunctionAtomicBodyPart1(t *testing.T) {
+	src := `FUNCTION f(x integer) RETURNS integer LANGUAGE sql BEGIN ATOMIC SELECT CASE WHEN x > 0 THEN 1 ELSE 0 END; END;
+FUNCTION g() RETURNS integer LANGUAGE sql AS $$SELECT 1$$;`
+	objs := scan(t, src)
+	if len(objs) != 2 {
+		t.Fatalf("expected 2 objects, got %d: %v", len(objs), objs)
+	}
+	assertKind(t, objs[0], pipeline.KindFunction)
+	assertPart1Contains(t, objs[0], "BEGIN ATOMIC")
+	assertPart1Contains(t, objs[0], "CASE")
+	if strings.HasSuffix(strings.TrimSpace(objs[0].Part1), ";") {
+		t.Errorf("Part1 must not include the trailing ';': %q", objs[0].Part1)
+	}
+	if !strings.HasSuffix(strings.TrimSpace(objs[0].Part1), "END") {
+		t.Errorf("Part1 must end at the outer BEGIN ATOMIC's own closing END, not the CASE expression's: %q", objs[0].Part1)
+	}
+	assertKind(t, objs[1], pipeline.KindFunction)
+}
+
+// TestProcedureAtomicBodyPart1 is TestFunctionAtomicBodyPart1's PROCEDURE
+// counterpart.
+func TestProcedureAtomicBodyPart1(t *testing.T) {
+	src := `PROCEDURE p(x integer) LANGUAGE sql BEGIN ATOMIC SELECT x; END;`
+	obj := assertOne(t, scan(t, src))
+	assertKind(t, obj, pipeline.KindProcedure)
+	assertPart1Contains(t, obj, "BEGIN ATOMIC")
+}
+
 func TestProcedure(t *testing.T) {
 	obj := assertOne(t, scan(t, `PROCEDURE process_settlements()
 LANGUAGE plpgsql SECURITY DEFINER

@@ -188,6 +188,10 @@ func toSnapObject(obj pipeline.IRObject) *SnapObject {
 			NameMaps:                     toSnapNameMaps(o.NameMaps),
 			ProcedureDependsOnExtensions: append([]string(nil), o.DependsOnExtensions...),
 			ProcedureOwner:               o.Owner,
+			ProcedureTransforms:          flattenTypeRefs(o.Attrs.Transforms),
+			ProcedureObjFile:             o.Attrs.ObjFile,
+			ProcedureLinkSymbol:          o.Attrs.LinkSymbol,
+			ProcedureAtomicBody:          o.Attrs.AtomicBody,
 		}
 		for _, g := range o.Grants {
 			so.Grants = append(so.Grants, toSnapGrant(g))
@@ -645,6 +649,20 @@ func flattenParams(params []pipeline.StorageParam) string {
 	return strings.Join(parts, ", ")
 }
 
+// flattenTypeRefs renders each TypeRef's canonical string form (RFC audit
+// item #26's TRANSFORM FOR TYPE list diffing input) — order-preserving,
+// since PostgreSQL's own comma-separated FOR TYPE clause is itself ordered.
+func flattenTypeRefs(refs []ir.TypeRef) []string {
+	if len(refs) == 0 {
+		return nil
+	}
+	out := make([]string, len(refs))
+	for i, r := range refs {
+		out[i] = r.String()
+	}
+	return out
+}
+
 func ToSnapIndex(idx *ir.Index) SnapIndex {
 	cols := make([]string, 0, len(idx.Columns))
 	for _, c := range idx.Columns {
@@ -822,6 +840,11 @@ func toSnapFunction(o *ir.Function) *SnapFunction {
 		Comment:     o.Comment,
 		Deprecated:  o.Deprecated,
 		Owner:       o.Owner,
+		Leakproof:   o.Attrs.Leakproof,
+		Transforms:  flattenTypeRefs(o.Attrs.Transforms),
+		ObjFile:     o.Attrs.ObjFile,
+		LinkSymbol:  o.Attrs.LinkSymbol,
+		AtomicBody:  o.Attrs.AtomicBody,
 	}
 	for _, g := range o.Grants {
 		sf.Grants = append(sf.Grants, toSnapGrant(g))

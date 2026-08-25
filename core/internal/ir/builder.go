@@ -4,6 +4,7 @@ package ir
 
 import (
 	"fmt"
+	"regexp"
 	"strconv"
 	"strings"
 
@@ -1527,7 +1528,7 @@ func (b *Builder) buildFunction(cfs *pg_query.CreateFunctionStmt, pg pipeline.PG
 	} else {
 		fn.ReturnType = impliedReturnType(fn.Args)
 	}
-	fn.Attrs = extractFuncAttrs(cfs.Options)
+	fn.Attrs = extractFuncAttrs(cfs, pg.SourceSQL)
 
 	fn.BodyHash = HashFunctionBody(fn.Attrs.Language, fn.Attrs.Body, pg.SourceSQL)
 
@@ -1566,7 +1567,7 @@ func (b *Builder) buildProcedure(cfs *pg_query.CreateFunctionStmt, pg pipeline.P
 			proc.Args = append(proc.Args, buildFuncArg(fp))
 		}
 	}
-	proc.Attrs = extractFuncAttrs(cfs.Options)
+	proc.Attrs = extractFuncAttrs(cfs, pg.SourceSQL)
 	proc.BodyHash = HashFunctionBody(proc.Attrs.Language, proc.Attrs.Body, pg.SourceSQL)
 	if block.Comment != nil {
 		proc.Comment = &block.Comment.Value
@@ -1662,9 +1663,9 @@ func impliedReturnType(args []FuncArg) TypeRef {
 	return TypeRef{}
 }
 
-func extractFuncAttrs(options []*pg_query.Node) FuncAttrs {
+func extractFuncAttrs(cfs *pg_query.CreateFunctionStmt, sourceSQL string) FuncAttrs {
 	attrs := FuncAttrs{Volatility: "VOLATILE", Parallel: "UNSAFE"}
-	for _, opt := range options {
+	for _, opt := range cfs.Options {
 		de := opt.GetDefElem()
 		if de == nil {
 			continue
@@ -1682,6 +1683,8 @@ func extractFuncAttrs(options []*pg_query.Node) FuncAttrs {
 			attrs.Strict = de.Arg.GetBoolean() != nil && de.Arg.GetBoolean().Boolval
 		case "security":
 			attrs.SecurityDef = de.Arg.GetBoolean() != nil && de.Arg.GetBoolean().Boolval
+		case "leakproof":
+			attrs.Leakproof = de.Arg.GetBoolean() != nil && de.Arg.GetBoolean().Boolval
 		case "parallel":
 			if sv := de.Arg.GetString_(); sv != nil {
 				attrs.Parallel = strings.ToUpper(sv.Sval)
@@ -1694,10 +1697,37 @@ func extractFuncAttrs(options []*pg_query.Node) FuncAttrs {
 			if v, ok := numericOnlyToFloat(de.Arg); ok {
 				attrs.Rows = &v
 			}
+		case "transform":
+			// TRANSFORM FOR TYPE t [, FOR TYPE t ...] — a List of TypeName
+			// nodes (confirmed live via pg_query.Parse; a structurally
+			// different shape from every other DefElem here).
+			if list := de.Arg.GetList(); list != nil {
+				for _, item := range list.Items {
+					if tn := item.GetTypeName(); tn != nil {
+						attrs.Transforms = append(attrs.Transforms, typeNameToRef(tn))
+					}
+				}
+			}
 		case "as":
-			// The body is in the Arg list as a List node for dollar-quoted bodies.
+			// The body is in the Arg list as a List node. A 2-item list is
+			// unambiguously LANGUAGE C's "AS 'obj_file', 'link_symbol'" form
+			// (confirmed live: the grammar never produces a 2-item list any
+			// other way). A 1-item list is ambiguous between a dollar-quoted
+			// procedural body and a bare "AS 'obj_file'"/"AS 'name'" single-
+			// string form — both parse identically (pg_query drops quote
+			// style entirely) — but both already round-trip correctly
+			// through Body's existing dollar-quoted re-render (PostgreSQL's
+			// own pg_get_functiondef does the same for LANGUAGE internal),
+			// so no further disambiguation is needed there.
 			if list := de.Arg.GetList(); list != nil && len(list.Items) > 0 {
-				if sv := list.Items[0].GetString_(); sv != nil {
+				if len(list.Items) >= 2 {
+					if sv0 := list.Items[0].GetString_(); sv0 != nil {
+						attrs.ObjFile = &sv0.Sval
+					}
+					if sv1 := list.Items[1].GetString_(); sv1 != nil {
+						attrs.LinkSymbol = &sv1.Sval
+					}
+				} else if sv := list.Items[0].GetString_(); sv != nil {
 					attrs.Body = sv.Sval
 				}
 			} else if sv := de.Arg.GetString_(); sv != nil {
@@ -1705,7 +1735,42 @@ func extractFuncAttrs(options []*pg_query.Node) FuncAttrs {
 			}
 		}
 	}
+	if cfs.SqlBody != nil {
+		// BEGIN ATOMIC ... END (PG14+, LANGUAGE SQL only) — cfs.Options has
+		// no "as" DefElem for this form at all (confirmed live via
+		// pg_query.Parse), so the body must come from the reconstructed
+		// source text instead. See ExtractAtomicBody's doc comment for why
+		// a raw-text extraction is safe here.
+		attrs.AtomicBody = true
+		attrs.Body = ExtractAtomicBody(sourceSQL)
+	}
 	return attrs
+}
+
+// beginAtomicRe locates a PG14+ BEGIN ATOMIC body's statement-list text.
+// Anchored to the end of the (single, already-isolated) source statement so
+// the greedy ".*" naturally captures up to the LAST "END" in the text —
+// the body's own real closing keyword — even when the statement list itself
+// contains a "CASE ... END" expression, since RFC Section 9.1's
+// sql-stmt-list grammar guarantees every statement (including the last) ends
+// with its own ";" immediately before that final closing END.
+var beginAtomicRe = regexp.MustCompile(`(?is)BEGIN\s+ATOMIC\s*(.*)\bEND\s*;?\s*$`)
+
+// ExtractAtomicBody extracts a BEGIN ATOMIC body's raw statement-list text
+// from sourceSQL — the full reconstructed "CREATE FUNCTION/PROCEDURE ..."
+// statement (pipeline.PGParseResult.SourceSQL). pg_query's own AST has no
+// separate body-text field for this form (unlike the dollar-quoted "AS"
+// form's List-of-String_ shape) — SqlBody is a fully parsed statement tree,
+// not source text — so this mirrors the same "raw string search" convention
+// RFC Section 9.1 already documents for AS 'obj_file' extraction. The
+// extracted text is fed straight into canonicalizeSQLBody/HashFunctionBody,
+// identical to a dollar-quoted LANGUAGE SQL body once extracted.
+func ExtractAtomicBody(sourceSQL string) string {
+	m := beginAtomicRe.FindStringSubmatch(strings.TrimSpace(sourceSQL))
+	if len(m) != 2 {
+		return ""
+	}
+	return strings.TrimSpace(m[1])
 }
 
 // numericOnlyToFloat converts a pg_query NumericOnly node (COST/ROWS'
