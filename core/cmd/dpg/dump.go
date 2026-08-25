@@ -1281,16 +1281,55 @@ func renderObjectDPG(b *strings.Builder, obj pipeline.IRObject, fmtOpts format.O
 		if o.ValidUntil != nil {
 			fmt.Fprintf(&opts, " %s %s %s", kw("VALID"), kw("UNTIL"), sqlStringLit(*o.ValidUntil))
 		}
-		if len(o.InRole) > 0 {
-			fmt.Fprintf(&opts, " %s %s %s", kw("IN"), kw("ROLE"), joinIdentsIfNeeded(o.InRole))
+		// RFC audit item #32: entries with no (or no longer meaningful)
+		// WITH INHERIT/SET value render inline via the plain IN ROLE/ROLE/
+		// ADMIN lists — real CREATE ROLE accepts no WITH modifiers there at
+		// all (confirmed live). Anything else needs its own block directive
+		// below. introspectRoleMemberships deliberately records the real
+		// live Inherit/Set value unconditionally (never suppressed — a
+		// first version that suppressed default-matching values there broke
+		// diffRoleMembership's live-comparison outright, see its own doc
+		// comment), so the compaction happens here instead, purely for
+		// rendering, on a copy — it never touches o.Memberships itself and
+		// has no effect on diffing. SET's default is a fixed constant
+		// (true, confirmed live) — safe to drop in both directions. INHERIT
+		// only has a safely-known default for an IN_ROLE-direction entry
+		// (o.Inherit — this exact role's own attribute, always non-nil once
+		// introspected); a ROLE-direction entry points at a DIFFERENT role
+		// whose own INHERIT this function has no access to, so that case is
+		// left rendered explicitly rather than guessed.
+		var inRole, roleMembers, adminRoles []string
+		var membershipDirs []ir.RoleMembership
+		for _, m := range o.Memberships {
+			if m.Set != nil && *m.Set {
+				m.Set = nil
+			}
+			if m.Direction == "IN_ROLE" && m.Inherit != nil && o.Inherit != nil && *m.Inherit == *o.Inherit {
+				m.Inherit = nil
+			}
+			if m.Inherit != nil || m.Set != nil {
+				membershipDirs = append(membershipDirs, m)
+				continue
+			}
+			switch {
+			case m.Direction == "IN_ROLE":
+				inRole = append(inRole, m.Role)
+			case m.Admin:
+				adminRoles = append(adminRoles, m.Role)
+			default:
+				roleMembers = append(roleMembers, m.Role)
+			}
 		}
-		if len(o.RoleMembers) > 0 {
-			fmt.Fprintf(&opts, " %s %s", kw("ROLE"), joinIdentsIfNeeded(o.RoleMembers))
+		if len(inRole) > 0 {
+			fmt.Fprintf(&opts, " %s %s %s", kw("IN"), kw("ROLE"), joinIdentsIfNeeded(inRole))
 		}
-		if len(o.AdminRoles) > 0 {
-			fmt.Fprintf(&opts, " %s %s", kw("ADMIN"), joinIdentsIfNeeded(o.AdminRoles))
+		if len(roleMembers) > 0 {
+			fmt.Fprintf(&opts, " %s %s", kw("ROLE"), joinIdentsIfNeeded(roleMembers))
 		}
-		if o.Comment != nil || len(o.SecurityLabels) > 0 || len(o.Configs) > 0 {
+		if len(adminRoles) > 0 {
+			fmt.Fprintf(&opts, " %s %s", kw("ADMIN"), joinIdentsIfNeeded(adminRoles))
+		}
+		if o.Comment != nil || len(o.SecurityLabels) > 0 || len(o.Configs) > 0 || len(membershipDirs) > 0 {
 			fmt.Fprintf(b, "\n%s %s%s\n{\n", kw("ROLE"), name, opts.String())
 			if o.Comment != nil {
 				fmt.Fprintf(b, "%s%s %s;\n", ind, kw("COMMENT"), sqlStringLit(*o.Comment))
@@ -1325,6 +1364,29 @@ func renderObjectDPG(b *strings.Builder, obj pipeline.IRObject, fmtOpts format.O
 				}
 				if c.InDatabase != nil {
 					fmt.Fprintf(b, " %s %s %s", kw("IN"), kw("DATABASE"), quoteIdentIfNeeded(*c.InDatabase))
+				}
+				b.WriteString(";\n")
+			}
+			// RFC audit item #32: entries whose live INHERIT/SET differs
+			// from the real PostgreSQL default (introspectRoleMemberships
+			// only ever sets these non-nil in that case) render as their
+			// own block directive — the only shape that can carry WITH
+			// ADMIN/INHERIT/SET at all.
+			for _, m := range membershipDirs {
+				if m.Direction == "IN_ROLE" {
+					fmt.Fprintf(b, "%s%s %s ", ind, kw("IN"), kw("ROLE"))
+				} else {
+					fmt.Fprintf(b, "%s%s ", ind, kw("ROLE"))
+				}
+				b.WriteString(quoteIdentIfNeeded(m.Role))
+				if m.Admin {
+					fmt.Fprintf(b, " %s %s %s", kw("WITH"), kw("ADMIN"), kw("OPTION"))
+				}
+				if m.Inherit != nil {
+					fmt.Fprintf(b, " %s %s %s", kw("WITH"), kw("INHERIT"), kw(boolWord(*m.Inherit)))
+				}
+				if m.Set != nil {
+					fmt.Fprintf(b, " %s %s %s", kw("WITH"), kw("SET"), kw(boolWord(*m.Set)))
 				}
 				b.WriteString(";\n")
 			}
@@ -2183,6 +2245,16 @@ func renderOpFamilyBody(b *strings.Builder, ind string, fmtOpts format.Options, 
 		fmt.Fprintf(b, "%s%s;\n", ind, m.AddClause())
 	}
 	b.WriteString("}\n")
+}
+
+// boolWord renders a Go bool as the bare "TRUE"/"FALSE" keyword text RFC
+// audit item #32's WITH INHERIT/SET clauses expect (real PostgreSQL grammar,
+// not a quoted string) — kw() applies keyword casing on top of this.
+func boolWord(v bool) string {
+	if v {
+		return "TRUE"
+	}
+	return "FALSE"
 }
 
 // sqlStringLit renders s as a single-quoted SQL string literal, doubling any

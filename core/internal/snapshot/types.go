@@ -648,26 +648,35 @@ type SnapSequence struct {
 // §11.1's "Password drift detection" for why hashing the declared text
 // (not just a boolean has_password) is safe and enables rotation detection.
 type SnapRole struct {
-	Name            string   `json:"name"`
-	CanLogin        *bool    `json:"can_login,omitempty"`
-	Superuser       *bool    `json:"superuser,omitempty"`
-	CreateDB        *bool    `json:"create_db,omitempty"`
-	CreateRole      *bool    `json:"create_role,omitempty"`
-	Inherit         *bool    `json:"inherit,omitempty"`
-	IsReplication   *bool    `json:"is_replication,omitempty"`
-	BypassRLS       *bool    `json:"bypass_rls,omitempty"`
-	ConnectionLimit *int     `json:"connection_limit,omitempty"`
-	PasswordHash    string   `json:"password_hash,omitempty"`
-	ValidUntil      *string  `json:"valid_until,omitempty"`
-	InRole          []string `json:"in_role,omitempty"`
-	RoleMembers     []string `json:"role_members,omitempty"`
-	AdminRoles      []string `json:"admin_roles,omitempty"`
-	Comment         *string  `json:"comment,omitempty"`
+	Name            string  `json:"name"`
+	CanLogin        *bool   `json:"can_login,omitempty"`
+	Superuser       *bool   `json:"superuser,omitempty"`
+	CreateDB        *bool   `json:"create_db,omitempty"`
+	CreateRole      *bool   `json:"create_role,omitempty"`
+	Inherit         *bool   `json:"inherit,omitempty"`
+	IsReplication   *bool   `json:"is_replication,omitempty"`
+	BypassRLS       *bool   `json:"bypass_rls,omitempty"`
+	ConnectionLimit *int    `json:"connection_limit,omitempty"`
+	PasswordHash    string  `json:"password_hash,omitempty"`
+	ValidUntil      *string `json:"valid_until,omitempty"`
+	Comment         *string `json:"comment,omitempty"`
+	// Memberships is RFC audit item #32's unified IN ROLE/ROLE/ADMIN
+	// diffing input — see ir.RoleMembership's doc comment.
+	Memberships []SnapRoleMembership `json:"memberships,omitempty"`
 	// Configs is RFC audit item #74's role-config-dir diffing input — see
 	// ir.RoleConfig's doc comment.
 	Configs        []SnapRoleConfig    `json:"configs,omitempty"`
 	SecurityLabels []SnapSecurityLabel `json:"security_labels,omitempty"`
 	NameMaps       []SnapNameMapEntry  `json:"name_maps,omitempty"`
+}
+
+// SnapRoleMembership is the snapshot form of ir.RoleMembership.
+type SnapRoleMembership struct {
+	Role      string `json:"role"`
+	Direction string `json:"direction"`
+	Admin     bool   `json:"admin,omitempty"`
+	Inherit   *bool  `json:"inherit,omitempty"`
+	Set       *bool  `json:"set,omitempty"`
 }
 
 // SnapRoleConfig is the snapshot form of ir.RoleConfig.

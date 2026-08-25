@@ -823,13 +823,13 @@ func mergeRoles(grp []pipeline.IRObject, base *ir.Role) (pipeline.IRObject, []pi
 			merged.Comment = next.Comment
 		}
 
-		// Role-membership lists are additive across files (RFC §3.7's
+		// Role-membership entries are additive across files (RFC §3.7's
 		// set-valued treatment — the point of splitting a role's memberships
 		// across files is usually to combine them, not to have one file's
-		// list silently discarded), not last-wins scalars.
-		merged.InRole = unionStrings(merged.InRole, next.InRole)
-		merged.RoleMembers = unionStrings(merged.RoleMembers, next.RoleMembers)
-		merged.AdminRoles = unionStrings(merged.AdminRoles, next.AdminRoles)
+		// list silently discarded), matching Grants' identical simple-append
+		// convention elsewhere in this function (see e.g. mergeTablespaces).
+		merged.Memberships = append(merged.Memberships, next.Memberships...)
+		merged.Configs = append(merged.Configs, next.Configs...)
 	}
 	return &merged, tracker.diags, nil
 }

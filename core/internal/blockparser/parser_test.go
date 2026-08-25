@@ -623,6 +623,96 @@ func TestRoleConfigNamespacedParam(t *testing.T) {
 	}
 }
 
+// TestMembershipInRoleBare guards RFC audit item #32's block-level "IN
+// ROLE identifier;" form with no WITH clause at all.
+func TestMembershipInRoleBare(t *testing.T) {
+	ast := parse(t, `IN ROLE parent1;`)
+	if len(ast.Memberships) != 1 {
+		t.Fatalf("expected 1 membership, got %d: %+v", len(ast.Memberships), ast.Memberships)
+	}
+	m := ast.Memberships[0]
+	if m.Role.Name != "parent1" || m.Direction != "IN_ROLE" || m.AdminDefault {
+		t.Errorf("got %+v", m)
+	}
+	if m.Admin != nil || m.Inherit != nil || m.Set != nil {
+		t.Errorf("expected all modifiers nil for a bare entry, got %+v", m)
+	}
+}
+
+// TestMembershipInRoleWithAllModifiers guards the full WITH ADMIN OPTION +
+// WITH INHERIT + WITH SET combination, in RFC grammar order.
+func TestMembershipInRoleWithAllModifiers(t *testing.T) {
+	ast := parse(t, `IN ROLE parent1 WITH ADMIN OPTION WITH INHERIT FALSE WITH SET TRUE;`)
+	if len(ast.Memberships) != 1 {
+		t.Fatalf("expected 1 membership, got %d", len(ast.Memberships))
+	}
+	m := ast.Memberships[0]
+	if m.Role.Name != "parent1" || m.Direction != "IN_ROLE" {
+		t.Errorf("got %+v", m)
+	}
+	if m.Admin == nil || !*m.Admin {
+		t.Errorf("Admin: got %v, want true", m.Admin)
+	}
+	if m.Inherit == nil || *m.Inherit {
+		t.Errorf("Inherit: got %v, want false", m.Inherit)
+	}
+	if m.Set == nil || !*m.Set {
+		t.Errorf("Set: got %v, want true", m.Set)
+	}
+}
+
+// TestMembershipAdminBooleanSpelling guards WITH ADMIN's second accepted
+// spelling — a bare boolean instead of the OPTION keyword (RFC's own
+// membership-opt grammar: "ADMIN" WSP ( "OPTION" / boolean )).
+func TestMembershipAdminBooleanSpelling(t *testing.T) {
+	ast := parse(t, `ROLE child1 WITH ADMIN TRUE;`)
+	if len(ast.Memberships) != 1 {
+		t.Fatalf("expected 1 membership, got %d", len(ast.Memberships))
+	}
+	m := ast.Memberships[0]
+	if m.Direction != "ROLE" || m.Admin == nil || !*m.Admin {
+		t.Errorf("got %+v", m)
+	}
+}
+
+// TestMembershipRoleBucket guards the bare "ROLE identifier;" block form
+// (Direction "ROLE", no admin default).
+func TestMembershipRoleBucket(t *testing.T) {
+	ast := parse(t, `ROLE child1;`)
+	if len(ast.Memberships) != 1 {
+		t.Fatalf("expected 1 membership, got %d", len(ast.Memberships))
+	}
+	m := ast.Memberships[0]
+	if m.Direction != "ROLE" || m.AdminDefault {
+		t.Errorf("got %+v", m)
+	}
+}
+
+// TestMembershipAdminBucket guards the bare "ADMIN identifier;" block
+// form — AdminDefault true, Direction "ROLE" (RFC audit item #32's
+// unification: ADMIN collapses into the same Direction as ROLE, admin
+// baseline forced on).
+func TestMembershipAdminBucket(t *testing.T) {
+	ast := parse(t, `ADMIN child1;`)
+	if len(ast.Memberships) != 1 {
+		t.Fatalf("expected 1 membership, got %d", len(ast.Memberships))
+	}
+	m := ast.Memberships[0]
+	if m.Direction != "ROLE" || !m.AdminDefault {
+		t.Errorf("got %+v", m)
+	}
+}
+
+// TestMembershipMultipleEntriesRepeatable guards that the block-level
+// directive is repeatable (Mode B, like TRIGGER/POLICY), not limited to
+// one entry per role declaration.
+func TestMembershipMultipleEntriesRepeatable(t *testing.T) {
+	ast := parse(t, `IN ROLE parent1; IN ROLE parent2 WITH INHERIT FALSE; ROLE child1; ADMIN child2;`)
+	if len(ast.Memberships) != 4 {
+		t.Fatalf("expected 4 memberships, got %d: %+v", len(ast.Memberships), ast.Memberships)
+	}
+}
+
 func TestGrantGrantedBy(t *testing.T) {
 	ast := parse(t, `GRANTS { SELECT TO reader WITH GRANT OPTION GRANTED BY admin; INSERT TO writer GRANTED BY admin2; }`)
 	if len(ast.Grants) != 2 {

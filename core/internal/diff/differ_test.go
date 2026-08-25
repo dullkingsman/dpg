@@ -13359,7 +13359,11 @@ func TestCreateRoleAllAttributes(t *testing.T) {
 		CreateDB: boolp(false), CreateRole: boolp(false), Inherit: boolp(true),
 		IsReplication: boolp(false), BypassRLS: boolp(false), ConnectionLimit: intp(20),
 		Password: strp("hunter2"), ValidUntil: strp("2030-01-01"),
-		InRole: []string{"role_a"}, RoleMembers: []string{"role_b"}, AdminRoles: []string{"role_c"},
+		Memberships: []ir.RoleMembership{
+			{Role: "role_a", Direction: "IN_ROLE"},
+			{Role: "role_b", Direction: "ROLE"},
+			{Role: "role_c", Direction: "ROLE", Admin: true},
+		},
 	}
 	ops := createRole(o)
 	if len(ops) != 1 {
@@ -13483,16 +13487,22 @@ func TestDiffRolePasswordUnchangedIsNoop(t *testing.T) {
 
 func TestDiffRoleMembershipAddedAndRemoved(t *testing.T) {
 	o := &ir.Role{
-		Name:        "svc",
-		InRole:      []string{"reader", "new_role"},
-		RoleMembers: []string{"member_new"},
-		AdminRoles:  []string{"admin_new"},
+		Name: "svc",
+		Memberships: []ir.RoleMembership{
+			{Role: "reader", Direction: "IN_ROLE"},
+			{Role: "new_role", Direction: "IN_ROLE"},
+			{Role: "member_new", Direction: "ROLE"},
+			{Role: "admin_new", Direction: "ROLE", Admin: true},
+		},
 	}
 	snap := &snapshot.SnapRole{
-		Name:        "svc",
-		InRole:      []string{"reader", "old_role"},
-		RoleMembers: []string{"member_old"},
-		AdminRoles:  []string{"admin_old"},
+		Name: "svc",
+		Memberships: []snapshot.SnapRoleMembership{
+			{Role: "reader", Direction: "IN_ROLE"},
+			{Role: "old_role", Direction: "IN_ROLE"},
+			{Role: "member_old", Direction: "ROLE"},
+			{Role: "admin_old", Direction: "ROLE", Admin: true},
+		},
 	}
 	ops := diffRole(o, snap)
 	var sqls []string
@@ -13518,11 +13528,83 @@ func TestDiffRoleMembershipAddedAndRemoved(t *testing.T) {
 }
 
 func TestDiffRoleMembershipUndeclaredNeverDiffed(t *testing.T) {
-	o := &ir.Role{Name: "svc"} // InRole/RoleMembers/AdminRoles all nil
-	snap := &snapshot.SnapRole{Name: "svc", InRole: []string{"reader"}, RoleMembers: []string{"m"}, AdminRoles: []string{"a"}}
+	o := &ir.Role{Name: "svc"} // Memberships nil — no direction managed
+	snap := &snapshot.SnapRole{Name: "svc", Memberships: []snapshot.SnapRoleMembership{
+		{Role: "reader", Direction: "IN_ROLE"},
+		{Role: "m", Direction: "ROLE"},
+		{Role: "a", Direction: "ROLE", Admin: true},
+	}}
 	ops := diffRole(o, snap)
 	if len(ops) != 0 {
 		t.Errorf("expected no membership ops when membership fields are undeclared, got %d: %v", len(ops), ops)
+	}
+}
+
+// TestDiffRoleMembershipSameNameBothDirectionsNoLongerAmbiguous guards the
+// deliberate behavior change RFC audit item #32's unification introduced:
+// pre-unification, the same role name could appear in both the plain-member
+// and admin-member buckets at once with unclear, order-dependent resulting
+// behavior (two separate GRANT statements racing for the same
+// pg_auth_members row). Post-unification there is exactly one entry per
+// (Direction, Role) key, so declaring "peer WITH ADMIN OPTION" is simply
+// the row's one Admin value — no ambiguity possible.
+func TestDiffRoleMembershipSameNameBothDirectionsNoLongerAmbiguous(t *testing.T) {
+	o := &ir.Role{Name: "svc", Memberships: []ir.RoleMembership{
+		{Role: "peer", Direction: "ROLE", Admin: true},
+	}}
+	ops := diffRole(o, &snapshot.SnapRole{Name: "svc"})
+	var sqls []string
+	for _, op := range ops {
+		sqls = append(sqls, op.SQL())
+	}
+	if !slices.Contains(sqls, `GRANT "svc" TO "peer" WITH ADMIN OPTION;`) {
+		t.Errorf("expected exactly one GRANT with WITH ADMIN OPTION, got: %v", sqls)
+	}
+	count := 0
+	for _, s := range sqls {
+		if strings.Contains(s, "peer") {
+			count++
+		}
+	}
+	if count != 1 {
+		t.Errorf("expected exactly one op mentioning peer, got %d: %v", count, sqls)
+	}
+}
+
+// TestDiffRoleMembershipInheritSetOnlyManagedWhenDeclared guards the
+// "declared, so managed" convention applied to WITH INHERIT/SET (RFC audit
+// item #32): an entry whose desired side never mentions INHERIT/SET must
+// not be re-GRANTed just because the snapshot happens to record a concrete
+// value for it (e.g. from live introspection recording a non-default
+// value) — matching Grant.GrantedBy's identical precedent.
+func TestDiffRoleMembershipInheritSetOnlyManagedWhenDeclared(t *testing.T) {
+	recordedInherit := false
+	o := &ir.Role{Name: "svc", Memberships: []ir.RoleMembership{
+		{Role: "parent1", Direction: "IN_ROLE"},
+	}}
+	snap := &snapshot.SnapRole{Name: "svc", Memberships: []snapshot.SnapRoleMembership{
+		{Role: "parent1", Direction: "IN_ROLE", Inherit: &recordedInherit},
+	}}
+	ops := diffRole(o, snap)
+	if len(ops) != 0 {
+		t.Errorf("expected no ops (Inherit not declared on desired side), got: %v", ops)
+	}
+}
+
+// TestDiffRoleMembershipInheritChangeReGrants guards a genuine declared
+// INHERIT change.
+func TestDiffRoleMembershipInheritChangeReGrants(t *testing.T) {
+	oldInherit := true
+	newInherit := false
+	o := &ir.Role{Name: "svc", Memberships: []ir.RoleMembership{
+		{Role: "parent1", Direction: "IN_ROLE", Inherit: &newInherit},
+	}}
+	snap := &snapshot.SnapRole{Name: "svc", Memberships: []snapshot.SnapRoleMembership{
+		{Role: "parent1", Direction: "IN_ROLE", Inherit: &oldInherit},
+	}}
+	ops := diffRole(o, snap)
+	if !containsSQL(ops, `GRANT "parent1" TO "svc" WITH INHERIT FALSE;`) {
+		t.Errorf("expected a re-GRANT with WITH INHERIT FALSE, got: %v", sqlList(ops))
 	}
 }
 

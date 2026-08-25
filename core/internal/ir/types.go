@@ -980,10 +980,20 @@ type Role struct {
 	ConnectionLimit *int
 	Password        *string
 	ValidUntil      *string
-	InRole          []string // IN ROLE role-list: this role becomes a member of these
-	RoleMembers     []string // ROLE role-list: these become members of this role
-	AdminRoles      []string // ADMIN role-list: these become members of this role, WITH ADMIN OPTION
-	Comment         *string
+	// Memberships is the unified representation of every IN ROLE/ROLE/ADMIN
+	// entry (RFC audit item #32, Section 11.1) — both the bare CREATE-time
+	// inline forms (real PG grammar, no WITH modifiers possible) and the
+	// modifier-bearing block-directive form (WITH ADMIN/INHERIT/SET, PG16+,
+	// only expressible this way — confirmed live that CREATE ROLE's own
+	// inline lists reject WITH entirely). One entry per (Direction, Role)
+	// pair, matching real PostgreSQL's own single-row-per-pair
+	// pg_auth_members model exactly — deliberately NOT two independently
+	// nil-guarded lists the way an earlier revision of this field kept
+	// ROLE/ADMIN apart, since that let the same role name appear in both
+	// buckets at once with ambiguous, order-dependent resulting behavior
+	// (PostgreSQL only ever has one admin_option value for a given pair).
+	Memberships []RoleMembership
+	Comment     *string
 	// RenamedFrom names the role's prior identity (RENAMED FROM, Section
 	// 11.1) — schema-agnostic, unlike Table/View/Type/Collation's identical
 	// field: roles are cluster-level, not schema-scoped, so there is no
@@ -1025,6 +1035,36 @@ type RoleConfig struct {
 	// cluster-wide (every database).
 	InDatabase *string
 	Pos        pipeline.SourcePos
+}
+
+// RoleMembership is one role-membership entry (RFC audit item #32, Section
+// 11.1) — the unified form of what used to be three separate lists
+// (InRole/RoleMembers/AdminRoles), one entry per (Direction, Role) pair,
+// matching real PostgreSQL's own single-row-per-pair pg_auth_members model.
+type RoleMembership struct {
+	// Role is the other role in the pair.
+	Role string
+	// Direction is "IN_ROLE" (this role is a member of Role — GRANT Role TO
+	// thisRole) or "ROLE" (Role is a member of this role — GRANT thisRole
+	// TO Role). Real PostgreSQL's single GRANT/REVOKE ROLE mechanism
+	// underlies both; Direction only decides which name goes on which side
+	// of the statement.
+	Direction string
+	// Admin renders WITH ADMIN OPTION when true — always meaningful
+	// (unlike Inherit/Set below), since real PostgreSQL always has a
+	// concrete admin_option value for a membership row (defaults to
+	// false), matching how the legacy AdminRoles bucket already always
+	// rendered WITH ADMIN OPTION unconditionally.
+	Admin bool
+	// Inherit/Set carry an explicitly-declared WITH INHERIT/WITH SET
+	// value — nil means not declared, so not managed (the same "declared,
+	// so managed" convention as Grant.GrantedBy): PostgreSQL's own default
+	// for an unspecified INHERIT depends on the member role's own INHERIT
+	// attribute at grant time, not a fixed value DPG could safely assume
+	// or compare against.
+	Inherit *bool
+	Set     *bool
+	Pos     pipeline.SourcePos
 }
 
 // Tablespace is a CREATE TABLESPACE declaration.

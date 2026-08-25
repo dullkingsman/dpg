@@ -483,6 +483,25 @@ func (b *blockParser) parseBlock(pos pipeline.SourcePos) (pipeline.BlockAST, err
 			var rc pipeline.RoleConfigDir
 			rc, err = b.parseRoleConfigReset(dirPos)
 			ast.RoleConfigs = append(ast.RoleConfigs, rc)
+		case "IN":
+			// RFC audit item #32 (Section 11.1) — block-level "IN ROLE
+			// identifier [WITH ...];", the only way to attach WITH ADMIN/
+			// INHERIT/SET modifiers (real CREATE ROLE's inline IN ROLE
+			// list accepts none, confirmed live).
+			if err = b.expect("ROLE"); err != nil {
+				return ast, err
+			}
+			var m pipeline.RoleMembershipDir
+			m, err = b.parseMembershipEntry("IN_ROLE", false, dirPos)
+			ast.Memberships = append(ast.Memberships, m)
+		case "ROLE":
+			var m pipeline.RoleMembershipDir
+			m, err = b.parseMembershipEntry("ROLE", false, dirPos)
+			ast.Memberships = append(ast.Memberships, m)
+		case "ADMIN":
+			var m pipeline.RoleMembershipDir
+			m, err = b.parseMembershipEntry("ROLE", true, dirPos)
+			ast.Memberships = append(ast.Memberships, m)
 		case "RENAME":
 			var r pipeline.EnumValueRenameDir
 			r, err = b.parseEnumValueRename(dirPos)
@@ -899,6 +918,89 @@ func (b *blockParser) parseRoleConfigReset(pos pipeline.SourcePos) (pipeline.Rol
 		return d, err
 	}
 	return d, nil
+}
+
+// parseBoolWord reads a bare "true"/"false" keyword token (RFC Appendix A's
+// `boolean` production — case-insensitive, matching every other DPG
+// keyword), confirmed live via pg_query.Parse as real PostgreSQL's own
+// GrantRoleStmt WITH-option spelling (a bare Boolean node, not a quoted
+// string).
+func (b *blockParser) parseBoolWord() (bool, error) {
+	b.skipWS()
+	w := strings.ToUpper(b.readWord())
+	switch w {
+	case "TRUE":
+		return true, nil
+	case "FALSE":
+		return false, nil
+	default:
+		return false, b.errorf("expected true or false, got %q", w)
+	}
+}
+
+// parseMembershipEntry parses one block-level membership directive's tail —
+// "identifier [WITH ADMIN [OPTION|boolean]] [WITH INHERIT boolean] [WITH SET
+// boolean];" — RFC audit item #32 (Section 11.1). direction/adminDefault are
+// supplied by the caller's dispatch on which leading keyword (IN ROLE/ROLE/
+// ADMIN) was consumed.
+func (b *blockParser) parseMembershipEntry(direction string, adminDefault bool, pos pipeline.SourcePos) (pipeline.RoleMembershipDir, error) {
+	m := pipeline.RoleMembershipDir{Direction: direction, AdminDefault: adminDefault, Pos: pos}
+	b.skipWS()
+	role, err := b.readIdentifier()
+	if err != nil {
+		return m, err
+	}
+	m.Role = role
+
+	for {
+		b.skipWS()
+		c := b.cur()
+		if strings.ToUpper(b.peekWord()) != "WITH" {
+			b.restore(c)
+			break
+		}
+		b.readWord()
+		b.skipWS()
+		switch strings.ToUpper(b.peekWord()) {
+		case "ADMIN":
+			b.readWord()
+			b.skipWS()
+			c2 := b.cur()
+			if strings.ToUpper(b.peekWord()) == "OPTION" {
+				b.readWord()
+				v := true
+				m.Admin = &v
+			} else {
+				b.restore(c2)
+				v, err := b.parseBoolWord()
+				if err != nil {
+					return m, err
+				}
+				m.Admin = &v
+			}
+		case "INHERIT":
+			b.readWord()
+			v, err := b.parseBoolWord()
+			if err != nil {
+				return m, err
+			}
+			m.Inherit = &v
+		case "SET":
+			b.readWord()
+			v, err := b.parseBoolWord()
+			if err != nil {
+				return m, err
+			}
+			m.Set = &v
+		default:
+			return m, b.errorf("expected ADMIN, INHERIT, or SET after WITH, got %q", b.peekWord())
+		}
+	}
+
+	if err := b.expectSemi(); err != nil {
+		return m, err
+	}
+	return m, nil
 }
 
 // parseEnumValueRename reads: VALUE 'old' TO 'new'; (the "RENAME" directive

@@ -2210,11 +2210,24 @@ func (b *Builder) buildRole(cs *pg_query.CreateRoleStmt, block pipeline.BlockAST
 			v := de.Arg.GetString_().Sval
 			r.ValidUntil = &v
 		case "addroleto":
-			r.InRole = roleSpecNames(de.Arg.GetList())
+			// RFC audit item #32: real CREATE ROLE's inline IN ROLE list
+			// accepts no WITH modifiers at all (confirmed live) — every
+			// entry here is bare (Admin false, Inherit/Set unmanaged).
+			for _, name := range roleSpecNames(de.Arg.GetList()) {
+				r.Memberships = append(r.Memberships, RoleMembership{Role: name, Direction: "IN_ROLE", Pos: pos})
+			}
 		case "rolemembers":
-			r.RoleMembers = roleSpecNames(de.Arg.GetList())
+			for _, name := range roleSpecNames(de.Arg.GetList()) {
+				r.Memberships = append(r.Memberships, RoleMembership{Role: name, Direction: "ROLE", Pos: pos})
+			}
 		case "adminmembers":
-			r.AdminRoles = roleSpecNames(de.Arg.GetList())
+			// Real CREATE ROLE ADMIN semantics: the named roles become
+			// members of the new role WITH ADMIN OPTION (confirmed against
+			// PostgreSQL's own documentation) — same Direction as
+			// rolemembers, Admin forced true.
+			for _, name := range roleSpecNames(de.Arg.GetList()) {
+				r.Memberships = append(r.Memberships, RoleMembership{Role: name, Direction: "ROLE", Admin: true, Pos: pos})
+			}
 		}
 	}
 	if block.Comment != nil {
@@ -2227,6 +2240,16 @@ func (b *Builder) buildRole(cs *pg_query.CreateRoleStmt, block pipeline.BlockAST
 		r.Configs = append(r.Configs, RoleConfig{
 			Param: rc.Param, Value: rc.Value, FromCurrent: rc.FromCurrent,
 			Reset: rc.Reset, ResetAll: rc.ResetAll, InDatabase: rc.InDatabase, Pos: rc.Pos,
+		})
+	}
+	for _, m := range block.Memberships {
+		admin := m.AdminDefault
+		if m.Admin != nil {
+			admin = *m.Admin
+		}
+		r.Memberships = append(r.Memberships, RoleMembership{
+			Role: m.Role.String(), Direction: m.Direction, Admin: admin,
+			Inherit: m.Inherit, Set: m.Set, Pos: m.Pos,
 		})
 	}
 	r.SecurityLabels = block.SecurityLabels

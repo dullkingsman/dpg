@@ -4416,17 +4416,99 @@ func buildCreateRoleSQL(o *ir.Role, password *string) string {
 	b.WriteString("CREATE ROLE ")
 	b.WriteString(quoteIdent(o.Name))
 	b.WriteString(roleAttrClause(o, password))
-	if len(o.InRole) > 0 {
-		b.WriteString(" IN ROLE " + roleList(o.InRole))
+	// Only bare entries (no WITH INHERIT/SET — real CREATE ROLE's inline
+	// IN ROLE/ROLE/ADMIN lists accept no WITH modifiers at all, confirmed
+	// live) render inline here; anything needing INHERIT/SET goes through
+	// its own follow-up GRANT in createRole, same treatment as RoleConfigs.
+	var inRole, roleMembers, adminRoles []string
+	for _, m := range o.Memberships {
+		if m.Inherit != nil || m.Set != nil {
+			continue
+		}
+		switch {
+		case m.Direction == "IN_ROLE":
+			inRole = append(inRole, m.Role)
+		case m.Admin:
+			adminRoles = append(adminRoles, m.Role)
+		default:
+			roleMembers = append(roleMembers, m.Role)
+		}
 	}
-	if len(o.RoleMembers) > 0 {
-		b.WriteString(" ROLE " + roleList(o.RoleMembers))
+	if len(inRole) > 0 {
+		b.WriteString(" IN ROLE " + roleList(inRole))
 	}
-	if len(o.AdminRoles) > 0 {
-		b.WriteString(" ADMIN " + roleList(o.AdminRoles))
+	if len(roleMembers) > 0 {
+		b.WriteString(" ROLE " + roleList(roleMembers))
+	}
+	if len(adminRoles) > 0 {
+		b.WriteString(" ADMIN " + roleList(adminRoles))
 	}
 	b.WriteString(";")
 	return b.String()
+}
+
+// boolSQL renders a Go bool as the bare TRUE/FALSE keyword real PostgreSQL's
+// GrantRoleStmt WITH-option grammar expects (confirmed live) — not a quoted
+// string literal.
+func boolSQL(v bool) string {
+	if v {
+		return "TRUE"
+	}
+	return "FALSE"
+}
+
+// roleMembershipGrantSQL renders one RoleMembership entry as a GRANT ...
+// TO ... [WITH ...]; statement (RFC audit item #32, Section 11.1).
+// Direction decides which of roleName/m.Role is the granted role and which
+// is the member: "IN_ROLE" grants m.Role to roleName (this role becomes a
+// member of m.Role); "ROLE" grants roleName to m.Role (m.Role becomes a
+// member of this role) — the same real PostgreSQL GRANT/REVOKE ROLE
+// mechanism underlies both directions, only the argument order differs.
+func roleMembershipGrantSQL(roleName string, m ir.RoleMembership) string {
+	grantedRole, memberRole := roleName, m.Role
+	if m.Direction == "IN_ROLE" {
+		grantedRole, memberRole = m.Role, roleName
+	}
+	var b strings.Builder
+	b.WriteString("GRANT ")
+	b.WriteString(quoteIdent(grantedRole))
+	b.WriteString(" TO ")
+	b.WriteString(quoteIdent(memberRole))
+	// Real PostgreSQL's GrantRoleStmt WITH clause is a single "WITH" keyword
+	// followed by a comma-separated option list — confirmed live via
+	// pg_query.Parse that repeated "WITH x WITH y" clauses are a syntax
+	// error, unlike this same codebase's table/column-level GRANT (whose
+	// only WITH option, WITH GRANT OPTION, never had a second option to
+	// combine with, so this shape never came up there).
+	var opts []string
+	if m.Admin {
+		opts = append(opts, "ADMIN OPTION")
+	}
+	if m.Inherit != nil {
+		opts = append(opts, "INHERIT "+boolSQL(*m.Inherit))
+	}
+	if m.Set != nil {
+		opts = append(opts, "SET "+boolSQL(*m.Set))
+	}
+	if len(opts) > 0 {
+		b.WriteString(" WITH ")
+		b.WriteString(strings.Join(opts, ", "))
+	}
+	b.WriteString(";")
+	return b.String()
+}
+
+// roleMembershipRevokeSQL is roleMembershipGrantSQL's REVOKE counterpart —
+// RFC's diffing table documents only a full-membership REVOKE for a removed
+// entry, no partial "REVOKE ADMIN OPTION FOR ... FROM ..." support (matches
+// this codebase's pre-unification behavior, which never supported it
+// either).
+func roleMembershipRevokeSQL(roleName string, m ir.RoleMembership) string {
+	grantedRole, memberRole := roleName, m.Role
+	if m.Direction == "IN_ROLE" {
+		grantedRole, memberRole = m.Role, roleName
+	}
+	return fmt.Sprintf("REVOKE %s FROM %s;", quoteIdent(grantedRole), quoteIdent(memberRole))
 }
 
 // roleCreateOp is the DiffOp for a CREATE ROLE statement whose PASSWORD
@@ -4473,6 +4555,15 @@ func createRole(o *ir.Role) []pipeline.DiffOp {
 		// clause at all (confirmed live) — every entry, even for a
 		// brand-new role, needs its own follow-up ALTER ROLE.
 		ops = append(ops, safeOp(roleConfigSQL(ident, c), o.SrcPos))
+	}
+	for _, m := range o.Memberships {
+		// RFC audit item #32: only bare entries (no WITH INHERIT/SET) were
+		// already rendered inline by buildCreateRoleSQL above — anything
+		// needing those modifiers needs its own follow-up GRANT, the same
+		// treatment as RoleConfigs.
+		if m.Inherit != nil || m.Set != nil {
+			ops = append(ops, safeOp(roleMembershipGrantSQL(o.Name, m), o.SrcPos))
+		}
 	}
 	ops = append(ops, createSecurityLabelOps(o.SecurityLabels, "ROLE "+quoteIdent(o.Name), o.SrcPos)...)
 	return ops
@@ -5717,43 +5808,69 @@ func stringSetDiff(desired, current []string) (added, removed []string) {
 	return added, removed
 }
 
-// diffRoleMembership diffs IN ROLE/ROLE/ADMIN (RFC §11.1) as GRANT/REVOKE —
-// PostgreSQL's ALTER ROLE has no membership clause at all (confirmed via
-// pg_query: addroleto/rolemembers/adminmembers are CreateRoleStmt-only
-// options), so an existing role's membership can only ever change via
-// GRANT/REVOKE, the same mechanism PostgreSQL itself uses post-creation.
-// Each of the three fields is only compared when declared (non-nil) —
-// undeclared means "not managed by DPG for this role", same convention as
-// every other optional Role field.
+// roleMembershipKey identifies a RoleMembership/SnapRoleMembership entry for
+// diffing purposes — real PostgreSQL's pg_auth_members has exactly one row
+// per (parent, member) pair, so (Direction, Role) is a genuine identity, not
+// an arbitrary choice: Admin/Inherit/Set are attributes of that one row, not
+// part of its identity (see ir.RoleMembership's own doc comment for why this
+// replaced two independently-managed ROLE/ADMIN buckets).
+func roleMembershipKey(direction, role string) string { return direction + "|" + role }
+
+// boolPtrDiffers reports whether an explicitly-declared *bool differs from
+// its snapshot counterpart — nil on the desired side means "not declared,
+// don't compare" (the same "declared, so managed" convention as
+// Grant.GrantedBy); nil on the snapshot side (a prior declaration never
+// recorded this option) is always "differs" once the desired side does
+// declare it, since there is nothing to compare against but the option is
+// now explicitly wanted.
+func boolPtrDiffers(desired, snap *bool) bool {
+	if desired == nil {
+		return false
+	}
+	if snap == nil {
+		return true
+	}
+	return *desired != *snap
+}
+
+// diffRoleMembership diffs IN ROLE/ROLE/ADMIN membership (RFC §11.1,
+// audit item #32) as GRANT/REVOKE — PostgreSQL's ALTER ROLE has no
+// membership clause at all (confirmed via pg_query: addroleto/rolemembers/
+// adminmembers are CreateRoleStmt-only options), so an existing role's
+// membership can only ever change via GRANT/REVOKE, the same mechanism
+// PostgreSQL itself uses post-creation. A Direction bucket ("IN_ROLE" or
+// "ROLE") is only managed when this run's o.Memberships has at least one
+// entry for it — undeclared means "not managed by DPG for this role", the
+// same convention every other optional Role field already uses (matches
+// the pre-unification three-bucket nil-guards exactly, now correctly scoped
+// by real catalog identity rather than by which bare keyword bucket an
+// entry happened to be typed under).
 func diffRoleMembership(o *ir.Role, snap *snapshot.SnapRole, pos pipeline.SourcePos) []pipeline.DiffOp {
 	var ops []pipeline.DiffOp
-	ident := quoteIdent(o.Name)
 
-	if o.InRole != nil {
-		added, removed := stringSetDiff(o.InRole, snap.InRole)
-		for _, r := range added {
-			ops = append(ops, safeOp(fmt.Sprintf("GRANT %s TO %s;", quoteIdent(r), ident), pos))
+	managedDirections := make(map[string]bool, 2)
+	desiredByKey := make(map[string]ir.RoleMembership, len(o.Memberships))
+	for _, m := range o.Memberships {
+		managedDirections[m.Direction] = true
+		desiredByKey[roleMembershipKey(m.Direction, m.Role)] = m
+	}
+	snapByKey := make(map[string]snapshot.SnapRoleMembership, len(snap.Memberships))
+	for _, m := range snap.Memberships {
+		snapByKey[roleMembershipKey(m.Direction, m.Role)] = m
+	}
+
+	for k, sm := range snapByKey {
+		if !managedDirections[sm.Direction] {
+			continue
 		}
-		for _, r := range removed {
-			ops = append(ops, cautionOp(fmt.Sprintf("REVOKE %s FROM %s;", quoteIdent(r), ident), pos))
+		if _, ok := desiredByKey[k]; !ok {
+			ops = append(ops, cautionOp(roleMembershipRevokeSQL(o.Name, ir.RoleMembership{Role: sm.Role, Direction: sm.Direction}), pos))
 		}
 	}
-	if o.RoleMembers != nil {
-		added, removed := stringSetDiff(o.RoleMembers, snap.RoleMembers)
-		for _, m := range added {
-			ops = append(ops, safeOp(fmt.Sprintf("GRANT %s TO %s;", ident, quoteIdent(m)), pos))
-		}
-		for _, m := range removed {
-			ops = append(ops, cautionOp(fmt.Sprintf("REVOKE %s FROM %s;", ident, quoteIdent(m)), pos))
-		}
-	}
-	if o.AdminRoles != nil {
-		added, removed := stringSetDiff(o.AdminRoles, snap.AdminRoles)
-		for _, m := range added {
-			ops = append(ops, safeOp(fmt.Sprintf("GRANT %s TO %s WITH ADMIN OPTION;", ident, quoteIdent(m)), pos))
-		}
-		for _, m := range removed {
-			ops = append(ops, cautionOp(fmt.Sprintf("REVOKE %s FROM %s;", ident, quoteIdent(m)), pos))
+	for k, m := range desiredByKey {
+		sm, ok := snapByKey[k]
+		if !ok || m.Admin != sm.Admin || boolPtrDiffers(m.Inherit, sm.Inherit) || boolPtrDiffers(m.Set, sm.Set) {
+			ops = append(ops, safeOp(roleMembershipGrantSQL(o.Name, m), pos))
 		}
 	}
 	return ops

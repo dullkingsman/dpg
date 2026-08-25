@@ -531,6 +531,42 @@ type BlockAST struct {
 	// Role-only in practice (the only object kind whose builder reads it),
 	// but parsed generically here like every other block directive.
 	RoleConfigs []RoleConfigDir
+	// Memberships is RFC audit item #32's block-level membership directive
+	// (Section 11.1): `IN ROLE`/`ROLE`/`ADMIN` entries carrying `WITH
+	// ADMIN`/`INHERIT`/`SET` modifiers — real PostgreSQL's `CREATE ROLE`
+	// inline `IN ROLE`/`ROLE`/`ADMIN` lists (parsed by the real PG parser,
+	// not here) accept no such modifiers at all (confirmed live), so a
+	// modifier-bearing membership can only be expressed this way, one entry
+	// per directive (Mode B — no plural wrapping block, mirroring TRIGGER/
+	// POLICY). Role-only in practice, same as RoleConfigs above.
+	Memberships []RoleMembershipDir
+}
+
+// RoleMembershipDir is Section 11.1's block-level membership directive: `(IN
+// ROLE / ROLE / ADMIN) identifier [WITH ADMIN [OPTION|boolean]] [WITH
+// INHERIT boolean] [WITH SET boolean];`.
+type RoleMembershipDir struct {
+	// Role is the other role named in the directive.
+	Role Identifier
+	// Direction is "IN_ROLE" (this role becomes a member of Role — from the
+	// `IN ROLE` keyword) or "ROLE" (Role becomes a member of this role —
+	// from either the `ROLE` or `ADMIN` keyword; `ADMIN` is `ROLE` with
+	// AdminDefault forcing the admin option on).
+	Direction string
+	// AdminDefault is true when the directive used the `ADMIN` keyword
+	// (real PostgreSQL's `CREATE ROLE ... ADMIN` semantics: the named role
+	// becomes a member WITH ADMIN OPTION) — the baseline Admin value before
+	// any explicit `WITH ADMIN ...` clause overrides it.
+	AdminDefault bool
+	// Admin/Inherit/Set carry an explicit `WITH ADMIN`/`WITH INHERIT`/`WITH
+	// SET` clause's boolean value when present — Admin is nil unless
+	// explicitly declared (AdminDefault supplies the baseline otherwise);
+	// Inherit/Set are nil when not declared at all (not managed — same
+	// "declared, so managed" convention as GrantEntry.GrantedBy).
+	Admin   *bool
+	Inherit *bool
+	Set     *bool
+	Pos     SourcePos
 }
 
 // RoleConfigDir is Section 11.1's `ALTER ROLE ... [IN DATABASE db] SET

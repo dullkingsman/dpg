@@ -949,8 +949,15 @@ func toSnapRole(o *ir.Role) *SnapRole {
 			Reset: c.Reset, ResetAll: c.ResetAll, InDatabase: c.InDatabase,
 		})
 	}
+	var memberships []SnapRoleMembership
+	for _, m := range o.Memberships {
+		memberships = append(memberships, SnapRoleMembership{
+			Role: m.Role, Direction: m.Direction, Admin: m.Admin, Inherit: m.Inherit, Set: m.Set,
+		})
+	}
 	return &SnapRole{
 		Configs:         configs,
+		Memberships:     memberships,
 		Name:            o.Name,
 		CanLogin:        o.CanLogin,
 		Superuser:       o.Superuser,
@@ -962,9 +969,6 @@ func toSnapRole(o *ir.Role) *SnapRole {
 		ConnectionLimit: o.ConnectionLimit,
 		PasswordHash:    pwHash,
 		ValidUntil:      o.ValidUntil,
-		InRole:          o.InRole,
-		RoleMembers:     o.RoleMembers,
-		AdminRoles:      o.AdminRoles,
 		Comment:         o.Comment,
 		SecurityLabels:  toSnapSecurityLabels(o.SecurityLabels),
 		NameMaps:        toSnapNameMaps(o.NameMaps),

@@ -348,16 +348,16 @@ func TestMergeRolesConnectionLimitConflict(t *testing.T) {
 	}
 }
 
-func TestMergeRolesInRoleUnionedNotConflicted(t *testing.T) {
-	a := &ir.Role{Name: "app_user", SrcPos: pos, InRole: []string{"readonly"}}
-	b := &ir.Role{Name: "app_user", SrcPos: pos2, InRole: []string{"readwrite"}}
+func TestMergeRolesMembershipsAppendedNotConflicted(t *testing.T) {
+	a := &ir.Role{Name: "app_user", SrcPos: pos, Memberships: []ir.RoleMembership{{Role: "readonly", Direction: "IN_ROLE"}}}
+	b := &ir.Role{Name: "app_user", SrcPos: pos2, Memberships: []ir.RoleMembership{{Role: "readwrite", Direction: "IN_ROLE"}}}
 	out, diags := mergeAll(t, a, b)
 	if len(findRule(diags, "scalar-merge-conflict")) != 0 {
-		t.Errorf("InRole is set-valued (union), not a scalar conflict: %v", diags)
+		t.Errorf("Memberships is set-valued (RFC audit item #32), not a scalar conflict: %v", diags)
 	}
 	role := out[0].(*ir.Role)
-	if len(role.InRole) != 2 {
-		t.Errorf("InRole: expected union of 2, got %d: %v", len(role.InRole), role.InRole)
+	if len(role.Memberships) != 2 {
+		t.Errorf("Memberships: expected 2 entries from both files, got %d: %+v", len(role.Memberships), role.Memberships)
 	}
 }
 

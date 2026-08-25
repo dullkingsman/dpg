@@ -3863,14 +3863,75 @@ func TestBuildRoleAllAttributes(t *testing.T) {
 	if r.ValidUntil == nil || *r.ValidUntil != "2030-01-01" {
 		t.Errorf("ValidUntil: got %v", r.ValidUntil)
 	}
-	if len(r.InRole) != 2 || r.InRole[0] != "role_a" || r.InRole[1] != "role_b" {
-		t.Errorf("InRole: got %v", r.InRole)
+	inRole := membershipsByDirection(r.Memberships, "IN_ROLE")
+	if len(inRole) != 2 || inRole[0].Role != "role_a" || inRole[1].Role != "role_b" {
+		t.Errorf("IN_ROLE memberships: got %+v", inRole)
 	}
-	if len(r.RoleMembers) != 1 || r.RoleMembers[0] != "role_c" {
-		t.Errorf("RoleMembers: got %v", r.RoleMembers)
+	for _, m := range inRole {
+		if m.Admin {
+			t.Errorf("bare IN ROLE entry %q must not carry Admin=true: %+v", m.Role, m)
+		}
 	}
-	if len(r.AdminRoles) != 1 || r.AdminRoles[0] != "role_d" {
-		t.Errorf("AdminRoles: got %v", r.AdminRoles)
+	roleEntries := membershipsByDirection(r.Memberships, "ROLE")
+	if len(roleEntries) != 2 {
+		t.Fatalf("ROLE-direction memberships: got %+v", roleEntries)
+	}
+	byRole := map[string]ir.RoleMembership{}
+	for _, m := range roleEntries {
+		byRole[m.Role] = m
+	}
+	if m, ok := byRole["role_c"]; !ok || m.Admin {
+		t.Errorf("role_c: got %+v, want present with Admin=false", m)
+	}
+	if m, ok := byRole["role_d"]; !ok || !m.Admin {
+		t.Errorf("role_d: got %+v, want present with Admin=true", m)
+	}
+}
+
+// membershipsByDirection filters and returns Memberships entries matching
+// direction, preserving order — a small test-only helper since the unified
+// list (RFC audit item #32) no longer has one field per direction.
+func membershipsByDirection(memberships []ir.RoleMembership, direction string) []ir.RoleMembership {
+	var out []ir.RoleMembership
+	for _, m := range memberships {
+		if m.Direction == direction {
+			out = append(out, m)
+		}
+	}
+	return out
+}
+
+// TestBuildRoleBlockMembershipWithModifiers guards RFC audit item #32's
+// block-directive membership form (WITH ADMIN/INHERIT/SET) wired through
+// buildRole into ir.Role.Memberships, merged alongside any CREATE-time bare
+// inline entries.
+func TestBuildRoleBlockMembershipWithModifiers(t *testing.T) {
+	obj := buildObject(t, pipeline.KindRole,
+		`app_service IN ROLE bare_parent`,
+		`IN ROLE parent1 WITH ADMIN OPTION WITH INHERIT FALSE; ROLE child1 WITH SET FALSE;`,
+	)
+	r, ok := obj.(*ir.Role)
+	if !ok {
+		t.Fatalf("expected *ir.Role, got %T", obj)
+	}
+	if len(r.Memberships) != 3 {
+		t.Fatalf("expected 3 memberships, got %d: %+v", len(r.Memberships), r.Memberships)
+	}
+	byRole := map[string]ir.RoleMembership{}
+	for _, m := range r.Memberships {
+		byRole[m.Role] = m
+	}
+	bare, ok := byRole["bare_parent"]
+	if !ok || bare.Direction != "IN_ROLE" || bare.Admin || bare.Inherit != nil || bare.Set != nil {
+		t.Errorf("bare_parent (from CREATE-time inline list): got %+v", bare)
+	}
+	p1, ok := byRole["parent1"]
+	if !ok || p1.Direction != "IN_ROLE" || !p1.Admin || p1.Inherit == nil || *p1.Inherit {
+		t.Errorf("parent1 (from block directive): got %+v", p1)
+	}
+	c1, ok := byRole["child1"]
+	if !ok || c1.Direction != "ROLE" || c1.Admin || c1.Set == nil || *c1.Set {
+		t.Errorf("child1 (from block directive): got %+v", c1)
 	}
 }
 
@@ -3882,8 +3943,8 @@ func TestBuildRoleUnsetAttributesAreNil(t *testing.T) {
 		r.ConnectionLimit != nil || r.Password != nil || r.ValidUntil != nil {
 		t.Errorf("expected all optional attributes nil for a bare ROLE decl, got: %+v", r)
 	}
-	if r.InRole != nil || r.RoleMembers != nil || r.AdminRoles != nil {
-		t.Errorf("expected nil membership lists, got InRole=%v RoleMembers=%v AdminRoles=%v", r.InRole, r.RoleMembers, r.AdminRoles)
+	if len(r.Memberships) != 0 {
+		t.Errorf("expected no memberships, got %+v", r.Memberships)
 	}
 }
 

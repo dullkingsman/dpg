@@ -1950,7 +1950,11 @@ func TestRenderRoleAttributesCompile(t *testing.T) {
 		CreateDB: boolp(false), CreateRole: boolp(false), Inherit: boolp(true),
 		IsReplication: boolp(false), BypassRLS: boolp(false), ConnectionLimit: intp(20),
 		ValidUntil: strp("2030-01-01"),
-		InRole:     []string{"reader_group"}, RoleMembers: []string{"member_role"}, AdminRoles: []string{"admin_role"},
+		Memberships: []ir.RoleMembership{
+			{Role: "reader_group", Direction: "IN_ROLE"},
+			{Role: "member_role", Direction: "ROLE"},
+			{Role: "admin_role", Direction: "ROLE", Admin: true},
+		},
 		Comment: &comment,
 		// Password deliberately unset — never introspected, must never be
 		// rendered (there's nothing to render: dump only ever sees
@@ -2014,17 +2018,85 @@ func TestRenderRoleAttributesCompile(t *testing.T) {
 	check("ConnectionLimit", got.ConnectionLimit, role.ConnectionLimit)
 	check("ValidUntil", got.ValidUntil, role.ValidUntil)
 	check("Comment", got.Comment, role.Comment)
-	if !reflect.DeepEqual(got.InRole, role.InRole) {
-		t.Errorf("InRole: got %v, want %v", got.InRole, role.InRole)
+	if len(got.Memberships) != len(role.Memberships) {
+		t.Fatalf("Memberships: got %+v, want %+v", got.Memberships, role.Memberships)
 	}
-	if !reflect.DeepEqual(got.RoleMembers, role.RoleMembers) {
-		t.Errorf("RoleMembers: got %v, want %v", got.RoleMembers, role.RoleMembers)
-	}
-	if !reflect.DeepEqual(got.AdminRoles, role.AdminRoles) {
-		t.Errorf("AdminRoles: got %v, want %v", got.AdminRoles, role.AdminRoles)
+	for i := range role.Memberships {
+		want, g := role.Memberships[i], got.Memberships[i]
+		if g.Role != want.Role || g.Direction != want.Direction || g.Admin != want.Admin {
+			t.Errorf("Memberships[%d]: got %+v, want %+v", i, g, want)
+		}
 	}
 	if got.Password != nil {
 		t.Errorf("Password: got %v, want nil", got.Password)
+	}
+}
+
+// TestRenderRoleMembershipsCompile guards RFC audit item #32's dump-and-
+// recompile round trip: a mix of bare memberships (render inline via the
+// plain IN ROLE/ROLE/ADMIN lists) and WITH-modifier-bearing memberships
+// (render as their own block directive, the only shape that can carry
+// INHERIT/SET at all) must both produce valid, recompilable .dpg source.
+func TestRenderRoleMembershipsCompile(t *testing.T) {
+	fmtOpts := format.Options{IndentSize: 4, KeywordCase: "upper"}
+	inheritFalse := false
+	setFalse := false
+	role := &ir.Role{
+		Name: "app_service",
+		Memberships: []ir.RoleMembership{
+			{Role: "bare_parent", Direction: "IN_ROLE"},
+			{Role: "bare_child", Direction: "ROLE"},
+			{Role: "bare_admin", Direction: "ROLE", Admin: true},
+			{Role: "modified_parent", Direction: "IN_ROLE", Admin: true, Inherit: &inheritFalse},
+			{Role: "modified_child", Direction: "ROLE", Set: &setFalse},
+		},
+	}
+
+	var b strings.Builder
+	renderObjectDPG(&b, role, fmtOpts)
+	rendered := b.String()
+
+	if !strings.Contains(rendered, "IN ROLE") || !strings.Contains(rendered, "bare_parent") {
+		t.Errorf("rendered role missing bare inline IN ROLE: %q", rendered)
+	}
+	if !strings.Contains(rendered, "WITH INHERIT FALSE") {
+		t.Errorf("rendered role missing WITH INHERIT FALSE block directive: %q", rendered)
+	}
+	if !strings.Contains(rendered, "WITH SET FALSE") {
+		t.Errorf("rendered role missing WITH SET FALSE block directive: %q", rendered)
+	}
+
+	dir := t.TempDir()
+	f := filepath.Join(dir, "roles.dpg")
+	if err := os.WriteFile(f, []byte(rendered), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	compiled, _, err := compiler.Compile([]string{f}, dir, pipeline.Default)
+	if err != nil {
+		t.Fatalf("dumped role failed to recompile: %v\n---\n%s", err, rendered)
+	}
+	got, ok := compiled[0].(*ir.Role)
+	if !ok {
+		t.Fatalf("expected *ir.Role, got %T", compiled[0])
+	}
+	if len(got.Memberships) != len(role.Memberships) {
+		t.Fatalf("Memberships did not round-trip: got %d entries, want %d: %+v", len(got.Memberships), len(role.Memberships), got.Memberships)
+	}
+	byRole := map[string]ir.RoleMembership{}
+	for _, m := range got.Memberships {
+		byRole[m.Role] = m
+	}
+	mp, ok := byRole["modified_parent"]
+	if !ok || !mp.Admin || mp.Inherit == nil || *mp.Inherit {
+		t.Errorf("modified_parent did not round-trip: got %+v", mp)
+	}
+	mc, ok := byRole["modified_child"]
+	if !ok || mc.Set == nil || *mc.Set {
+		t.Errorf("modified_child did not round-trip: got %+v", mc)
+	}
+	ba, ok := byRole["bare_admin"]
+	if !ok || !ba.Admin || ba.Inherit != nil || ba.Set != nil {
+		t.Errorf("bare_admin did not round-trip: got %+v", ba)
 	}
 }
 

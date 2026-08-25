@@ -3085,16 +3085,7 @@ SELECT r.rolname,
        r.rolreplication,
        r.rolbypassrls,
        r.rolconnlimit,
-       r.rolvaliduntil::text,
-       (SELECT array_agg(pr.rolname ORDER BY pr.rolname)
-          FROM pg_auth_members am JOIN pg_roles pr ON pr.oid = am.roleid
-         WHERE am.member = r.oid) AS in_role,
-       (SELECT array_agg(pr.rolname ORDER BY pr.rolname)
-          FROM pg_auth_members am JOIN pg_roles pr ON pr.oid = am.member
-         WHERE am.roleid = r.oid AND NOT am.admin_option) AS role_members,
-       (SELECT array_agg(pr.rolname ORDER BY pr.rolname)
-          FROM pg_auth_members am JOIN pg_roles pr ON pr.oid = am.member
-         WHERE am.roleid = r.oid AND am.admin_option) AS admin_roles
+       r.rolvaliduntil::text
 FROM   pg_roles r
 WHERE  r.rolname NOT LIKE 'pg_%'
 AND    r.rolname <> 'postgres'
@@ -3112,7 +3103,6 @@ ORDER  BY r.rolname`
 		if err := rs.Scan(
 			&r.Name, &r.Comment, &r.CanLogin, &r.Superuser, &r.CreateDB, &r.CreateRole,
 			&r.Inherit, &r.IsReplication, &r.BypassRLS, &r.ConnectionLimit, &r.ValidUntil,
-			&r.InRole, &r.RoleMembers, &r.AdminRoles,
 		); err != nil {
 			return nil, err
 		}
@@ -3125,6 +3115,9 @@ ORDER  BY r.rolname`
 		return nil, err
 	}
 	if err := introspectRoleConfigs(ctx, conn, out); err != nil {
+		return nil, err
+	}
+	if err := introspectRoleMemberships(ctx, conn, out); err != nil {
 		return nil, err
 	}
 	return out, nil
@@ -3185,6 +3178,119 @@ ORDER  BY r.rolname, d.datname`
 		}
 	}
 	return rs.Err()
+}
+
+// introspectRoleMemberships populates Role.Memberships (RFC audit item #32)
+// from pg_auth_members — one row per (parent, member) pair, real
+// PostgreSQL's own catalog model, which is exactly why ir.RoleMembership
+// unified what used to be three separately-diffed lists (see its own doc
+// comment). Each row is expanded into two entries, one per side of the
+// relationship: the member role gets an "IN_ROLE" entry pointing at the
+// parent, and the parent role gets a "ROLE" entry pointing at the member —
+// both carrying the identical Admin/Inherit/Set values, since it's the same
+// underlying GRANT fact viewed from either role's own declaration.
+//
+// inherit_option/set_option (PG16+ only, confirmed live — pre-16
+// pg_auth_members has no such columns) are ALWAYS recorded with their real
+// live value here, never suppressed to nil even when they happen to match
+// PostgreSQL's own default. A first version of this function suppressed a
+// default-matching value to nil to keep dump's output compact — live-tested
+// before shipping, that broke diffRoleMembership's "declared, so managed"
+// convention outright: an explicit WITH INHERIT TRUE that happens to equal
+// the member role's own default rolinherit would introspect back as
+// Inherit == nil, and boolPtrDiffers(desired=&true, snap=nil) unconditionally
+// reports "changed" (nil-on-the-snapshot-side means "never recorded, so
+// different" — correct for a genuinely new declaration, wrong here), causing
+// a permanent re-GRANT loop that never actually converges. Any dump-
+// rendering compactness this would have bought belongs in cmd/dpg/dump.go's
+// own rendering logic, not here, precisely because introspection output
+// must double as diffRoleMembership's live-comparison input.
+func introspectRoleMemberships(ctx context.Context, conn pipeline.Querier, roles []pipeline.IRObject) error {
+	idx := make(map[string]*ir.Role, len(roles))
+	for _, o := range roles {
+		if r, ok := o.(*ir.Role); ok {
+			idx[r.Name] = r
+		}
+	}
+	if len(idx) == 0 {
+		return nil
+	}
+
+	type row struct {
+		parent, member string
+		admin          bool
+		inherit        bool
+		setOpt         bool
+		hasOptionCols  bool
+	}
+	var rows []row
+
+	if serverVersionNum(ctx, conn) >= 160000 {
+		const q = `
+SELECT parent.rolname, member.rolname, am.admin_option,
+       am.inherit_option, am.set_option
+FROM   pg_auth_members am
+JOIN   pg_roles parent ON parent.oid = am.roleid
+JOIN   pg_roles member ON member.oid = am.member
+ORDER  BY parent.rolname, member.rolname`
+		rs, err := conn.QueryRows(ctx, q)
+		if err != nil {
+			return fmt.Errorf("introspect role memberships: %w", err)
+		}
+		defer rs.Close()
+		for rs.Next() {
+			var r row
+			r.hasOptionCols = true
+			if err := rs.Scan(&r.parent, &r.member, &r.admin, &r.inherit, &r.setOpt); err != nil {
+				return err
+			}
+			rows = append(rows, r)
+		}
+		if err := rs.Err(); err != nil {
+			return err
+		}
+	} else {
+		const q = `
+SELECT parent.rolname, member.rolname, am.admin_option
+FROM   pg_auth_members am
+JOIN   pg_roles parent ON parent.oid = am.roleid
+JOIN   pg_roles member ON member.oid = am.member
+ORDER  BY parent.rolname, member.rolname`
+		rs, err := conn.QueryRows(ctx, q)
+		if err != nil {
+			return fmt.Errorf("introspect role memberships: %w", err)
+		}
+		defer rs.Close()
+		for rs.Next() {
+			var r row
+			if err := rs.Scan(&r.parent, &r.member, &r.admin); err != nil {
+				return err
+			}
+			rows = append(rows, r)
+		}
+		if err := rs.Err(); err != nil {
+			return err
+		}
+	}
+
+	for _, r := range rows {
+		var inherit, setOpt *bool
+		if r.hasOptionCols {
+			inherit = &r.inherit
+			setOpt = &r.setOpt
+		}
+		if member, ok := idx[r.member]; ok {
+			member.Memberships = append(member.Memberships, ir.RoleMembership{
+				Role: r.parent, Direction: "IN_ROLE", Admin: r.admin, Inherit: inherit, Set: setOpt,
+			})
+		}
+		if parent, ok := idx[r.parent]; ok {
+			parent.Memberships = append(parent.Memberships, ir.RoleMembership{
+				Role: r.member, Direction: "ROLE", Admin: r.admin, Inherit: inherit, Set: setOpt,
+			})
+		}
+	}
+	return nil
 }
 
 var _ pipeline.Introspector = (*CatalogIntrospector)(nil)
