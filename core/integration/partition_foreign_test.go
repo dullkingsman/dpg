@@ -94,15 +94,8 @@ func TestRoundtripPartitionForeign(t *testing.T) {
 	// back at this same database/container) plus the real local table it
 	// proxies to, so INSERTs against the foreign partition can be proven to
 	// actually land somewhere, not just parse and apply without error.
-	// EXTENSION's own COMMENT block restates postgres_fdw's control-file
-	// default comment (confirmed live via obj_description) — without it,
-	// introspection's real (non-nil) comment would permanently mismatch
-	// this fixture's undeclared (nil) one on every live re-diff, a real
-	// but unrelated pre-existing diffExtension gap this test isn't about.
 	write(`
-EXTENSION postgres_fdw {
-    COMMENT 'foreign-data wrapper for remote PostgreSQL servers';
-};
+EXTENSION postgres_fdw;
 SERVER loopback_srv FOREIGN DATA WRAPPER postgres_fdw OPTIONS (host 'localhost', port '5432', dbname 'dpgtest');
 USER MAPPING FOR dpg SERVER loopback_srv OPTIONS (user 'dpg', password 'dpg');
 TABLE events_archive_backing (id BIGINT, region TEXT);
@@ -116,9 +109,7 @@ TABLE events (id BIGINT, region TEXT) PARTITION BY LIST (region) {
 	// Stage 1: add the FOREIGN default partition, backed by the loopback
 	// server, proxying to the real local table above.
 	write(`
-EXTENSION postgres_fdw {
-    COMMENT 'foreign-data wrapper for remote PostgreSQL servers';
-};
+EXTENSION postgres_fdw;
 SERVER loopback_srv FOREIGN DATA WRAPPER postgres_fdw OPTIONS (host 'localhost', port '5432', dbname 'dpgtest');
 USER MAPPING FOR dpg SERVER loopback_srv OPTIONS (user 'dpg', password 'dpg');
 TABLE events_archive_backing (id BIGINT, region TEXT);
@@ -152,9 +143,7 @@ TABLE events (id BIGINT, region TEXT) PARTITION BY LIST (region) {
 	// table"). A failing Apply here is exactly the predicted symptom of
 	// reverting the dropPartitionVerb fix.
 	write(`
-EXTENSION postgres_fdw {
-    COMMENT 'foreign-data wrapper for remote PostgreSQL servers';
-};
+EXTENSION postgres_fdw;
 SERVER loopback_srv FOREIGN DATA WRAPPER postgres_fdw OPTIONS (host 'localhost', port '5432', dbname 'dpgtest');
 USER MAPPING FOR dpg SERVER loopback_srv OPTIONS (user 'dpg', password 'dpg');
 TABLE events_archive_backing (id BIGINT, region TEXT);

@@ -742,14 +742,31 @@ ORDER  BY n.nspname, grantee, a.privilege_type`
 
 // ── extensions ────────────────────────────────────────────────────────────────
 
+// introspectExtensions populates ir.Extension.Comment only when it differs
+// from the extension's own control-file default: CREATE EXTENSION
+// auto-populates obj_description from the .control file's `comment` field
+// with zero explicit COMMENT ON EXTENSION ever run (confirmed live —
+// postgres_fdw's real obj_description right after a bare CREATE EXTENSION
+// is already "foreign-data wrapper for remote PostgreSQL servers"). Without
+// this, an undeclared (nil) source Comment permanently mismatched that
+// live default in diffExtension, producing a spurious `COMMENT ON
+// EXTENSION ... IS NULL` on every plan for any extension whose control
+// file sets one — the same "only report a non-default value" convention
+// already used for Table.AccessMethod ("heap") and Index's opclass
+// ("btree"). pg_available_extension_versions (not pg_available_extensions,
+// which has only one row per name) is joined on both name AND the
+// installed version, since the control-file comment is version-scoped.
 func introspectExtensions(ctx context.Context, conn pipeline.Querier) ([]pipeline.IRObject, error) {
 	const q = `
 SELECT e.extname,
        n.nspname AS schema,
        e.extversion,
-       obj_description(e.oid, 'pg_extension') AS comment
+       obj_description(e.oid, 'pg_extension') AS comment,
+       av.comment AS default_comment
 FROM   pg_extension e
 JOIN   pg_namespace n ON n.oid = e.extnamespace
+LEFT   JOIN pg_available_extension_versions av
+       ON av.name = e.extname AND av.version = e.extversion
 WHERE  n.nspname NOT IN ('pg_catalog', 'information_schema')
 ORDER  BY e.extname`
 
@@ -762,9 +779,12 @@ ORDER  BY e.extname`
 	var out []pipeline.IRObject
 	for rs.Next() {
 		var name, schema, version string
-		var comment *string
-		if err := rs.Scan(&name, &schema, &version, &comment); err != nil {
+		var comment, defaultComment *string
+		if err := rs.Scan(&name, &schema, &version, &comment, &defaultComment); err != nil {
 			return nil, err
+		}
+		if comment != nil && defaultComment != nil && *comment == *defaultComment {
+			comment = nil
 		}
 		out = append(out, &ir.Extension{Name: name, Schema: &schema, Version: &version, Comment: comment})
 	}
