@@ -847,6 +847,8 @@ func toSnapFunction(o *ir.Function) *SnapFunction {
 		ObjFile:     o.Attrs.ObjFile,
 		LinkSymbol:  o.Attrs.LinkSymbol,
 		AtomicBody:  o.Attrs.AtomicBody,
+		Strict:      o.Attrs.Strict,
+		SecurityDef: o.Attrs.SecurityDef,
 	}
 	for _, g := range o.Grants {
 		sf.Grants = append(sf.Grants, toSnapGrant(g))

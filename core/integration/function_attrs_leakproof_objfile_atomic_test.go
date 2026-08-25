@@ -175,6 +175,81 @@ func TestRoundtripFunctionObjFileLinkSymbol(t *testing.T) {
 	assertNoLiveDrift(t, ctx, conn, []string{f}, dir, differ, store)
 }
 
+// TestRoundtripFunctionStrictSecurityDefChanged guards a diffFunction gap
+// found while auditing items #25-#28's neighboring attributes: SnapFunction
+// had no Strict/SecurityDef fields at all, so an in-place STRICT/SECURITY
+// DEFINER-only change (no body/other-attribute change) produced zero diff
+// ops — the property change was silently never applied. Proves declaring
+// STRICT and SECURITY DEFINER on an already-applied function actually flips
+// pg_proc.proisstrict/prosecdef live, that removing them flips both back,
+// and that a fresh plan is a genuine no-op at every stage.
+func TestRoundtripFunctionStrictSecurityDefChanged(t *testing.T) {
+	connStr := testpg.Start(t)
+	ctx := context.Background()
+
+	differ := diff.New()
+	emitter := emit.New()
+	applyExec := executor.New()
+	store := newMemStore()
+
+	conn, err := executor.Connect(ctx, connStr)
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	defer conn.Close(ctx)
+
+	dir := t.TempDir()
+	f := filepath.Join(dir, "schema.dpg")
+
+	flags := func() (strict, secDef bool) {
+		t.Helper()
+		rows, err := conn.QueryRows(ctx, `SELECT proisstrict, prosecdef FROM pg_proc WHERE proname = 'f_strict_secdef'`)
+		if err != nil {
+			t.Fatalf("query pg_proc: %v", err)
+		}
+		defer rows.Close()
+		if !rows.Next() {
+			t.Fatal("f_strict_secdef not found in pg_proc")
+		}
+		if err := rows.Scan(&strict, &secDef); err != nil {
+			t.Fatalf("scan: %v", err)
+		}
+		return strict, secDef
+	}
+
+	v1 := `FUNCTION f_strict_secdef(x integer) RETURNS integer LANGUAGE sql AS $$ SELECT x $$ {}`
+	if err := os.WriteFile(f, []byte(v1), 0o644); err != nil {
+		t.Fatalf("write v1: %v", err)
+	}
+	applyFixture(t, ctx, conn, []string{f}, dir, differ, emitter, applyExec, store)
+
+	if strict, secDef := flags(); strict || secDef {
+		t.Fatalf("expected neither flag set initially, got strict=%v secDef=%v", strict, secDef)
+	}
+	assertNoLiveDrift(t, ctx, conn, []string{f}, dir, differ, store)
+
+	v2 := `FUNCTION f_strict_secdef(x integer) RETURNS integer LANGUAGE sql STRICT SECURITY DEFINER AS $$ SELECT x $$ {}`
+	if err := os.WriteFile(f, []byte(v2), 0o644); err != nil {
+		t.Fatalf("write v2: %v", err)
+	}
+	applyFixture(t, ctx, conn, []string{f}, dir, differ, emitter, applyExec, store)
+
+	if strict, secDef := flags(); !strict || !secDef {
+		t.Fatalf("expected both flags set after declaring STRICT SECURITY DEFINER, got strict=%v secDef=%v", strict, secDef)
+	}
+	assertNoLiveDrift(t, ctx, conn, []string{f}, dir, differ, store)
+
+	if err := os.WriteFile(f, []byte(v1), 0o644); err != nil {
+		t.Fatalf("write v1 again: %v", err)
+	}
+	applyFixture(t, ctx, conn, []string{f}, dir, differ, emitter, applyExec, store)
+
+	if strict, secDef := flags(); strict || secDef {
+		t.Fatalf("expected both flags cleared after removing STRICT SECURITY DEFINER, got strict=%v secDef=%v", strict, secDef)
+	}
+	assertNoLiveDrift(t, ctx, conn, []string{f}, dir, differ, store)
+}
+
 // TestRoundtripFunctionAtomicBody guards RFC audit item #28. Before this
 // fix, cfs.Options carried no "as" DefElem at all for a BEGIN ATOMIC
 // function (confirmed live via pg_query.Parse), so extractFuncAttrs left

@@ -2160,6 +2160,76 @@ func TestDiffFunctionAtomicBodyChanged(t *testing.T) {
 	}
 }
 
+// TestDiffFunctionStrictSecurityDefChanged guards a gap found while auditing
+// item #25-#28's neighboring attributes: diffFunction's recreate condition
+// never compared Strict/SecurityDef at all, so adding/removing STRICT or
+// SECURITY DEFINER alone (no body/other-attribute change) was silently
+// invisible to plan forever, even though CREATE-time rendering
+// (RenderCreateFunctionSQL) already writes both correctly for a brand-new
+// function.
+func TestDiffFunctionStrictSecurityDefChanged(t *testing.T) {
+	hash := ir.HashFunctionBody("sql", "SELECT x", "")
+	newDesired := func(strict, secDef bool) []pipeline.IRObject {
+		return []pipeline.IRObject{
+			&ir.Function{
+				Schema: "public", Name: "f",
+				Args:       []ir.FuncArg{{Type: ir.TypeRef{Name: "integer"}}},
+				ReturnType: ir.TypeRef{Name: "integer"},
+				BodyHash:   hash,
+				Attrs: ir.FuncAttrs{
+					Language: "sql", Volatility: "VOLATILE", Parallel: "UNSAFE",
+					Body: "SELECT x", Strict: strict, SecurityDef: secDef,
+				},
+			},
+		}
+	}
+	newSnap := func(strict, secDef bool) *pipeline.Snapshot {
+		snap := &pipeline.Snapshot{}
+		_ = snap.SetObject("public.f(integer)", &snapshot.SnapObject{
+			Kind: "function",
+			Function: &snapshot.SnapFunction{
+				Schema: "public", Name: "f", Args: "integer", ReturnType: "integer",
+				Language: "sql", Volatility: "VOLATILE", Parallel: "UNSAFE", BodyHash: hash,
+				Strict: strict, SecurityDef: secDef,
+			},
+		})
+		return snap
+	}
+
+	t.Run("strict added", func(t *testing.T) {
+		d := New()
+		ops, err := d.Diff(newDesired(true, false), newSnap(false, false))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(ops) == 0 || !strings.Contains(ops[0].SQL(), "STRICT") {
+			t.Errorf("expected a recreate rendering STRICT, got: %v", sqlList(ops))
+		}
+	})
+
+	t.Run("security definer added", func(t *testing.T) {
+		d := New()
+		ops, err := d.Diff(newDesired(false, true), newSnap(false, false))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(ops) == 0 || !strings.Contains(ops[0].SQL(), "SECURITY DEFINER") {
+			t.Errorf("expected a recreate rendering SECURITY DEFINER, got: %v", sqlList(ops))
+		}
+	})
+
+	t.Run("unchanged is noop", func(t *testing.T) {
+		d := New()
+		ops, err := d.Diff(newDesired(true, true), newSnap(true, true))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(ops) != 0 {
+			t.Errorf("expected no ops, got: %v", sqlList(ops))
+		}
+	})
+}
+
 // TestDiffProcedureTransformsChanged guards RFC audit item #26 for
 // Procedure specifically: diffProcedure previously compared BodyHash only,
 // so Transforms drift (which doesn't feed BodyHash at all) went completely

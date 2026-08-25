@@ -560,6 +560,12 @@ type SnapFunction struct {
 	// Owner is RFC audit item #70's ALTER FUNCTION ... OWNER TO diffing
 	// input — see ir.Function.Owner's doc comment.
 	Owner *string `json:"owner,omitempty"`
+	// Strict/SecurityDef carry ir.FuncAttrs.Strict/SecurityDef into the
+	// snapshot so an in-place STRICT/SECURITY DEFINER change on an
+	// otherwise-unchanged function is detected as drift — see diffFunction's
+	// recreate condition.
+	Strict      bool `json:"strict,omitempty"`
+	SecurityDef bool `json:"security_def,omitempty"`
 }
 
 type SnapType struct {

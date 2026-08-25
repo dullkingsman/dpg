@@ -6339,7 +6339,8 @@ func diffFunction(o *ir.Function, snap *snapshot.SnapFunction) []pipeline.DiffOp
 		desiredFloatChanged(o.Attrs.Cost, snap.Cost) || desiredFloatChanged(o.Attrs.Rows, snap.Rows) ||
 		o.Attrs.Leakproof != snap.Leakproof || transformsChanged(o.Attrs.Transforms, snap.Transforms) ||
 		!ptrEq(o.Attrs.ObjFile, snap.ObjFile) || !ptrEq(o.Attrs.LinkSymbol, snap.LinkSymbol) ||
-		o.Attrs.AtomicBody != snap.AtomicBody {
+		o.Attrs.AtomicBody != snap.AtomicBody ||
+		o.Attrs.Strict != snap.Strict || o.Attrs.SecurityDef != snap.SecurityDef {
 		ops = append(ops, safeOp(buildFunctionSQL(o), pos))
 	}
 	if !ptrEq(o.Owner, snap.Owner) && o.Owner != nil {
