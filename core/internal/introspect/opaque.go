@@ -1349,6 +1349,29 @@ ORDER  BY n.nspname, o.oprname`
 		}
 		body := fmt.Sprintf("CREATE OPERATOR %s (%s)", operatorRef(schema, name), strings.Join(parts, ", "))
 		op := &ir.Operator{Schema: schema, Name: name, Body: canonicalDDL(body), Comment: comment, Reconstructed: true}
+		// Restrict/Join/Commutator/Negator/Hashes/Merges (RFC Section 14.3)
+		// structured fields, populated from the exact same catalog data
+		// already fetched to reconstruct Body above — previously discarded
+		// after building the Body string, forcing diffOperator's
+		// predecessor (the generic opaque hash compare) to treat every
+		// hint-only live change as an unrecognized drift needing a full
+		// DROP+CREATE.
+		if restrictFn != nil {
+			op.Restrict = restrictFn
+		}
+		if joinFn != nil {
+			op.Join = joinFn
+		}
+		if comName != nil {
+			com := qualifiedFuncRef(deref(comSchema), *comName)
+			op.Commutator = &com
+		}
+		if negName != nil {
+			neg := qualifiedFuncRef(deref(negSchema), *negName)
+			op.Negator = &neg
+		}
+		op.Hashes = canHash
+		op.Merges = canMerge
 		if leftArg != nil {
 			t := ir.TypeRef{Name: *leftArg}
 			op.LeftType = &t
@@ -1465,7 +1488,7 @@ ORDER  BY n.nspname, t.tmplname`
 // snowball dictionary. Splits on top-level ", " (a comma immediately
 // followed by a space, which real PostgreSQL's own formatting always uses
 // here) and unquotes each value the same way a SQL string literal is
-// quoted (doubled '' as an escaped single quote) — values are stored raw/
+// quoted (doubled ” as an escaped single quote) — values are stored raw/
 // unquoted, matching every other StorageParam producer in this codebase
 // (buildOrderedOptions' nodeToText included), so diffTSDictOptions can
 // re-quote uniformly via quoteLit at SQL-emission time regardless of which

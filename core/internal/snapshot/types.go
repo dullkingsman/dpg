@@ -197,6 +197,25 @@ type SnapOpaque struct {
 	// CollationRules is RFC audit item #111's PG16+ ICU RULES diffing
 	// input — see ir.Collation.Rules' doc comment.
 	CollationRules *string `json:"collation_rules,omitempty"`
+	// OperatorStructured/OperatorRestrict/OperatorJoin/OperatorCommutator/
+	// OperatorNegator/OperatorHashes/OperatorMerges are RFC Section 14.3's
+	// optimizer-hint structured diffing inputs — see ir.Operator.Restrict's
+	// doc comment. OperatorStructured is the same explicit-sentinel pattern
+	// as CollationStructured above: Hashes/Merges being false is itself a
+	// legitimate declared state (most operators have neither), not a
+	// reliable "predates this field" signal.
+	OperatorStructured bool    `json:"operator_structured,omitempty"`
+	OperatorRestrict   *string `json:"operator_restrict,omitempty"`
+	OperatorJoin       *string `json:"operator_join,omitempty"`
+	OperatorCommutator *string `json:"operator_commutator,omitempty"`
+	OperatorNegator    *string `json:"operator_negator,omitempty"`
+	OperatorHashes     bool    `json:"operator_hashes,omitempty"`
+	OperatorMerges     bool    `json:"operator_merges,omitempty"`
+	// OperatorCoreHash is BodyHash's counterpart with the 6 hint properties'
+	// text stripped first (see OperatorCoreBodyHashInput) — a hint-only
+	// change must not trip the core-definition DROP+CREATE comparison, the
+	// same reasoning as BaseImmutableHash for BASE types.
+	OperatorCoreHash string `json:"operator_core_hash,omitempty"`
 	// StatisticsStructured/StatisticsTable/StatisticsKinds/
 	// StatisticsColumns/StatisticsTarget are RFC §14.6's structured
 	// diffing inputs — see ir.StatisticsObject.Table's doc comment.

@@ -15302,6 +15302,234 @@ func TestDiffOperatorOverloadOnlyEditedOneChanges(t *testing.T) {
 	}
 }
 
+// ── Operator optimizer-hint diffing (RFC Section 14.3) ─────────────────────
+//
+// Operator was the one opaque kind with no structured fields for its
+// optimizer hints (RESTRICT/JOIN/COMMUTATOR/NEGATOR/HASHES/MERGES), so any
+// change to them — even hint-only, function/operand types unchanged — always
+// forced the generic whole-body-hash DROP+CREATE. These tests guard the new
+// diffOperator: a hint-only change must route through a real, SAFE
+// ALTER OPERATOR ... SET (...) (confirmed live against PostgreSQL 17), while
+// a change to an already-set COMMUTATOR/NEGATOR/HASHES/MERGES value (which
+// real PostgreSQL flatly rejects via ALTER) still falls back to DESTRUCTIVE
+// DROP+CREATE.
+
+func baseOperatorSnap(restrict, join *string, commutator, negator *string, hashes, merges bool) *pipeline.Snapshot {
+	intType := ir.TypeRef{Name: "integer"}
+	snap := &pipeline.Snapshot{}
+	_ = snapshot.Populate(snap, []pipeline.IRObject{
+		&ir.Operator{
+			Schema: "public", Name: "===", LeftType: &intType, RightType: &intType,
+			Function: "my_lt", Restrict: restrict, Join: join, Commutator: commutator, Negator: negator,
+			Hashes: hashes, Merges: merges,
+			Body: "CREATE OPERATOR public.=== (FUNCTION = my_lt, LEFTARG = integer, RIGHTARG = integer)",
+		},
+	})
+	return snap
+}
+
+// TestDiffOperatorHintOnlyChangeIsSafe guards the core bug: a RESTRICT/JOIN
+// change with the function/operand types unchanged must be a SAFE, targeted
+// ALTER OPERATOR ... SET (...), not a DROP+CREATE.
+func TestDiffOperatorHintOnlyChangeIsSafe(t *testing.T) {
+	d := New()
+	oldRestrict := "scalarltsel"
+	snap := baseOperatorSnap(&oldRestrict, nil, nil, nil, false, false)
+
+	intType := ir.TypeRef{Name: "integer"}
+	newRestrict, newJoin := "scalargtsel", "scalargtjoinsel"
+	desired := []pipeline.IRObject{
+		&ir.Operator{
+			Schema: "public", Name: "===", LeftType: &intType, RightType: &intType,
+			Function: "my_lt", Restrict: &newRestrict, Join: &newJoin,
+			Body: "CREATE OPERATOR public.=== (FUNCTION = my_lt, LEFTARG = integer, RIGHTARG = integer)",
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, o := range ops {
+		if strings.Contains(o.SQL(), "DROP OPERATOR") || strings.Contains(o.SQL(), "CREATE OPERATOR") {
+			t.Errorf("hint-only change must not drop/recreate the operator, got: %s", o.SQL())
+		}
+	}
+	if len(ops) != 1 {
+		t.Fatalf("expected exactly one ALTER OPERATOR SET op, got %d: %v", len(ops), sqlList(ops))
+	}
+	if !strings.Contains(ops[0].SQL(), "RESTRICT = scalargtsel") || !strings.Contains(ops[0].SQL(), "JOIN = scalargtjoinsel") {
+		t.Errorf("unexpected SQL: %s", ops[0].SQL())
+	}
+	if ops[0].Safety() != pipeline.Safe {
+		t.Errorf("expected Safe, got %s", ops[0].Safety())
+	}
+}
+
+// TestDiffOperatorRestrictClearedEmitsNone guards RESTRICT/JOIN's clearing
+// path — real PostgreSQL's ALTER OPERATOR ... SET (RESTRICT = NONE) is the
+// documented way to remove an already-set estimator function.
+func TestDiffOperatorRestrictClearedEmitsNone(t *testing.T) {
+	d := New()
+	oldRestrict := "scalarltsel"
+	snap := baseOperatorSnap(&oldRestrict, nil, nil, nil, false, false)
+
+	intType := ir.TypeRef{Name: "integer"}
+	desired := []pipeline.IRObject{
+		&ir.Operator{
+			Schema: "public", Name: "===", LeftType: &intType, RightType: &intType,
+			Function: "my_lt", // Restrict left nil: cleared
+			Body:     "CREATE OPERATOR public.=== (FUNCTION = my_lt, LEFTARG = integer, RIGHTARG = integer)",
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ops) != 1 || !strings.Contains(ops[0].SQL(), "RESTRICT = NONE") {
+		t.Fatalf("expected SET (RESTRICT = NONE), got: %v", sqlList(ops))
+	}
+}
+
+// TestDiffOperatorCommutatorUnsetToSetIsSafe guards the unset->set direction
+// for COMMUTATOR — the one direction real PostgreSQL's ALTER OPERATOR SET
+// actually supports for this property.
+func TestDiffOperatorCommutatorUnsetToSetIsSafe(t *testing.T) {
+	d := New()
+	snap := baseOperatorSnap(nil, nil, nil, nil, false, false) // no commutator yet
+
+	intType := ir.TypeRef{Name: "integer"}
+	commutator := "public.==!="
+	desired := []pipeline.IRObject{
+		&ir.Operator{
+			Schema: "public", Name: "===", LeftType: &intType, RightType: &intType,
+			Function: "my_lt", Commutator: &commutator,
+			Body: "CREATE OPERATOR public.=== (FUNCTION = my_lt, LEFTARG = integer, RIGHTARG = integer)",
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ops) != 1 {
+		t.Fatalf("expected exactly one ALTER OPERATOR SET op, got %d: %v", len(ops), sqlList(ops))
+	}
+	if !strings.Contains(ops[0].SQL(), `COMMUTATOR = OPERATOR("public".==!=)`) {
+		t.Errorf("expected qualified OPERATOR(...) COMMUTATOR reference, got: %s", ops[0].SQL())
+	}
+	if ops[0].Safety() != pipeline.Safe {
+		t.Errorf("expected Safe, got %s", ops[0].Safety())
+	}
+}
+
+// TestDiffOperatorCommutatorChangedIsDestructive guards the other direction:
+// real PostgreSQL rejects ALTER OPERATOR SET (COMMUTATOR = ...) once already
+// set ("operator attribute ... cannot be changed if it has already been
+// set"), confirmed live, so changing an already-set COMMUTATOR must still
+// fall back to DROP+CREATE.
+func TestDiffOperatorCommutatorChangedIsDestructive(t *testing.T) {
+	d := New()
+	oldCommutator := "public.==!="
+	snap := baseOperatorSnap(nil, nil, &oldCommutator, nil, false, false)
+
+	intType := ir.TypeRef{Name: "integer"}
+	newCommutator := "public.==!!="
+	desired := []pipeline.IRObject{
+		&ir.Operator{
+			Schema: "public", Name: "===", LeftType: &intType, RightType: &intType,
+			Function: "my_lt", Commutator: &newCommutator,
+			Body: "CREATE OPERATOR public.=== (FUNCTION = my_lt, LEFTARG = integer, RIGHTARG = integer)",
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsSQL(ops, `DROP OPERATOR IF EXISTS "public".===(integer, integer);`) {
+		t.Errorf("expected DROP OPERATOR, got: %v", sqlList(ops))
+	}
+	var dropOp pipeline.DiffOp
+	for _, o := range ops {
+		if strings.Contains(o.SQL(), "DROP OPERATOR") {
+			dropOp = o
+		}
+	}
+	if dropOp == nil || dropOp.Safety() != pipeline.Destructive {
+		t.Errorf("expected the DROP op to be Destructive, got ops: %v", sqlList(ops))
+	}
+}
+
+// TestDiffOperatorHashesUnsetToSetIsSafe/TestDiffOperatorMergesClearedIsDestructive
+// cover HASHES/MERGES' identical one-directional asymmetry.
+func TestDiffOperatorHashesUnsetToSetIsSafe(t *testing.T) {
+	d := New()
+	snap := baseOperatorSnap(nil, nil, nil, nil, false, false)
+
+	intType := ir.TypeRef{Name: "integer"}
+	desired := []pipeline.IRObject{
+		&ir.Operator{
+			Schema: "public", Name: "===", LeftType: &intType, RightType: &intType,
+			Function: "my_lt", Hashes: true,
+			Body: "CREATE OPERATOR public.=== (FUNCTION = my_lt, LEFTARG = integer, RIGHTARG = integer)",
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ops) != 1 || !strings.Contains(ops[0].SQL(), "HASHES") || strings.Contains(ops[0].SQL(), "DROP") {
+		t.Fatalf("expected a SAFE SET (HASHES) op, got: %v", sqlList(ops))
+	}
+	if ops[0].Safety() != pipeline.Safe {
+		t.Errorf("expected Safe, got %s", ops[0].Safety())
+	}
+}
+
+func TestDiffOperatorMergesClearedIsDestructive(t *testing.T) {
+	d := New()
+	snap := baseOperatorSnap(nil, nil, nil, nil, false, true) // MERGES already set
+
+	intType := ir.TypeRef{Name: "integer"}
+	desired := []pipeline.IRObject{
+		&ir.Operator{
+			Schema: "public", Name: "===", LeftType: &intType, RightType: &intType,
+			Function: "my_lt", Merges: false, // cleared
+			Body: "CREATE OPERATOR public.=== (FUNCTION = my_lt, LEFTARG = integer, RIGHTARG = integer)",
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsSQL(ops, `DROP OPERATOR IF EXISTS "public".===(integer, integer);`) {
+		t.Errorf("expected DROP OPERATOR for a MERGES clear, got: %v", sqlList(ops))
+	}
+}
+
+// TestDiffOperatorUnchangedIsNoop guards against diffOperator firing
+// spuriously when nothing about the operator (hints included) changed.
+func TestDiffOperatorUnchangedIsNoop(t *testing.T) {
+	d := New()
+	restrict := "scalarltsel"
+	commutator := "public.==!="
+	snap := baseOperatorSnap(&restrict, nil, &commutator, nil, true, false)
+
+	intType := ir.TypeRef{Name: "integer"}
+	desired := []pipeline.IRObject{
+		&ir.Operator{
+			Schema: "public", Name: "===", LeftType: &intType, RightType: &intType,
+			Function: "my_lt", Restrict: &restrict, Commutator: &commutator, Hashes: true,
+			Body: "CREATE OPERATOR public.=== (FUNCTION = my_lt, LEFTARG = integer, RIGHTARG = integer)",
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ops) != 0 {
+		t.Errorf("expected no-op, got: %v", sqlList(ops))
+	}
+}
+
 // VERIFY: desired side is the introspected reconstruction (Reconstructed=true),
 // snap side is the stored source hash. Must NOT report spurious drift despite
 // different-but-equivalent spelling.

@@ -2006,6 +2006,31 @@ func defElemQualifiedName(definition []*pg_query.Node, defname string) (schema, 
 	return "", ""
 }
 
+// defElemOperatorRef extracts a CREATE/ALTER OPERATOR COMMUTATOR/NEGATOR
+// value — a List of String name-part nodes ("public", "==!=" for the
+// qualified "OPERATOR(public.==!=)" form, or just "==!=" unqualified;
+// confirmed via pg_query.Parse probe, distinct from RESTRICT/JOIN's
+// TypeName shape since an operator symbol isn't a valid type name), joined
+// into the same dotted schema.symbol form Operator.Commutator/Negator
+// store. Returns nil if elem's Arg isn't a List or is empty.
+func defElemOperatorRef(elem *pg_query.DefElem) *string {
+	lst := elem.GetArg().GetList()
+	if lst == nil || len(lst.Items) == 0 {
+		return nil
+	}
+	parts := make([]string, 0, len(lst.Items))
+	for _, item := range lst.Items {
+		if sv := item.GetString_(); sv != nil {
+			parts = append(parts, sv.Sval)
+		}
+	}
+	if len(parts) == 0 {
+		return nil
+	}
+	ref := strings.Join(parts, ".")
+	return &ref
+}
+
 // joinQualName combines a schema+name pair into the single dotted string
 // Trigger.Function/Cast.Function/Operator.Function/TSParser.Functions/etc.
 // all use for dependency-edge lookups — schema omitted entirely when empty,
@@ -2823,6 +2848,30 @@ func (b *Builder) buildDefineStmt(ds *pg_query.DefineStmt, block pipeline.BlockA
 			op.Function = funcName
 			if funcSchema != "" {
 				op.Function = funcSchema + "." + funcName
+			}
+		}
+		if restrictSchema, restrictName := defElemQualifiedName(ds.Definition, "restrict"); restrictName != "" {
+			r := joinQualName(restrictSchema, restrictName)
+			op.Restrict = &r
+		}
+		if joinSchema, joinName := defElemQualifiedName(ds.Definition, "join"); joinName != "" {
+			j := joinQualName(joinSchema, joinName)
+			op.Join = &j
+		}
+		for _, de := range ds.Definition {
+			elem := de.GetDefElem()
+			if elem == nil {
+				continue
+			}
+			switch elem.Defname {
+			case "commutator":
+				op.Commutator = defElemOperatorRef(elem)
+			case "negator":
+				op.Negator = defElemOperatorRef(elem)
+			case "hashes":
+				op.Hashes = true
+			case "merges":
+				op.Merges = true
 			}
 		}
 		if block.Comment != nil {

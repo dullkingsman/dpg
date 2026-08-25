@@ -149,6 +149,29 @@ func BaseBodyHashInput(body string) string {
 	return baseAlterablePropRe.ReplaceAllString(body, "")
 }
 
+// operatorHintPropRe matches one "KEY = value" assignment for RESTRICT/JOIN/
+// COMMUTATOR/NEGATOR (COMMUTATOR/NEGATOR's value may itself be parenthesized,
+// OPERATOR(schema.symbol)) or a bare HASHES/MERGES keyword — RFC Section
+// 14.3's 6 optimizer-hint properties — inside an Operator's raw CREATE
+// OPERATOR options text. Each keyword may be double-quoted in the
+// deparsed/canonical form (JOIN in particular: it's a reserved SQL keyword,
+// so pg_query's deparser always renders it as "join" — confirmed via a
+// direct compile probe), hence the optional `"?` around each keyword. See
+// OperatorCoreBodyHashInput.
+var operatorHintPropRe = regexp.MustCompile(`(?i)"?\b(?:RESTRICT|JOIN)\b"?\s*=\s*[^,()]+|"?\b(?:COMMUTATOR|NEGATOR)\b"?\s*=\s*(?:OPERATOR\([^)]*\)|[^,()]+)|"?\b(?:HASHES|MERGES)\b"?`)
+
+// OperatorCoreBodyHashInput strips the 6 optimizer-hint properties' text out
+// of an Operator's raw Body before hashing it, the same "strip the
+// in-place-alterable bits before hashing" technique as BaseBodyHashInput —
+// so a hint-only change (handled instead by a targeted
+// ALTER OPERATOR ... SET (...), see ir.Operator.Restrict's doc comment)
+// doesn't also trip the core-definition DROP+CREATE comparison. Purely a
+// hash input — never rendered as SQL — so leftover punctuation from the
+// removal is harmless.
+func OperatorCoreBodyHashInput(body string) string {
+	return operatorHintPropRe.ReplaceAllString(body, "")
+}
+
 // Populate converts objects into SnapObjects and stores them in snap.
 func Populate(snap *pipeline.Snapshot, objects []pipeline.IRObject) error {
 	for _, obj := range objects {
@@ -315,9 +338,17 @@ func toSnapObject(obj pipeline.IRObject) *SnapObject {
 	case *ir.Operator:
 		return &SnapObject{Kind: "operator", Opaque: &SnapOpaque{
 			Kind: "operator", Schema: o.Schema, Name: o.Name,
-			Args:     ir.OperandsKey(o.LeftType, o.RightType),
-			BodyHash: sourceBodyHash(o.Body, o.Reconstructed),
-			Comment:  o.Comment,
+			Args:               ir.OperandsKey(o.LeftType, o.RightType),
+			BodyHash:           sourceBodyHash(o.Body, o.Reconstructed),
+			Comment:            o.Comment,
+			OperatorStructured: true,
+			OperatorRestrict:   o.Restrict,
+			OperatorJoin:       o.Join,
+			OperatorCommutator: o.Commutator,
+			OperatorNegator:    o.Negator,
+			OperatorHashes:     o.Hashes,
+			OperatorMerges:     o.Merges,
+			OperatorCoreHash:   sourceBodyHash(OperatorCoreBodyHashInput(o.Body), o.Reconstructed),
 		}}
 	case *ir.OperatorClass:
 		// Members/StorageType are populated unconditionally like OperatorFamily's

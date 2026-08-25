@@ -1501,7 +1501,32 @@ type Operator struct {
 	// function exists fails at apply time ("function ... does not exist"),
 	// and nothing else in the IR records this reference since Operator is
 	// otherwise fully opaque.
-	Function      string
+	Function string
+	// Restrict/Join are the qualified names of the RESTRICT/JOIN selectivity
+	// estimator functions (nil = not declared). Commutator/Negator are the
+	// referenced operator's dotted schema.symbol (schema-less when
+	// unqualified in source). Hashes/Merges are the bare HASHES/MERGES
+	// presence keywords. All six are RFC Section 14.3's optimizer-hint
+	// properties, structured here (rather than folded into the opaque Body
+	// hash, the one treatment every sibling opaque kind — FDW, Foreign
+	// Server, Collation, Cast, Statistics Object, Event Trigger — already
+	// got) so a hint-only change can route through a real
+	// ALTER OPERATOR ... SET (...) instead of forcing a DROP+CREATE.
+	//
+	// Real PostgreSQL's ALTER OPERATOR ... SET (confirmed live against a
+	// PostgreSQL 17 server) is asymmetric: RESTRICT/JOIN are freely
+	// re-settable and clearable (SET (RESTRICT = NONE)) in place; but
+	// COMMUTATOR/NEGATOR/HASHES/MERGES can only move from unset to set —
+	// changing (or clearing) an already-set value on any of those four is
+	// flatly rejected ("operator attribute ... cannot be changed if it has
+	// already been set"), so that specific transition still needs the
+	// generic DROP+CREATE path (see diffOperator).
+	Restrict      *string
+	Join          *string
+	Commutator    *string
+	Negator       *string
+	Hashes        bool
+	Merges        bool
 	Comment       *string // see EventTrigger.Comment
 	Body          string
 	Reconstructed bool // Body rebuilt from the catalog; see Tablespace.Reconstructed

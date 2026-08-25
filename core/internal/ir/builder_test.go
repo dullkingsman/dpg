@@ -3846,6 +3846,57 @@ func TestBuildOperatorBinaryOperandTypes(t *testing.T) {
 	}
 }
 
+// TestBuildOperatorOptimizerHints guards RFC Section 14.3's optimizer-hint
+// properties — previously Operator had no structured fields for these at
+// all, so diffing always routed through the generic whole-body hash
+// compare, forcing DROP+CREATE for even a hint-only edit.
+func TestBuildOperatorOptimizerHints(t *testing.T) {
+	obj := buildObject(t, pipeline.KindOperator,
+		`public.=== (LEFTARG = integer, RIGHTARG = integer, PROCEDURE = my_lt,
+			COMMUTATOR = OPERATOR(public.==!=), NEGATOR = <>!,
+			RESTRICT = scalarltsel, JOIN = scalarltjoinsel, HASHES, MERGES)`, ``)
+	op, ok := obj.(*ir.Operator)
+	if !ok {
+		t.Fatalf("expected *ir.Operator, got %T", obj)
+	}
+	if op.Restrict == nil || *op.Restrict != "scalarltsel" {
+		t.Errorf("Restrict: got %v, want scalarltsel", op.Restrict)
+	}
+	if op.Join == nil || *op.Join != "scalarltjoinsel" {
+		t.Errorf("Join: got %v, want scalarltjoinsel", op.Join)
+	}
+	if op.Commutator == nil || *op.Commutator != "public.==!=" {
+		t.Errorf("Commutator: got %v, want public.==!=", op.Commutator)
+	}
+	if op.Negator == nil || *op.Negator != "<>!" {
+		t.Errorf("Negator: got %v, want <>! (unqualified)", op.Negator)
+	}
+	if !op.Hashes {
+		t.Error("expected Hashes = true")
+	}
+	if !op.Merges {
+		t.Error("expected Merges = true")
+	}
+}
+
+// TestBuildOperatorNoOptimizerHints guards the common case (no hints
+// declared at all) leaving every hint field at its nil/false zero value,
+// not some accidentally-inferred default.
+func TestBuildOperatorNoOptimizerHints(t *testing.T) {
+	obj := buildObject(t, pipeline.KindOperator,
+		`public.=== (LEFTARG = integer, RIGHTARG = integer, PROCEDURE = my_lt)`, ``)
+	op, ok := obj.(*ir.Operator)
+	if !ok {
+		t.Fatalf("expected *ir.Operator, got %T", obj)
+	}
+	if op.Restrict != nil || op.Join != nil || op.Commutator != nil || op.Negator != nil {
+		t.Errorf("expected all hint refs nil, got Restrict=%v Join=%v Commutator=%v Negator=%v", op.Restrict, op.Join, op.Commutator, op.Negator)
+	}
+	if op.Hashes || op.Merges {
+		t.Errorf("expected Hashes/Merges false, got %v/%v", op.Hashes, op.Merges)
+	}
+}
+
 // TestBuildOperatorPrefixOperandTypes proves a unary (prefix) operator, which
 // omits LEFTARG entirely, leaves LeftType nil rather than defaulting to a
 // zero value that could be mistaken for a real type.

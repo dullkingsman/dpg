@@ -2027,6 +2027,129 @@ func diffCast(o *ir.Cast, snap *snapshot.SnapOpaque) ([]pipeline.DiffOp, error) 
 	return nil, nil
 }
 
+// operatorHintRef renders a Commutator/Negator dotted schema.symbol back
+// into ALTER/CREATE OPERATOR's own reference syntax: OPERATOR(schema.symbol)
+// when schema-qualified (confirmed live that this wrapper is required in
+// both CREATE and ALTER OPERATOR SET contexts — an operator symbol is not a
+// valid identifier, so a bare "schema.symbol" would parse wrong), or the
+// bare symbol when unqualified.
+func operatorHintRef(ref string) string {
+	if idx := strings.LastIndex(ref, "."); idx >= 0 {
+		return fmt.Sprintf("OPERATOR(%s.%s)", quoteIdent(ref[:idx]), ref[idx+1:])
+	}
+	return ref
+}
+
+// diffOperator implements RFC Section 14.3's optimizer-hint diffing: a
+// change to RESTRICT/JOIN/COMMUTATOR/NEGATOR/HASHES/MERGES previously always
+// forced a DROP+CREATE via the generic opaque body-hash compare (Operator
+// was the one opaque kind without dedicated structured fields — every
+// sibling, FDW/Foreign Server/Collation/Cast/Statistics Object/Event
+// Trigger, already got them for exactly this reason).
+//
+// Real PostgreSQL's ALTER OPERATOR ... SET is asymmetric (confirmed live
+// against a PostgreSQL 17 server): RESTRICT/JOIN are freely re-settable and
+// clearable in place (SET (RESTRICT = NONE)); COMMUTATOR/NEGATOR/HASHES/
+// MERGES can only move from unset to set — PostgreSQL flatly rejects
+// changing (or clearing) an already-set value on any of those four
+// ("operator attribute ... cannot be changed if it has already been set"),
+// so that specific transition still routes through DROP+CREATE below.
+func diffOperator(o *ir.Operator, snap *snapshot.SnapOpaque) ([]pipeline.DiffOp, error) {
+	pos := o.SrcPos
+	name := o.QualifiedName()
+
+	commentOps := func() []pipeline.DiffOp {
+		var ops []pipeline.DiffOp
+		if !ptrEq(o.Comment, snap.Comment) {
+			if sql := commentOnOpaqueSQL("operator", o.Schema, o.Name, snap.Args, "", o.Comment); sql != "" {
+				ops = append(ops, safeOp(sql, pos))
+			}
+		}
+		return ops
+	}
+
+	// Stale snapshot predating these structured fields — same self-healing
+	// guard pattern as diffCast/diffCollation's identical checks.
+	if !snap.OperatorStructured {
+		ops := commentOps()
+		if len(ops) == 0 {
+			ops = append(ops, safeOp(fmt.Sprintf("-- refresh snapshot metadata for operator %s", name), pos))
+		}
+		return ops, nil
+	}
+
+	// Core-definition change (Function, operand types, or anything else in
+	// Body besides the 6 hint properties) still needs DROP+CREATE — detected
+	// via OperatorCoreHash (Body with the hint properties' text stripped
+	// first, see OperatorCoreBodyHashInput), not the plain whole-Body hash,
+	// so a hint-only change doesn't also trip this branch. Same technique,
+	// same reasoning as diffType's BASE-type BaseImmutableHash check.
+	coreHash := ""
+	if o.Body != "" && !o.Reconstructed {
+		sum := sha256.Sum256([]byte(strings.TrimSpace(snapshot.OperatorCoreBodyHashInput(o.Body))))
+		coreHash = fmt.Sprintf("%x", sum)
+	}
+	coreChanged := coreHash != "" && snap.OperatorCoreHash != "" && coreHash != snap.OperatorCoreHash
+
+	// Commutator/Negator/Hashes/Merges are one-directional (see doc comment
+	// above): only unset->set can go through ALTER OPERATOR SET, so a
+	// change to an already-set value on any of these four also forces
+	// DROP+CREATE even though it wouldn't otherwise trip the core-hash
+	// check (they're part of the hint-stripped text, not the core).
+	commutatorBreaking := snap.OperatorCommutator != nil && !ptrEq(o.Commutator, snap.OperatorCommutator)
+	negatorBreaking := snap.OperatorNegator != nil && !ptrEq(o.Negator, snap.OperatorNegator)
+	hashesBreaking := snap.OperatorHashes && !o.Hashes
+	mergesBreaking := snap.OperatorMerges && !o.Merges
+
+	if coreChanged || commutatorBreaking || negatorBreaking || hashesBreaking || mergesBreaking {
+		ops := dropObject(&snapshot.SnapObject{Kind: snap.Kind, Opaque: snap})
+		createOps, err := createOpaque(name, o.Body, "OPERATOR", o.Schema, pos)
+		if err != nil {
+			return nil, err
+		}
+		ops = append(ops, createOps...)
+		return appendCommentOp(ops, nil, "operator", o.Schema, o.Name, snap.Args, "", o.Comment, pos)
+	}
+
+	var setClauses []string
+	if !ptrEq(o.Restrict, snap.OperatorRestrict) {
+		if o.Restrict != nil {
+			setClauses = append(setClauses, "RESTRICT = "+*o.Restrict)
+		} else {
+			setClauses = append(setClauses, "RESTRICT = NONE")
+		}
+	}
+	if !ptrEq(o.Join, snap.OperatorJoin) {
+		if o.Join != nil {
+			setClauses = append(setClauses, "JOIN = "+*o.Join)
+		} else {
+			setClauses = append(setClauses, "JOIN = NONE")
+		}
+	}
+	if o.Commutator != nil && snap.OperatorCommutator == nil {
+		setClauses = append(setClauses, "COMMUTATOR = "+operatorHintRef(*o.Commutator))
+	}
+	if o.Negator != nil && snap.OperatorNegator == nil {
+		setClauses = append(setClauses, "NEGATOR = "+operatorHintRef(*o.Negator))
+	}
+	if o.Hashes && !snap.OperatorHashes {
+		setClauses = append(setClauses, "HASHES")
+	}
+	if o.Merges && !snap.OperatorMerges {
+		setClauses = append(setClauses, "MERGES")
+	}
+
+	var ops []pipeline.DiffOp
+	if len(setClauses) > 0 {
+		ops = append(ops, safeOp(
+			fmt.Sprintf("ALTER OPERATOR %s (%s) SET (%s);", qualOperatorIdent(o.Schema, o.Name), snap.Args, strings.Join(setClauses, ", ")),
+			pos,
+		))
+	}
+	ops = append(ops, commentOps()...)
+	return ops, nil
+}
+
 // diffEventTrigger implements RFC §14.1's structured diffing: PostgreSQL has
 // no ALTER EVENT TRIGGER for Event/Tags/Function (only ENABLE/DISABLE/
 // OWNER TO/RENAME TO, none modeled here), so any change to those three
@@ -4744,7 +4867,7 @@ func diffObject(desired pipeline.IRObject, snap *snapshot.SnapObject, fullSnap *
 		if snap.Opaque == nil {
 			return nil, nil
 		}
-		return diffOpaqueIR(o.QualifiedName(), o.Body, o.Reconstructed, o.Comment, snap.Opaque, o.SrcPos)
+		return diffOperator(o, snap.Opaque)
 	case *ir.OperatorClass:
 		if snap.Opaque == nil {
 			return nil, nil
