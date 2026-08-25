@@ -382,6 +382,7 @@ FROM   pg_proc p
 JOIN   pg_namespace n ON n.oid = p.pronamespace,
        LATERAL aclexplode(p.proacl) a
 WHERE  p.prokind = 'a'
+AND    a.grantor <> a.grantee
 AND    n.nspname NOT IN ('pg_catalog','information_schema','pg_toast')
 ORDER  BY n.nspname, p.proname, args, grantee, a.privilege_type`
 
@@ -679,6 +680,7 @@ FROM   pg_namespace n,
        LATERAL aclexplode(n.nspacl) a
 WHERE  n.nspname NOT LIKE 'pg_%'
 AND    n.nspname != 'information_schema'
+AND    a.grantor <> a.grantee
 ORDER  BY n.nspname, grantee, a.privilege_type`
 
 	rs, err := conn.QueryRows(ctx, q)
@@ -2393,6 +2395,7 @@ FROM   pg_type t
 JOIN   pg_namespace n ON n.oid = t.typnamespace,
        LATERAL aclexplode(t.typacl) a
 WHERE  t.typtype IN ('e','c','r','d','b')
+AND    a.grantor <> a.grantee
 AND    n.nspname NOT IN ('pg_catalog','information_schema','pg_toast')
 ORDER  BY n.nspname, t.typname, grantee, a.privilege_type`
 
@@ -3004,6 +3007,7 @@ FROM   pg_class c
 JOIN   pg_namespace n ON n.oid = c.relnamespace,
        LATERAL aclexplode(c.relacl) a
 WHERE  c.relkind = 'S'
+AND    a.grantor <> a.grantee
 AND    n.nspname NOT IN ('pg_catalog','information_schema','pg_toast')
 ORDER  BY n.nspname, c.relname, grantee, a.privilege_type`
 
@@ -3367,6 +3371,19 @@ func introspectTableGrants(ctx context.Context, conn pipeline.Querier, idx map[s
 	// aclexplode(NULL) returns 0 rows on PG14+, so no COALESCE needed.
 	// An empty-literal COALESCE ('{}'::aclitem[]) produces ARR_NDIM=0, which
 	// PG17 rejects with "ACL arrays must be one-dimensional".
+	//
+	// grantor <> grantee excludes the self-grant PostgreSQL materializes for
+	// the object owner the moment ANY explicit GRANT touches the object
+	// (confirmed live: an untouched table's relacl is NULL, but after a
+	// single unrelated GRANT it gains a real "owner=<full-privs>/owner"
+	// aclitem alongside the explicit one) — without this, that synthesized
+	// entry reads back as an "extra" live grant and diffGrantSet proposes
+	// REVOKEing it, contradicting RFC Section 11.2's "does NOT report extra
+	// grants present live but absent from DPG source". introspectColumnGrants
+	// already carried this guard; every other object kind's *Grants query
+	// needs the identical filter (same PostgreSQL ACL mechanism, not
+	// table-specific — confirmed live across sequence/function/schema/type/
+	// FDW too).
 	const q = `
 SELECT n.nspname, c.relname,
        CASE WHEN a.grantee = 0 THEN 'PUBLIC' ELSE pg_get_userbyid(a.grantee) END AS grantee,
@@ -3376,6 +3393,7 @@ JOIN   pg_namespace n ON n.oid = c.relnamespace,
        LATERAL aclexplode(c.relacl) a
 WHERE  c.relkind IN ('r', 'p', 'f')
 AND    NOT c.relispartition
+AND    a.grantor <> a.grantee
 AND    n.nspname NOT IN ('pg_catalog','information_schema','pg_toast')
 ORDER  BY n.nspname, c.relname, grantee, a.privilege_type`
 
@@ -3441,6 +3459,7 @@ FROM   pg_class c
 JOIN   pg_namespace n ON n.oid = c.relnamespace,
        LATERAL aclexplode(c.relacl) a
 WHERE  c.relkind IN ('v', 'm')
+AND    a.grantor <> a.grantee
 AND    n.nspname NOT IN ('pg_catalog','information_schema','pg_toast')
 ORDER  BY n.nspname, c.relname, grantee, a.privilege_type`
 
@@ -3507,6 +3526,7 @@ FROM   pg_proc p
 JOIN   pg_namespace n ON n.oid = p.pronamespace,
        LATERAL aclexplode(p.proacl) a
 WHERE  p.prokind = 'f'
+AND    a.grantor <> a.grantee
 AND    n.nspname NOT IN ('pg_catalog','information_schema','pg_toast')
 ORDER  BY n.nspname, p.proname, args, grantee, a.privilege_type`
 
@@ -3584,6 +3604,7 @@ FROM   pg_proc p
 JOIN   pg_namespace n ON n.oid = p.pronamespace,
        LATERAL aclexplode(p.proacl) a
 WHERE  p.prokind = 'p'
+AND    a.grantor <> a.grantee
 AND    n.nspname NOT IN ('pg_catalog','information_schema','pg_toast')
 ORDER  BY n.nspname, p.proname, args, grantee, a.privilege_type`
 

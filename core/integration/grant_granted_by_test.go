@@ -97,18 +97,15 @@ TABLE orders (id INT) {
 
 	// The offline dpg plan path (desired vs. the stored snapshot of last-
 	// declared state, not live introspection) must already be a no-op for
-	// the unchanged declaration. Deliberately not checking live-
-	// introspection drift here (e.g. via assertNoLiveDrift): doing so
-	// independently surfaced a real, pre-existing, unrelated gap —
-	// introspectTableGrants has no grantor<>grantee filter (unlike
-	// introspectColumnGrants), so the object owner's own privileges, which
-	// PostgreSQL materializes into a real aclitem row the moment any
-	// explicit GRANT touches the table (confirmed live via direct psql),
-	// get read back as an "extra" live grant and diffGrantSet's live-
-	// comparison path proposes revoking it — contradicting RFC Section
-	// 11.2's own explicit "does NOT report extra grants present in the
-	// live catalog but absent from DPG source" text. Flagged separately;
-	// out of scope for GRANTED BY itself.
+	// the unchanged declaration. Deliberately not checking live-introspection
+	// drift here (e.g. via assertNoLiveDrift): introspectTableGrants never
+	// captures grantor into ir.Grant.GrantedBy at all (a separate, still-open
+	// gap from the self-grant filter fixed alongside this test — see
+	// TestRoundtripTableGrantSelfGrantNoLiveDrift), so a live-introspected
+	// Grant for this table always has GrantedBy == nil; diffGrantSet's
+	// "declared, so managed" rule then sees the declared GRANTED BY
+	// CURRENT_USER as mismatched against that nil and proposes a spurious
+	// REVOKE+GRANT. Flagged separately; out of scope for GRANTED BY itself.
 	desired, _, err := compiler.Compile([]string{f}, dir, pipeline.Default)
 	if err != nil {
 		t.Fatalf("compile: %v", err)
@@ -137,4 +134,67 @@ TABLE orders (id INT) {
 	if _, ok := grantorOf("reader"); ok {
 		t.Fatal("reader still has a live SELECT grant on orders after an explicit REVOCATIONS entry with GRANTED BY — REVOKE never applied")
 	}
+}
+
+// TestRoundtripTableGrantSelfGrantNoLiveDrift guards a bug found flagged
+// (not by GRANTED BY itself, which needs a separate, still-open gap in
+// introspectTableGrants worked around above): introspectTableGrants had no
+// grantor<>grantee filter, unlike introspectColumnGrants. PostgreSQL
+// materializes the object owner's own full privilege set into a real
+// aclitem row the moment ANY explicit GRANT touches a table (confirmed live
+// via direct psql: an untouched table's relacl is NULL, but gains a real
+// "owner=<privs>/owner" entry alongside the first explicit GRANT); without
+// the filter, introspection read that synthesized self-grant back as an
+// "extra" live grant and diffGrantSet's live-comparison path proposed
+// REVOKEing it — contradicting RFC Section 11.2's own explicit "does NOT
+// report extra grants present in the live catalog but absent from DPG
+// source" text. This test uses a plain GRANT with no GRANTED BY, so it
+// isolates the self-grant fix from the separate GrantedBy-introspection gap.
+func TestRoundtripTableGrantSelfGrantNoLiveDrift(t *testing.T) {
+	connStr := testpg.Start(t)
+	ctx := context.Background()
+
+	differ := diff.New()
+	emitter := emit.New()
+	applyExec := executor.New()
+	store := newMemStore()
+
+	conn, err := executor.Connect(ctx, connStr)
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	defer conn.Close(ctx)
+
+	dir := t.TempDir()
+	f := filepath.Join(dir, "schema.dpg")
+
+	src := `ROLE app_service NOLOGIN;
+
+TABLE widgets (id INT) {
+    GRANTS { SELECT TO app_service; }
+}`
+	if err := os.WriteFile(f, []byte(src), 0o644); err != nil {
+		t.Fatalf("write schema: %v", err)
+	}
+	applyFixture(t, ctx, conn, []string{f}, dir, differ, emitter, applyExec, store)
+
+	selfGrantRows, err := conn.QueryRows(ctx,
+		`SELECT count(*) FROM pg_class c, pg_namespace n, LATERAL aclexplode(c.relacl) acl
+		 WHERE c.relnamespace = n.oid AND n.nspname = 'public' AND c.relname = 'widgets'
+		 AND acl.grantor = acl.grantee`)
+	if err != nil {
+		t.Fatalf("query self-grant count: %v", err)
+	}
+	defer selfGrantRows.Close()
+	if !selfGrantRows.Next() {
+		t.Fatal("count query returned no row")
+	}
+	var selfGrantCount int
+	_ = selfGrantRows.Scan(&selfGrantCount)
+	selfGrantRows.Close()
+	if selfGrantCount == 0 {
+		t.Fatal("expected PostgreSQL to have materialized an owner self-grant on widgets after an explicit GRANT — test premise invalid")
+	}
+
+	assertNoLiveDrift(t, ctx, conn, []string{f}, dir, differ, store)
 }

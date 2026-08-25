@@ -273,12 +273,17 @@ ORDER  BY spcname`
 // columns — shared by Tablespace/ForeignDataWrapper/ForeignServer (RFC audit
 // items #4/#5/#6), mirroring introspectTableGrants' established shape.
 func introspectSimpleGrants(ctx context.Context, conn pipeline.Querier, table, nameCol, aclCol string, addGrant func(name string, g ir.Grant)) error {
+	// grantor <> grantee excludes the owner self-grant PostgreSQL
+	// materializes the moment any explicit GRANT touches the object — same
+	// fix as introspectTableGrants' identical guard, confirmed live to
+	// apply identically to FDW/server/tablespace ACLs.
 	q := fmt.Sprintf(`
 SELECT t.%s,
        CASE WHEN a.grantee = 0 THEN 'PUBLIC' ELSE pg_get_userbyid(a.grantee) END AS grantee,
        a.privilege_type, a.is_grantable
 FROM   %s t,
        LATERAL aclexplode(t.%s) a
+WHERE  a.grantor <> a.grantee
 ORDER  BY t.%s, grantee, a.privilege_type`, nameCol, table, aclCol, nameCol)
 
 	rs, err := conn.QueryRows(ctx, q)
