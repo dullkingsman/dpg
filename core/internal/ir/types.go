@@ -170,6 +170,12 @@ type Constraint struct {
 	// actually captured for either kind before now. Only meaningful for
 	// Type == "NOT NULL" currently.
 	NoInherit bool
+	// NotEnforced is PostgreSQL 18+'s NOT ENFORCED modifier (RFC Section
+	// 7.2/7.3) — the constraint is catalogued and visible to tooling but
+	// never checked by PostgreSQL itself. Only meaningful for Type ==
+	// "CHECK" or "FOREIGN KEY"; zero-value (false) matches PostgreSQL's
+	// own default (ENFORCED) when the clause is omitted.
+	NotEnforced bool
 	// CheckColumn is the single column PostgreSQL's own auto-naming
 	// algorithm considers this CHECK constraint's own (heap.c's
 	// AddRelationNewConstraints: pull_var_clause over the expression, then

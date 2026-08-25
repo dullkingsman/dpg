@@ -171,6 +171,9 @@ type ConstraintDef struct {
 	Name     Identifier
 	Expr     RawExpr
 	NotValid bool
+	// NotEnforced is PostgreSQL 18+'s NOT ENFORCED modifier (RFC Section
+	// 7.3), applicable to CHECK/FOREIGN KEY only — see ir.Constraint.NotEnforced.
+	NotEnforced bool
 	// RenamedFrom names the constraint's prior identity (RENAMED FROM, RFC
 	// Section 7.3) — a bare identifier, matched within the same table's
 	// constraint list; no cross-schema form, same as Index's (a

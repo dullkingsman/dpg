@@ -341,6 +341,10 @@ func (b *Builder) buildColumn(cd *pg_query.ColumnDef, pos pipeline.SourcePos) (*
 	}
 
 	var promoted []*Constraint
+	// lastPromoted tracks the most recently promoted table-level
+	// Constraint, for the trailing-attribute nodes handled by the
+	// CONSTR_ATTR_* case below to attach themselves to.
+	var lastPromoted *Constraint
 
 	for _, cn := range cd.Constraints {
 		cst := cn.GetConstraint()
@@ -348,6 +352,50 @@ func (b *Builder) buildColumn(cd *pg_query.ColumnDef, pos pipeline.SourcePos) (*
 			continue
 		}
 		switch cst.Contype {
+		// PostgreSQL's own grammar parses a trailing DEFERRABLE/NOT
+		// DEFERRABLE/INITIALLY DEFERRED/INITIALLY IMMEDIATE/ENFORCED/NOT
+		// ENFORCED clause after an inline col-constraint (e.g. "REFERENCES
+		// t (id) DEFERRABLE INITIALLY DEFERRED", "CHECK (...) NOT
+		// ENFORCED") as its OWN separate Constraint node with one of these
+		// six CONSTR_ATTR_* contypes — confirmed live — not as fields on
+		// the real constraint node it modifies (real PostgreSQL's own
+		// semantic analysis, transformConstraintAttrs, merges them
+		// server-side; pg_query only parses, so this codebase must do the
+		// same merge itself). Found via a NOT ENFORCED test unexpectedly
+		// failing: cst.IsEnforced on the CHECK node itself was always true
+		// regardless of a trailing NOT ENFORCED clause, because the real
+		// value lives on this separate node instead. The identical
+		// oversight already existed for inline FOREIGN KEY ... DEFERRABLE/
+		// INITIALLY DEFERRED (confirmed live the same way) — cst.Deferrable/
+		// cst.Initdeferred on the FOREIGN KEY node were always false for an
+		// inline declaration, a real pre-existing bug this fixes as one
+		// mechanism rather than two.
+		case pg_query.ConstrType_CONSTR_ATTR_DEFERRABLE:
+			if lastPromoted != nil {
+				lastPromoted.Deferrable = true
+			}
+		case pg_query.ConstrType_CONSTR_ATTR_NOT_DEFERRABLE:
+			if lastPromoted != nil {
+				lastPromoted.Deferrable = false
+				lastPromoted.InitiallyDeferred = false
+			}
+		case pg_query.ConstrType_CONSTR_ATTR_DEFERRED:
+			if lastPromoted != nil {
+				lastPromoted.InitiallyDeferred = true
+			}
+		case pg_query.ConstrType_CONSTR_ATTR_IMMEDIATE:
+			if lastPromoted != nil {
+				lastPromoted.InitiallyDeferred = false
+			}
+		case pg_query.ConstrType_CONSTR_ATTR_ENFORCED:
+			if lastPromoted != nil {
+				lastPromoted.NotEnforced = false
+			}
+		case pg_query.ConstrType_CONSTR_ATTR_NOT_ENFORCED:
+			if lastPromoted != nil {
+				lastPromoted.NotEnforced = true
+			}
+
 		case pg_query.ConstrType_CONSTR_NOTNULL:
 			col.NotNull = true
 			// A bare "NOT NULL" (no CONSTRAINT keyword, no NO INHERIT) stays
@@ -375,6 +423,7 @@ func (b *Builder) buildColumn(cd *pg_query.ColumnDef, pos pipeline.SourcePos) (*
 					tc.Expr += " NO INHERIT"
 				}
 				promoted = append(promoted, tc)
+				lastPromoted = tc
 			}
 
 		case pg_query.ConstrType_CONSTR_DEFAULT:
@@ -412,6 +461,7 @@ func (b *Builder) buildColumn(cd *pg_query.ColumnDef, pos pipeline.SourcePos) (*
 			}
 			tc.Expr = "PRIMARY KEY (" + quoteIdent(cd.Colname) + ")"
 			promoted = append(promoted, tc)
+			lastPromoted = tc
 
 		case pg_query.ConstrType_CONSTR_UNIQUE:
 			// Inline UNIQUE — promote to a table-level constraint.
@@ -429,6 +479,7 @@ func (b *Builder) buildColumn(cd *pg_query.ColumnDef, pos pipeline.SourcePos) (*
 			}
 			tc.Expr = "UNIQUE " + nd + "(" + quoteIdent(cd.Colname) + ")"
 			promoted = append(promoted, tc)
+			lastPromoted = tc
 
 		case pg_query.ConstrType_CONSTR_CHECK:
 			// Inline CHECK — promote to a table-level constraint.
@@ -443,9 +494,11 @@ func (b *Builder) buildColumn(cd *pg_query.ColumnDef, pos pipeline.SourcePos) (*
 					Columns:     []string{cd.Colname},
 					CheckColumn: checkExprSingleColumn(cst.RawExpr),
 					Expr:        "CHECK (" + expr + ")",
+					NotEnforced: !cst.IsEnforced,
 					Pos:         pos,
 				}
 				promoted = append(promoted, tc)
+				lastPromoted = tc
 			}
 
 		case pg_query.ConstrType_CONSTR_FOREIGN:
@@ -487,6 +540,7 @@ func (b *Builder) buildColumn(cd *pg_query.ColumnDef, pos pipeline.SourcePos) (*
 				Columns:           []string{cd.Colname},
 				Deferrable:        cst.Deferrable,
 				InitiallyDeferred: cst.Initdeferred,
+				NotEnforced:       !cst.IsEnforced,
 				Expr:              fkBuf.String(),
 				RefColumns:        refCols,
 				Pos:               pos,
@@ -496,6 +550,25 @@ func (b *Builder) buildColumn(cd *pg_query.ColumnDef, pos pipeline.SourcePos) (*
 				tc.RefTable = cst.Pktable.Relname
 			}
 			promoted = append(promoted, tc)
+			lastPromoted = tc
+		}
+	}
+
+	// A FOREIGN KEY's Expr text is built once, inline, from cst.Deferrable/
+	// cst.Initdeferred at the moment its own node is processed above — but
+	// a trailing CONSTR_ATTR_DEFERRABLE/DEFERRED node (see the case above)
+	// is only discovered AFTER that text is already finalized, so a
+	// genuinely deferrable inline FK would otherwise build with correct
+	// Constraint.Deferrable/InitiallyDeferred fields (used for diffing) but
+	// an Expr silently missing the DEFERRABLE clause (used for the actual
+	// CREATE TABLE SQL) — a real, previously-silent rendering bug this
+	// closes as part of the same fix.
+	for _, tc := range promoted {
+		if tc.Type == "FOREIGN KEY" && tc.Deferrable && !strings.Contains(tc.Expr, "DEFERRABLE") {
+			tc.Expr += " DEFERRABLE"
+			if tc.InitiallyDeferred {
+				tc.Expr += " INITIALLY DEFERRED"
+			}
 		}
 	}
 
@@ -583,6 +656,7 @@ func buildConstraint(c *pg_query.Constraint, pos pipeline.SourcePos) *Constraint
 
 	case pg_query.ConstrType_CONSTR_CHECK:
 		cst.Type = "CHECK"
+		cst.NotEnforced = !c.IsEnforced
 		if c.RawExpr != nil {
 			expr := nodeToText(c.RawExpr)
 			cst.Expr = "CHECK (" + expr + ")"
@@ -610,6 +684,7 @@ func buildConstraint(c *pg_query.Constraint, pos pipeline.SourcePos) *Constraint
 
 	case pg_query.ConstrType_CONSTR_FOREIGN:
 		cst.Type = "FOREIGN KEY"
+		cst.NotEnforced = !c.IsEnforced
 		localCols := nodeListToNames(c.FkAttrs)
 		refCols := nodeListToNames(c.PkAttrs)
 		cst.Columns = localCols
@@ -1145,6 +1220,7 @@ func mergeTableBlock(tbl *Table, block pipeline.BlockAST) error {
 			Type:        classifyConstraintExprType(cst.Expr.Text),
 			Expr:        cst.Expr.Text,
 			NotValid:    cst.NotValid,
+			NotEnforced: cst.NotEnforced,
 			RenamedFrom: cst.RenamedFrom,
 			Pos:         cst.Pos,
 		}

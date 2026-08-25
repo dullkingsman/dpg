@@ -2342,6 +2342,268 @@ func TestDiffNotNullConstraintRenameKeptStillNeedsDropRecreate(t *testing.T) {
 	}
 }
 
+// TestDiffAddCheckNotEnforced guards RFC Section 7.2's ENFORCED/NOT
+// ENFORCED (PostgreSQL 18+, CHECK/FOREIGN KEY only): a brand-new NOT
+// ENFORCED CHECK constraint emits ADD CONSTRAINT ... NOT ENFORCED.
+func TestDiffAddCheckNotEnforced(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.widgets", &snapshot.SnapObject{
+		Kind: "table",
+		Table: &snapshot.SnapTable{
+			Schema:  "public",
+			Name:    "widgets",
+			Columns: []snapshot.SnapColumn{{Name: "amount", Type: "numeric"}},
+		},
+	})
+	desired := []pipeline.IRObject{
+		&ir.Table{
+			Schema:  "public",
+			Name:    "widgets",
+			Columns: []*ir.Column{{Name: "amount", Type: ir.TypeRef{Name: "numeric"}}},
+			Constraints: []*ir.Constraint{
+				{Name: "ck", Type: "CHECK", Columns: []string{"amount"}, Expr: "CHECK (amount > 0)", NotEnforced: true},
+			},
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var addOp pipeline.DiffOp
+	for _, o := range ops {
+		if strings.Contains(o.SQL(), "ADD CONSTRAINT") {
+			addOp = o
+		}
+	}
+	if addOp == nil {
+		t.Fatalf("expected an ADD CONSTRAINT op, got: %v", sqlList(ops))
+	}
+	if !strings.Contains(addOp.SQL(), `ADD CONSTRAINT "ck" CHECK (amount > 0) NOT ENFORCED`) {
+		t.Errorf("unexpected SQL: %s", addOp.SQL())
+	}
+}
+
+// TestDiffCheckEnforcedChangeRecreates guards the CHECK half of #38's
+// diffing: real PostgreSQL has no ALTER path for a CHECK constraint's
+// ENFORCED/NOT ENFORCED at all (confirmed live: "cannot alter
+// enforceability of constraint ... is not a foreign key constraint"), so a
+// change must drop and recreate it.
+func TestDiffCheckEnforcedChangeRecreates(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.widgets", &snapshot.SnapObject{
+		Kind: "table",
+		Table: &snapshot.SnapTable{
+			Schema:  "public",
+			Name:    "widgets",
+			Columns: []snapshot.SnapColumn{{Name: "amount", Type: "numeric"}},
+			Constraints: []snapshot.SnapConstraint{
+				{Name: "ck", Type: "CHECK", Expr: "CHECK (amount > 0)", NotEnforced: false},
+			},
+		},
+	})
+	desired := []pipeline.IRObject{
+		&ir.Table{
+			Schema:  "public",
+			Name:    "widgets",
+			Columns: []*ir.Column{{Name: "amount", Type: ir.TypeRef{Name: "numeric"}}},
+			Constraints: []*ir.Constraint{
+				{Name: "ck", Type: "CHECK", Columns: []string{"amount"}, Expr: "CHECK (amount > 0)", NotEnforced: true},
+			},
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var dropOp, addOp pipeline.DiffOp
+	for _, o := range ops {
+		if strings.Contains(o.SQL(), "ALTER CONSTRAINT") {
+			t.Errorf("CHECK ENFORCED change must not use ALTER CONSTRAINT (real PostgreSQL rejects it), got: %s", o.SQL())
+		}
+		if strings.Contains(o.SQL(), "DROP CONSTRAINT") {
+			dropOp = o
+		}
+		if strings.Contains(o.SQL(), "ADD CONSTRAINT") {
+			addOp = o
+		}
+	}
+	if dropOp == nil || addOp == nil {
+		t.Fatalf("expected DROP CONSTRAINT + ADD CONSTRAINT, got: %v", sqlList(ops))
+	}
+	if !strings.Contains(addOp.SQL(), "NOT ENFORCED") {
+		t.Errorf("re-added constraint missing NOT ENFORCED: %s", addOp.SQL())
+	}
+}
+
+// TestDiffFKEnforcedChangeUsesAlterConstraint guards the FOREIGN KEY half:
+// real PostgreSQL DOES support ALTER CONSTRAINT ENFORCED/NOT ENFORCED for
+// FOREIGN KEY (confirmed live, unlike CHECK), so this must be a targeted
+// SAFE ALTER, not a drop-and-recreate.
+func TestDiffFKEnforcedChangeUsesAlterConstraint(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.orders", &snapshot.SnapObject{
+		Kind: "table",
+		Table: &snapshot.SnapTable{
+			Schema: "public",
+			Name:   "orders",
+			Columns: []snapshot.SnapColumn{
+				{Name: "id", Type: "bigint"},
+				{Name: "parent_id", Type: "bigint"},
+			},
+			Constraints: []snapshot.SnapConstraint{
+				{Name: "fk_parent", Type: "FOREIGN KEY", Expr: `FOREIGN KEY ("parent_id") REFERENCES "orders" ("id")`, NotEnforced: false},
+			},
+		},
+	})
+	desired := []pipeline.IRObject{
+		&ir.Table{
+			Schema: "public",
+			Name:   "orders",
+			Columns: []*ir.Column{
+				{Name: "id", Type: ir.TypeRef{Name: "bigint"}},
+				{Name: "parent_id", Type: ir.TypeRef{Name: "bigint"}},
+			},
+			Constraints: []*ir.Constraint{
+				{Name: "fk_parent", Type: "FOREIGN KEY", Columns: []string{"parent_id"}, Expr: `FOREIGN KEY ("parent_id") REFERENCES "orders" ("id")`, NotEnforced: true},
+			},
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var alterOp pipeline.DiffOp
+	for _, o := range ops {
+		if strings.Contains(o.SQL(), "DROP CONSTRAINT") || strings.Contains(o.SQL(), "ADD CONSTRAINT") {
+			t.Errorf("FK ENFORCED-only change should not drop/re-add the constraint, got: %v", sqlList(ops))
+		}
+		if strings.Contains(o.SQL(), "ALTER CONSTRAINT") {
+			alterOp = o
+		}
+	}
+	if alterOp == nil {
+		t.Fatalf("expected an ALTER CONSTRAINT op, got: %v", sqlList(ops))
+	}
+	if !strings.Contains(alterOp.SQL(), `ALTER CONSTRAINT "fk_parent" NOT ENFORCED`) {
+		t.Errorf("unexpected SQL: %s", alterOp.SQL())
+	}
+	if alterOp.Safety() != pipeline.Safe {
+		t.Errorf("expected Safe, got %s", alterOp.Safety())
+	}
+}
+
+// TestDiffFKDeferrableOnlyChangeUsesAlterConstraint guards RFC Section
+// 7.3's "Deferrability-only changes" row for FOREIGN KEY — previously
+// documented but never actually implemented anywhere in core/ (found while
+// implementing #38, since ENFORCED and deferrability share the same ALTER
+// CONSTRAINT statement in real PostgreSQL).
+func TestDiffFKDeferrableOnlyChangeUsesAlterConstraint(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.orders", &snapshot.SnapObject{
+		Kind: "table",
+		Table: &snapshot.SnapTable{
+			Schema: "public",
+			Name:   "orders",
+			Columns: []snapshot.SnapColumn{
+				{Name: "id", Type: "bigint"},
+				{Name: "parent_id", Type: "bigint"},
+			},
+			Constraints: []snapshot.SnapConstraint{
+				{Name: "fk_parent", Type: "FOREIGN KEY", Expr: `FOREIGN KEY ("parent_id") REFERENCES "orders" ("id")`, Deferrable: false},
+			},
+		},
+	})
+	desired := []pipeline.IRObject{
+		&ir.Table{
+			Schema: "public",
+			Name:   "orders",
+			Columns: []*ir.Column{
+				{Name: "id", Type: ir.TypeRef{Name: "bigint"}},
+				{Name: "parent_id", Type: ir.TypeRef{Name: "bigint"}},
+			},
+			Constraints: []*ir.Constraint{
+				{Name: "fk_parent", Type: "FOREIGN KEY", Columns: []string{"parent_id"}, Expr: `FOREIGN KEY ("parent_id") REFERENCES "orders" ("id")`, Deferrable: true, InitiallyDeferred: true},
+			},
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var alterOp pipeline.DiffOp
+	for _, o := range ops {
+		if strings.Contains(o.SQL(), "DROP CONSTRAINT") || strings.Contains(o.SQL(), "ADD CONSTRAINT") {
+			t.Errorf("deferrability-only change should not drop/re-add the constraint, got: %v", sqlList(ops))
+		}
+		if strings.Contains(o.SQL(), "ALTER CONSTRAINT") {
+			alterOp = o
+		}
+	}
+	if alterOp == nil {
+		t.Fatalf("expected an ALTER CONSTRAINT op, got: %v", sqlList(ops))
+	}
+	if !strings.Contains(alterOp.SQL(), `ALTER CONSTRAINT "fk_parent" DEFERRABLE INITIALLY DEFERRED`) {
+		t.Errorf("unexpected SQL: %s", alterOp.SQL())
+	}
+}
+
+// TestDiffFKCombinedDeferrableAndEnforcedOneStatement guards that a
+// simultaneous deferrability + ENFORCED change emits ONE combined ALTER
+// CONSTRAINT statement, matching real PostgreSQL's own combined grammar
+// (RFC Section 7.3), not two separate statements.
+func TestDiffFKCombinedDeferrableAndEnforcedOneStatement(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.orders", &snapshot.SnapObject{
+		Kind: "table",
+		Table: &snapshot.SnapTable{
+			Schema: "public",
+			Name:   "orders",
+			Columns: []snapshot.SnapColumn{
+				{Name: "id", Type: "bigint"},
+				{Name: "parent_id", Type: "bigint"},
+			},
+			Constraints: []snapshot.SnapConstraint{
+				{Name: "fk_parent", Type: "FOREIGN KEY", Expr: `FOREIGN KEY ("parent_id") REFERENCES "orders" ("id")`, Deferrable: false, NotEnforced: false},
+			},
+		},
+	})
+	desired := []pipeline.IRObject{
+		&ir.Table{
+			Schema: "public",
+			Name:   "orders",
+			Columns: []*ir.Column{
+				{Name: "id", Type: ir.TypeRef{Name: "bigint"}},
+				{Name: "parent_id", Type: ir.TypeRef{Name: "bigint"}},
+			},
+			Constraints: []*ir.Constraint{
+				{Name: "fk_parent", Type: "FOREIGN KEY", Columns: []string{"parent_id"}, Expr: `FOREIGN KEY ("parent_id") REFERENCES "orders" ("id")`, Deferrable: true, NotEnforced: true},
+			},
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var alterOps []pipeline.DiffOp
+	for _, o := range ops {
+		if strings.Contains(o.SQL(), "ALTER CONSTRAINT") {
+			alterOps = append(alterOps, o)
+		}
+	}
+	if len(alterOps) != 1 {
+		t.Fatalf("expected exactly one combined ALTER CONSTRAINT statement, got %d: %v", len(alterOps), sqlList(ops))
+	}
+	sql := alterOps[0].SQL()
+	if !strings.Contains(sql, "DEFERRABLE") || !strings.Contains(sql, "NOT ENFORCED") {
+		t.Errorf("expected both DEFERRABLE and NOT ENFORCED in one statement, got: %s", sql)
+	}
+}
+
 // TestCreateForeignTableEmitsServerOptions guards a real bug found live-
 // testing a demo project: createTable wrote the "CREATE FOREIGN TABLE"
 // keyword but never appended SERVER/OPTIONS — not just incomplete, an

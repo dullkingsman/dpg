@@ -1039,7 +1039,19 @@ ORDER  BY n.nspname, c.relname, a.attnum`
 // introspectConstraints populates Table.Constraints. See introspectColumns
 // for why relkind must include 'p' (partitioned parent) alongside 'r'.
 func introspectConstraints(ctx context.Context, conn pipeline.Querier, idx map[string]*ir.Table) error {
-	const q = `
+	// conenforced/condeferred: conenforced is a genuinely new PostgreSQL 18
+	// catalog column (ENFORCED/NOT ENFORCED didn't exist in any form
+	// before) — querying it directly against an older server errors
+	// outright, unlike connoinherit above (an existing pre-18 column, only
+	// newly meaningful for contype='n' rows). Select-guarded the same way
+	// introspectSubscriptions guards its own version-gated columns: a
+	// literal "true" substituted on <18 (every constraint is enforced —
+	// PostgreSQL's only possible state before this existed).
+	enforcedCol := "true"
+	if serverVersionNum(ctx, conn) >= 180000 {
+		enforcedCol = "con.conenforced"
+	}
+	q := fmt.Sprintf(`
 SELECT n.nspname, c.relname,
        con.conname,
        CASE con.contype
@@ -1051,7 +1063,9 @@ SELECT n.nspname, c.relname,
        pg_get_constraintdef(con.oid) AS def,
        NOT con.convalidated AS not_valid,
        con.condeferrable AS deferrable,
+       con.condeferred AS initially_deferred,
        con.connoinherit AS no_inherit,
+       NOT (%s) AS not_enforced,
        CASE WHEN con.contype IN ('p','u','f','n') AND array_length(con.conkey, 1) = 1
             THEN (SELECT a.attname FROM pg_attribute a
                   WHERE  a.attrelid = con.conrelid AND a.attnum = con.conkey[1])
@@ -1069,7 +1083,7 @@ WHERE  c.relkind IN ('r', 'p', 'f')
 -- same reasoning.
 AND    con.conislocal
 AND    n.nspname NOT IN ('pg_catalog','information_schema','pg_toast')
-ORDER  BY n.nspname, c.relname, con.conname`
+ORDER  BY n.nspname, c.relname, con.conname`, enforcedCol)
 
 	rs, err := conn.QueryRows(ctx, q)
 	if err != nil {
@@ -1079,9 +1093,9 @@ ORDER  BY n.nspname, c.relname, con.conname`
 
 	for rs.Next() {
 		var schema, table, name, typ, expr string
-		var notValid, deferrable, noInherit bool
+		var notValid, deferrable, initiallyDeferred, noInherit, notEnforced bool
 		var singleCol, comment *string
-		if err := rs.Scan(&schema, &table, &name, &typ, &expr, &notValid, &deferrable, &noInherit, &singleCol, &comment); err != nil {
+		if err := rs.Scan(&schema, &table, &name, &typ, &expr, &notValid, &deferrable, &initiallyDeferred, &noInherit, &notEnforced, &singleCol, &comment); err != nil {
 			return err
 		}
 		t, ok := idx[schema+"."+table]
@@ -1098,6 +1112,15 @@ ORDER  BY n.nspname, c.relname, con.conname`
 		// (e.g. dump) appends NOT VALID itself based on NotValid.
 		if notValid {
 			expr = strings.TrimSpace(strings.TrimSuffix(strings.TrimSpace(expr), "NOT VALID"))
+		}
+		// pg_get_constraintdef also bakes in a trailing "NOT ENFORCED" for
+		// an unenforced CHECK/FOREIGN KEY (confirmed live: it suppresses
+		// the otherwise-redundant "NOT VALID" in this case — an unenforced
+		// constraint is unvalidated purely as a side effect, so notValid
+		// above is true but the "NOT VALID" text never actually appears)
+		// — same reasoning and treatment as NOT VALID just above.
+		if notEnforced {
+			expr = strings.TrimSpace(strings.TrimSuffix(strings.TrimSpace(expr), "NOT ENFORCED"))
 		}
 		if typ == "NOT NULL" {
 			// PostgreSQL 18+ catalogues a real pg_constraint row for EVERY
@@ -1125,13 +1148,15 @@ ORDER  BY n.nspname, c.relname, con.conname`
 			}
 		}
 		cst := &ir.Constraint{
-			Name:       name,
-			Type:       typ,
-			Expr:       expr,
-			NotValid:   notValid,
-			Deferrable: deferrable,
-			NoInherit:  noInherit,
-			Comment:    comment,
+			Name:              name,
+			Type:              typ,
+			Expr:              expr,
+			NotValid:          notValid,
+			Deferrable:        deferrable,
+			InitiallyDeferred: initiallyDeferred,
+			NoInherit:         noInherit,
+			NotEnforced:       notEnforced,
+			Comment:           comment,
 		}
 		if singleCol != nil {
 			cst.Columns = []string{*singleCol}

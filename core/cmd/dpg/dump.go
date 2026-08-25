@@ -510,12 +510,18 @@ func renderObjectDPG(b *strings.Builder, obj pipeline.IRObject, fmtOpts format.O
 		for _, cst := range o.Constraints {
 			if cst.Comment != nil {
 				blockCSTs = append(blockCSTs, cst)
-			} else if len(cst.Columns) == 1 && isInlineable(cst.Type) && !cst.NotValid {
+			} else if len(cst.Columns) == 1 && isInlineable(cst.Type) && !cst.NotValid && !cst.NotEnforced {
 				// !cst.NotValid matches CHECK's existing exclusion from
 				// inlining (see isInlineable/inlineConstraintClause):
 				// NOT VALID has no inline column-constraint rendering, so
 				// it must stay a table-level item, the only place
-				// renderCSTText below actually appends it.
+				// renderCSTText below actually appends it. !cst.NotEnforced
+				// is a deliberate simplification, not a limitation (real
+				// PostgreSQL's inline grammar does support ENFORCED/NOT
+				// ENFORCED, unlike NOT VALID) — routing the rare NOT
+				// ENFORCED case through the one place NOT ENFORCED is
+				// already rendered (below) avoids a second rendering path
+				// for it.
 				inlinedByCol[cst.Columns[0]] = append(inlinedByCol[cst.Columns[0]], inlineConstraintClause(cst))
 				if cst.Type == "NOT NULL" {
 					notNullInlined[cst.Columns[0]] = true
@@ -582,10 +588,14 @@ func renderObjectDPG(b *strings.Builder, obj pipeline.IRObject, fmtOpts format.O
 			if cst.NotValid {
 				notValid = fmt.Sprintf(" %s %s", kw("NOT"), kw("VALID"))
 			}
-			if cst.Name != "" {
-				return fmt.Sprintf("%s%s %s %s%s", ind, kw("CONSTRAINT"), quoteIdentIfNeeded(cst.Name), cst.Expr, notValid)
+			enforcedClause := ""
+			if cst.NotEnforced {
+				enforcedClause = fmt.Sprintf(" %s %s", kw("NOT"), kw("ENFORCED"))
 			}
-			return ind + cst.Expr + notValid
+			if cst.Name != "" {
+				return fmt.Sprintf("%s%s %s %s%s%s", ind, kw("CONSTRAINT"), quoteIdentIfNeeded(cst.Name), cst.Expr, notValid, enforcedClause)
+			}
+			return ind + cst.Expr + notValid + enforcedClause
 		}
 		for _, cst := range refCSTs {
 			items = append(items, tableItem{section: "references", text: renderCSTText(cst)})

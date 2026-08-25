@@ -581,12 +581,14 @@ func toSnapColumn(col *ir.Column) SnapColumn {
 
 func toSnapConstraint(cst *ir.Constraint) SnapConstraint {
 	sc := SnapConstraint{
-		Name:       cst.Name,
-		Type:       cst.Type,
-		Expr:       cst.Expr,
-		NotValid:   cst.NotValid,
-		Deferrable: cst.Deferrable,
-		NoInherit:  cst.NoInherit,
+		Name:              cst.Name,
+		Type:              cst.Type,
+		Expr:              cst.Expr,
+		NotValid:          cst.NotValid,
+		Deferrable:        cst.Deferrable,
+		NoInherit:         cst.NoInherit,
+		NotEnforced:       cst.NotEnforced,
+		InitiallyDeferred: cst.InitiallyDeferred,
 	}
 	if cst.Comment != nil {
 		sc.Comment = *cst.Comment

@@ -276,6 +276,179 @@ func TestBuildTableLevelNotNullConstraintNotValid(t *testing.T) {
 	}
 }
 
+// TestBuildCheckNotEnforcedInline guards RFC Section 7.2's ENFORCED/NOT
+// ENFORCED (PostgreSQL 18+, CHECK/FOREIGN KEY only): an inline CHECK's
+// trailing NOT ENFORCED promotes with Constraint.NotEnforced set — CHECK is
+// always promoted regardless (existing precedent), so this only needs the
+// new field threaded through, not a new promotion decision.
+func TestBuildCheckNotEnforcedInline(t *testing.T) {
+	obj := buildObject(t, pipeline.KindTable,
+		`widgets (
+			id     BIGINT,
+			amount NUMERIC CONSTRAINT ck CHECK (amount > 0) NOT ENFORCED
+		)`,
+		``,
+	)
+	tbl, ok := obj.(*ir.Table)
+	if !ok {
+		t.Fatalf("expected *ir.Table, got %T", obj)
+	}
+	var cst *ir.Constraint
+	for _, c := range tbl.Constraints {
+		if c.Type == "CHECK" {
+			cst = c
+		}
+	}
+	if cst == nil {
+		t.Fatalf("expected a promoted CHECK constraint, got constraints: %+v", tbl.Constraints)
+	}
+	if !cst.NotEnforced {
+		t.Error("NotEnforced: expected true")
+	}
+}
+
+// TestBuildCheckEnforcedDefaultIsFalse is the negative-space regression
+// guard for TestBuildCheckNotEnforcedInline: an ordinary CHECK (no ENFORCED/
+// NOT ENFORCED clause at all) must build with NotEnforced == false —
+// PostgreSQL's own default when the clause is omitted.
+func TestBuildCheckEnforcedDefaultIsFalse(t *testing.T) {
+	obj := buildObject(t, pipeline.KindTable,
+		`widgets (
+			id     BIGINT,
+			amount NUMERIC CONSTRAINT ck CHECK (amount > 0)
+		)`,
+		``,
+	)
+	tbl, ok := obj.(*ir.Table)
+	if !ok {
+		t.Fatalf("expected *ir.Table, got %T", obj)
+	}
+	var cst *ir.Constraint
+	for _, c := range tbl.Constraints {
+		if c.Type == "CHECK" {
+			cst = c
+		}
+	}
+	if cst == nil {
+		t.Fatalf("expected a promoted CHECK constraint, got constraints: %+v", tbl.Constraints)
+	}
+	if cst.NotEnforced {
+		t.Error("NotEnforced: expected false for an ordinary CHECK")
+	}
+}
+
+// TestBuildForeignKeyNotEnforcedTableLevel guards the FOREIGN KEY half of
+// the same feature, via the table-level table-constraint-body form.
+func TestBuildForeignKeyNotEnforcedTableLevel(t *testing.T) {
+	obj := buildObject(t, pipeline.KindTable,
+		`orders (
+			id        BIGINT,
+			parent_id BIGINT,
+			CONSTRAINT fk_parent FOREIGN KEY (parent_id) REFERENCES orders (id) NOT ENFORCED
+		)`,
+		``,
+	)
+	tbl, ok := obj.(*ir.Table)
+	if !ok {
+		t.Fatalf("expected *ir.Table, got %T", obj)
+	}
+	var cst *ir.Constraint
+	for _, c := range tbl.Constraints {
+		if c.Type == "FOREIGN KEY" {
+			cst = c
+		}
+	}
+	if cst == nil {
+		t.Fatalf("expected a promoted FOREIGN KEY constraint, got constraints: %+v", tbl.Constraints)
+	}
+	if !cst.NotEnforced {
+		t.Error("NotEnforced: expected true")
+	}
+}
+
+// TestBuildCheckNotValidNotEnforcedBlock guards the blockparser's clause-
+// order fix: a block-declared CHECK combining NOT VALID and NOT ENFORCED
+// (RFC Section 7.3's actual clause order — body, then NOT VALID, then
+// enforced-clause) must strip both correctly. Before this fix,
+// parseConstraint only ever stripped RENAMED FROM then NOT VALID as
+// suffixes — "CHECK (...) NOT VALID NOT ENFORCED" doesn't end in "NOT
+// VALID" at all, so the NOT VALID check would have silently missed it.
+func TestBuildCheckNotValidNotEnforcedBlock(t *testing.T) {
+	obj := buildObject(t, pipeline.KindTable,
+		`widgets (
+			id     BIGINT,
+			amount NUMERIC
+		)`,
+		`CONSTRAINT ck CHECK (amount > 0) NOT VALID NOT ENFORCED;`,
+	)
+	tbl, ok := obj.(*ir.Table)
+	if !ok {
+		t.Fatalf("expected *ir.Table, got %T", obj)
+	}
+	var cst *ir.Constraint
+	for _, c := range tbl.Constraints {
+		if c.Type == "CHECK" {
+			cst = c
+		}
+	}
+	if cst == nil {
+		t.Fatalf("expected a promoted CHECK constraint, got constraints: %+v", tbl.Constraints)
+	}
+	if !cst.NotValid {
+		t.Error("NotValid: expected true")
+	}
+	if !cst.NotEnforced {
+		t.Error("NotEnforced: expected true")
+	}
+	if strings.Contains(cst.Expr, "ENFORCED") || strings.Contains(cst.Expr, "VALID") {
+		t.Errorf("Expr should not carry the stripped clauses verbatim: %q", cst.Expr)
+	}
+}
+
+// TestBuildInlineForeignKeyDeferrable guards a real, pre-existing bug found
+// while implementing ENFORCED/NOT ENFORCED: PostgreSQL's own parser splits
+// a trailing DEFERRABLE/INITIALLY DEFERRED (and, separately, ENFORCED/NOT
+// ENFORCED) clause after an INLINE "REFERENCES ..." into its own separate
+// Constraint node (CONSTR_ATTR_DEFERRABLE/CONSTR_ATTR_DEFERRED, confirmed
+// live) rather than as fields on the FOREIGN KEY node itself — so
+// cst.Deferrable/cst.Initdeferred on that node were always false for an
+// inline declaration, regardless of what was actually written. Only the
+// table-level "CONSTRAINT name FOREIGN KEY (...) REFERENCES ... DEFERRABLE"
+// form (buildConstraint) was ever affected correctly; this is the inline
+// column-constraint form (buildColumn) via a REFERENCES clause directly on
+// the column.
+func TestBuildInlineForeignKeyDeferrable(t *testing.T) {
+	obj := buildObject(t, pipeline.KindTable,
+		`orders (
+			id        BIGINT,
+			parent_id BIGINT REFERENCES orders (id) DEFERRABLE INITIALLY DEFERRED
+		)`,
+		``,
+	)
+	tbl, ok := obj.(*ir.Table)
+	if !ok {
+		t.Fatalf("expected *ir.Table, got %T", obj)
+	}
+	var cst *ir.Constraint
+	for _, c := range tbl.Constraints {
+		if c.Type == "FOREIGN KEY" {
+			cst = c
+		}
+	}
+	if cst == nil {
+		t.Fatalf("expected a promoted FOREIGN KEY constraint, got constraints: %+v", tbl.Constraints)
+	}
+	if !cst.Deferrable {
+		t.Error("Deferrable: expected true")
+	}
+	if !cst.InitiallyDeferred {
+		t.Error("InitiallyDeferred: expected true")
+	}
+	if !strings.Contains(cst.Expr, "DEFERRABLE INITIALLY DEFERRED") {
+		t.Errorf("Expr does not carry the DEFERRABLE clause (would silently drop it from the emitted CREATE TABLE SQL): %q", cst.Expr)
+	}
+}
+
 func TestBuildSimpleTable(t *testing.T) {
 	obj := buildObject(t, pipeline.KindTable,
 		`users (

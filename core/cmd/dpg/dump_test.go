@@ -174,6 +174,78 @@ func TestRenderNotValidNotNullConstraintCompiles(t *testing.T) {
 	}
 }
 
+// TestRenderCheckNotEnforcedCompiles guards RFC Section 7.2's ENFORCED/NOT
+// ENFORCED (PostgreSQL 18+, CHECK/FOREIGN KEY only): a NOT ENFORCED CHECK
+// renders as its own table-level item (deliberately excluded from inlining,
+// same treatment as NOT VALID — see isInlineable's call site) and
+// recompiles.
+func TestRenderCheckNotEnforcedCompiles(t *testing.T) {
+	fmtOpts := format.Options{IndentSize: 4, KeywordCase: "upper"}
+	tbl := &ir.Table{
+		Schema: "public", Name: "widgets",
+		Columns: []*ir.Column{
+			{Name: "amount", Type: ir.TypeRef{Name: "numeric"}},
+		},
+		Constraints: []*ir.Constraint{
+			{Name: "ck", Type: "CHECK", Columns: []string{"amount"}, Expr: "CHECK (amount > 0)", NotEnforced: true},
+		},
+	}
+
+	var b strings.Builder
+	renderObjectDPG(&b, tbl, fmtOpts)
+	rendered := b.String()
+
+	if !strings.Contains(rendered, "CONSTRAINT ck CHECK (amount > 0) NOT ENFORCED") {
+		t.Errorf("rendered constraint missing or malformed: %q", rendered)
+	}
+
+	dir := t.TempDir()
+	f := filepath.Join(dir, "objects.dpg")
+	if err := os.WriteFile(f, []byte(rendered), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := compiler.Compile([]string{f}, dir, pipeline.Default); err != nil {
+		t.Fatalf("dumped table with a NOT ENFORCED CHECK constraint failed to recompile: %v\n---\n%s", err, rendered)
+	}
+}
+
+// TestRenderForeignKeyNotEnforcedCompiles is
+// TestRenderCheckNotEnforcedCompiles' FOREIGN KEY counterpart.
+func TestRenderForeignKeyNotEnforcedCompiles(t *testing.T) {
+	fmtOpts := format.Options{IndentSize: 4, KeywordCase: "upper"}
+	tbl := &ir.Table{
+		Schema: "public", Name: "orders",
+		Columns: []*ir.Column{
+			{Name: "id", Type: ir.TypeRef{Name: "bigint"}},
+			{Name: "parent_id", Type: ir.TypeRef{Name: "bigint"}},
+		},
+		Constraints: []*ir.Constraint{
+			{
+				Name: "fk_parent", Type: "FOREIGN KEY", Columns: []string{"parent_id"},
+				Expr:        `FOREIGN KEY ("parent_id") REFERENCES "orders" ("id")`,
+				NotEnforced: true,
+			},
+		},
+	}
+
+	var b strings.Builder
+	renderObjectDPG(&b, tbl, fmtOpts)
+	rendered := b.String()
+
+	if !strings.Contains(rendered, "NOT ENFORCED") {
+		t.Errorf("rendered constraint does not carry NOT ENFORCED: %q", rendered)
+	}
+
+	dir := t.TempDir()
+	f := filepath.Join(dir, "objects.dpg")
+	if err := os.WriteFile(f, []byte(rendered), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := compiler.Compile([]string{f}, dir, pipeline.Default); err != nil {
+		t.Fatalf("dumped table with a NOT ENFORCED FOREIGN KEY constraint failed to recompile: %v\n---\n%s", err, rendered)
+	}
+}
+
 // TestRenderIndexUsingMethodCompiles guards a real bug found live-testing a
 // demo project: the RFC's ABNF and every one of its worked examples
 // (rfc/dpg-1.md §7.7, e.g. "idx_location USING gist (location);") place

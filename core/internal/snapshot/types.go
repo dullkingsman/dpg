@@ -355,6 +355,15 @@ type SnapConstraint struct {
 	// NoInherit mirrors ir.Constraint.NoInherit (PostgreSQL 18+ NOT NULL
 	// NO INHERIT, RFC Section 7.3).
 	NoInherit bool `json:"no_inherit,omitempty"`
+	// NotEnforced mirrors ir.Constraint.NotEnforced (PostgreSQL 18+ NOT
+	// ENFORCED on CHECK/FOREIGN KEY, RFC Section 7.2/7.3).
+	NotEnforced bool `json:"not_enforced,omitempty"`
+	// InitiallyDeferred mirrors ir.Constraint.InitiallyDeferred — previously
+	// tracked on the ir.Constraint side but never persisted to the
+	// snapshot at all (Deferrable alone was), so a FOREIGN KEY's initial
+	// deferred-vs-immediate state round-tripped incorrectly through
+	// apply/re-plan.
+	InitiallyDeferred bool `json:"initially_deferred,omitempty"`
 }
 
 // SnapIndex is a flat, fully comparable (string/bool fields only) snapshot of

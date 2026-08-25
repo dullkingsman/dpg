@@ -3041,8 +3041,14 @@ func createTable(o *ir.Table, vtypes map[string]string) []pipeline.DiffOp {
 			// The REFERENCES suffix includes ON DELETE/UPDATE actions and DEFERRABLE.
 			// NotValid constraints are never inlined (see the CHECK case's identical
 			// guard below for why) — they always stay in the table-level loop, the
-			// only place NOT VALID is actually appended.
-			if len(cols) == 1 && !cst.NotValid {
+			// only place NOT VALID is actually appended. NotEnforced constraints are
+			// excluded the same way, even though real PostgreSQL's inline grammar
+			// does support ENFORCED/NOT ENFORCED there (unlike NOT VALID) — a
+			// deliberate simplification, not a limitation: NOT ENFORCED is rare
+			// enough that routing it through the one table-level rendering path
+			// this codebase already appends it at (below) is simpler than adding a
+			// second, inline-specific rendering path for it.
+			if len(cols) == 1 && !cst.NotValid && !cst.NotEnforced {
 				upper := strings.ToUpper(cst.Expr)
 				if refIdx := strings.Index(upper, "REFERENCES"); refIdx > 0 {
 					inlineFor[cols[0]] = append(inlineFor[cols[0]], inlineKW{name: cst.Name, keyword: cst.Expr[refIdx:]})
@@ -3059,8 +3065,11 @@ func createTable(o *ir.Table, vtypes map[string]string) []pipeline.DiffOp {
 			// accepts a trailing NOT VALID isn't verified here, so routing them to
 			// the table-level loop (which does append it, confirmed live) avoids
 			// silently dropping NOT VALID again the way the un-guarded version of
-			// this loop did before this fix.
-			if len(cst.Columns) == 1 && !cst.NotValid {
+			// this loop did before this fix. NotEnforced constraints are excluded
+			// the same way — see the FOREIGN KEY case's identical guard above for
+			// why (this one's real PostgreSQL support for inline ENFORCED is
+			// confirmed, not just assumed, but the simplification is the same).
+			if len(cst.Columns) == 1 && !cst.NotValid && !cst.NotEnforced {
 				inlineFor[cst.Columns[0]] = append(inlineFor[cst.Columns[0]], inlineKW{name: cst.Name, keyword: cst.Expr})
 				skipIdx[i] = true
 			}
@@ -3142,6 +3151,9 @@ func createTable(o *ir.Table, vtypes map[string]string) []pipeline.DiffOp {
 		b.WriteString(cst.Expr)
 		if cst.NotValid {
 			b.WriteString(" NOT VALID")
+		}
+		if cst.NotEnforced {
+			b.WriteString(" NOT ENFORCED")
 		}
 	}
 	b.WriteString("\n)")
@@ -7310,39 +7322,57 @@ func diffConstraints(tbl string, o *ir.Table, snap *snapshot.SnapTable, fullSnap
 
 	for _, c := range o.Constraints {
 		if sc, exists := snapByKey[key(c.Name, c.Type, c.Expr)]; exists {
-			ops = append(ops, validateConstraintOp("TABLE", tbl, sc, c)...)
-			ops = append(ops, alterNotNullInheritOp(tbl, sc, c)...)
-			ops = append(ops, commentOp(sc, c)...)
-			continue
-		}
-		if c.RenamedFrom != nil {
-			if sc, exists := snapByKey["n:"+*c.RenamedFrom]; exists {
-				// RENAMED FROM on a constraint (like index RENAMED FROM,
-				// Section 7.7) emits ALTER TABLE ... RENAME CONSTRAINT —
-				// SAFE, metadata-only — instead of the drop-and-recreate a
-				// name-only difference would otherwise trigger. Subsequent
-				// ops reference the constraint's NEW (post-rename) name, not
-				// sc's snapshot name, since the rename already executed.
-				ops = append(ops, safeOp(
-					fmt.Sprintf("ALTER TABLE %s RENAME CONSTRAINT %s TO %s;", tbl, quoteIdent(sc.Name), quoteIdent(c.Name)),
-					c.Pos,
-				))
-				renamedSc := *sc
-				renamedSc.Name = c.Name
-				ops = append(ops, validateConstraintOp("TABLE", tbl, &renamedSc, c)...)
-				ops = append(ops, alterNotNullInheritOp(tbl, &renamedSc, c)...)
-				ops = append(ops, commentOp(&renamedSc, c)...)
+			matched, recreate := matchedConstraintOps(tbl, sc, c)
+			ops = append(ops, matched...)
+			if !recreate {
+				ops = append(ops, commentOp(sc, c)...)
 				continue
 			}
-		}
-		if c.Name == "" {
+			// CHECK's ENFORCED/NOT ENFORCED changed — matched's only entry
+			// is the DROP; fall through to this constraint's own ADD
+			// CONSTRAINT below to recreate it.
+		} else if c.RenamedFrom != nil {
+			if sc, exists := snapByKey["n:"+*c.RenamedFrom]; exists {
+				if sc.Type == "CHECK" && sc.Name != "" && sc.NotEnforced != c.NotEnforced {
+					// Renaming AND changing ENFORCED at once — real
+					// PostgreSQL has no ALTER path for the latter on CHECK
+					// at all (confirmed live), so this drops the OLD name
+					// outright and falls through to ADD under the NEW one,
+					// rather than renaming first and then immediately
+					// dropping+recreating under the name it was just given.
+					ops = append(ops, destructiveOp(
+						fmt.Sprintf("ALTER TABLE %s DROP CONSTRAINT %s;", tbl, quoteIdent(sc.Name)),
+						c.Pos,
+					))
+				} else {
+					// RENAMED FROM on a constraint (like index RENAMED FROM,
+					// Section 7.7) emits ALTER TABLE ... RENAME CONSTRAINT —
+					// SAFE, metadata-only — instead of the drop-and-recreate a
+					// name-only difference would otherwise trigger. Subsequent
+					// ops reference the constraint's NEW (post-rename) name, not
+					// sc's snapshot name, since the rename already executed.
+					ops = append(ops, safeOp(
+						fmt.Sprintf("ALTER TABLE %s RENAME CONSTRAINT %s TO %s;", tbl, quoteIdent(sc.Name), quoteIdent(c.Name)),
+						c.Pos,
+					))
+					renamedSc := *sc
+					renamedSc.Name = c.Name
+					matched, _ := matchedConstraintOps(tbl, &renamedSc, c)
+					ops = append(ops, matched...)
+					ops = append(ops, commentOp(&renamedSc, c)...)
+					continue
+				}
+			}
+		} else if c.Name == "" {
 			if label, ok := pgConstraintNameLabel(c.Type); ok {
 				if predicted, predOK := predictName(c, label); predOK {
 					if sc, exists := snapByKey["n:"+predicted]; exists {
-						ops = append(ops, validateConstraintOp("TABLE", tbl, sc, c)...)
-						ops = append(ops, alterNotNullInheritOp(tbl, sc, c)...)
-						ops = append(ops, commentOp(sc, c)...)
-						continue
+						matched, recreate := matchedConstraintOps(tbl, sc, c)
+						ops = append(ops, matched...)
+						if !recreate {
+							ops = append(ops, commentOp(sc, c)...)
+							continue
+						}
 					}
 				}
 			}
@@ -7385,12 +7415,19 @@ func diffConstraints(tbl string, o *ir.Table, snap *snapshot.SnapTable, fullSnap
 		if c.NotValid {
 			notValid = " NOT VALID"
 		}
+		// RFC Section 7.3's table-constraint clause order: body, then
+		// [NOT VALID], then [ENFORCED|NOT ENFORCED] — CHECK/FOREIGN KEY
+		// only, PostgreSQL 18+ (Section 7.2/7.3).
+		enforcedClause := ""
+		if c.NotEnforced {
+			enforcedClause = " NOT ENFORCED"
+		}
 		var sql string
 		if c.Name != "" {
-			sql = fmt.Sprintf("ALTER TABLE %s ADD CONSTRAINT %s %s%s;",
-				tbl, quoteIdent(c.Name), c.Expr, notValid)
+			sql = fmt.Sprintf("ALTER TABLE %s ADD CONSTRAINT %s %s%s%s;",
+				tbl, quoteIdent(c.Name), c.Expr, notValid, enforcedClause)
 		} else {
-			sql = fmt.Sprintf("ALTER TABLE %s ADD %s%s;", tbl, c.Expr, notValid)
+			sql = fmt.Sprintf("ALTER TABLE %s ADD %s%s%s;", tbl, c.Expr, notValid, enforcedClause)
 		}
 		ops = append(ops, cautionOp(sql, c.Pos))
 		if c.Comment != nil && c.Name != "" {
@@ -7401,6 +7438,42 @@ func diffConstraints(tbl string, o *ir.Table, snap *snapshot.SnapTable, fullSnap
 		}
 	}
 	return ops, nil
+}
+
+// matchedConstraintOps handles a table constraint matched against an
+// existing snapshot entry by name (or predicted auto-name): the ordinary
+// in-place changes (NOT VALID lifecycle, NOT NULL NO INHERIT, FK
+// deferrable/ENFORCED) that real PostgreSQL supports via a targeted ALTER.
+// Returns recreate=true when the match isn't enough on its own — a CHECK
+// constraint's ENFORCED/NOT ENFORCED changed, and real PostgreSQL has no
+// ALTER path for that at all (confirmed live, unlike FOREIGN KEY) — in
+// which case ops holds only the DROP CONSTRAINT and the caller must fall
+// through to its own ADD CONSTRAINT logic instead of treating this
+// constraint as already up to date.
+func matchedConstraintOps(tbl string, sc *snapshot.SnapConstraint, c *ir.Constraint) (ops []pipeline.DiffOp, recreate bool) {
+	if sc.Type == "CHECK" && sc.Name != "" && sc.NotEnforced != c.NotEnforced {
+		return []pipeline.DiffOp{destructiveOp(
+			fmt.Sprintf("ALTER TABLE %s DROP CONSTRAINT %s;", tbl, quoteIdent(sc.Name)),
+			c.Pos,
+		)}, true
+	}
+	ops = append(ops, alterFKAttributesOp(tbl, sc, c)...)
+	// A FOREIGN KEY transitioning NOT ENFORCED -> ENFORCED is already
+	// validated by alterFKAttributesOp's own ALTER CONSTRAINT ENFORCED as
+	// a side effect (confirmed live: convalidated flips true in lockstep
+	// with conenforced) — issuing VALIDATE CONSTRAINT as well, ordered
+	// BEFORE that ALTER as this function's sequence originally had it,
+	// isn't merely redundant but a real PostgreSQL error ("cannot validate
+	// NOT ENFORCED constraint"), confirmed live. Ordering alterFKAttributesOp
+	// first (above) fixes the sequencing; skipping validateConstraintOp
+	// entirely for exactly this transition avoids emitting a statement
+	// that's harmless once reordered but still pure noise.
+	reenforcing := sc.Type == "FOREIGN KEY" && sc.NotEnforced && !c.NotEnforced
+	if !reenforcing {
+		ops = append(ops, validateConstraintOp("TABLE", tbl, sc, c)...)
+	}
+	ops = append(ops, alterNotNullInheritOp(tbl, sc, c)...)
+	return ops, false
 }
 
 // validateConstraintOp emits ALTER <alterKW> ... VALIDATE CONSTRAINT ... when
@@ -7431,13 +7504,14 @@ func validateConstraintOp(alterKW, tbl string, sc *snapshot.SnapConstraint, c *i
 // from the snapshot but everything else about it (column, validity) is
 // unchanged — RFC Section 7.3's "NOT NULL constraint inheritability
 // (PostgreSQL 18+)" row. This is a separate, distinctly-named ALTER
-// CONSTRAINT variant from FK's own deferrability-only-change one (real
-// PostgreSQL's ALTER CONSTRAINT grammar is constraint-kind-specific, not one
-// shared option set) — SAFE, metadata-only, confirmed live against a
-// PostgreSQL 18 server. sc.Name (the snapshot's recorded/catalog name), not
-// c.Name, is used as the target, matching validateConstraintOp's identical
-// reasoning just above: PostgreSQL always assigns NOT NULL a real catalog
-// name, even one DPG's own source never spelled out.
+// CONSTRAINT variant from FK's own deferrability/ENFORCED one
+// (alterFKAttributesOp, below) — real PostgreSQL's ALTER CONSTRAINT grammar
+// is constraint-kind-specific, not one shared option set — SAFE,
+// metadata-only, confirmed live against a PostgreSQL 18 server. sc.Name (the
+// snapshot's recorded/catalog name), not c.Name, is used as the target,
+// matching validateConstraintOp's identical reasoning just above:
+// PostgreSQL always assigns NOT NULL a real catalog name, even one DPG's own
+// source never spelled out.
 func alterNotNullInheritOp(tbl string, sc *snapshot.SnapConstraint, c *ir.Constraint) []pipeline.DiffOp {
 	if sc.Type != "NOT NULL" || sc.Name == "" || sc.NoInherit == c.NoInherit {
 		return nil
@@ -7448,6 +7522,59 @@ func alterNotNullInheritOp(tbl string, sc *snapshot.SnapConstraint, c *ir.Constr
 	}
 	return []pipeline.DiffOp{safeOp(
 		fmt.Sprintf("ALTER TABLE %s ALTER CONSTRAINT %s %s;", tbl, quoteIdent(sc.Name), kw),
+		c.Pos,
+	)}
+}
+
+// alterFKAttributesOp emits a single combined ALTER TABLE ... ALTER
+// CONSTRAINT name [[NOT] DEFERRABLE [INITIALLY ...]] [ENFORCED|NOT
+// ENFORCED] when a FOREIGN KEY constraint's deferrability and/or PostgreSQL
+// 18+ ENFORCED state differ from the snapshot but everything else about it
+// is unchanged — RFC Section 7.3's "Deferrability-only changes" row (real
+// PostgreSQL's ALTER CONSTRAINT supports only this narrow set of changes,
+// and only for FOREIGN KEY constraints — confirmed live: the identical
+// statement against a CHECK constraint errors "cannot alter enforceability
+// of constraint ... is not a foreign key constraint"), extended to also
+// cover ENFORCED/NOT ENFORCED in the same statement when both differ at
+// once, matching real PostgreSQL's own combined grammar rather than two
+// separate ALTER CONSTRAINT statements. SAFE, metadata-only. Toggling
+// ENFORCED back on also re-validates the constraint as a side effect
+// (confirmed live: convalidated flips true→false→true in lockstep with
+// conenforced) — validateConstraintOp may also fire redundantly alongside
+// this in that case; a VALIDATE CONSTRAINT on an already-valid constraint
+// is a harmless no-op in real PostgreSQL, so this isn't specially
+// suppressed.
+func alterFKAttributesOp(tbl string, sc *snapshot.SnapConstraint, c *ir.Constraint) []pipeline.DiffOp {
+	if sc.Type != "FOREIGN KEY" || sc.Name == "" {
+		return nil
+	}
+	deferChanged := sc.Deferrable != c.Deferrable || (c.Deferrable && sc.InitiallyDeferred != c.InitiallyDeferred)
+	enforcedChanged := sc.NotEnforced != c.NotEnforced
+	if !deferChanged && !enforcedChanged {
+		return nil
+	}
+	var parts []string
+	if deferChanged {
+		if c.Deferrable {
+			parts = append(parts, "DEFERRABLE")
+			if c.InitiallyDeferred {
+				parts = append(parts, "INITIALLY DEFERRED")
+			} else {
+				parts = append(parts, "INITIALLY IMMEDIATE")
+			}
+		} else {
+			parts = append(parts, "NOT DEFERRABLE")
+		}
+	}
+	if enforcedChanged {
+		if c.NotEnforced {
+			parts = append(parts, "NOT ENFORCED")
+		} else {
+			parts = append(parts, "ENFORCED")
+		}
+	}
+	return []pipeline.DiffOp{safeOp(
+		fmt.Sprintf("ALTER TABLE %s ALTER CONSTRAINT %s %s;", tbl, quoteIdent(sc.Name), strings.Join(parts, " ")),
 		c.Pos,
 	)}
 }

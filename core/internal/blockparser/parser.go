@@ -1476,8 +1476,26 @@ func (b *blockParser) parseConstraint(pos pipeline.SourcePos) (pipeline.Constrai
 		cst.RenamedFrom = &renamed
 		raw = strings.TrimSpace(rm[1])
 	}
-	// Check for NOT VALID suffix
+	// Check for a trailing ENFORCED/NOT ENFORCED clause (PostgreSQL 18+,
+	// RFC Section 7.3) — positioned here, between RENAMED FROM and NOT
+	// VALID, to match table-constraint's actual clause order (body
+	// [NOT VALID] [enforced-clause] [DEFERRABLE ...] [RENAMED FROM]):
+	// stripping suffixes right-to-left, DEFERRABLE isn't tracked for a
+	// block-declared constraint at all yet (a separate, pre-existing gap,
+	// not touched here), but enforced-clause must still be peeled off
+	// before the NOT VALID check below, or e.g. "CHECK (...) NOT VALID
+	// NOT ENFORCED" would leave the string not ending in "NOT VALID" and
+	// silently miss it entirely.
 	upper := strings.ToUpper(raw)
+	switch {
+	case strings.HasSuffix(upper, "NOT ENFORCED"):
+		cst.NotEnforced = true
+		raw = strings.TrimSpace(raw[:len(raw)-len("NOT ENFORCED")])
+	case strings.HasSuffix(upper, "ENFORCED"):
+		raw = strings.TrimSpace(raw[:len(raw)-len("ENFORCED")])
+	}
+	// Check for NOT VALID suffix
+	upper = strings.ToUpper(raw)
 	if strings.HasSuffix(upper, "NOT VALID") {
 		cst.NotValid = true
 		raw = strings.TrimSpace(raw[:len(raw)-len("NOT VALID")])
