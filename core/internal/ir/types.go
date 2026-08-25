@@ -160,9 +160,16 @@ type Index struct {
 // Constraint is a table or column constraint.
 type Constraint struct {
 	Name    string
-	Type    string // "PRIMARY KEY", "UNIQUE", "CHECK", "FOREIGN KEY", "EXCLUDE"
+	Type    string // "PRIMARY KEY", "UNIQUE", "CHECK", "FOREIGN KEY", "EXCLUDE", "NOT NULL"
 	Expr    string // raw constraint expression/definition
 	Columns []string
+	// NoInherit is PostgreSQL 18+'s NO INHERIT modifier on a table-level
+	// named NOT NULL constraint (RFC Section 7.3) — scopes it to this table
+	// only, the same modifier CHECK constraints already carry inline (via
+	// no-inherit in table-constraint-body) but this codebase has never
+	// actually captured for either kind before now. Only meaningful for
+	// Type == "NOT NULL" currently.
+	NoInherit bool
 	// CheckColumn is the single column PostgreSQL's own auto-naming
 	// algorithm considers this CHECK constraint's own (heap.c's
 	// AddRelationNewConstraints: pull_var_clause over the expression, then

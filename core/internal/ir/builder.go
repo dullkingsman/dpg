@@ -285,6 +285,27 @@ func (b *Builder) buildTable(cs *pg_query.CreateStmt, block pipeline.BlockAST, p
 	if err := mergeTableBlock(tbl, block); err != nil {
 		return nil, err
 	}
+
+	// A table-level named NOT NULL constraint (RFC Section 7.3, PostgreSQL
+	// 18+) implies its column is NOT NULL the same way an inline "col type
+	// NOT NULL" does — but unlike the inline form (buildColumn sets
+	// col.NotNull directly), a table-level one is only ever visible via
+	// buildConstraint/mergeTableBlock's promoted Constraint, which never
+	// touches Column at all. Without this, a column declared NOT NULL
+	// *only* via a table-level named constraint would build with
+	// Column.NotNull left false, contradicting both the constraint that
+	// was just built for it and real PostgreSQL's own behavior.
+	for _, cst := range tbl.Constraints {
+		if cst.Type != "NOT NULL" || len(cst.Columns) != 1 {
+			continue
+		}
+		for _, col := range tbl.Columns {
+			if col.Name == cst.Columns[0] {
+				col.NotNull = true
+			}
+		}
+	}
+
 	return tbl, nil
 }
 
@@ -329,6 +350,32 @@ func (b *Builder) buildColumn(cd *pg_query.ColumnDef, pos pipeline.SourcePos) (*
 		switch cst.Contype {
 		case pg_query.ConstrType_CONSTR_NOTNULL:
 			col.NotNull = true
+			// A bare "NOT NULL" (no CONSTRAINT keyword, no NO INHERIT) stays
+			// the plain Column.NotNull bool — the overwhelmingly common case,
+			// and the pre-existing representation this codebase has always
+			// used. Only promote to a table-level Constraint (auto-named
+			// like an unnamed inline PRIMARY KEY/UNIQUE/CHECK already is,
+			// when the user gave no name) once there's something the bool
+			// alone can't carry: an explicit name, or PostgreSQL 18+'s NO
+			// INHERIT (RFC Section 7.2/7.3) — matches real PostgreSQL
+			// itself, which catalogues even a bare inline NOT NULL as a
+			// real named pg_constraint row (confirmed live), just one this
+			// codebase doesn't need to track individually unless the user
+			// wrote something beyond the ordinary case.
+			if cst.Conname != "" || cst.IsNoInherit {
+				tc := &Constraint{
+					Name:      cst.Conname,
+					Type:      "NOT NULL",
+					Columns:   []string{cd.Colname},
+					NoInherit: cst.IsNoInherit,
+					Expr:      "NOT NULL " + quoteIdent(cd.Colname),
+					Pos:       pos,
+				}
+				if cst.IsNoInherit {
+					tc.Expr += " NO INHERIT"
+				}
+				promoted = append(promoted, tc)
+			}
 
 		case pg_query.ConstrType_CONSTR_DEFAULT:
 			if cst.RawExpr != nil {
@@ -455,6 +502,56 @@ func (b *Builder) buildColumn(cd *pg_query.ColumnDef, pos pipeline.SourcePos) (*
 	return col, promoted, nil
 }
 
+// classifyConstraintExprType returns the Constraint.Type a block-declared
+// constraint's raw Expr text implies, matching the exact Type strings
+// buildConstraint's structured pg_query path already produces. Expr always
+// starts with the constraint keyword (blockparser strips NOT VALID/comment
+// suffixes before this ever runs) — no ambiguity between e.g. "CHECK" and
+// "CHECK ..." vs the "n:" key format, since this only ever sees the
+// keyword-first raw definition text, the same shape pg_get_constraintdef
+// (introspection) and buildConstraint's own Expr construction both produce.
+func classifyConstraintExprType(expr string) string {
+	upper := strings.ToUpper(expr)
+	switch {
+	case strings.HasPrefix(upper, "PRIMARY KEY"):
+		return "PRIMARY KEY"
+	case strings.HasPrefix(upper, "UNIQUE"):
+		return "UNIQUE"
+	case strings.HasPrefix(upper, "CHECK"):
+		return "CHECK"
+	case strings.HasPrefix(upper, "FOREIGN KEY"):
+		return "FOREIGN KEY"
+	case strings.HasPrefix(upper, "EXCLUDE"):
+		return "EXCLUDE"
+	case strings.HasPrefix(upper, "NOT NULL"):
+		return "NOT NULL"
+	default:
+		return "UNKNOWN"
+	}
+}
+
+// parseNotNullExpr recovers the column name and NO INHERIT flag from a
+// table-level NOT NULL constraint's raw Expr text ("NOT NULL colname" or
+// "NOT NULL colname NO INHERIT") — the inverse of buildConstraint's own
+// Expr construction for the same constraint kind (see its CONSTR_NOTNULL
+// case), needed here because a block-declared constraint only ever reaches
+// this codebase as already-rendered text, never structured pg_query data.
+func parseNotNullExpr(expr string) (col string, noInherit bool, ok bool) {
+	if len(expr) < len("NOT NULL ") || !strings.EqualFold(expr[:len("NOT NULL ")], "NOT NULL ") {
+		return "", false, false
+	}
+	rest := expr[len("NOT NULL "):]
+	if len(rest) >= len(" NO INHERIT") && strings.EqualFold(rest[len(rest)-len(" NO INHERIT"):], " NO INHERIT") {
+		rest = rest[:len(rest)-len(" NO INHERIT")]
+		noInherit = true
+	}
+	rest = strings.Trim(strings.TrimSpace(rest), `"`)
+	if rest == "" {
+		return "", false, false
+	}
+	return rest, noInherit, true
+}
+
 func buildConstraint(c *pg_query.Constraint, pos pipeline.SourcePos) *Constraint {
 	cst := &Constraint{
 		Name:              c.Conname,
@@ -490,6 +587,25 @@ func buildConstraint(c *pg_query.Constraint, pos pipeline.SourcePos) *Constraint
 			expr := nodeToText(c.RawExpr)
 			cst.Expr = "CHECK (" + expr + ")"
 			cst.CheckColumn = checkExprSingleColumn(c.RawExpr)
+		}
+
+	case pg_query.ConstrType_CONSTR_NOTNULL:
+		// Table-level named NOT NULL constraint (PostgreSQL 18+, RFC
+		// Section 7.3): "CONSTRAINT name NOT NULL col_name [NO INHERIT]
+		// [NOT VALID]" — grammatically always reaches here via the
+		// "CONSTRAINT" wrapper (table-constraint), unlike buildColumn's
+		// inline NOT NULL case above, which only promotes when the inline
+		// form itself carries a name or NO INHERIT. NotValid is already
+		// captured generically above from c.SkipValidation.
+		cst.Type = "NOT NULL"
+		cols := nodeListToNames(c.Keys)
+		cst.Columns = cols
+		cst.NoInherit = c.IsNoInherit
+		if len(cols) > 0 {
+			cst.Expr = "NOT NULL " + quoteIdent(cols[0])
+			if c.IsNoInherit {
+				cst.Expr += " NO INHERIT"
+			}
 		}
 
 	case pg_query.ConstrType_CONSTR_FOREIGN:
@@ -1011,14 +1127,32 @@ func mergeTableBlock(tbl *Table, block pipeline.BlockAST) error {
 		col.NameMaps = append(col.NameMaps, cb.NameMaps...)
 	}
 
-	// Additional constraints from block.
+	// Additional constraints from block. RFC Section 7.3's grammar requires
+	// "CONSTRAINT" WSP identifier for every table-constraint, so a
+	// block-declared constraint is always named — unlike buildConstraint's
+	// pg_query-based path (structured Contype from the parse tree), there
+	// is no structured type here at all, only Expr's raw text, so Type/
+	// Columns/NoInherit are inferred from it below instead. Only Type and
+	// (for NOT NULL specifically) Columns/NoInherit are inferred — Columns
+	// for the other kinds and CheckColumn are deliberately left unset: both
+	// exist solely to reconstruct PostgreSQL's own auto-generated name for
+	// an UNNAMED constraint (predictName, internal/diff), which a
+	// block-declared constraint — always named per the grammar above — can
+	// never need.
 	for _, cst := range block.Constraints {
 		newCst := &Constraint{
 			Name:        cst.Name.Name,
+			Type:        classifyConstraintExprType(cst.Expr.Text),
 			Expr:        cst.Expr.Text,
 			NotValid:    cst.NotValid,
 			RenamedFrom: cst.RenamedFrom,
 			Pos:         cst.Pos,
+		}
+		if newCst.Type == "NOT NULL" {
+			if col, noInherit, ok := parseNotNullExpr(cst.Expr.Text); ok {
+				newCst.Columns = []string{col}
+				newCst.NoInherit = noInherit
+			}
 		}
 		if cst.Comment != nil {
 			newCst.Comment = &cst.Comment.Value

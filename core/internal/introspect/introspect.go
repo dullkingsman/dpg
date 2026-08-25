@@ -1045,12 +1045,14 @@ SELECT n.nspname, c.relname,
        CASE con.contype
            WHEN 'p' THEN 'PRIMARY KEY' WHEN 'u' THEN 'UNIQUE'
            WHEN 'c' THEN 'CHECK'       WHEN 'f' THEN 'FOREIGN KEY'
-           WHEN 'x' THEN 'EXCLUDE'     ELSE con.contype::text
+           WHEN 'x' THEN 'EXCLUDE'     WHEN 'n' THEN 'NOT NULL'
+           ELSE con.contype::text
        END AS con_type,
        pg_get_constraintdef(con.oid) AS def,
        NOT con.convalidated AS not_valid,
        con.condeferrable AS deferrable,
-       CASE WHEN con.contype IN ('p','u','f') AND array_length(con.conkey, 1) = 1
+       con.connoinherit AS no_inherit,
+       CASE WHEN con.contype IN ('p','u','f','n') AND array_length(con.conkey, 1) = 1
             THEN (SELECT a.attname FROM pg_attribute a
                   WHERE  a.attrelid = con.conrelid AND a.attnum = con.conkey[1])
             ELSE NULL
@@ -1060,7 +1062,6 @@ FROM   pg_constraint con
 JOIN   pg_class c     ON c.oid = con.conrelid
 JOIN   pg_namespace n ON n.oid = c.relnamespace
 WHERE  c.relkind IN ('r', 'p', 'f')
-AND    con.contype != 'n'
 -- conislocal excludes a CHECK constraint present on a child only because it's
 -- inherited from a parent under classic INHERITS (PRIMARY KEY/UNIQUE/FOREIGN
 -- KEY/EXCLUDE never propagate to children this way, so this only ever
@@ -1078,9 +1079,9 @@ ORDER  BY n.nspname, c.relname, con.conname`
 
 	for rs.Next() {
 		var schema, table, name, typ, expr string
-		var notValid, deferrable bool
+		var notValid, deferrable, noInherit bool
 		var singleCol, comment *string
-		if err := rs.Scan(&schema, &table, &name, &typ, &expr, &notValid, &deferrable, &singleCol, &comment); err != nil {
+		if err := rs.Scan(&schema, &table, &name, &typ, &expr, &notValid, &deferrable, &noInherit, &singleCol, &comment); err != nil {
 			return err
 		}
 		t, ok := idx[schema+"."+table]
@@ -1098,12 +1099,38 @@ ORDER  BY n.nspname, c.relname, con.conname`
 		if notValid {
 			expr = strings.TrimSpace(strings.TrimSuffix(strings.TrimSpace(expr), "NOT VALID"))
 		}
+		if typ == "NOT NULL" {
+			// PostgreSQL 18+ catalogues a real pg_constraint row for EVERY
+			// NOT NULL column, even a bare "col TEXT NOT NULL" with no
+			// CONSTRAINT keyword at all in source (confirmed live) —
+			// introspectColumns already sets Column.NotNull from
+			// attnotnull directly, independent of this row existing at
+			// all. Collapse the ordinary case (unvalidated-never, not
+			// NO INHERIT, catalog name matches what PostgreSQL's own
+			// auto-naming algorithm would produce for an unnamed
+			// declaration) back into that plain bool instead of promoting
+			// it to a table-level ir.Constraint — otherwise every single
+			// NOT NULL column in a dumped/verified project would sprout a
+			// separate, noisy CONSTRAINT clause never actually written
+			// in source. Only promote when there's something the bool
+			// can't represent: NO INHERIT, an unvalidated (NOT VALID)
+			// state, or a name that doesn't match the auto-generated
+			// pattern (a real user-chosen name). A false negative here
+			// (an unmodeled name collision making the auto-name
+			// prediction wrong) only costs an unnecessary promotion, never
+			// lost information — see predictNotNullConstraintName's own
+			// doc comment for why full collision-tracking isn't done here.
+			if singleCol != nil && !noInherit && !notValid && name == predictNotNullConstraintName(table, *singleCol) {
+				continue
+			}
+		}
 		cst := &ir.Constraint{
 			Name:       name,
 			Type:       typ,
 			Expr:       expr,
 			NotValid:   notValid,
 			Deferrable: deferrable,
+			NoInherit:  noInherit,
 			Comment:    comment,
 		}
 		if singleCol != nil {
@@ -1112,6 +1139,23 @@ ORDER  BY n.nspname, c.relname, con.conname`
 		t.Constraints = append(t.Constraints, cst)
 	}
 	return rs.Err()
+}
+
+// predictNotNullConstraintName reconstructs PostgreSQL's own auto-generated
+// name for an unnamed table-level NOT NULL constraint (ChooseConstraintName
+// with label "not_null", src/backend/catalog/heap.c) — confirmed live:
+// "<table>_<col>_not_null", e.g. "widgets_sku_not_null". Deliberately a
+// narrower, single-purpose port of internal/diff's pgAutoConstraintName (not
+// reused directly: introspect is a leaf package with no dependency on diff,
+// matching the two packages' existing architecture) — no collision-retry
+// suffix and no NAMEDATALEN truncation, since this is used only to decide
+// whether introspectConstraints can collapse an ordinary NOT NULL row back
+// into Column.NotNull's plain bool; getting it wrong for a pathologically
+// long or colliding name just means the row is promoted to a real
+// ir.Constraint instead (an unnecessary but harmless explicit declaration in
+// dump output), never a silently dropped NO INHERIT/NOT VALID.
+func predictNotNullConstraintName(table, col string) string {
+	return table + "_" + col + "_not_null"
 }
 
 // introspectIndexes populates Table.Indexes. See introspectColumns for why

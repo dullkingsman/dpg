@@ -128,6 +128,154 @@ func TestBuildGeneratedColumnStoredAndVirtual(t *testing.T) {
 	}
 }
 
+// TestBuildTableLevelNotNullConstraint guards RFC Section 7.3's table-level
+// named NOT NULL constraint (PostgreSQL 18+): `CONSTRAINT name NOT NULL
+// col_name [NO INHERIT]` promotes to a table-level ir.Constraint (the same
+// treatment PRIMARY KEY/UNIQUE/CHECK/FOREIGN KEY already get), carrying
+// NoInherit — previously nothing in buildConstraint's switch handled
+// CONSTR_NOTNULL at all, so this form built a zero-value Constraint.
+func TestBuildTableLevelNotNullConstraint(t *testing.T) {
+	obj := buildObject(t, pipeline.KindTable,
+		`widgets (
+			id   BIGINT,
+			name TEXT,
+			CONSTRAINT named_nn NOT NULL name NO INHERIT
+		)`,
+		``,
+	)
+	tbl, ok := obj.(*ir.Table)
+	if !ok {
+		t.Fatalf("expected *ir.Table, got %T", obj)
+	}
+	var cst *ir.Constraint
+	for _, c := range tbl.Constraints {
+		if c.Type == "NOT NULL" {
+			cst = c
+		}
+	}
+	if cst == nil {
+		t.Fatalf("expected a promoted NOT NULL constraint, got constraints: %+v", tbl.Constraints)
+	}
+	if cst.Name != "named_nn" {
+		t.Errorf("Name: got %q", cst.Name)
+	}
+	if len(cst.Columns) != 1 || cst.Columns[0] != "name" {
+		t.Errorf("Columns: got %v", cst.Columns)
+	}
+	if !cst.NoInherit {
+		t.Error("NoInherit: expected true")
+	}
+	// The column itself must still report NotNull — the promoted
+	// Constraint is additive metadata, not a replacement for the bool.
+	for _, col := range tbl.Columns {
+		if col.Name == "name" && !col.NotNull {
+			t.Error("Column \"name\".NotNull: expected true")
+		}
+	}
+}
+
+// TestBuildInlineNotNullNoInheritPromotesUnnamed guards the inline half of
+// the same feature: a bare "col NOT NULL NO INHERIT" (no CONSTRAINT
+// keyword) also promotes to a table-level Constraint — auto-named (Name ==
+// ""), matching how an unnamed inline PRIMARY KEY/UNIQUE already promotes —
+// because NO INHERIT is state Column.NotNull's plain bool can't carry at
+// all, unlike an ordinary bare NOT NULL (see
+// TestBuildInlineNotNullPlainStaysBool below for that contrasting case).
+func TestBuildInlineNotNullNoInheritPromotesUnnamed(t *testing.T) {
+	obj := buildObject(t, pipeline.KindTable,
+		`widgets (
+			id   BIGINT,
+			name TEXT NOT NULL NO INHERIT
+		)`,
+		``,
+	)
+	tbl, ok := obj.(*ir.Table)
+	if !ok {
+		t.Fatalf("expected *ir.Table, got %T", obj)
+	}
+	var cst *ir.Constraint
+	for _, c := range tbl.Constraints {
+		if c.Type == "NOT NULL" {
+			cst = c
+		}
+	}
+	if cst == nil {
+		t.Fatalf("expected a promoted NOT NULL constraint, got constraints: %+v", tbl.Constraints)
+	}
+	if cst.Name != "" {
+		t.Errorf("Name: expected auto-named (empty), got %q", cst.Name)
+	}
+	if !cst.NoInherit {
+		t.Error("NoInherit: expected true")
+	}
+}
+
+// TestBuildInlineNotNullPlainStaysBool is the negative-space regression
+// guard for the two tests above: the overwhelmingly common ordinary case —
+// a bare "col NOT NULL", no CONSTRAINT keyword, no NO INHERIT — must NOT
+// promote to a table-level Constraint at all, only set Column.NotNull.
+// Promoting every plain NOT NULL column would flood dump output and
+// diffing with a constraint object for the single most common column
+// property in the entire language.
+func TestBuildInlineNotNullPlainStaysBool(t *testing.T) {
+	obj := buildObject(t, pipeline.KindTable,
+		`widgets (
+			id   BIGINT,
+			name TEXT NOT NULL
+		)`,
+		``,
+	)
+	tbl, ok := obj.(*ir.Table)
+	if !ok {
+		t.Fatalf("expected *ir.Table, got %T", obj)
+	}
+	for _, c := range tbl.Constraints {
+		if c.Type == "NOT NULL" {
+			t.Fatalf("expected no promoted NOT NULL constraint for a plain inline NOT NULL, got: %+v", c)
+		}
+	}
+	var nameCol *ir.Column
+	for _, col := range tbl.Columns {
+		if col.Name == "name" {
+			nameCol = col
+		}
+	}
+	if nameCol == nil || !nameCol.NotNull {
+		t.Fatal("expected Column \"name\".NotNull = true")
+	}
+}
+
+// TestBuildTableLevelNotNullConstraintNotValid guards RFC Section 7.3's NOT
+// VALID lifecycle extended to NOT NULL (PostgreSQL 18+): NOT VALID MUST be
+// declared in the `{ }` block (real PostgreSQL rejects it inline in CREATE
+// TABLE for every constraint kind, NOT NULL included), so this exercises
+// the blockparser path, not the `()` list.
+func TestBuildTableLevelNotNullConstraintNotValid(t *testing.T) {
+	obj := buildObject(t, pipeline.KindTable,
+		`widgets (
+			id   BIGINT,
+			name TEXT
+		)`,
+		`CONSTRAINT named_nn NOT NULL name NOT VALID;`,
+	)
+	tbl, ok := obj.(*ir.Table)
+	if !ok {
+		t.Fatalf("expected *ir.Table, got %T", obj)
+	}
+	var cst *ir.Constraint
+	for _, c := range tbl.Constraints {
+		if c.Type == "NOT NULL" {
+			cst = c
+		}
+	}
+	if cst == nil {
+		t.Fatalf("expected a promoted NOT NULL constraint, got constraints: %+v", tbl.Constraints)
+	}
+	if !cst.NotValid {
+		t.Error("NotValid: expected true")
+	}
+}
+
 func TestBuildSimpleTable(t *testing.T) {
 	obj := buildObject(t, pipeline.KindTable,
 		`users (

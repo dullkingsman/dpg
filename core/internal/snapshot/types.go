@@ -352,6 +352,9 @@ type SnapConstraint struct {
 	NotValid   bool   `json:"not_valid,omitempty"`
 	Deferrable bool   `json:"deferrable,omitempty"`
 	Comment    string `json:"comment,omitempty"`
+	// NoInherit mirrors ir.Constraint.NoInherit (PostgreSQL 18+ NOT NULL
+	// NO INHERIT, RFC Section 7.3).
+	NoInherit bool `json:"no_inherit,omitempty"`
 }
 
 // SnapIndex is a flat, fully comparable (string/bool fields only) snapshot of

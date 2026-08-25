@@ -586,6 +586,7 @@ func toSnapConstraint(cst *ir.Constraint) SnapConstraint {
 		Expr:       cst.Expr,
 		NotValid:   cst.NotValid,
 		Deferrable: cst.Deferrable,
+		NoInherit:  cst.NoInherit,
 	}
 	if cst.Comment != nil {
 		sc.Comment = *cst.Comment

@@ -93,6 +93,87 @@ func TestRenderGeneratedColumnVirtualCompiles(t *testing.T) {
 	}
 }
 
+// TestRenderNamedNotNullConstraintCompiles guards RFC Section 7.3's
+// table-level named NOT NULL constraint (PostgreSQL 18+): a single-column,
+// validated one renders inline on its column (isInlineable/
+// inlineConstraintClause), without ALSO emitting a redundant bare "NOT
+// NULL" from Column.NotNull's own rendering — and the result recompiles.
+func TestRenderNamedNotNullConstraintCompiles(t *testing.T) {
+	fmtOpts := format.Options{IndentSize: 4, KeywordCase: "upper"}
+	tbl := &ir.Table{
+		Schema: "public", Name: "widgets",
+		Columns: []*ir.Column{
+			{Name: "id", Type: ir.TypeRef{Name: "bigint"}},
+			{Name: "sku", Type: ir.TypeRef{Name: "text"}, NotNull: true},
+		},
+		Constraints: []*ir.Constraint{
+			{Name: "named_nn", Type: "NOT NULL", Columns: []string{"sku"}, NoInherit: true, Expr: `NOT NULL "sku" NO INHERIT`},
+		},
+	}
+
+	var b strings.Builder
+	renderObjectDPG(&b, tbl, fmtOpts)
+	rendered := b.String()
+
+	// Constraint names are intentionally dropped when inlined — matching
+	// the pre-existing PRIMARY KEY/UNIQUE/FOREIGN KEY precedent
+	// (inlineConstraintClause's own doc comment: "PostgreSQL auto-generates
+	// them"), extended here to NOT NULL for consistency.
+	if !strings.Contains(rendered, "sku text NOT NULL NO INHERIT") {
+		t.Errorf("rendered column does not inline NOT NULL NO INHERIT: %q", rendered)
+	}
+	if strings.Count(rendered, "NOT NULL") != 1 {
+		t.Errorf("expected exactly one NOT NULL occurrence (no redundant bare one), got: %q", rendered)
+	}
+
+	dir := t.TempDir()
+	f := filepath.Join(dir, "objects.dpg")
+	if err := os.WriteFile(f, []byte(rendered), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := compiler.Compile([]string{f}, dir, pipeline.Default); err != nil {
+		t.Fatalf("dumped table with a named NOT NULL constraint failed to recompile: %v\n---\n%s", err, rendered)
+	}
+}
+
+// TestRenderNotValidNotNullConstraintCompiles is
+// TestRenderNamedNotNullConstraintCompiles' NOT VALID counterpart — a
+// constraint with NOT VALID can't be inlined (same exclusion CHECK/FOREIGN
+// KEY already have), so it must render as its own table-level item instead.
+func TestRenderNotValidNotNullConstraintCompiles(t *testing.T) {
+	fmtOpts := format.Options{IndentSize: 4, KeywordCase: "upper"}
+	tbl := &ir.Table{
+		Schema: "public", Name: "widgets",
+		Columns: []*ir.Column{
+			{Name: "id", Type: ir.TypeRef{Name: "bigint"}},
+			{Name: "sku", Type: ir.TypeRef{Name: "text"}, NotNull: true},
+		},
+		Constraints: []*ir.Constraint{
+			{Name: "named_nn", Type: "NOT NULL", Columns: []string{"sku"}, NotValid: true, Expr: `NOT NULL "sku"`},
+		},
+	}
+
+	var b strings.Builder
+	renderObjectDPG(&b, tbl, fmtOpts)
+	rendered := b.String()
+
+	if !strings.Contains(rendered, `CONSTRAINT named_nn NOT NULL "sku"`) {
+		t.Errorf("rendered constraint missing or malformed: %q", rendered)
+	}
+	if !strings.Contains(rendered, "NOT VALID") {
+		t.Errorf("rendered constraint does not carry NOT VALID: %q", rendered)
+	}
+
+	dir := t.TempDir()
+	f := filepath.Join(dir, "objects.dpg")
+	if err := os.WriteFile(f, []byte(rendered), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := compiler.Compile([]string{f}, dir, pipeline.Default); err != nil {
+		t.Fatalf("dumped table with a NOT VALID NOT NULL constraint failed to recompile: %v\n---\n%s", err, rendered)
+	}
+}
+
 // TestRenderIndexUsingMethodCompiles guards a real bug found live-testing a
 // demo project: the RFC's ABNF and every one of its worked examples
 // (rfc/dpg-1.md §7.7, e.g. "idx_location USING gist (location);") place

@@ -2099,6 +2099,249 @@ func TestDiffNoValidateConstraintWhenAlreadyValid(t *testing.T) {
 	}
 }
 
+// TestDiffAddNamedNotNullConstraint guards RFC Section 7.3's table-level
+// named NOT NULL constraint (PostgreSQL 18+): a brand-new one emits ALTER
+// TABLE ... ADD CONSTRAINT name NOT NULL col NO INHERIT, CAUTION — and,
+// since the constraint's own ADD CONSTRAINT performs the "make not null"
+// transition itself (confirmed live), diffColumns must NOT also emit a
+// separate ALTER COLUMN SET NOT NULL for the same column.
+func TestDiffAddNamedNotNullConstraint(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.widgets", &snapshot.SnapObject{
+		Kind: "table",
+		Table: &snapshot.SnapTable{
+			Schema:  "public",
+			Name:    "widgets",
+			Columns: []snapshot.SnapColumn{{Name: "sku", Type: "text"}},
+		},
+	})
+	desired := []pipeline.IRObject{
+		&ir.Table{
+			Schema:  "public",
+			Name:    "widgets",
+			Columns: []*ir.Column{{Name: "sku", Type: ir.TypeRef{Name: "text"}, NotNull: true}},
+			Constraints: []*ir.Constraint{
+				{Name: "named_nn", Type: "NOT NULL", Columns: []string{"sku"}, NoInherit: true, Expr: `NOT NULL "sku" NO INHERIT`},
+			},
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var addOp pipeline.DiffOp
+	for _, o := range ops {
+		if strings.Contains(o.SQL(), "SET NOT NULL") {
+			t.Errorf("expected no separate SET NOT NULL alongside ADD CONSTRAINT, got: %v", sqlList(ops))
+		}
+		if strings.Contains(o.SQL(), "ADD CONSTRAINT") {
+			addOp = o
+		}
+	}
+	if addOp == nil {
+		t.Fatalf("expected an ADD CONSTRAINT op, got: %v", sqlList(ops))
+	}
+	if !strings.Contains(addOp.SQL(), `ADD CONSTRAINT "named_nn" NOT NULL "sku" NO INHERIT`) {
+		t.Errorf("unexpected SQL: %s", addOp.SQL())
+	}
+	if addOp.Safety() != pipeline.Caution {
+		t.Errorf("expected Caution, got %s", addOp.Safety())
+	}
+}
+
+// TestDiffAlterNotNullInheritOnly guards RFC Section 7.3's "NOT NULL
+// constraint inheritability (PostgreSQL 18+)" row: when only NO INHERIT
+// differs, the compiler emits a targeted ALTER TABLE ... ALTER CONSTRAINT
+// name [NO] INHERIT — SAFE — instead of drop-and-recreate.
+func TestDiffAlterNotNullInheritOnly(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.widgets", &snapshot.SnapObject{
+		Kind: "table",
+		Table: &snapshot.SnapTable{
+			Schema:  "public",
+			Name:    "widgets",
+			Columns: []snapshot.SnapColumn{{Name: "sku", Type: "text", NotNull: true}},
+			Constraints: []snapshot.SnapConstraint{
+				{Name: "named_nn", Type: "NOT NULL", Expr: `NOT NULL "sku"`, NoInherit: false},
+			},
+		},
+	})
+	desired := []pipeline.IRObject{
+		&ir.Table{
+			Schema:  "public",
+			Name:    "widgets",
+			Columns: []*ir.Column{{Name: "sku", Type: ir.TypeRef{Name: "text"}, NotNull: true}},
+			Constraints: []*ir.Constraint{
+				{Name: "named_nn", Type: "NOT NULL", Columns: []string{"sku"}, NoInherit: true, Expr: `NOT NULL "sku" NO INHERIT`},
+			},
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var alterOp pipeline.DiffOp
+	for _, o := range ops {
+		if strings.Contains(o.SQL(), "DROP CONSTRAINT") || strings.Contains(o.SQL(), "ADD CONSTRAINT") {
+			t.Errorf("NO INHERIT-only change should not drop/re-add the constraint, got: %v", sqlList(ops))
+		}
+		if strings.Contains(o.SQL(), "ALTER CONSTRAINT") {
+			alterOp = o
+		}
+	}
+	if alterOp == nil {
+		t.Fatalf("expected an ALTER CONSTRAINT op, got: %v", sqlList(ops))
+	}
+	if !strings.Contains(alterOp.SQL(), `ALTER CONSTRAINT "named_nn" NO INHERIT`) {
+		t.Errorf("unexpected SQL: %s", alterOp.SQL())
+	}
+	if alterOp.Safety() != pipeline.Safe {
+		t.Errorf("expected Safe, got %s", alterOp.Safety())
+	}
+}
+
+// TestDiffValidateConstraintReusedForNotNull guards #114: the NOT VALID/
+// VALIDATE CONSTRAINT lifecycle already implemented for CHECK/FK (RFC
+// Section 7.3, see TestDiffValidateConstraintOnNotValidRemoval above) is
+// type-agnostic and reused unmodified for NOT NULL, since Constraint.Type
+// was added to pgConstraintNameLabel and validateConstraintOp never
+// switches on Type at all.
+func TestDiffValidateConstraintReusedForNotNull(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.widgets", &snapshot.SnapObject{
+		Kind: "table",
+		Table: &snapshot.SnapTable{
+			Schema:  "public",
+			Name:    "widgets",
+			Columns: []snapshot.SnapColumn{{Name: "sku", Type: "text", NotNull: true}},
+			Constraints: []snapshot.SnapConstraint{
+				{Name: "named_nn", Type: "NOT NULL", Expr: `NOT NULL "sku"`, NotValid: true},
+			},
+		},
+	})
+	desired := []pipeline.IRObject{
+		&ir.Table{
+			Schema:  "public",
+			Name:    "widgets",
+			Columns: []*ir.Column{{Name: "sku", Type: ir.TypeRef{Name: "text"}, NotNull: true}},
+			Constraints: []*ir.Constraint{
+				{Name: "named_nn", Type: "NOT NULL", Columns: []string{"sku"}, Expr: `NOT NULL "sku"`},
+			},
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var found bool
+	for _, o := range ops {
+		if strings.Contains(o.SQL(), "VALIDATE CONSTRAINT") {
+			found = true
+			if !strings.Contains(o.SQL(), `"named_nn"`) {
+				t.Errorf("VALIDATE CONSTRAINT does not name the constraint: %s", o.SQL())
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("expected ALTER TABLE ... VALIDATE CONSTRAINT ..., got: %v", sqlList(ops))
+	}
+}
+
+// TestDiffDropNotNullConstraintNoDoubleOp guards against a real conflict
+// found live-testing against a PostgreSQL 18 server: ALTER COLUMN ... DROP
+// NOT NULL already removes the underlying named/NO INHERIT constraint
+// entirely (confirmed live, regardless of its custom name) — a second,
+// separate ALTER TABLE ... DROP CONSTRAINT for the same now-gone name would
+// fail with "constraint does not exist". Removing NOT NULL from source
+// (column kept) must emit only the DROP NOT NULL, never both.
+func TestDiffDropNotNullConstraintNoDoubleOp(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.widgets", &snapshot.SnapObject{
+		Kind: "table",
+		Table: &snapshot.SnapTable{
+			Schema:  "public",
+			Name:    "widgets",
+			Columns: []snapshot.SnapColumn{{Name: "sku", Type: "text", NotNull: true}},
+			Constraints: []snapshot.SnapConstraint{
+				{Name: "named_nn", Type: "NOT NULL", Expr: `NOT NULL "sku"`, NoInherit: true},
+			},
+		},
+	})
+	desired := []pipeline.IRObject{
+		&ir.Table{
+			Schema:  "public",
+			Name:    "widgets",
+			Columns: []*ir.Column{{Name: "sku", Type: ir.TypeRef{Name: "text"}}}, // no longer NOT NULL
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var dropNotNullOp pipeline.DiffOp
+	for _, o := range ops {
+		if strings.Contains(o.SQL(), "DROP CONSTRAINT") {
+			t.Errorf("expected no separate DROP CONSTRAINT alongside DROP NOT NULL, got: %v", sqlList(ops))
+		}
+		if strings.Contains(o.SQL(), "DROP NOT NULL") {
+			dropNotNullOp = o
+		}
+	}
+	if dropNotNullOp == nil {
+		t.Fatalf("expected a DROP NOT NULL op, got: %v", sqlList(ops))
+	}
+	if dropNotNullOp.Safety() != pipeline.Safe {
+		t.Errorf("expected Safe, got %s", dropNotNullOp.Safety())
+	}
+}
+
+// TestDiffNotNullConstraintRenameKeptStillNeedsDropRecreate is the negative
+// case for TestDiffDropNotNullConstraintNoDoubleOp above: when the column
+// STAYS NOT NULL but the named constraint disappears from desired (e.g. the
+// user removed the explicit name, reverting to a bare inline NOT NULL),
+// this is a genuine identity change that still needs its own
+// drop-and-recreate — the narrower guard in diffConstraints' removal loop
+// must not suppress this case just because the column is still NOT NULL.
+func TestDiffNotNullConstraintRenameKeptStillNeedsDropRecreate(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.widgets", &snapshot.SnapObject{
+		Kind: "table",
+		Table: &snapshot.SnapTable{
+			Schema:  "public",
+			Name:    "widgets",
+			Columns: []snapshot.SnapColumn{{Name: "sku", Type: "text", NotNull: true}},
+			Constraints: []snapshot.SnapConstraint{
+				{Name: "named_nn", Type: "NOT NULL", Expr: `NOT NULL "sku"`},
+			},
+		},
+	})
+	desired := []pipeline.IRObject{
+		&ir.Table{
+			Schema:  "public",
+			Name:    "widgets",
+			Columns: []*ir.Column{{Name: "sku", Type: ir.TypeRef{Name: "text"}, NotNull: true}}, // plain, no promoted constraint
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var dropOp pipeline.DiffOp
+	for _, o := range ops {
+		if strings.Contains(o.SQL(), "DROP CONSTRAINT") && strings.Contains(o.SQL(), "named_nn") {
+			dropOp = o
+		}
+	}
+	if dropOp == nil {
+		t.Fatalf("expected DROP CONSTRAINT \"named_nn\" (constraint identity genuinely changed), got: %v", sqlList(ops))
+	}
+}
+
 // TestCreateForeignTableEmitsServerOptions guards a real bug found live-
 // testing a demo project: createTable wrote the "CREATE FOREIGN TABLE"
 // keyword but never appended SERVER/OPTIONS — not just incomplete, an

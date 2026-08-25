@@ -2998,7 +2998,13 @@ func createTable(o *ir.Table, vtypes map[string]string) []pipeline.DiffOp {
 	}
 	inlineFor := make(map[string][]inlineKW) // colName → ordered inline clauses
 	pkColSet := make(map[string]bool)        // any PK column (single- or multi-)
-	skipIdx := make(map[int]bool)            // constraint index to omit at table level
+	// notNullColSet tracks columns whose NOT NULL is represented by a
+	// promoted table-level Constraint (explicit name and/or NO INHERIT)
+	// rather than the plain Column.NotNull bool, so the per-column render
+	// loop below doesn't ALSO emit a redundant bare " NOT NULL" alongside
+	// the inlined "CONSTRAINT name NOT NULL ... [NO INHERIT]" clause.
+	notNullColSet := make(map[string]bool)
+	skipIdx := make(map[int]bool) // constraint index to omit at table level
 
 	for i, cst := range o.Constraints {
 		cols := localConstraintCols(cst.Expr)
@@ -3058,6 +3064,17 @@ func createTable(o *ir.Table, vtypes map[string]string) []pipeline.DiffOp {
 				inlineFor[cst.Columns[0]] = append(inlineFor[cst.Columns[0]], inlineKW{name: cst.Name, keyword: cst.Expr})
 				skipIdx[i] = true
 			}
+		case "NOT NULL":
+			// A promoted NOT NULL constraint (explicit name and/or NO
+			// INHERIT — see buildColumn/buildConstraint's promotion rule)
+			// always has exactly one column, matching real PostgreSQL's
+			// own single-column-only grammar for this constraint kind.
+			// NotValid stays table-level, same reasoning as CHECK above.
+			if len(cst.Columns) == 1 && !cst.NotValid {
+				notNullColSet[cst.Columns[0]] = true
+				inlineFor[cst.Columns[0]] = append(inlineFor[cst.Columns[0]], inlineKW{name: cst.Name, keyword: cst.Expr})
+				skipIdx[i] = true
+			}
 		}
 	}
 
@@ -3078,8 +3095,13 @@ func createTable(o *ir.Table, vtypes map[string]string) []pipeline.DiffOp {
 			b.WriteString(resolveColType(col.Type, vtypes))
 		}
 		// Suppress NOT NULL for PK columns — PRIMARY KEY already implies it.
-		// Also suppress for SERIAL — PG's own macro-expansion adds it.
-		if col.NotNull && !pkColSet[col.Name] && col.Serial == nil {
+		// Also suppress for SERIAL — PG's own macro-expansion adds it. Also
+		// suppress when a promoted NOT NULL constraint (explicit name
+		// and/or NO INHERIT) is about to be inlined for this column below —
+		// otherwise both the bare keyword and the CONSTRAINT clause would
+		// render, redundantly (and, for NO INHERIT specifically, wrongly:
+		// the bare form has no way to carry it at all).
+		if col.NotNull && !pkColSet[col.Name] && col.Serial == nil && !notNullColSet[col.Name] {
 			b.WriteString(" NOT NULL")
 		}
 		if col.Default != nil && col.Serial == nil {
@@ -6565,6 +6587,26 @@ func diffTableInherits(tbl string, o *ir.Table, snap *snapshot.SnapTable, pos pi
 func diffColumns(tbl string, o *ir.Table, snap *snapshot.SnapTable, vtypes map[string]string) ([]pipeline.DiffOp, map[string]string, map[string]bool, error) {
 	var ops []pipeline.DiffOp
 
+	// notNullConstrainedCols tracks columns whose NOT NULL is governed by a
+	// promoted table-level Constraint (explicit name and/or PostgreSQL 18+
+	// NO INHERIT — see buildColumn/buildConstraint's promotion rule) rather
+	// than the plain Column.NotNull bool. diffConstraints' own ADD
+	// CONSTRAINT/ALTER CONSTRAINT path already handles the full "make not
+	// null" transition for these (confirmed live: ADD CONSTRAINT name NOT
+	// NULL col performs the transition itself, no separate SET NOT NULL
+	// needed) — a bare ALTER COLUMN SET NOT NULL emitted here as well for
+	// the same column, same run, would either be redundant or, if the
+	// eventual NO INHERIT differs from what SET NOT NULL's own
+	// auto-created constraint gets, a real PostgreSQL error ("cannot
+	// change NO INHERIT status of NOT NULL constraint ..."), confirmed
+	// live.
+	notNullConstrainedCols := make(map[string]bool)
+	for _, cst := range o.Constraints {
+		if cst.Type == "NOT NULL" && len(cst.Columns) == 1 {
+			notNullConstrainedCols[cst.Columns[0]] = true
+		}
+	}
+
 	// PostgreSQL PRIMARY KEY implies NOT NULL. Snapshots written before this
 	// inference was applied may have not_null=false for PK columns; normalise
 	// them here so we don't emit a spurious SET NOT NULL on every plan run.
@@ -6666,7 +6708,7 @@ func diffColumns(tbl string, o *ir.Table, snap *snapshot.SnapTable, vtypes map[s
 			} else {
 				fmt.Fprintf(&b, "ALTER TABLE %s ADD COLUMN %s %s", tbl, quoteIdent(col.Name), resolveColType(col.Type, vtypes))
 			}
-			if col.NotNull && col.Serial == nil {
+			if col.NotNull && col.Serial == nil && !notNullConstrainedCols[col.Name] {
 				b.WriteString(" NOT NULL")
 			}
 			if col.Default != nil && col.Serial == nil {
@@ -6692,9 +6734,14 @@ func diffColumns(tbl string, o *ir.Table, snap *snapshot.SnapTable, vtypes map[s
 			b.WriteString(";")
 			// NOT NULL without a volatile default risks failing on existing
 			// rows. SERIAL is exempt — PostgreSQL auto-populates it via the
-			// sequence default, same exemption Identity/Generated already get.
+			// sequence default, same exemption Identity/Generated already
+			// get. A notNullConstrainedCols column is also exempt here:
+			// this statement no longer carries NOT NULL text at all (see
+			// above), so the risk — and the CAUTION classification for it
+			// — belongs entirely to diffConstraints' own separate ADD
+			// CONSTRAINT statement instead.
 			safety := pipeline.Safe
-			if col.NotNull && col.Default == nil && col.Identity == nil && col.Generated == nil && col.Serial == nil {
+			if col.NotNull && col.Default == nil && col.Identity == nil && col.Generated == nil && col.Serial == nil && !notNullConstrainedCols[col.Name] {
 				safety = pipeline.Caution
 			}
 			ops = append(ops, &op{sql: b.String(), safety: safety, pos: col.SrcPos, txn: true})
@@ -6770,7 +6817,13 @@ func diffColumns(tbl string, o *ir.Table, snap *snapshot.SnapTable, vtypes map[s
 			})
 		}
 		ops = append(ops, diffGeneratedColumn(tbl, col, sc, resolvedType)...)
-		if col.NotNull && !sc.NotNull {
+		// A notNullConstrainedCols column's "make not null" transition is
+		// handled entirely by diffConstraints' own ADD CONSTRAINT NOT NULL
+		// (which performs the transition itself — confirmed live) — see
+		// notNullConstrainedCols' doc comment above for why a bare SET NOT
+		// NULL here as well would be redundant at best, a real PostgreSQL
+		// error at worst.
+		if col.NotNull && !sc.NotNull && !notNullConstrainedCols[col.Name] {
 			ops = append(ops, cautionOp(
 				fmt.Sprintf("ALTER TABLE %s ALTER COLUMN %s SET NOT NULL;", tbl, quoteIdent(col.Name)),
 				col.SrcPos,
@@ -6960,6 +7013,42 @@ func diffGeneratedColumn(tbl string, col *ir.Column, sc *snapshot.SnapColumn, re
 
 func diffConstraints(tbl string, o *ir.Table, snap *snapshot.SnapTable, fullSnap *pipeline.Snapshot, pos pipeline.SourcePos, renamedCols map[string]string, droppedCols map[string]bool) ([]pipeline.DiffOp, error) {
 	var ops []pipeline.DiffOp
+
+	// colStillNotNull records every desired column that is still NOT NULL
+	// (regardless of whether that's the plain bool or a promoted
+	// Constraint) — used below to tell "a NOT NULL constraint disappeared
+	// because NOT NULL itself was dropped from the column" (diffColumns'
+	// own DROP NOT NULL already handles removing it, so this function must
+	// not also try) apart from "the column is still NOT NULL, only its
+	// name/NO INHERIT changed" (a genuine identity change still needing
+	// its own drop-and-recreate here).
+	colStillNotNull := make(map[string]bool, len(o.Columns))
+	for _, col := range o.Columns {
+		if col.NotNull {
+			colStillNotNull[col.Name] = true
+		}
+	}
+
+	// snapNotNullCol/snapHasPromotedNotNull together identify the "ordinary
+	// bare NOT NULL is being promoted to a named/NO INHERIT constraint for
+	// the first time" transition — see the "promoting an ordinary NOT
+	// NULL" branch below for why this needs its own handling, separate
+	// from both the generic ADD CONSTRAINT path and colStillNotNull above.
+	snapNotNullCol := make(map[string]bool, len(snap.Columns))
+	for _, sc := range snap.Columns {
+		if sc.NotNull {
+			snapNotNullCol[sc.Name] = true
+		}
+	}
+	snapHasPromotedNotNull := make(map[string]bool, len(snap.Constraints))
+	for _, sc := range snap.Constraints {
+		if sc.Type != "NOT NULL" {
+			continue
+		}
+		for _, col := range localConstraintCols(sc.Expr) {
+			snapHasPromotedNotNull[col] = true
+		}
+	}
 
 	// Inline constraints (e.g. `id BIGINT PRIMARY KEY`) have no user-supplied
 	// name, so matching by name alone would treat them as new on every run.
@@ -7166,7 +7255,22 @@ func diffConstraints(tbl string, o *ir.Table, snap *snapshot.SnapTable, fullSnap
 		// PG cascades constraint removal when the underlying column is dropped.
 		// If every local column referenced by this constraint is being dropped,
 		// skip emitting anything — DROP COLUMN already handles it.
-		if cols := localConstraintCols(sc.Expr); allDropped(cols, droppedCols) {
+		cols := localConstraintCols(sc.Expr)
+		if allDropped(cols, droppedCols) {
+			continue
+		}
+		// A NOT NULL constraint (PostgreSQL 18+) genuinely going away —
+		// the column stays, but is no longer NOT NULL at all — is already
+		// fully handled by diffColumns' own DROP NOT NULL (confirmed live:
+		// it removes the underlying constraint regardless of name/NO
+		// INHERIT). Skip here to avoid a second, redundant DROP CONSTRAINT
+		// targeting a name PostgreSQL has already removed. This is
+		// deliberately narrower than the cascade-skip above: it must NOT
+		// fire when the column is simply losing its explicit name/NO
+		// INHERIT while staying NOT NULL (a real identity change still
+		// needing its own drop-and-recreate under the new auto-generated
+		// name, same limitation every other constraint kind already has).
+		if desiredCols := localConstraintCols(translateConstraintExpr(sc.Expr, renamedCols)); sc.Type == "NOT NULL" && len(desiredCols) == 1 && !colStillNotNull[desiredCols[0]] {
 			continue
 		}
 		if sc.Name == "" {
@@ -7207,6 +7311,7 @@ func diffConstraints(tbl string, o *ir.Table, snap *snapshot.SnapTable, fullSnap
 	for _, c := range o.Constraints {
 		if sc, exists := snapByKey[key(c.Name, c.Type, c.Expr)]; exists {
 			ops = append(ops, validateConstraintOp("TABLE", tbl, sc, c)...)
+			ops = append(ops, alterNotNullInheritOp(tbl, sc, c)...)
 			ops = append(ops, commentOp(sc, c)...)
 			continue
 		}
@@ -7225,6 +7330,7 @@ func diffConstraints(tbl string, o *ir.Table, snap *snapshot.SnapTable, fullSnap
 				renamedSc := *sc
 				renamedSc.Name = c.Name
 				ops = append(ops, validateConstraintOp("TABLE", tbl, &renamedSc, c)...)
+				ops = append(ops, alterNotNullInheritOp(tbl, &renamedSc, c)...)
 				ops = append(ops, commentOp(&renamedSc, c)...)
 				continue
 			}
@@ -7234,11 +7340,46 @@ func diffConstraints(tbl string, o *ir.Table, snap *snapshot.SnapTable, fullSnap
 				if predicted, predOK := predictName(c, label); predOK {
 					if sc, exists := snapByKey["n:"+predicted]; exists {
 						ops = append(ops, validateConstraintOp("TABLE", tbl, sc, c)...)
+						ops = append(ops, alterNotNullInheritOp(tbl, sc, c)...)
 						ops = append(ops, commentOp(sc, c)...)
 						continue
 					}
 				}
 			}
+		}
+		// Promoting an ordinary NOT NULL (RFC Section 7.3): the desired
+		// side just gained a name and/or NO INHERIT for a column that was
+		// ALREADY NOT NULL — via a bare inline declaration this codebase
+		// deliberately never promotes to its own Constraint (see
+		// buildColumn's promotion rule) — and, critically, PostgreSQL
+		// itself already auto-created a real catalogued constraint for it
+		// under its own generated name the moment the column became NOT
+		// NULL. A plain ADD CONSTRAINT here would collide with that
+		// existing row (confirmed live: "cannot change NO INHERIT status
+		// of NOT NULL constraint ... on relation ..."), so this retargets
+		// PostgreSQL's own auto-generated name instead — RENAME CONSTRAINT
+		// to the new name (only if one was actually given; a bare NO
+		// INHERIT with no CONSTRAINT keyword keeps the auto-name) and/or
+		// ALTER CONSTRAINT NO INHERIT, exactly the machinery
+		// alterNotNullInheritOp already provides for the "unchanged name,
+		// only NO INHERIT differs" case above — reused here via a synthetic
+		// SnapConstraint standing in for the live, snapshot-untracked
+		// auto-created row.
+		if c.Type == "NOT NULL" && len(c.Columns) == 1 &&
+			snapNotNullCol[c.Columns[0]] && !snapHasPromotedNotNull[c.Columns[0]] {
+			predicted := pgAutoConstraintName(o.Name, c.Columns, "not_null", maps.Clone(otherTableNames))
+			newName := c.Name
+			if newName == "" {
+				newName = predicted
+			}
+			if newName != predicted {
+				ops = append(ops, safeOp(
+					fmt.Sprintf("ALTER TABLE %s RENAME CONSTRAINT %s TO %s;", tbl, quoteIdent(predicted), quoteIdent(newName)),
+					c.Pos,
+				))
+			}
+			ops = append(ops, alterNotNullInheritOp(tbl, &snapshot.SnapConstraint{Type: "NOT NULL", Name: newName, NoInherit: false}, c)...)
+			continue
 		}
 		notValid := ""
 		if c.NotValid {
@@ -7285,6 +7426,32 @@ func validateConstraintOp(alterKW, tbl string, sc *snapshot.SnapConstraint, c *i
 	)}
 }
 
+// alterNotNullInheritOp emits ALTER TABLE ... ALTER CONSTRAINT name [NO]
+// INHERIT when a table-level NOT NULL constraint's NO INHERIT flag differs
+// from the snapshot but everything else about it (column, validity) is
+// unchanged — RFC Section 7.3's "NOT NULL constraint inheritability
+// (PostgreSQL 18+)" row. This is a separate, distinctly-named ALTER
+// CONSTRAINT variant from FK's own deferrability-only-change one (real
+// PostgreSQL's ALTER CONSTRAINT grammar is constraint-kind-specific, not one
+// shared option set) — SAFE, metadata-only, confirmed live against a
+// PostgreSQL 18 server. sc.Name (the snapshot's recorded/catalog name), not
+// c.Name, is used as the target, matching validateConstraintOp's identical
+// reasoning just above: PostgreSQL always assigns NOT NULL a real catalog
+// name, even one DPG's own source never spelled out.
+func alterNotNullInheritOp(tbl string, sc *snapshot.SnapConstraint, c *ir.Constraint) []pipeline.DiffOp {
+	if sc.Type != "NOT NULL" || sc.Name == "" || sc.NoInherit == c.NoInherit {
+		return nil
+	}
+	kw := "INHERIT"
+	if c.NoInherit {
+		kw = "NO INHERIT"
+	}
+	return []pipeline.DiffOp{safeOp(
+		fmt.Sprintf("ALTER TABLE %s ALTER CONSTRAINT %s %s;", tbl, quoteIdent(sc.Name), kw),
+		c.Pos,
+	)}
+}
+
 // pgConstraintNameLabel returns the label PostgreSQL's auto-naming
 // algorithm uses for a constraint type, and whether pgAutoConstraintName can
 // reconstruct a name for it at all. For EXCLUDE this is necessary but not
@@ -7304,6 +7471,8 @@ func pgConstraintNameLabel(typ string) (label string, ok bool) {
 		return "check", true
 	case "EXCLUDE":
 		return "excl", true
+	case "NOT NULL":
+		return "not_null", true
 	default:
 		return "", false
 	}
@@ -7803,6 +7972,21 @@ func translateConstraintExpr(expr string, renamedCols map[string]string) string 
 // the first parenthesized group of a constraint expression. Used to decide
 // whether a snapshot constraint's columns are entirely being dropped.
 func localConstraintCols(expr string) []string {
+	// NOT NULL (PostgreSQL 18+, RFC Section 7.3) is the one constraint kind
+	// whose Expr carries no parenthesized column list at all — "NOT NULL
+	// colname" or "NOT NULL colname NO INHERIT" — so it needs its own
+	// extraction instead of falling through to firstParenGroup below, which
+	// would otherwise return nil (no referenced columns found) and silently
+	// disable both the column-dropped cascade-skip and any other caller
+	// that needs this constraint's column.
+	if rest, ok := strings.CutPrefix(expr, "NOT NULL "); ok {
+		col, _, _ := strings.Cut(rest, " ")
+		col = strings.Trim(col, `"`)
+		if col == "" {
+			return nil
+		}
+		return []string{col}
+	}
 	open, close := firstParenGroup(expr)
 	if open == -1 {
 		return nil

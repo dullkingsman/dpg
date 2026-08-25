@@ -490,6 +490,12 @@ func renderObjectDPG(b *strings.Builder, obj pipeline.IRObject, fmtOpts format.O
 	switch o := obj.(type) {
 	case *ir.Table:
 		inlinedByCol := map[string][]string{}
+		// notNullInlined tracks columns whose NOT NULL is rendered via an
+		// inlined "CONSTRAINT ... NOT NULL [NO INHERIT]"/"NOT NULL [NO
+		// INHERIT]" clause (added to inlinedByCol below) rather than the
+		// plain Column.NotNull bool — renderColText must suppress its own
+		// bare " NOT NULL" for these, or both would render redundantly.
+		notNullInlined := map[string]bool{}
 		var refCSTs []*ir.Constraint
 		var otherCSTs []*ir.Constraint
 		// blockCSTs holds constraints carrying a Comment: real PostgreSQL's
@@ -504,8 +510,16 @@ func renderObjectDPG(b *strings.Builder, obj pipeline.IRObject, fmtOpts format.O
 		for _, cst := range o.Constraints {
 			if cst.Comment != nil {
 				blockCSTs = append(blockCSTs, cst)
-			} else if len(cst.Columns) == 1 && isInlineable(cst.Type) {
+			} else if len(cst.Columns) == 1 && isInlineable(cst.Type) && !cst.NotValid {
+				// !cst.NotValid matches CHECK's existing exclusion from
+				// inlining (see isInlineable/inlineConstraintClause):
+				// NOT VALID has no inline column-constraint rendering, so
+				// it must stay a table-level item, the only place
+				// renderCSTText below actually appends it.
 				inlinedByCol[cst.Columns[0]] = append(inlinedByCol[cst.Columns[0]], inlineConstraintClause(cst))
+				if cst.Type == "NOT NULL" {
+					notNullInlined[cst.Columns[0]] = true
+				}
 			} else if cst.Type == "FOREIGN KEY" {
 				refCSTs = append(refCSTs, cst)
 			} else {
@@ -532,7 +546,7 @@ func renderObjectDPG(b *strings.Builder, obj pipeline.IRObject, fmtOpts format.O
 			} else {
 				fmt.Fprintf(&sb, "%s%s %s", ind, quoteIdentIfNeeded(col.Name), col.Type.String())
 			}
-			if col.NotNull && col.Identity == nil && col.Serial == nil {
+			if col.NotNull && col.Identity == nil && col.Serial == nil && !notNullInlined[col.Name] {
 				fmt.Fprintf(&sb, " %s %s", kw("NOT"), kw("NULL"))
 			}
 			if col.Default != nil && col.Serial == nil {
@@ -2150,7 +2164,7 @@ func classifyColumn(col *ir.Column) string {
 // isInlineable reports whether a constraint type can be written as a column-level clause.
 func isInlineable(typ string) bool {
 	switch typ {
-	case "PRIMARY KEY", "UNIQUE", "FOREIGN KEY":
+	case "PRIMARY KEY", "UNIQUE", "FOREIGN KEY", "NOT NULL":
 		return true
 	}
 	return false
@@ -2173,6 +2187,15 @@ func inlineConstraintClause(cst *ir.Constraint) string {
 			return strings.TrimSpace(cst.Expr[idx+1:])
 		}
 		return cst.Expr
+	case "NOT NULL":
+		// cst.Expr is "NOT NULL colname [NO INHERIT]" — strip the column
+		// name (already implied by the column this clause is being
+		// inlined onto) the same way FOREIGN KEY strips its own leading
+		// "FOREIGN KEY (col) " above.
+		if cst.NoInherit {
+			return "NOT NULL NO INHERIT"
+		}
+		return "NOT NULL"
 	}
 	return cst.Expr
 }
