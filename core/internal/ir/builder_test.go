@@ -3751,6 +3751,28 @@ func TestBuildCollationRulesUnspecified(t *testing.T) {
 	}
 }
 
+// TestBuildCollationFrom guards RFC Section 14.2's "FROM existing_collation"
+// copy-from shorthand: confirmed via pg_query.Parse probe that FROM's arg is
+// a List of String_ nodes, unlike every other Collation DefElem (a plain
+// string or TypeName) — buildCollation's switch had no "from" case at all.
+func TestBuildCollationFrom(t *testing.T) {
+	obj := buildObject(t, pipeline.KindCollation, `c1_alias FROM c1`, ``)
+	col := obj.(*ir.Collation)
+	if col.CopyFrom == nil || *col.CopyFrom != "c1" {
+		t.Errorf("CopyFrom: got %v, want \"c1\"", col.CopyFrom)
+	}
+}
+
+// TestBuildCollationFromSchemaQualified guards the schema-qualified form —
+// FROM's arg list can carry more than one part.
+func TestBuildCollationFromSchemaQualified(t *testing.T) {
+	obj := buildObject(t, pipeline.KindCollation, `c1_alias FROM other_schema.c1`, ``)
+	col := obj.(*ir.Collation)
+	if col.CopyFrom == nil || *col.CopyFrom != "other_schema.c1" {
+		t.Errorf("CopyFrom: got %v, want \"other_schema.c1\"", col.CopyFrom)
+	}
+}
+
 // TestBuildCollationOwner guards RFC audit item #81: Collation had no Owner
 // field at all.
 func TestBuildCollationOwner(t *testing.T) {

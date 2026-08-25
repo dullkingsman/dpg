@@ -2104,7 +2104,11 @@ func diffCollation(o *ir.Collation, snap *snapshot.SnapOpaque) ([]pipeline.DiffO
 		))
 	}
 
-	if !snap.CollationStructured {
+	// ownerCommentRefreshOps builds the owner/comment/REFRESH VERSION ops
+	// shared by both branches below that skip the structured property
+	// comparison (a FROM-declared collation, permanently, and a stale
+	// pre-CollationStructured snapshot, transiently — see each call site).
+	ownerCommentRefreshOps := func() []pipeline.DiffOp {
 		ops := renameOps
 		if !ptrEq(o.Owner, snap.CollationOwner) && o.Owner != nil {
 			ops = append(ops, safeOp(fmt.Sprintf("ALTER COLLATION %s OWNER TO %s;", ident, quoteIdent(*o.Owner)), pos))
@@ -2117,6 +2121,28 @@ func diffCollation(o *ir.Collation, snap *snapshot.SnapOpaque) ([]pipeline.DiffO
 		if o.RefreshVersion {
 			ops = append(ops, collationRefreshVersionOp(o))
 		}
+		return ops
+	}
+
+	// A FROM-declared collation (RFC Section 14.2) skips the structured
+	// property comparison below entirely, permanently — see
+	// ir.Collation.CopyFrom's doc comment for why (this struct's Provider/
+	// Collate/Ctype/ICULocale/Deterministic/Rules are just hardcoded Go
+	// zero-value defaults for a FROM declaration, never DPG's real
+	// understanding of what the collation resolves to; comparing them
+	// against introspection's actual resolved values would be actively
+	// wrong, not just unhelpful). Deliberately no "nothing else to say"
+	// placeholder op here, unlike the stale-snapshot branch below: that
+	// placeholder exists to self-heal a snapshot ONE TIME as it upgrades to
+	// CollationStructured — CopyFrom's opt-out is permanent (every future
+	// plan still declares FROM), so the same placeholder here would show up
+	// as a harmless but permanently-visible no-op change in every single
+	// `dpg plan` output, forever.
+	if o.CopyFrom != nil {
+		return ownerCommentRefreshOps(), nil
+	}
+	if !snap.CollationStructured {
+		ops := ownerCommentRefreshOps()
 		if len(ops) == 0 {
 			ops = append(ops, safeOp(fmt.Sprintf("-- refresh snapshot metadata for collation %s", ident), pos))
 		}

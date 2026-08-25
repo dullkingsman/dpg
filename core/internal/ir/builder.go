@@ -2741,6 +2741,17 @@ func (b *Builder) buildDefineStmt(ds *pg_query.DefineStmt, block pipeline.BlockA
 					v := sv.Sval
 					col.Rules = &v
 				}
+			case "from":
+				// RFC Section 14.2's "FROM existing_collation" copy-from
+				// shorthand — confirmed via pg_query.Parse probe: unlike
+				// every other Collation DefElem, "from"'s Arg is a List of
+				// String_ nodes (a possibly schema-qualified name), the same
+				// shape qualifiedNameText already handles for an EXCLUDE
+				// element's opclass/collation target.
+				if lst := de.GetArg().GetList(); lst != nil {
+					v := qualifiedNameText(lst.GetItems())
+					col.CopyFrom = &v
+				}
 			}
 		}
 		if locale != nil {

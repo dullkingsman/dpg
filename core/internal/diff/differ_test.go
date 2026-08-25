@@ -17180,6 +17180,71 @@ func TestDiffCollationUnchangedIsNoop(t *testing.T) {
 	}
 }
 
+// TestDiffCollationCopyFromSkipsStructuredComparison is the regression
+// guard for RFC Section 14.2's "FROM existing_collation" copy-from
+// shorthand: a FROM-declared ir.Collation has none of its Provider/Collate/
+// Ctype/ICULocale/Deterministic/Rules fields populated (DPG's Builder
+// processes one object at a time with no visibility into another declared
+// collation, so it genuinely cannot know what they resolve to) — comparing
+// those hardcoded Go zero-value defaults (Provider "c", Deterministic true)
+// against introspection's REAL resolved values (here deliberately set to
+// something that would never match those defaults: icu/false/a populated
+// ICULocale) would otherwise produce a permanent spurious DROP+CREATE on
+// every single plan against an already-applied FROM-declared collation.
+func TestDiffCollationCopyFromSkipsStructuredComparison(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.c1_alias", &snapshot.SnapObject{
+		Kind: "collation",
+		Opaque: &snapshot.SnapOpaque{
+			Kind: "collation", Schema: "public", Name: "c1_alias", CollationStructured: true,
+			CollationProvider: "i", CollationICULocale: strPtr("und-u-ks-level2"), CollationDeterministic: false,
+		},
+	})
+	from := "c1"
+	desired := []pipeline.IRObject{
+		&ir.Collation{
+			Schema: "public", Name: "c1_alias", CopyFrom: &from,
+			Provider: "c", Deterministic: true, // Go zero-value defaults, never DPG's real understanding
+			Body: "CREATE COLLATION public.c1_alias FROM c1",
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Unlike the stale-snapshot fallback (which may emit a harmless one-
+	// time "nothing else to say" placeholder as it self-heals), a
+	// FROM-declared collation's opt-out is permanent, so this must be
+	// truly zero ops every time — a placeholder here would show up as a
+	// no-op change in every single `dpg plan` output, forever.
+	if len(ops) != 0 {
+		t.Errorf("expected zero ops for an unchanged FROM-declared collation, got: %v", sqlList(ops))
+	}
+}
+
+// TestDiffCreateCollationFrom proves a brand-new FROM-declared collation
+// still creates via its (deparser-reconstructed) Body text, which already
+// includes the FROM clause verbatim — CREATE-time emission needed no fix,
+// only the ongoing comparison did.
+func TestDiffCreateCollationFrom(t *testing.T) {
+	d := New()
+	from := "c1"
+	desired := []pipeline.IRObject{
+		&ir.Collation{
+			Schema: "public", Name: "c1_alias", CopyFrom: &from,
+			Body: "CREATE COLLATION public.c1_alias FROM public.c1",
+		},
+	}
+	ops, err := d.Diff(desired, &pipeline.Snapshot{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsSQL(ops, "CREATE COLLATION public.c1_alias FROM public.c1;") {
+		t.Errorf("expected the FROM clause preserved verbatim, got: %v", sqlList(ops))
+	}
+}
+
 // TestDiffCollationOwnerChanged guards RFC audit item #81: Collation had no
 // Owner field at all.
 func TestDiffCollationOwnerChanged(t *testing.T) {

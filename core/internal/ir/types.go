@@ -1273,8 +1273,25 @@ type Collation struct {
 	// PostgreSQL's ALTER COLLATION has no way to alter it in place), so a
 	// RULES-only change must be compared here too or it's undetected
 	// drift, not just an unoptimized DROP+CREATE.
-	Rules   *string
-	Comment *string // see EventTrigger.Comment
+	Rules *string
+	// CopyFrom is RFC Section 14.2's "FROM existing_collation" copy-from
+	// shorthand — nil when not declared. CREATE-time only, deliberately
+	// excluded from any ongoing diff comparison (no SnapOpaque field, same
+	// "no live catalog trace of it" reasoning as ir.Index.Only): real
+	// PostgreSQL resolves the referenced collation's properties into this
+	// collation's own independent catalog row at creation time, with no
+	// persisted link back afterward, so there is nothing to introspect —
+	// and DPG's Builder processes one object at a time with no visibility
+	// into another declared collation, so it can't resolve what a copied
+	// collation's Provider/Collate/Ctype/ICULocale/Deterministic/Rules
+	// SHOULD be either. diffCollation skips the structured 6-property
+	// comparison entirely when this is set (comparing it against this
+	// struct's own hardcoded Go zero-value defaults — Provider "c",
+	// Deterministic true — would otherwise be actively wrong, not just
+	// unhelpful, producing a permanent spurious DROP+CREATE against the
+	// real resolved values introspection reports).
+	CopyFrom *string
+	Comment  *string // see EventTrigger.Comment
 	// RenamedFrom/RenamedFromSchema — see Table's identical doc comments;
 	// reuses the same generic cross-schema RENAME TO/SET SCHEMA mechanism.
 	RenamedFrom       *string
