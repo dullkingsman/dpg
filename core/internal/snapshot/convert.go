@@ -225,7 +225,8 @@ func toSnapObject(obj pipeline.IRObject) *SnapObject {
 	case *ir.Tablespace:
 		so := &SnapOpaque{
 			Kind: "tablespace", Name: o.Name, TablespaceLocation: o.Location, TablespaceOwner: o.Owner,
-			BodyHash: sourceBodyHash(o.Body, o.Reconstructed), Comment: o.Comment,
+			TablespaceStorageParams: flattenParams(o.StorageParams),
+			BodyHash:                sourceBodyHash(o.Body, o.Reconstructed), Comment: o.Comment,
 			SecurityLabels: toSnapSecurityLabels(o.SecurityLabels),
 		}
 		for _, g := range o.Grants {
@@ -318,11 +319,29 @@ func toSnapObject(obj pipeline.IRObject) *SnapObject {
 		// Members/StorageType are populated unconditionally like OperatorFamily's
 		// Members above, not gated on Reconstructed — needed for the differ's
 		// structural comparison on both source-declared and introspected classes.
+		//
+		// FamilySchema/FamilyName resolve the same "omitted means implicit
+		// same-name/same-schema-at-creation-time auto-family" fallback
+		// diffOperatorClass's desired-side comparison already applies — the
+		// snapshot must record the family's ACTUAL resolved identity (what
+		// PostgreSQL really created), not the raw possibly-empty source
+		// declaration, or a later diff comparing against this snapshot has
+		// no way to know the family stayed behind in its original schema
+		// when the class itself later moves via SET SCHEMA (real PostgreSQL
+		// never moves an implicit auto-family along with its class).
+		famSchema := o.FamilySchema
+		if famSchema == "" {
+			famSchema = o.Schema
+		}
+		famName := o.FamilyName
+		if famName == "" {
+			famName = o.Name
+		}
 		return &SnapObject{Kind: "operator_class", Opaque: &SnapOpaque{
 			Kind: "operator_class", Schema: o.Schema, Name: o.Name, Using: o.AccessMethod, BodyHash: sourceBodyHash(o.Body, o.Reconstructed), Comment: o.Comment,
 			OperatorClassMembersStructured: true, OperatorClassMembers: toSnapOpFamilyMembers(o.Members),
 			OperatorClassStorageType:  o.StorageType,
-			OperatorClassFamilySchema: o.FamilySchema, OperatorClassFamilyName: o.FamilyName,
+			OperatorClassFamilySchema: famSchema, OperatorClassFamilyName: famName,
 		}}
 	case *ir.OperatorFamily:
 		// Members are populated unconditionally, never routed through

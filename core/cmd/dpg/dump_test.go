@@ -597,6 +597,47 @@ func TestRenderTableAccessMethodCompiles(t *testing.T) {
 	}
 }
 
+// TestRenderTableRLSForcedCompiles guards a real bug: RLSForced (Section
+// 7.11's FORCE ROW LEVEL SECURITY, set from real applied state — see
+// mergeTableBlock/diffTable) was never rendered by renderObjectDPG at all,
+// so a `dpg dump` of a table with RLS forced silently dropped that
+// directive, and re-applying the dumped source would have emitted a
+// spurious NO FORCE ROW LEVEL SECURITY on the next plan.
+func TestRenderTableRLSForcedCompiles(t *testing.T) {
+	fmtOpts := format.Options{IndentSize: 4, KeywordCase: "upper"}
+	tbl := &ir.Table{
+		Schema: "public", Name: "events", RLSEnabled: true, RLSForced: true,
+		Columns: []*ir.Column{{Name: "id", Type: ir.TypeRef{Name: "bigint"}}},
+	}
+
+	var b strings.Builder
+	renderObjectDPG(&b, tbl, fmtOpts)
+	rendered := b.String()
+
+	if !strings.Contains(rendered, "FORCE ROW LEVEL SECURITY;") {
+		t.Errorf("expected FORCE ROW LEVEL SECURITY, got:\n%s", rendered)
+	}
+
+	dir := t.TempDir()
+	f := filepath.Join(dir, "objects.dpg")
+	if err := os.WriteFile(f, []byte(rendered), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	compiled, _, err := compiler.Compile([]string{f}, dir, pipeline.Default)
+	if err != nil {
+		t.Fatalf("dumped table failed to recompile: %v\n---\n%s", err, rendered)
+	}
+	var found *ir.Table
+	for _, o := range compiled {
+		if tb, ok := o.(*ir.Table); ok && tb.Name == "events" {
+			found = tb
+		}
+	}
+	if found == nil || !found.RLSForced {
+		t.Errorf("RLSForced did not round-trip: %+v", found)
+	}
+}
+
 // TestRenderTableInheritsPartitionByUsingWithOrderingCompiles guards a real
 // bug: renderObjectDPG previously wrote INHERITS after Foreign/Tablespace and
 // USING before PARTITION BY — real PostgreSQL's own fixed CREATE TABLE
@@ -2748,6 +2789,48 @@ func TestRenderPolicyAndTriggerRoundtrip(t *testing.T) {
 				t.Errorf("audit_status: Args did not round-trip: %v", trg.Args)
 			}
 		}
+	}
+}
+
+// TestRenderPolicyRenamedFromRoundtrip guards RFC Section 7.8's policy
+// RENAMED FROM clause — renderPolicy previously had no rendering path for
+// it at all, despite it now being genuinely diffed (diffPolicies).
+func TestRenderPolicyRenamedFromRoundtrip(t *testing.T) {
+	fmtOpts := format.Options{IndentSize: 4, KeywordCase: "upper"}
+	renamedFrom := "view_own"
+	tbl := &ir.Table{
+		Schema: "public", Name: "orders",
+		Columns: []*ir.Column{{Name: "id", Type: ir.TypeRef{Name: "bigint"}}},
+		Policies: []*ir.Policy{
+			{Name: "view_self", Command: "SELECT", Permissive: true, RenamedFrom: &renamedFrom},
+		},
+	}
+
+	var b strings.Builder
+	renderObjectDPG(&b, tbl, fmtOpts)
+	rendered := b.String()
+
+	if !strings.Contains(rendered, "RENAMED FROM view_own") {
+		t.Fatalf("expected RENAMED FROM view_own, got:\n%s", rendered)
+	}
+
+	dir := t.TempDir()
+	f := filepath.Join(dir, "schema.dpg")
+	if err := os.WriteFile(f, []byte(rendered), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	compiled, _, err := compiler.Compile([]string{f}, dir, pipeline.Default)
+	if err != nil {
+		t.Fatalf("dumped policy failed to recompile: %v\n---\n%s", err, rendered)
+	}
+	var found *ir.Table
+	for _, o := range compiled {
+		if tb, ok := o.(*ir.Table); ok && tb.Name == "orders" {
+			found = tb
+		}
+	}
+	if found == nil || len(found.Policies) != 1 || found.Policies[0].RenamedFrom == nil || *found.Policies[0].RenamedFrom != "view_own" {
+		t.Errorf("Policy RenamedFrom did not round-trip: %+v", found)
 	}
 }
 

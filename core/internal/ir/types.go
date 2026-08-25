@@ -312,8 +312,14 @@ type Policy struct {
 	Using      *string
 	WithCheck  *string
 	Roles      []string
-	Comment    *string
-	Pos        pipeline.SourcePos
+	// RenamedFrom names the policy's prior identity (RENAMED FROM, RFC
+	// Section 7.8) — matched within the same table's policy list only, like
+	// Constraint/Index's identical sub-object RenamedFrom fields, not the
+	// cross-schema-capable RenamedFromSchema pattern top-level kinds use
+	// (PostgreSQL provides no mechanism to move a policy to another table).
+	RenamedFrom *string
+	Comment     *string
+	Pos         pipeline.SourcePos
 }
 
 // Trigger is a trigger definition.
@@ -518,10 +524,10 @@ type Table struct {
 	// ClusterOn names the index a future manual CLUSTER would use (Section
 	// 7.11); nil means none declared — removing a previously-declared
 	// value emits ALTER TABLE ... SET WITHOUT CLUSTER.
-	ClusterOn     *string
-	Inherits      []string
-	PartitionBy   *PartitionSpec
-	Partitions    []*Partition
+	ClusterOn   *string
+	Inherits    []string
+	PartitionBy *PartitionSpec
+	Partitions  []*Partition
 	// StorageParams is a WITH (...) clause's key=value pairs, source order
 	// preserved (a slice, not a map, matching Index.With — deterministic
 	// re-emission needs a stable order, both at CREATE time and for SET/RESET
@@ -991,7 +997,11 @@ type Tablespace struct {
 	// Role/Publication/ForeignServer's identical field: tablespaces are
 	// cluster-level, not schema-scoped.
 	RenamedFrom *string
-	SrcPos      pipeline.SourcePos
+	// StorageParams is a WITH (...) clause's key=value pairs (Section 14.7),
+	// source order preserved — same convention as Table.StorageParams, and
+	// diffed the same SET/RESET way via ALTER TABLESPACE.
+	StorageParams []pipeline.StorageParam
+	SrcPos        pipeline.SourcePos
 }
 
 func (ts *Tablespace) QualifiedName() string   { return ts.Name }

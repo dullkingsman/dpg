@@ -1809,6 +1809,21 @@ func (b *blockParser) parseOnePolicy() (pipeline.PolicyDef, error) {
 			}
 			b.advance()
 			pol.WithCheck = &pipeline.RawExpr{Text: strings.TrimSpace(raw), Pos: pos}
+		case "RENAMED":
+			// RFC Section 7.8: the last optional clause on a policy-decl,
+			// right before the terminating ';' — no semicolon of its own to
+			// consume here (unlike the top-level BLOCK "RENAMED FROM old;"
+			// directive parseRenamedFrom handles), matching Column's inline
+			// RENAMED FROM within a single larger decl.
+			if err := b.expect("FROM"); err != nil {
+				return pol, err
+			}
+			b.skipWS()
+			renamed, err2 := b.readIdentifier()
+			if err2 != nil {
+				return pol, err2
+			}
+			pol.RenamedFrom = &renamed
 		default:
 			b.restore(c)
 			goto donePolicy

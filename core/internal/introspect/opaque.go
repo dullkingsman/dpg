@@ -212,7 +212,8 @@ func introspectTablespaces(ctx context.Context, conn pipeline.Querier) ([]pipeli
 SELECT spcname,
        pg_tablespace_location(t.oid)               AS location,
        shobj_description(t.oid, 'pg_tablespace')    AS comment,
-       r.rolname                                    AS owner
+       r.rolname                                    AS owner,
+       t.spcoptions
 FROM   pg_tablespace t
 JOIN   pg_roles r ON r.oid = t.spcowner
 WHERE  spcname NOT IN ('pg_default', 'pg_global')
@@ -228,11 +229,25 @@ ORDER  BY spcname`
 	for rs.Next() {
 		var name, location, owner string
 		var comment *string
-		if err := rs.Scan(&name, &location, &comment, &owner); err != nil {
+		var spcoptions []string
+		if err := rs.Scan(&name, &location, &comment, &owner, &spcoptions); err != nil {
 			return nil, err
 		}
+		var params []pipeline.StorageParam
+		for _, kv := range spcoptions {
+			if k, v, ok := strings.Cut(kv, "="); ok {
+				params = append(params, pipeline.StorageParam{Key: k, Value: v})
+			}
+		}
 		body := fmt.Sprintf("CREATE TABLESPACE %s OWNER %s LOCATION %s", quoteIdent(name), quoteIdent(owner), quoteLit(location))
-		out = append(out, &ir.Tablespace{Name: name, Location: location, Body: canonicalDDL(body), Comment: comment, Reconstructed: true, Owner: &owner})
+		if len(params) > 0 {
+			parts := make([]string, len(params))
+			for i, p := range params {
+				parts[i] = fmt.Sprintf("%s=%s", p.Key, p.Value)
+			}
+			body += fmt.Sprintf(" WITH (%s)", strings.Join(parts, ", "))
+		}
+		out = append(out, &ir.Tablespace{Name: name, Location: location, Body: canonicalDDL(body), Comment: comment, Reconstructed: true, Owner: &owner, StorageParams: params})
 	}
 	if err := rs.Err(); err != nil {
 		return nil, err

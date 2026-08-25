@@ -864,6 +864,41 @@ func TestSimplePolicy(t *testing.T) {
 	}
 }
 
+// TestPolicyRenamedFrom guards RFC Section 7.8's policy-decl RENAMED FROM
+// clause (the last optional clause before the terminating ';').
+func TestPolicyRenamedFrom(t *testing.T) {
+	src := `POLICIES {
+		view_self FOR SELECT USING (id = auth.uid()) RENAMED FROM view_own;
+	}`
+	ast := parse(t, src)
+	if len(ast.Policies) != 1 {
+		t.Fatalf("expected 1 policy, got %d", len(ast.Policies))
+	}
+	pol := ast.Policies[0]
+	if pol.RenamedFrom == nil || pol.RenamedFrom.Name != "view_own" {
+		t.Errorf("RenamedFrom: got %v, want view_own", pol.RenamedFrom)
+	}
+}
+
+// TestPolicyRenamedFromWithTrailingComment guards RENAMED FROM followed by
+// a trailing { COMMENT '...'; } block on the same policy entry.
+func TestPolicyRenamedFromWithTrailingComment(t *testing.T) {
+	src := `POLICIES {
+		view_self FOR SELECT RENAMED FROM view_own { COMMENT 'self-visibility'; }
+	}`
+	ast := parse(t, src)
+	if len(ast.Policies) != 1 {
+		t.Fatalf("expected 1 policy, got %d", len(ast.Policies))
+	}
+	pol := ast.Policies[0]
+	if pol.RenamedFrom == nil || pol.RenamedFrom.Name != "view_own" {
+		t.Errorf("RenamedFrom: got %v, want view_own", pol.RenamedFrom)
+	}
+	if pol.Comment == nil || pol.Comment.Value != "self-visibility" {
+		t.Errorf("Comment: got %v", pol.Comment)
+	}
+}
+
 // Mode B (§4.8 Dual Definition Modes): the singular POLICY keyword precedes a
 // single entry outside a plural block — previously this would have hit the
 // same conflation bug already fixed for INDEX/INDICES and GRANT/REVOCATION

@@ -11573,6 +11573,62 @@ func TestDiffOperatorClassRenamedFromCrossSchema(t *testing.T) {
 	}
 }
 
+// TestDiffOperatorClassImplicitAutoFamilySetSchemaIsSafeNotDestructive
+// guards a real bug: a class relying on PostgreSQL's implicit same-name
+// auto-family (no FAMILY clause declared at all — FamilySchema/FamilyName
+// both "") previously had its desired-side family schema fall back to the
+// class's own (post-move) schema, spuriously miscomparing against the
+// snapshot's real, unmoved family schema and forcing a DESTRUCTIVE
+// drop+recreate on every cross-schema SET SCHEMA — confirmed live via a
+// real postgres:17 server that ALTER OPERATOR CLASS ... SET SCHEMA moves
+// the class but never its auto-created family. A pure schema move must stay
+// the plain SAFE ALTER ... SET SCHEMA it actually is.
+func TestDiffOperatorClassImplicitAutoFamilySetSchemaIsSafeNotDestructive(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("old_schema.my_ops USING btree", &snapshot.SnapObject{
+		Kind: "operator_class",
+		Opaque: &snapshot.SnapOpaque{
+			Kind: "operator_class", Schema: "old_schema", Name: "my_ops", Using: "btree",
+			OperatorClassMembersStructured: true,
+			OperatorClassMembers:           opClassMemberFixtureIntrospected(),
+			// The auto-created family lives where the class was ORIGINALLY
+			// created — still "old_schema" even as the class itself moves.
+			OperatorClassFamilySchema: "old_schema", OperatorClassFamilyName: "my_ops",
+		},
+	})
+	oldName := "my_ops"
+	oldSchema := "old_schema"
+	desired := []pipeline.IRObject{
+		&ir.OperatorClass{
+			// No FAMILY clause declared at all: implicit auto-family. Same
+			// name, only the schema moves — still needs RENAMED FROM to
+			// match against the snapshot at all (Section 7.6: a cross-
+			// schema move has no unqualified-match path of its own).
+			Schema: "new_schema", Name: "my_ops", AccessMethod: "btree",
+			RenamedFrom: &oldName, RenamedFromSchema: &oldSchema,
+			Body:    "CREATE OPERATOR CLASS new_schema.my_ops FOR TYPE int4 USING btree AS OPERATOR 1 <, OPERATOR 3 =, FUNCTION 1 btint4cmp(int4, int4)",
+			Members: opClassMemberFixture(),
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if containsSQL(ops, "DROP OPERATOR CLASS") {
+		t.Fatalf("a class-only SET SCHEMA move must not drop+recreate just because the (unmoved) implicit family now appears in a different schema than the class, got: %v", sqlList(ops))
+	}
+	want := `ALTER OPERATOR CLASS "old_schema"."my_ops" USING btree SET SCHEMA "new_schema";`
+	if !containsSQL(ops, want) {
+		t.Errorf("expected %q, got: %v", want, sqlList(ops))
+	}
+	for _, op := range ops {
+		if op.Safety() == pipeline.Destructive {
+			t.Errorf("expected no DESTRUCTIVE op for a pure schema move, got: [%s] %s", op.Safety(), op.SQL())
+		}
+	}
+}
+
 // TestDiffOperatorClassRenamedFromStaleErrors mirrors every other kind's
 // identical stale-RENAMED-FROM validation.
 func TestDiffOperatorClassRenamedFromStaleErrors(t *testing.T) {
@@ -16129,6 +16185,45 @@ func TestDiffTablespaceOwnerChanged(t *testing.T) {
 	}
 }
 
+// TestDiffTablespaceStorageParamsSetAndReset guards RFC Section 14.7's
+// WITH (...) storage-params clause (#15): previously never diffed at any
+// layer at all (worse than Table's pre-#60 gap — not even folded into the
+// opaque body hash, since Tablespace bodies are always Reconstructed and so
+// skip hash comparison entirely). Mirrors diffTable's identical SET/RESET
+// shape via the shared diffStorageParamsSetReset helper.
+func TestDiffTablespaceStorageParamsSetAndReset(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("ts", &snapshot.SnapObject{
+		Kind: "tablespace",
+		Opaque: &snapshot.SnapOpaque{
+			Kind: "tablespace", Name: "ts", TablespaceLocation: "/data/ts1",
+			TablespaceStorageParams: "seq_page_cost=1.5, random_page_cost=2.0",
+		},
+	})
+	desired := []pipeline.IRObject{
+		&ir.Tablespace{
+			Name: "ts", Location: "/data/ts1", Body: "CREATE TABLESPACE ts LOCATION '/data/ts1'",
+			StorageParams: []pipeline.StorageParam{{Key: "seq_page_cost", Value: "1.0"}, {Key: "effective_io_concurrency", Value: "200"}},
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsSQL(ops, `ALTER TABLESPACE "ts" SET (seq_page_cost=1.0, effective_io_concurrency=200);`) {
+		t.Errorf("expected SET with changed+new keys, got: %v", sqlList(ops))
+	}
+	if !containsSQL(ops, `ALTER TABLESPACE "ts" RESET (random_page_cost);`) {
+		t.Errorf("expected RESET with removed key, got: %v", sqlList(ops))
+	}
+	for _, op := range ops {
+		if (strings.Contains(op.SQL(), " SET (") || strings.Contains(op.SQL(), " RESET (")) && op.Safety() != pipeline.Caution {
+			t.Errorf("storage-params op safety = %v, want Caution: %s", op.Safety(), op.SQL())
+		}
+	}
+}
+
 // TestDiffTablespaceRenamedFromEmitsAlterRename guards RFC audit item #80's
 // other half: Tablespace had no RenamedFrom field at all.
 func TestDiffTablespaceRenamedFromEmitsAlterRename(t *testing.T) {
@@ -18664,6 +18759,167 @@ func TestDiffPolicyUnspecifiedRolesEqualsExplicitPublicIsNoop(t *testing.T) {
 	}
 	if len(ops) != 0 {
 		t.Errorf("expected no ops: unspecified TO clause must be treated as equal to explicit PUBLIC, got: %v", sqlList(ops))
+	}
+}
+
+// TestDiffPolicyRenamedFromEmitsAlterRename guards RFC Section 7.8's policy
+// RENAMED FROM: previously ir.Policy had no such field at all, so a renamed
+// policy misdiffed as a drop of the old name plus a create of the new one
+// (losing the atomic, metadata-only ALTER POLICY ... RENAME TO real
+// PostgreSQL provides), despite RFC E.19 claiming this was already closed.
+func TestDiffPolicyRenamedFromEmitsAlterRename(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.t", &snapshot.SnapObject{
+		Kind: "table",
+		Table: &snapshot.SnapTable{
+			Schema:  "public",
+			Name:    "t",
+			Columns: []snapshot.SnapColumn{{Name: "id", Type: "bigint"}},
+			Policies: []snapshot.SnapPolicy{
+				{Name: "view_own", Command: "SELECT", Permissive: true, Using: "true"},
+			},
+		},
+	})
+	renamedFrom := "view_own"
+	using := "true"
+	desired := []pipeline.IRObject{
+		&ir.Table{
+			Schema:  "public",
+			Name:    "t",
+			Columns: []*ir.Column{{Name: "id", Type: ir.TypeRef{Name: "bigint"}}},
+			Policies: []*ir.Policy{
+				{Name: "view_self", Command: "SELECT", Permissive: true, Using: &using, RenamedFrom: &renamedFrom},
+			},
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsSQL(ops, `ALTER POLICY "view_own" ON "public"."t" RENAME TO "view_self";`) {
+		t.Errorf("expected ALTER POLICY ... RENAME TO, got: %v", sqlList(ops))
+	}
+	if containsSQL(ops, "DROP POLICY") {
+		t.Errorf("expected no DROP POLICY for a rename-only change, got: %v", sqlList(ops))
+	}
+	for _, op := range ops {
+		if strings.Contains(op.SQL(), "RENAME TO") && op.Safety() != pipeline.Safe {
+			t.Errorf("policy rename safety = %v, want Safe (metadata-only sub-object rename): %s", op.Safety(), op.SQL())
+		}
+	}
+}
+
+// TestDiffPolicyRenamedFromAndUsingChanged guards RFC E.19's documented
+// "renamed AND TO/USING/WITH CHECK also differ" case: two statements, RENAME
+// first then ALTER POLICY under the new name.
+func TestDiffPolicyRenamedFromAndUsingChanged(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.t", &snapshot.SnapObject{
+		Kind: "table",
+		Table: &snapshot.SnapTable{
+			Schema:  "public",
+			Name:    "t",
+			Columns: []snapshot.SnapColumn{{Name: "id", Type: "bigint"}},
+			Policies: []snapshot.SnapPolicy{
+				{Name: "view_own", Command: "SELECT", Permissive: true, Using: "owner_id = current_user_id()"},
+			},
+		},
+	})
+	renamedFrom := "view_own"
+	newUsing := "owner_id = current_user_id() OR is_admin()"
+	desired := []pipeline.IRObject{
+		&ir.Table{
+			Schema:  "public",
+			Name:    "t",
+			Columns: []*ir.Column{{Name: "id", Type: ir.TypeRef{Name: "bigint"}}},
+			Policies: []*ir.Policy{
+				{Name: "view_self", Command: "SELECT", Permissive: true, Using: &newUsing, RenamedFrom: &renamedFrom},
+			},
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsSQL(ops, `ALTER POLICY "view_own" ON "public"."t" RENAME TO "view_self";`) {
+		t.Errorf("expected the rename statement, got: %v", sqlList(ops))
+	}
+	if !containsSQL(ops, `ALTER POLICY "view_self" ON "public"."t"`) || !containsSQL(ops, "is_admin()") {
+		t.Errorf("expected a second ALTER POLICY under the new name reflecting the USING change, got: %v", sqlList(ops))
+	}
+}
+
+// TestDiffPolicyRenamedFromPostApplyNoop proves a RENAMED FROM directive
+// still present in source after a successful rename is a no-op, not an
+// error or a repeated rename — the snapshot already carries the new name,
+// mirroring the same three-state resolution Index/Constraint's identical
+// RENAMED FROM mechanisms already use.
+func TestDiffPolicyRenamedFromPostApplyNoop(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.t", &snapshot.SnapObject{
+		Kind: "table",
+		Table: &snapshot.SnapTable{
+			Schema:  "public",
+			Name:    "t",
+			Columns: []snapshot.SnapColumn{{Name: "id", Type: "bigint"}},
+			Policies: []snapshot.SnapPolicy{
+				{Name: "view_self", Command: "SELECT", Permissive: true, Using: "true"},
+			},
+		},
+	})
+	renamedFrom := "view_own"
+	using := "true"
+	desired := []pipeline.IRObject{
+		&ir.Table{
+			Schema:  "public",
+			Name:    "t",
+			Columns: []*ir.Column{{Name: "id", Type: ir.TypeRef{Name: "bigint"}}},
+			Policies: []*ir.Policy{
+				{Name: "view_self", Command: "SELECT", Permissive: true, Using: &using, RenamedFrom: &renamedFrom},
+			},
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ops) != 0 {
+		t.Errorf("expected no ops for a post-apply stale RENAMED FROM, got: %v", sqlList(ops))
+	}
+}
+
+// TestDiffPolicyRenamedFromStaleErrors proves a RENAMED FROM directive whose
+// old name matches neither the current nor a prior snapshot name errors
+// clearly instead of silently doing nothing or misfiring a rename.
+func TestDiffPolicyRenamedFromStaleErrors(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.t", &snapshot.SnapObject{
+		Kind: "table",
+		Table: &snapshot.SnapTable{
+			Schema:  "public",
+			Name:    "t",
+			Columns: []snapshot.SnapColumn{{Name: "id", Type: "bigint"}},
+		},
+	})
+	renamedFrom := "nonexistent_policy"
+	using := "true"
+	desired := []pipeline.IRObject{
+		&ir.Table{
+			Schema:  "public",
+			Name:    "t",
+			Columns: []*ir.Column{{Name: "id", Type: ir.TypeRef{Name: "bigint"}}},
+			Policies: []*ir.Policy{
+				{Name: "view_self", Command: "SELECT", Permissive: true, Using: &using, RenamedFrom: &renamedFrom},
+			},
+		},
+	}
+	_, err := d.Diff(desired, snap)
+	if err == nil {
+		t.Fatal("expected an error for a RENAMED FROM matching neither name in the snapshot")
 	}
 }
 

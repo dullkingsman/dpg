@@ -185,13 +185,10 @@ func TestRoundtripOperatorClassRenamedFromCrossSchema(t *testing.T) {
 
 	// FAMILY deliberately names a family that never moves and is declared
 	// explicitly (not PostgreSQL's own implicit same-schema/same-name
-	// auto-family) — isolates this test from a separate, narrower gap
-	// found while writing it: ALTER OPERATOR CLASS ... SET SCHEMA does not
-	// (and per real PostgreSQL, cannot on its own) move an implicitly
-	// auto-created family along with the class, which DPG's FamilySchema
-	// fallback doesn't currently account for. That's a pre-existing
-	// family-resolution modeling gap, orthogonal to the SET SCHEMA
-	// mechanism this test verifies — see the memory note for this session.
+	// auto-family) — the implicit case (and the fact that real PostgreSQL
+	// never moves that auto-family along with a class-only SET SCHEMA
+	// either) has its own dedicated live test,
+	// TestRoundtripOperatorClassImplicitAutoFamilySetSchema.
 	v1 := `SCHEMA old_schema {}
 
 OPERATOR FAMILY old_schema.my_int_ops_fam USING btree;

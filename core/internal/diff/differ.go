@@ -1845,6 +1845,7 @@ func diffTablespace(o *ir.Tablespace, snap *snapshot.SnapOpaque) ([]pipeline.Dif
 		ops = append(ops, diffGrantSet(snap.Grants, o.Grants, onClause, pos)...)
 		ops = append(ops, diffRevocationSet(snap.Revocations, o.Revocations, onClause, pos)...)
 		ops = append(ops, diffSecurityLabelSet(snap.SecurityLabels, o.SecurityLabels, onClause, pos)...)
+		ops = append(ops, diffTablespaceStorageParams(ident, o.StorageParams, snap.TablespaceStorageParams, pos)...)
 		if len(ops) == 0 {
 			ops = append(ops, safeOp(fmt.Sprintf("-- refresh snapshot metadata for tablespace %s", quoteIdent(o.Name)), pos))
 		}
@@ -1877,6 +1878,7 @@ func diffTablespace(o *ir.Tablespace, snap *snapshot.SnapOpaque) ([]pipeline.Dif
 	ops = append(ops, diffGrantSet(snap.Grants, o.Grants, onClause, pos)...)
 	ops = append(ops, diffRevocationSet(snap.Revocations, o.Revocations, onClause, pos)...)
 	ops = append(ops, diffSecurityLabelSet(snap.SecurityLabels, o.SecurityLabels, onClause, pos)...)
+	ops = append(ops, diffTablespaceStorageParams(ident, o.StorageParams, snap.TablespaceStorageParams, pos)...)
 	return ops, nil
 }
 
@@ -4829,9 +4831,26 @@ func renameOperatorIfUnchanged(ops []pipeline.DiffOp, alterKW, accessMethod stri
 }
 
 func diffOperatorClass(o *ir.OperatorClass, snap *snapshot.SnapOpaque) ([]pipeline.DiffOp, error) {
+	// An omitted/unqualified FAMILY schema does NOT mean "wherever the class
+	// currently lives" — confirmed live via a real postgres:17 server
+	// (ALTER OPERATOR CLASS ... SET SCHEMA moves the class but leaves its
+	// same-name auto-created family exactly where it was created). The
+	// snapshot's own last-known family schema is authoritative for an
+	// already-existing class; o.Schema is only the right fallback for a
+	// class with no prior recorded family schema at all (a brand-new class,
+	// or a stale snapshot predating OperatorClassFamilySchema — same
+	// self-healing spirit as the stale-snapshot guards elsewhere in this
+	// file). Without this, a class relying on the implicit auto-family
+	// spuriously misdiffed as "family changed" on every cross-schema SET
+	// SCHEMA, forcing an unnecessary DESTRUCTIVE drop+recreate instead of
+	// the real SAFE ALTER ... SET SCHEMA the class-only move actually is.
 	famSchema := o.FamilySchema
 	if famSchema == "" {
-		famSchema = o.Schema
+		if snap.OperatorClassFamilySchema != "" {
+			famSchema = snap.OperatorClassFamilySchema
+		} else {
+			famSchema = o.Schema
+		}
 	}
 	// famName mirrors famSchema's fallback: ir.OperatorClass.FamilyName's own
 	// doc comment documents empty FamilyName as meaning "hand-written source
@@ -6645,7 +6664,11 @@ func diffTable(o *ir.Table, snap *snapshot.SnapTable, fullSnap *pipeline.Snapsho
 		return nil, err
 	}
 	ops = append(ops, indexOps...)
-	ops = append(ops, diffPolicies(o.Schema, o.Name, o, snap)...)
+	policyOps, err := diffPolicies(o.Schema, o.Name, o, snap)
+	if err != nil {
+		return nil, err
+	}
+	ops = append(ops, policyOps...)
 	ops = append(ops, diffTriggers(o.Schema, o.Name, o, snap)...)
 	ops = append(ops, diffTableInherits(tbl, o, snap, pos)...)
 	ops = append(ops, diffGrantSet(snap.Grants, o.Grants, "TABLE "+tbl, pos)...)
@@ -6711,16 +6734,32 @@ func diffForeignOptions(tbl string, desired []pipeline.StorageParam, snapFlat st
 }
 
 // diffTableStorageParams computes ALTER TABLE ... SET (...)/RESET (...) for
-// a changed WITH (...) storage-params clause (Section 7.11). Unlike
-// diffForeignOptions' single ADD/SET/DROP OPTIONS statement, real PostgreSQL
-// splits this into two independently-valid clauses — a changed/added key
-// goes through SET, a removed one through RESET, and either may be omitted
-// when empty (confirmed live: "ALTER TABLE t RESET ()" is a syntax error).
-// snapFlat is the snapshot's flattened "key=value, key=value" form (see
-// flattenParams); desired is the live IR's ordered param list. CAUTION, not
-// SAFE: reloptions like fillfactor/autovacuum_* alter storage/maintenance
-// behavior, not pure metadata.
+// a changed WITH (...) storage-params clause (Section 7.11).
 func diffTableStorageParams(tbl string, desired []pipeline.StorageParam, snapFlat string, pos pipeline.SourcePos) []pipeline.DiffOp {
+	return diffStorageParamsSetReset("ALTER TABLE", tbl, desired, snapFlat, pos)
+}
+
+// diffTablespaceStorageParams is diffTableStorageParams' Tablespace
+// counterpart (Section 14.7) — real PostgreSQL's ALTER TABLESPACE ... SET
+// (...)/RESET (...) is the identical two-clause grammar as ALTER TABLE's
+// (confirmed via \h ALTER TABLESPACE), just a different verb.
+func diffTablespaceStorageParams(ident string, desired []pipeline.StorageParam, snapFlat string, pos pipeline.SourcePos) []pipeline.DiffOp {
+	return diffStorageParamsSetReset("ALTER TABLESPACE", ident, desired, snapFlat, pos)
+}
+
+// diffStorageParamsSetReset is the shared implementation behind
+// diffTableStorageParams/diffTablespaceStorageParams: alterStmt is the
+// prefix ("ALTER TABLE"/"ALTER TABLESPACE"), ident the already-quoted
+// target identifier. Unlike diffForeignOptions' single ADD/SET/DROP OPTIONS
+// statement, real PostgreSQL splits a WITH (...) storage-params change into
+// two independently-valid clauses — a changed/added key goes through SET, a
+// removed one through RESET, and either may be omitted when empty
+// (confirmed live: "ALTER TABLE t RESET ()" is a syntax error). snapFlat is
+// the snapshot's flattened "key=value, key=value" form (see flattenParams);
+// desired is the live IR's ordered param list. CAUTION, not SAFE: reloptions
+// like fillfactor/autovacuum_*/tablespace cost-planner params alter
+// storage/maintenance/planning behavior, not pure metadata.
+func diffStorageParamsSetReset(alterStmt, ident string, desired []pipeline.StorageParam, snapFlat string, pos pipeline.SourcePos) []pipeline.DiffOp {
 	snapMap := make(map[string]string)
 	for _, kv := range strings.Split(snapFlat, ", ") {
 		if kv == "" {
@@ -6753,10 +6792,10 @@ func diffTableStorageParams(tbl string, desired []pipeline.StorageParam, snapFla
 
 	var ops []pipeline.DiffOp
 	if len(sets) > 0 {
-		ops = append(ops, cautionOp(fmt.Sprintf("ALTER TABLE %s SET (%s);", tbl, strings.Join(sets, ", ")), pos))
+		ops = append(ops, cautionOp(fmt.Sprintf("%s %s SET (%s);", alterStmt, ident, strings.Join(sets, ", ")), pos))
 	}
 	if len(resets) > 0 {
-		ops = append(ops, cautionOp(fmt.Sprintf("ALTER TABLE %s RESET (%s);", tbl, strings.Join(resets, ", ")), pos))
+		ops = append(ops, cautionOp(fmt.Sprintf("%s %s RESET (%s);", alterStmt, ident, strings.Join(resets, ", ")), pos))
 	}
 	return ops
 }
@@ -8961,7 +9000,40 @@ func policyRoleKey(roles []string) string {
 	return strings.Join(r, ",")
 }
 
-func diffPolicies(schema, table string, o *ir.Table, snap *snapshot.SnapTable) []pipeline.DiffOp {
+// validatePolicyRenames mirrors validateIndexRenames' identical three-state
+// resolution (genuine rename / post-apply no-op / stale-directive error),
+// scoped to one table's own policy list — a policy has no independent
+// schema, so matching is always within THIS table only, never cross-schema
+// (RFC Section 7.8: PostgreSQL provides no mechanism to move a policy to a
+// different table via rename).
+func validatePolicyRenames(desired []*ir.Policy, desiredByName map[string]*ir.Policy, snapByName map[string]*snapshot.SnapPolicy) (map[string]string, error) {
+	renamedFrom := make(map[string]string) // snap name -> desired name
+	for _, pol := range desired {
+		if pol.RenamedFrom == nil {
+			continue
+		}
+		if _, collide := desiredByName[*pol.RenamedFrom]; collide {
+			return nil, pipeline.Errorf(pol.Pos,
+				"RENAMED FROM %q on policy %q collides with another policy of the same name in the desired declaration. Remove the stale policy.",
+				*pol.RenamedFrom, pol.Name)
+		}
+		_, oldInSnap := snapByName[*pol.RenamedFrom]
+		_, newInSnap := snapByName[pol.Name]
+		if newInSnap {
+			// Post-apply / no-op state: the snapshot already has the new name.
+			continue
+		}
+		if !oldInSnap {
+			return nil, pipeline.Errorf(pol.Pos,
+				"RENAMED FROM %q on policy %q does not match the snapshot — neither the old nor the new name exists there. Remove RENAMED FROM if this is a genuinely new policy.",
+				*pol.RenamedFrom, pol.Name)
+		}
+		renamedFrom[*pol.RenamedFrom] = pol.Name
+	}
+	return renamedFrom, nil
+}
+
+func diffPolicies(schema, table string, o *ir.Table, snap *snapshot.SnapTable) ([]pipeline.DiffOp, error) {
 	var ops []pipeline.DiffOp
 	tblIdent := qualIdent(schema, table)
 
@@ -8974,18 +9046,44 @@ func diffPolicies(schema, table string, o *ir.Table, snap *snapshot.SnapTable) [
 		desiredByName[p.Name] = p
 	}
 
+	renamedFrom, err := validatePolicyRenames(o.Policies, desiredByName, snapByName)
+	if err != nil {
+		return nil, err
+	}
+
 	for _, sp := range snap.Policies {
-		if _, ok := desiredByName[sp.Name]; !ok {
-			// A dropped RLS policy silently widens row visibility —
-			// behavior-changing even though no data is lost (RFC audit item #26).
-			ops = append(ops, cautionOp(
-				fmt.Sprintf("DROP POLICY IF EXISTS %s ON %s;", quoteIdent(sp.Name), tblIdent),
-				pipeline.SourcePos{},
-			))
+		if _, ok := desiredByName[sp.Name]; ok {
+			continue
 		}
+		if _, wasRenamed := renamedFrom[sp.Name]; wasRenamed {
+			continue
+		}
+		// A dropped RLS policy silently widens row visibility —
+		// behavior-changing even though no data is lost (RFC audit item #26).
+		ops = append(ops, cautionOp(
+			fmt.Sprintf("DROP POLICY IF EXISTS %s ON %s;", quoteIdent(sp.Name), tblIdent),
+			pipeline.SourcePos{},
+		))
 	}
 	for _, pol := range o.Policies {
 		existing, exists := snapByName[pol.Name]
+		if !exists && pol.RenamedFrom != nil {
+			if oldSp, ok := snapByName[*pol.RenamedFrom]; ok {
+				existing, exists = oldSp, true
+				// RENAMED FROM on a policy (Section 7.8): SAFE, metadata-only
+				// — matches Constraint/Index's identical sub-object rename
+				// classification, not the CAUTION used for an independently-
+				// referenceable top-level object's RENAME TO. Emitted before
+				// any other change below, which then compares against
+				// existing's OLD definition but always names the policy by
+				// its new pol.Name, consistent with the rename having
+				// already applied.
+				ops = append(ops, safeOp(
+					fmt.Sprintf("ALTER POLICY %s ON %s RENAME TO %s;", quoteIdent(*pol.RenamedFrom), tblIdent, quoteIdent(pol.Name)),
+					pol.Pos,
+				))
+			}
+		}
 		if !exists {
 			ops = append(ops, createPolicy(schema, table, pol)...)
 		} else if pol.Command != existing.Command || pol.Permissive != existing.Permissive {
@@ -9061,7 +9159,7 @@ func diffPolicies(schema, table string, o *ir.Table, snap *snapshot.SnapTable) [
 			}
 		}
 	}
-	return ops
+	return ops, nil
 }
 
 func diffTriggers(schema, table string, o *ir.Table, snap *snapshot.SnapTable) []pipeline.DiffOp {

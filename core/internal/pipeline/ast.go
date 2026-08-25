@@ -104,8 +104,12 @@ type PolicyDef struct {
 	Using      *RawExpr
 	WithCheck  *RawExpr
 	Roles      []Identifier
-	Comment    *StringLit
-	Pos        SourcePos
+	// RenamedFrom names the policy's prior identity (RENAMED FROM, RFC
+	// Section 7.8) — matched within the same table only, like
+	// Constraint/Index's identical sub-object RENAMED FROM.
+	RenamedFrom *Identifier
+	Comment     *StringLit
+	Pos         SourcePos
 }
 
 // TriggerDef is a single trigger definition inside a { } block.

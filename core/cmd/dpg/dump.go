@@ -699,7 +699,7 @@ func renderObjectDPG(b *strings.Builder, obj pipeline.IRObject, fmtOpts format.O
 			}
 		}
 		replicaIdentityDeclared := o.ReplicaIdentity.Mode != "" && o.ReplicaIdentity.Mode != "DEFAULT"
-		if o.Owner != nil || o.Comment != nil || o.RLSEnabled || replicaIdentityDeclared || o.ClusterOn != nil ||
+		if o.Owner != nil || o.Comment != nil || o.RLSEnabled || o.RLSForced || replicaIdentityDeclared || o.ClusterOn != nil ||
 			len(o.Indexes) > 0 || len(colsWithAttrs) > 0 ||
 			len(o.Partitions) > 0 || len(o.Policies) > 0 || len(o.Triggers) > 0 || len(o.Grants) > 0 || len(o.Revocations) > 0 ||
 			len(o.SecurityLabels) > 0 || len(blockCSTs) > 0 {
@@ -715,6 +715,10 @@ func renderObjectDPG(b *strings.Builder, obj pipeline.IRObject, fmtOpts format.O
 			}
 			if o.RLSEnabled {
 				fmt.Fprintf(b, "%s%s %s %s %s;\n", ind, kw("ENABLE"), kw("ROW"), kw("LEVEL"), kw("SECURITY"))
+				blockHasContent = true
+			}
+			if o.RLSForced {
+				fmt.Fprintf(b, "%s%s %s %s %s;\n", ind, kw("FORCE"), kw("ROW"), kw("LEVEL"), kw("SECURITY"))
 				blockHasContent = true
 			}
 			// REPLICA IDENTITY DEFAULT is PostgreSQL's own default (and the
@@ -2344,6 +2348,9 @@ func renderPolicy(b *strings.Builder, pol *ir.Policy, fmtOpts format.Options) {
 	}
 	if pol.WithCheck != nil {
 		fmt.Fprintf(b, " %s %s (%s)", kw("WITH"), kw("CHECK"), *pol.WithCheck)
+	}
+	if pol.RenamedFrom != nil {
+		fmt.Fprintf(b, " %s %s %s", kw("RENAMED"), kw("FROM"), quoteIdentIfNeeded(*pol.RenamedFrom))
 	}
 	writeEntryCommentBlock(b, ind, fmtOpts, pol.Comment)
 }

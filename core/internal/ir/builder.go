@@ -2165,7 +2165,7 @@ func (b *Builder) buildRole(cs *pg_query.CreateRoleStmt, block pipeline.BlockAST
 // ── Tablespace ────────────────────────────────────────────────────────────────
 
 func (b *Builder) buildTablespace(cs *pg_query.CreateTableSpaceStmt, block pipeline.BlockAST, pos pipeline.SourcePos, body string) (pipeline.IRObject, error) {
-	ts := &Tablespace{Name: cs.Tablespacename, Location: cs.Location, Body: body, SrcPos: pos}
+	ts := &Tablespace{Name: cs.Tablespacename, Location: cs.Location, Body: body, StorageParams: buildOrderedOptions(cs.Options), SrcPos: pos}
 	if cs.Owner != nil && cs.Owner.Rolename != "" {
 		owner := cs.Owner.Rolename
 		ts.Owner = &owner
@@ -3522,6 +3522,9 @@ func blockPolicyToIR(pol pipeline.PolicyDef) *Policy {
 	}
 	for _, r := range pol.Roles {
 		p.Roles = append(p.Roles, r.String())
+	}
+	if pol.RenamedFrom != nil {
+		p.RenamedFrom = &pol.RenamedFrom.Name
 	}
 	if pol.Comment != nil {
 		p.Comment = &pol.Comment.Value

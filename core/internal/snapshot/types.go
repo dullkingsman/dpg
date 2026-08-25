@@ -67,13 +67,16 @@ type SnapOpaque struct {
 	TablespaceLocation string `json:"tablespace_location,omitempty"`
 	// TablespaceOwner is RFC audit item #80's inline `OWNER` diffing input
 	// — see ir.Tablespace.Owner's doc comment.
-	TablespaceOwner      *string  `json:"tablespace_owner,omitempty"`
-	CastMethod           string   `json:"cast_method,omitempty"`
-	CastContext          string   `json:"cast_context,omitempty"`
-	CastFunction         string   `json:"cast_function,omitempty"`
-	EventTriggerEvent    string   `json:"event_trigger_event,omitempty"`
-	EventTriggerTags     []string `json:"event_trigger_tags,omitempty"`
-	EventTriggerFunction string   `json:"event_trigger_function,omitempty"`
+	TablespaceOwner *string `json:"tablespace_owner,omitempty"`
+	// TablespaceStorageParams is Section 14.7's WITH (...) diffing input,
+	// flattened via flattenParams the same way Table.StorageParams is.
+	TablespaceStorageParams string   `json:"tablespace_storage_params,omitempty"`
+	CastMethod              string   `json:"cast_method,omitempty"`
+	CastContext             string   `json:"cast_context,omitempty"`
+	CastFunction            string   `json:"cast_function,omitempty"`
+	EventTriggerEvent       string   `json:"event_trigger_event,omitempty"`
+	EventTriggerTags        []string `json:"event_trigger_tags,omitempty"`
+	EventTriggerFunction    string   `json:"event_trigger_function,omitempty"`
 	// EventTriggerOwner is Section 14.1's ALTER EVENT TRIGGER ... OWNER TO
 	// diffing input — same shape as PublicationOwner above.
 	EventTriggerOwner *string `json:"event_trigger_owner,omitempty"`
@@ -280,12 +283,12 @@ type SnapTable struct {
 	Comment        *string `json:"comment,omitempty"`
 	// OfType/AccessMethod mirror ir.Table's identically-named fields
 	// (Section 7.1); "" means unset (ordinary table / cluster default).
-	OfType       string  `json:"of_type,omitempty"`
-	AccessMethod string  `json:"access_method,omitempty"`
+	OfType       string `json:"of_type,omitempty"`
+	AccessMethod string `json:"access_method,omitempty"`
 	// StorageParams is a WITH (...) clause's key=value pairs, flattened via
 	// flattenParams the same way ForeignOptions is — see its doc comment.
-	StorageParams string `json:"storage_params,omitempty"`
-	RenamedFrom  *string `json:"renamed_from,omitempty"`
+	StorageParams string  `json:"storage_params,omitempty"`
+	RenamedFrom   *string `json:"renamed_from,omitempty"`
 	// RenamedFromSchema is the schema the RENAMED FROM name lived in, when the
 	// directive was schema-qualified (a rename combined with a SET SCHEMA
 	// move) — see ir.Table.RenamedFromSchema's identical doc comment.

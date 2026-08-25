@@ -658,6 +658,28 @@ func TestBuildTableStorageParams(t *testing.T) {
 	}
 }
 
+// TestBuildTablePolicyRenamedFrom guards RFC Section 7.8's policy-decl
+// RENAMED FROM clause reaching ir.Policy — RFC E.19 documented this as
+// closed alongside Trigger/TSConfig's identical additions, but ir.Policy
+// never actually gained the field.
+func TestBuildTablePolicyRenamedFrom(t *testing.T) {
+	obj := buildObject(t, pipeline.KindTable,
+		`t (id BIGINT NOT NULL)`,
+		`POLICIES { view_self FOR SELECT USING (true) RENAMED FROM view_own; }`,
+	)
+	tbl, ok := obj.(*ir.Table)
+	if !ok {
+		t.Fatalf("expected *ir.Table, got %T", obj)
+	}
+	if len(tbl.Policies) != 1 {
+		t.Fatalf("expected 1 policy, got %d", len(tbl.Policies))
+	}
+	pol := tbl.Policies[0]
+	if pol.RenamedFrom == nil || *pol.RenamedFrom != "view_own" {
+		t.Errorf("RenamedFrom: got %v, want view_own", pol.RenamedFrom)
+	}
+}
+
 func TestBuildTableWithBlock(t *testing.T) {
 	obj := buildObject(t, pipeline.KindTable,
 		`users (
@@ -979,6 +1001,23 @@ func TestBuildTablespaceOwner(t *testing.T) {
 	}
 	if ts.Owner == nil || *ts.Owner != "app_admin" {
 		t.Errorf("Owner: got %v, want app_admin", ts.Owner)
+	}
+}
+
+// TestBuildTablespaceStorageParams guards RFC Section 14.7's WITH (...)
+// storage-params clause, same source-order-preserved convention as Table's.
+func TestBuildTablespaceStorageParams(t *testing.T) {
+	obj := buildObject(t, pipeline.KindTablespace,
+		`gl_ts LOCATION '/var/lib/postgresql/ts1' WITH (seq_page_cost=1.5, random_page_cost=2.0)`,
+		``,
+	)
+	ts, ok := obj.(*ir.Tablespace)
+	if !ok {
+		t.Fatalf("expected *ir.Tablespace, got %T", obj)
+	}
+	want := []pipeline.StorageParam{{Key: "seq_page_cost", Value: "1.5"}, {Key: "random_page_cost", Value: "2.0"}}
+	if !slices.Equal(ts.StorageParams, want) {
+		t.Errorf("StorageParams: got %v, want %v", ts.StorageParams, want)
 	}
 }
 
