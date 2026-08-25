@@ -176,6 +176,25 @@ type Constraint struct {
 	// "CHECK" or "FOREIGN KEY"; zero-value (false) matches PostgreSQL's
 	// own default (ENFORCED) when the clause is omitted.
 	NotEnforced bool
+	// WithoutOverlaps is PostgreSQL 18+'s WITHOUT OVERLAPS modifier
+	// (RFC Section 7.3, SQL:2011 temporal keys) on the trailing column of
+	// a PRIMARY KEY/UNIQUE's column list — that column (Columns' last
+	// element) must already be a range or multirange type; there is no
+	// DPG or PostgreSQL syntax to declare a generated one (see Section
+	// 7.3's own note on this — a documented former RFC error). Only
+	// meaningful for Type == "PRIMARY KEY" or "UNIQUE".
+	WithoutOverlaps bool
+	// FkWithPeriod/PkWithPeriod mark PostgreSQL 18+'s PERIOD modifier on a
+	// temporal FOREIGN KEY's local/referenced trailing column respectively
+	// (RFC Section 7.3) — the local column is Columns' last element, the
+	// referenced one is RefColumns' last element. Only meaningful for
+	// Type == "FOREIGN KEY". Real PostgreSQL requires both sides to carry
+	// PERIOD together (confirmed live) — DPG mirrors that as two
+	// independent fields rather than one shared flag only because that is
+	// how PostgreSQL's own grammar (and pg_query's parse tree) represents
+	// it, not because the two are ever meant to differ in practice.
+	FkWithPeriod bool
+	PkWithPeriod bool
 	// CheckColumn is the single column PostgreSQL's own auto-naming
 	// algorithm considers this CHECK constraint's own (heap.c's
 	// AddRelationNewConstraints: pull_var_clause over the expression, then

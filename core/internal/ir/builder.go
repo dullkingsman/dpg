@@ -638,20 +638,22 @@ func buildConstraint(c *pg_query.Constraint, pos pipeline.SourcePos) *Constraint
 		cst.Type = "PRIMARY KEY"
 		cols := nodeListToNames(c.Keys)
 		cst.Columns = cols
+		cst.WithoutOverlaps = c.WithoutOverlaps
 		if len(cols) > 0 {
-			cst.Expr = "PRIMARY KEY (" + strings.Join(quoteIdents(cols), ", ") + ")"
+			cst.Expr = "PRIMARY KEY (" + colListWithTrailingSuffix(cols, c.WithoutOverlaps, "WITHOUT OVERLAPS") + ")"
 		}
 
 	case pg_query.ConstrType_CONSTR_UNIQUE:
 		cst.Type = "UNIQUE"
 		cols := nodeListToNames(c.Keys)
 		cst.Columns = cols
+		cst.WithoutOverlaps = c.WithoutOverlaps
 		if len(cols) > 0 {
 			nd := ""
 			if c.NullsNotDistinct {
 				nd = "NULLS NOT DISTINCT "
 			}
-			cst.Expr = "UNIQUE " + nd + "(" + strings.Join(quoteIdents(cols), ", ") + ")"
+			cst.Expr = "UNIQUE " + nd + "(" + colListWithTrailingSuffix(cols, c.WithoutOverlaps, "WITHOUT OVERLAPS") + ")"
 		}
 
 	case pg_query.ConstrType_CONSTR_CHECK:
@@ -685,12 +687,14 @@ func buildConstraint(c *pg_query.Constraint, pos pipeline.SourcePos) *Constraint
 	case pg_query.ConstrType_CONSTR_FOREIGN:
 		cst.Type = "FOREIGN KEY"
 		cst.NotEnforced = !c.IsEnforced
+		cst.FkWithPeriod = c.FkWithPeriod
+		cst.PkWithPeriod = c.PkWithPeriod
 		localCols := nodeListToNames(c.FkAttrs)
 		refCols := nodeListToNames(c.PkAttrs)
 		cst.Columns = localCols
 		var b strings.Builder
 		b.WriteString("FOREIGN KEY (")
-		b.WriteString(strings.Join(quoteIdents(localCols), ", "))
+		b.WriteString(colListWithTrailingPrefix(localCols, c.FkWithPeriod, "PERIOD"))
 		b.WriteString(") REFERENCES ")
 		if c.Pktable != nil {
 			if c.Pktable.Schemaname != "" {
@@ -701,7 +705,7 @@ func buildConstraint(c *pg_query.Constraint, pos pipeline.SourcePos) *Constraint
 		}
 		if len(refCols) > 0 {
 			b.WriteString(" (")
-			b.WriteString(strings.Join(quoteIdents(refCols), ", "))
+			b.WriteString(colListWithTrailingPrefix(refCols, c.PkWithPeriod, "PERIOD"))
 			b.WriteByte(')')
 		}
 		if action := fkAction(c.FkUpdAction); action != "" {
@@ -967,6 +971,31 @@ func quoteIdents(names []string) []string {
 		out[i] = quoteIdent(n)
 	}
 	return out
+}
+
+// colListWithTrailingSuffix renders a comma-separated, quoted column list
+// with a trailing keyword appended after the LAST column only when apply is
+// true — PostgreSQL 18+'s "col_name WITHOUT OVERLAPS" temporal-key modifier
+// (RFC Section 7.3), which the grammar only ever allows on a PRIMARY KEY/
+// UNIQUE's final column.
+func colListWithTrailingSuffix(cols []string, apply bool, suffix string) string {
+	quoted := quoteIdents(cols)
+	if apply && len(quoted) > 0 {
+		quoted[len(quoted)-1] += " " + suffix
+	}
+	return strings.Join(quoted, ", ")
+}
+
+// colListWithTrailingPrefix is colListWithTrailingSuffix's mirror for
+// PostgreSQL 18+'s "PERIOD col_name" temporal FOREIGN KEY modifier (RFC
+// Section 7.3) — the keyword precedes the LAST column instead of following
+// it.
+func colListWithTrailingPrefix(cols []string, apply bool, prefix string) string {
+	quoted := quoteIdents(cols)
+	if apply && len(quoted) > 0 {
+		quoted[len(quoted)-1] = prefix + " " + quoted[len(quoted)-1]
+	}
+	return strings.Join(quoted, ", ")
 }
 
 // fkAction converts a pg_query FK action char to its SQL keyword.

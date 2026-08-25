@@ -2604,6 +2604,118 @@ func TestDiffFKCombinedDeferrableAndEnforcedOneStatement(t *testing.T) {
 	}
 }
 
+// TestDiffTemporalForeignKeyColumnDropCascade guards a real gap found while
+// implementing RFC Section 7.3's PERIOD temporal FOREIGN KEY (PostgreSQL
+// 18+): localConstraintCols previously truncated a "PERIOD colname" entry
+// at its own internal space, returning the literal word "PERIOD" instead
+// of the actual column name — so the "every local column this constraint
+// references is being dropped, skip the redundant DROP CONSTRAINT" cascade
+// check (PostgreSQL itself already drops the constraint via DROP COLUMN)
+// never matched for a temporal FK, which would have emitted a second,
+// conflicting DROP CONSTRAINT against a name PostgreSQL already removed.
+func TestDiffTemporalForeignKeyColumnDropCascade(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.room_bookings", &snapshot.SnapObject{
+		Kind: "table",
+		Table: &snapshot.SnapTable{
+			Schema:  "public",
+			Name:    "room_bookings",
+			Columns: []snapshot.SnapColumn{{Name: "room_id", Type: "bigint"}},
+		},
+	})
+	_ = snap.SetObject("public.room_events", &snapshot.SnapObject{
+		Kind: "table",
+		Table: &snapshot.SnapTable{
+			Schema: "public",
+			Name:   "room_events",
+			Columns: []snapshot.SnapColumn{
+				{Name: "room_id", Type: "bigint"},
+				{Name: "valid_at", Type: "daterange"},
+			},
+			Constraints: []snapshot.SnapConstraint{
+				{
+					Name: "fk_room", Type: "FOREIGN KEY",
+					Expr: `FOREIGN KEY ("room_id", PERIOD "valid_at") REFERENCES "room_bookings" ("room_id", PERIOD "valid_at")`,
+				},
+			},
+		},
+	})
+	desired := []pipeline.IRObject{
+		&ir.Table{
+			Schema:  "public",
+			Name:    "room_bookings",
+			Columns: []*ir.Column{{Name: "room_id", Type: ir.TypeRef{Name: "bigint"}}},
+		},
+		&ir.Table{
+			Schema: "public",
+			Name:   "room_events",
+			// valid_at (and its temporal FK) dropped entirely.
+			Columns: []*ir.Column{{Name: "room_id", Type: ir.TypeRef{Name: "bigint"}}},
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, o := range ops {
+		if strings.Contains(o.SQL(), "DROP CONSTRAINT") && strings.Contains(o.SQL(), "fk_room") {
+			t.Errorf("expected no separate DROP CONSTRAINT for fk_room (DROP COLUMN valid_at already cascades it), got: %v", sqlList(ops))
+		}
+	}
+	var dropColOp pipeline.DiffOp
+	for _, o := range ops {
+		if strings.Contains(o.SQL(), "DROP COLUMN") && strings.Contains(o.SQL(), "valid_at") {
+			dropColOp = o
+		}
+	}
+	if dropColOp == nil {
+		t.Fatalf("expected a DROP COLUMN valid_at op, got: %v", sqlList(ops))
+	}
+}
+
+// TestDiffMultiColumnUniqueColumnDropCascade guards anyDropped's general
+// fix (found while implementing temporal FOREIGN KEY above, but not
+// specific to it): confirmed live that PostgreSQL cascades away a
+// multi-column UNIQUE constraint entirely when even ONE of its two
+// columns is dropped, not only when both are — the pre-fix ALL-columns
+// condition would have emitted a redundant, conflicting DROP CONSTRAINT
+// for a name PostgreSQL had already removed via cascade.
+func TestDiffMultiColumnUniqueColumnDropCascade(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.t", &snapshot.SnapObject{
+		Kind: "table",
+		Table: &snapshot.SnapTable{
+			Schema: "public",
+			Name:   "t",
+			Columns: []snapshot.SnapColumn{
+				{Name: "a", Type: "integer"},
+				{Name: "b", Type: "integer"},
+			},
+			Constraints: []snapshot.SnapConstraint{
+				{Name: "uq", Type: "UNIQUE", Expr: `UNIQUE ("a", "b")`},
+			},
+		},
+	})
+	desired := []pipeline.IRObject{
+		&ir.Table{
+			Schema:  "public",
+			Name:    "t",
+			Columns: []*ir.Column{{Name: "b", Type: ir.TypeRef{Name: "integer"}}}, // "a" dropped
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, o := range ops {
+		if strings.Contains(o.SQL(), "DROP CONSTRAINT") {
+			t.Errorf("expected no separate DROP CONSTRAINT for uq (DROP COLUMN a already cascades it), got: %v", sqlList(ops))
+		}
+	}
+}
+
 // TestCreateForeignTableEmitsServerOptions guards a real bug found live-
 // testing a demo project: createTable wrote the "CREATE FOREIGN TABLE"
 // keyword but never appended SERVER/OPTIONS — not just incomplete, an

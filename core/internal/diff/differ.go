@@ -7265,10 +7265,13 @@ func diffConstraints(tbl string, o *ir.Table, snap *snapshot.SnapTable, fullSnap
 			continue
 		}
 		// PG cascades constraint removal when the underlying column is dropped.
-		// If every local column referenced by this constraint is being dropped,
-		// skip emitting anything — DROP COLUMN already handles it.
+		// If any local column referenced by this constraint is being dropped,
+		// skip emitting anything — DROP COLUMN already handles it (confirmed
+		// live it cascades the whole constraint away even when only one of
+		// several referenced columns is dropped — see anyDropped's own doc
+		// comment).
 		cols := localConstraintCols(sc.Expr)
-		if allDropped(cols, droppedCols) {
+		if anyDropped(cols, droppedCols) {
 			continue
 		}
 		// A NOT NULL constraint (PostgreSQL 18+) genuinely going away —
@@ -7961,7 +7964,7 @@ func diffIndexes(schema, table string, o *ir.Table, snap *snapshot.SnapTable, re
 		// Apply the rename map before deciding whether the snap index has truly
 		// disappeared from desired (i.e. its only columns were dropped).
 		cols := translateIndexCols(si.Columns, renamedCols)
-		if allDropped(cols, droppedCols) {
+		if anyDropped(cols, droppedCols) {
 			continue // DROP COLUMN cascade handles it.
 		}
 		ops = append(ops, cautionOp(
@@ -8122,7 +8125,17 @@ func localConstraintCols(expr string) []string {
 	var names []string
 	for part := range strings.SplitSeq(inside, ",") {
 		part = strings.TrimSpace(part)
-		// Strip optional sort/nulls suffixes that may appear on PK/UNIQUE.
+		// Strip PostgreSQL 18+'s leading "PERIOD " on a temporal FOREIGN
+		// KEY's local/referenced column (RFC Section 7.3) before the
+		// trailing-suffix strip below — otherwise that strip (built for a
+		// trailing modifier) would truncate "PERIOD valid_at" at its own
+		// internal space and return the literal word "PERIOD" as the
+		// column name instead of "valid_at".
+		if rest, ok := strings.CutPrefix(part, "PERIOD "); ok {
+			part = rest
+		}
+		// Strip optional sort/nulls suffixes that may appear on PK/UNIQUE
+		// (or, for a temporal PRIMARY KEY/UNIQUE, "WITHOUT OVERLAPS").
 		if sp := strings.IndexAny(part, " \t"); sp != -1 {
 			part = part[:sp]
 		}
@@ -8492,19 +8505,36 @@ func splitSQLStringLiterals(s string) []sqlSegment {
 	return segs
 }
 
-// allDropped reports whether the given column names are non-empty and every
-// one is a member of the dropped set. Empty input returns false so we don't
-// suppress drops for constraints/indexes whose columns we couldn't parse.
-func allDropped(cols []string, droppedCols map[string]bool) bool {
+// anyDropped reports whether at least one of cols is being dropped —
+// confirmed live (a real bug found implementing RFC Section 7.3's temporal
+// FOREIGN KEY, PostgreSQL 18+, but general to every multi-column
+// constraint/index, not specific to that feature) that PostgreSQL cascades
+// away a constraint or index referencing SEVERAL columns the moment ANY
+// ONE of them is dropped via ALTER TABLE ... DROP COLUMN — not only when
+// every referenced column is dropped, which this function (formerly named
+// allDropped) required before. The stricter, pre-fix ALL-columns condition
+// meant a multi-column constraint/index losing only one of its columns
+// still got an explicit DROP CONSTRAINT/DROP INDEX emitted for it,
+// targeting a name PostgreSQL had already removed via cascade — confirmed
+// live to fail outright ("constraint ... does not exist") for a temporal
+// FOREIGN KEY's PERIOD column specifically, but the same failure mode
+// applies to a plain multi-column UNIQUE and to a plain multi-column index
+// too (both confirmed live). Both call sites (diffConstraints' and
+// diffIndexes' removal loops) only ever reach this for a snapshot
+// entry with no matching desired entry at all, so there is no risk of also
+// suppressing a legitimate drop-and-recreate for one the user still wants
+// on a narrowed column set — that entry would already have matched by key
+// earlier and never reached here.
+func anyDropped(cols []string, droppedCols map[string]bool) bool {
 	if len(cols) == 0 || len(droppedCols) == 0 {
 		return false
 	}
 	for _, c := range cols {
-		if c == "" || !droppedCols[c] {
-			return false
+		if c != "" && droppedCols[c] {
+			return true
 		}
 	}
-	return true
+	return false
 }
 
 // policyRoleKey returns a canonical, order-independent key for a policy's TO

@@ -246,6 +246,88 @@ func TestRenderForeignKeyNotEnforcedCompiles(t *testing.T) {
 	}
 }
 
+// TestRenderTemporalPrimaryKeyCompiles guards RFC Section 7.3's WITHOUT
+// OVERLAPS temporal-key modifier (PostgreSQL 18+, SQL:2011): the promoted
+// constraint's Expr already carries the modifier verbatim (see the
+// builder's colListWithTrailingSuffix), so this table-level clause renders
+// unchanged and recompiles — no special-casing needed in dump itself.
+func TestRenderTemporalPrimaryKeyCompiles(t *testing.T) {
+	fmtOpts := format.Options{IndentSize: 4, KeywordCase: "upper"}
+	tbl := &ir.Table{
+		Schema: "public", Name: "room_bookings",
+		Columns: []*ir.Column{
+			{Name: "room_id", Type: ir.TypeRef{Name: "bigint"}, NotNull: true},
+			{Name: "valid_at", Type: ir.TypeRef{Name: "daterange"}, NotNull: true},
+		},
+		Constraints: []*ir.Constraint{
+			{
+				Name: "no_double_booking", Type: "PRIMARY KEY", Columns: []string{"room_id", "valid_at"},
+				Expr:            `PRIMARY KEY ("room_id", "valid_at" WITHOUT OVERLAPS)`,
+				WithoutOverlaps: true,
+			},
+		},
+	}
+
+	var b strings.Builder
+	renderObjectDPG(&b, tbl, fmtOpts)
+	rendered := b.String()
+
+	if !strings.Contains(rendered, "WITHOUT OVERLAPS") {
+		t.Errorf("rendered constraint does not carry WITHOUT OVERLAPS: %q", rendered)
+	}
+
+	dir := t.TempDir()
+	f := filepath.Join(dir, "objects.dpg")
+	if err := os.WriteFile(f, []byte(rendered), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := compiler.Compile([]string{f}, dir, pipeline.Default); err != nil {
+		t.Fatalf("dumped table with a temporal PRIMARY KEY failed to recompile: %v\n---\n%s", err, rendered)
+	}
+}
+
+// TestRenderTemporalForeignKeyCompiles is
+// TestRenderTemporalPrimaryKeyCompiles' FOREIGN KEY/PERIOD counterpart.
+func TestRenderTemporalForeignKeyCompiles(t *testing.T) {
+	fmtOpts := format.Options{IndentSize: 4, KeywordCase: "upper"}
+	tbl := &ir.Table{
+		Schema: "public", Name: "room_events",
+		Columns: []*ir.Column{
+			{Name: "room_id", Type: ir.TypeRef{Name: "bigint"}, NotNull: true},
+			{Name: "valid_at", Type: ir.TypeRef{Name: "daterange"}, NotNull: true},
+		},
+		Constraints: []*ir.Constraint{
+			{
+				Name: "fk_room", Type: "FOREIGN KEY", Columns: []string{"room_id", "valid_at"},
+				Expr:         `FOREIGN KEY ("room_id", PERIOD "valid_at") REFERENCES "room_bookings" ("room_id", PERIOD "valid_at")`,
+				FkWithPeriod: true, PkWithPeriod: true,
+			},
+		},
+	}
+
+	var b strings.Builder
+	renderObjectDPG(&b, tbl, fmtOpts)
+	rendered := b.String()
+
+	if strings.Count(rendered, "PERIOD") != 2 {
+		t.Errorf("rendered constraint missing one or both PERIOD markers: %q", rendered)
+	}
+
+	dir := t.TempDir()
+	f := filepath.Join(dir, "objects.dpg")
+	if err := os.WriteFile(f, []byte(rendered), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// room_bookings doesn't exist in this single-table fixture, so this
+	// intentionally only proves the DPG-level syntax round-trips (parses
+	// and rebuilds identically), not that the REFERENCES target resolves —
+	// matching TestRenderForeignKeyNotEnforcedCompiles's identical
+	// single-table scope just above.
+	if _, _, err := compiler.Compile([]string{f}, dir, pipeline.Default); err != nil {
+		t.Fatalf("dumped table with a temporal FOREIGN KEY failed to recompile: %v\n---\n%s", err, rendered)
+	}
+}
+
 // TestRenderIndexUsingMethodCompiles guards a real bug found live-testing a
 // demo project: the RFC's ABNF and every one of its worked examples
 // (rfc/dpg-1.md §7.7, e.g. "idx_location USING gist (location);") place

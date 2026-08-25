@@ -449,6 +449,82 @@ func TestBuildInlineForeignKeyDeferrable(t *testing.T) {
 	}
 }
 
+// TestBuildTemporalPrimaryKeyWithoutOverlaps guards RFC Section 7.3's
+// WITHOUT OVERLAPS temporal-key modifier (PostgreSQL 18+, SQL:2011): a
+// trailing "col WITHOUT OVERLAPS" on PRIMARY KEY's column list sets
+// Constraint.WithoutOverlaps and is preserved verbatim in Expr (real
+// PostgreSQL's own pg_get_constraintdef renders it in the same shape,
+// confirmed live — see the differ/introspection notes in this wave's
+// commit for why no separate diffing logic was needed beyond this).
+func TestBuildTemporalPrimaryKeyWithoutOverlaps(t *testing.T) {
+	obj := buildObject(t, pipeline.KindTable,
+		`room_bookings (
+			room_id  BIGINT NOT NULL,
+			valid_at DATERANGE NOT NULL,
+			CONSTRAINT no_double_booking PRIMARY KEY (room_id, valid_at WITHOUT OVERLAPS)
+		)`,
+		``,
+	)
+	tbl, ok := obj.(*ir.Table)
+	if !ok {
+		t.Fatalf("expected *ir.Table, got %T", obj)
+	}
+	var cst *ir.Constraint
+	for _, c := range tbl.Constraints {
+		if c.Type == "PRIMARY KEY" {
+			cst = c
+		}
+	}
+	if cst == nil {
+		t.Fatalf("expected a promoted PRIMARY KEY constraint, got constraints: %+v", tbl.Constraints)
+	}
+	if !cst.WithoutOverlaps {
+		t.Error("WithoutOverlaps: expected true")
+	}
+	if cst.Expr != `PRIMARY KEY ("room_id", "valid_at" WITHOUT OVERLAPS)` {
+		t.Errorf("Expr: got %q", cst.Expr)
+	}
+}
+
+// TestBuildTemporalForeignKeyPeriod guards the FOREIGN KEY half of the same
+// feature: a "PERIOD col" on both the local and REFERENCES column lists
+// sets FkWithPeriod/PkWithPeriod and renders correctly on both sides.
+func TestBuildTemporalForeignKeyPeriod(t *testing.T) {
+	obj := buildObject(t, pipeline.KindTable,
+		`room_events (
+			room_id  BIGINT NOT NULL,
+			valid_at DATERANGE NOT NULL,
+			CONSTRAINT fk_room FOREIGN KEY (room_id, PERIOD valid_at) REFERENCES room_bookings (room_id, PERIOD valid_at)
+		)`,
+		``,
+	)
+	tbl, ok := obj.(*ir.Table)
+	if !ok {
+		t.Fatalf("expected *ir.Table, got %T", obj)
+	}
+	var cst *ir.Constraint
+	for _, c := range tbl.Constraints {
+		if c.Type == "FOREIGN KEY" {
+			cst = c
+		}
+	}
+	if cst == nil {
+		t.Fatalf("expected a promoted FOREIGN KEY constraint, got constraints: %+v", tbl.Constraints)
+	}
+	if !cst.FkWithPeriod {
+		t.Error("FkWithPeriod: expected true")
+	}
+	if !cst.PkWithPeriod {
+		t.Error("PkWithPeriod: expected true")
+	}
+	if !strings.Contains(cst.Expr, `PERIOD "valid_at") REFERENCES`) {
+		t.Errorf("Expr missing local PERIOD marker: %q", cst.Expr)
+	}
+	if !strings.Contains(cst.Expr, `("room_id", PERIOD "valid_at")`) || strings.Count(cst.Expr, "PERIOD") != 2 {
+		t.Errorf("Expr missing referenced-side PERIOD marker: %q", cst.Expr)
+	}
+}
+
 func TestBuildSimpleTable(t *testing.T) {
 	obj := buildObject(t, pipeline.KindTable,
 		`users (
