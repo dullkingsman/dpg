@@ -278,7 +278,11 @@ type SnapTable struct {
 	Owner          *string `json:"owner,omitempty"`
 	Tablespace     *string `json:"tablespace,omitempty"`
 	Comment        *string `json:"comment,omitempty"`
-	RenamedFrom    *string `json:"renamed_from,omitempty"`
+	// OfType/AccessMethod mirror ir.Table's identically-named fields
+	// (Section 7.1); "" means unset (ordinary table / cluster default).
+	OfType       string  `json:"of_type,omitempty"`
+	AccessMethod string  `json:"access_method,omitempty"`
+	RenamedFrom  *string `json:"renamed_from,omitempty"`
 	// RenamedFromSchema is the schema the RENAMED FROM name lived in, when the
 	// directive was schema-qualified (a rename combined with a SET SCHEMA
 	// move) — see ir.Table.RenamedFromSchema's identical doc comment.
@@ -320,25 +324,25 @@ type SnapPartition struct {
 }
 
 type SnapColumn struct {
-	Name           string              `json:"name"`
-	Type           string              `json:"type"`
-	NotNull        bool                `json:"not_null,omitempty"`
-	Default        *string             `json:"default,omitempty"`
-	Identity       *string             `json:"identity,omitempty"` // "ALWAYS" or "BY DEFAULT"
-	Serial         *string             `json:"serial,omitempty"`   // "SMALLSERIAL"/"SERIAL"/"BIGSERIAL"
-	Generated      *string             `json:"generated,omitempty"`
+	Name      string  `json:"name"`
+	Type      string  `json:"type"`
+	NotNull   bool    `json:"not_null,omitempty"`
+	Default   *string `json:"default,omitempty"`
+	Identity  *string `json:"identity,omitempty"` // "ALWAYS" or "BY DEFAULT"
+	Serial    *string `json:"serial,omitempty"`   // "SMALLSERIAL"/"SERIAL"/"BIGSERIAL"
+	Generated *string `json:"generated,omitempty"`
 	// GeneratedVirtual is true when Generated is VIRTUAL (PG18+) rather
 	// than STORED — meaningless when Generated is nil. Kept as a sibling
 	// bool rather than folding into Generated's own shape, matching this
 	// struct's existing flat-field convention (e.g. Identity/Serial are
 	// each a bare *string, not a nested struct).
-	GeneratedVirtual bool `json:"generated_virtual,omitempty"`
-	Comment        *string             `json:"comment,omitempty"`
-	Statistics     *int                `json:"statistics,omitempty"`
-	Compression    *string             `json:"compression,omitempty"`
-	Storage        *string             `json:"storage,omitempty"`
-	Deprecated     *string             `json:"deprecated,omitempty"`
-	RenamedFrom    *string             `json:"renamed_from,omitempty"`
+	GeneratedVirtual bool    `json:"generated_virtual,omitempty"`
+	Comment          *string `json:"comment,omitempty"`
+	Statistics       *int    `json:"statistics,omitempty"`
+	Compression      *string `json:"compression,omitempty"`
+	Storage          *string `json:"storage,omitempty"`
+	Deprecated       *string `json:"deprecated,omitempty"`
+	RenamedFrom      *string `json:"renamed_from,omitempty"`
 	// Collation is a composite-type attribute's COLLATE target (RFC Section
 	// 5.2); "" for a table column, which has no such feature.
 	Collation      string              `json:"collation,omitempty"`

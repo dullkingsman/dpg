@@ -275,6 +275,30 @@ func (b *Builder) buildTable(cs *pg_query.CreateStmt, block pipeline.BlockAST, p
 		tbl.StorageParams = buildStorageParams(cs.Options)
 	}
 
+	// OF type_name (Section 7.1's typed-table "Form 2") and USING method
+	// (table access method) are both real PG grammar directly on CreateStmt
+	// (OfTypename/AccessMethod) — no DPG-specific parsing needed.
+	if cs.OfTypename != nil {
+		tbl.OfType = typeNameToRef(cs.OfTypename)
+	}
+	if cs.AccessMethod != "" {
+		tbl.AccessMethod = cs.AccessMethod
+	}
+	// A typed table's parenthesized list can only ever contain per-
+	// attribute "col WITH OPTIONS constraint..." narrowing entries (real
+	// PostgreSQL rejects a genuinely new column there outright) or table-
+	// level constraints — never a fresh ColumnDef with its own type. Any
+	// tbl.Columns entry here is necessarily one of those WITH OPTIONS
+	// narrowing forms, which this codebase deliberately doesn't model yet
+	// (see ir.Table.OfType's doc comment) — reject explicitly rather than
+	// silently dropping the declared narrowing when createTable/dump only
+	// ever render OfType + Constraints for a typed table.
+	if tbl.OfType.Name != "" && len(tbl.Columns) > 0 {
+		return nil, pipeline.Errorf(pos,
+			"typed table %s: per-attribute \"col WITH OPTIONS ...\" constraint narrowing (column %q) is not yet supported; declare only table-level constraints in the OF type_name column list",
+			qualName(tbl.Schema, tbl.Name), tbl.Columns[0].Name)
+	}
+
 	// Tablespace
 	if cs.Tablespacename != "" {
 		ts := cs.Tablespacename

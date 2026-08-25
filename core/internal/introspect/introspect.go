@@ -800,13 +800,16 @@ SELECT c.relname, n.nspname, c.relpersistence::text, c.relkind::text,
        (SELECT ic.relname FROM pg_index pi JOIN pg_class ic ON ic.oid = pi.indexrelid
           WHERE pi.indrelid = c.oid AND pi.indisreplident) AS replident_index,
        (SELECT ic2.relname FROM pg_index pi2 JOIN pg_class ic2 ON ic2.oid = pi2.indexrelid
-          WHERE pi2.indrelid = c.oid AND pi2.indisclustered) AS cluster_index
+          WHERE pi2.indrelid = c.oid AND pi2.indisclustered) AS cluster_index,
+       CASE WHEN c.reloftype <> 0 THEN pg_catalog.format_type(c.reloftype, NULL) END AS of_type,
+       am.amname AS access_method
 FROM   pg_class c
 JOIN   pg_namespace n ON n.oid = c.relnamespace
 JOIN   pg_roles r     ON r.oid = c.relowner
 LEFT   JOIN pg_foreign_table ft  ON ft.ftrelid = c.oid
 LEFT   JOIN pg_foreign_server fs ON fs.oid = ft.ftserver
 LEFT   JOIN pg_tablespace ts     ON ts.oid = c.reltablespace
+LEFT   JOIN pg_am am          ON am.oid = c.relam
 WHERE  c.relkind IN ('r', 'p', 'f')
 AND    NOT c.relispartition
 AND    n.nspname NOT IN ('pg_catalog','information_schema','pg_toast')
@@ -825,9 +828,10 @@ ORDER  BY n.nspname, c.relname`
 	for rs.Next() {
 		var name, schema, persistence, relkind, owner, replident string
 		var comment, server, tablespace, replidentIndex, clusterIndex *string
+		var ofType, accessMethod *string
 		var rlsEnabled, rlsForced bool
 		var ftoptions []string
-		if err := rs.Scan(&name, &schema, &persistence, &relkind, &owner, &comment, &rlsEnabled, &rlsForced, &server, &ftoptions, &tablespace, &replident, &replidentIndex, &clusterIndex); err != nil {
+		if err := rs.Scan(&name, &schema, &persistence, &relkind, &owner, &comment, &rlsEnabled, &rlsForced, &server, &ftoptions, &tablespace, &replident, &replidentIndex, &clusterIndex, &ofType, &accessMethod); err != nil {
 			return nil, err
 		}
 		t := &ir.Table{
@@ -842,6 +846,24 @@ ORDER  BY n.nspname, c.relname`
 			Tablespace:      tablespace,
 			ReplicaIdentity: replicaIdentityFromCatalog(replident, replidentIndex),
 			ClusterOn:       clusterIndex,
+		}
+		if ofType != nil {
+			// format_type() already omits the schema when the type is
+			// visible unqualified via search_path (the common case for a
+			// same-schema reference) — matching typeNameToRef's identical
+			// treatment of an unqualified "OF type_name" in source, the same
+			// convention introspectDomainBodies' base-type text already
+			// uses. Stored directly in Name (Schema left "") rather than
+			// split, so String() reproduces exactly this text.
+			t.OfType = ir.TypeRef{Name: *ofType}
+		}
+		// "heap" is PostgreSQL's own built-in default table access method —
+		// same "only report a non-default value" convention as Index's
+		// identical "btree" suppression (see dump.go/differ.go's `!=
+		// "btree"` guards), since every table always has a concrete relam
+		// regardless of whether USING was ever explicitly declared.
+		if accessMethod != nil && *accessMethod != "heap" {
+			t.AccessMethod = *accessMethod
 		}
 		if t.Foreign {
 			t.ForeignServer = server
@@ -1623,13 +1645,13 @@ ORDER  BY n.nspname, c.relname, t.tgname`
 			}
 		}
 		t.Triggers = append(t.Triggers, &ir.Trigger{
-			Name:              name,
-			When:              when,
-			Events:            cleanEvents,
-			ForEach:           forEach,
-			UpdateOfColumns:   updateOfColumns,
-			OldTransitionName: oldTransitionName,
-			NewTransitionName: newTransitionName,
+			Name:                name,
+			When:                when,
+			Events:              cleanEvents,
+			ForEach:             forEach,
+			UpdateOfColumns:     updateOfColumns,
+			OldTransitionName:   oldTransitionName,
+			NewTransitionName:   newTransitionName,
 			Function:            fn,
 			Condition:           condition,
 			Comment:             comment,

@@ -2991,6 +2991,47 @@ func createTable(o *ir.Table, vtypes map[string]string) []pipeline.DiffOp {
 		b.WriteString("CREATE TABLE ")
 	}
 	b.WriteString(qualIdent(o.Schema, o.Name))
+
+	if o.OfType.Name != "" {
+		// RFC Section 7.1's "Form 2" typed table: buildTable already
+		// rejects any per-attribute WITH OPTIONS narrowing column (see
+		// ir.Table.OfType's doc comment), so o.Columns is guaranteed empty
+		// here — the only possible parenthesized content is table-level
+		// constraints (a plain CHECK etc., which parse identically to a
+		// regular table's). Real PostgreSQL rejects empty parens outright
+		// ("CREATE TABLE t OF ty ()" is a syntax error), so they're omitted
+		// entirely when there are none to declare.
+		b.WriteString(" OF ")
+		b.WriteString(o.OfType.String())
+		if len(o.Constraints) > 0 {
+			b.WriteString(" (")
+			for i, cst := range o.Constraints {
+				if i > 0 {
+					b.WriteString(",")
+				}
+				b.WriteString("\n    ")
+				if cst.Name != "" {
+					b.WriteString("CONSTRAINT ")
+					b.WriteString(quoteIdent(cst.Name))
+					b.WriteString(" ")
+				}
+				b.WriteString(cst.Expr)
+				if cst.NotValid {
+					b.WriteString(" NOT VALID")
+				}
+				if cst.NotEnforced {
+					b.WriteString(" NOT ENFORCED")
+				}
+			}
+			b.WriteString("\n)")
+		}
+		if o.AccessMethod != "" {
+			b.WriteString(" USING ")
+			b.WriteString(o.AccessMethod)
+		}
+		return finishCreateTable(&b, o)
+	}
+
 	b.WriteString(" (")
 
 	// Classify constraints: single-column PK/UNIQUE/FK and column-promoted CHECK
@@ -3164,6 +3205,20 @@ func createTable(o *ir.Table, vtypes map[string]string) []pipeline.DiffOp {
 		}
 	}
 	b.WriteString("\n)")
+	if o.AccessMethod != "" {
+		b.WriteString(" USING ")
+		b.WriteString(o.AccessMethod)
+	}
+	return finishCreateTable(&b, o)
+}
+
+// finishCreateTable renders the CREATE TABLE clauses/ops shared by both
+// createTable's regular-column path and its OF type_name (typed-table)
+// path (Section 7.1): everything after the column-list/OF-type-and-
+// constraints portion, which the two paths build differently but otherwise
+// finish identically (INHERITS, PARTITION BY, SERVER/TABLESPACE, then every
+// op that follows the CREATE TABLE statement itself).
+func finishCreateTable(b *strings.Builder, o *ir.Table) []pipeline.DiffOp {
 	if len(o.Inherits) > 0 && !o.Foreign {
 		b.WriteString(" INHERITS (")
 		for i, p := range o.Inherits {
@@ -6323,6 +6378,31 @@ func diffTable(o *ir.Table, snap *snapshot.SnapTable, fullSnap *pipeline.Snapsho
 		}
 	}
 
+	// OF type_name / NOT OF (Section 7.11) — CAUTION: PostgreSQL validates
+	// every column against the type's attributes at execution time, unlike
+	// a plain metadata change.
+	if o.OfType.String() != snap.OfType {
+		if o.OfType.Name != "" {
+			ops = append(ops, cautionOp(fmt.Sprintf("ALTER TABLE %s OF %s;", tbl, o.OfType.String()), pos))
+		} else {
+			ops = append(ops, cautionOp(fmt.Sprintf("ALTER TABLE %s NOT OF;", tbl), pos))
+		}
+	}
+
+	// SET ACCESS METHOD (Section 7.11) — CAUTION: rewrites the table's
+	// storage using the new method. Only diffed when DESIRED declares a
+	// method (same "omitting a directive means leave it alone" convention
+	// as Owner/ClusterOn's != nil guards elsewhere), except clearing an
+	// already-declared one back to the cluster default, which real
+	// PostgreSQL expresses as the literal keyword DEFAULT.
+	if o.AccessMethod != snap.AccessMethod {
+		if o.AccessMethod != "" {
+			ops = append(ops, cautionOp(fmt.Sprintf("ALTER TABLE %s SET ACCESS METHOD %s;", tbl, o.AccessMethod), pos))
+		} else {
+			ops = append(ops, cautionOp(fmt.Sprintf("ALTER TABLE %s SET ACCESS METHOD DEFAULT;", tbl), pos))
+		}
+	}
+
 	colOps, renamedCols, droppedCols, err := diffColumns(tbl, o, snap, vtypes)
 	if err != nil {
 		return nil, err
@@ -6613,6 +6693,19 @@ func diffTableInherits(tbl string, o *ir.Table, snap *snapshot.SnapTable, pos pi
 // (RENAMED FROM names a column ALSO present in the desired DDL) stays
 // snapshot-independent because it's incoherent intent regardless of state.
 func diffColumns(tbl string, o *ir.Table, snap *snapshot.SnapTable, vtypes map[string]string) ([]pipeline.DiffOp, map[string]string, map[string]bool, error) {
+	// A typed table (Section 7.1's OF type_name) never has its own
+	// independently-diffed Columns in this codebase — the desired side is
+	// always empty (buildTable rejects any WITH OPTIONS narrowing column,
+	// see ir.Table.OfType's doc comment) while the snapshot side, once
+	// populated from a live-introspected typed table, genuinely does carry
+	// the type's inherited attributes (introspectColumns reads pg_attribute
+	// with no reloftype awareness). Comparing the two would otherwise
+	// propose dropping and re-adding every one of them on every plan —
+	// they aren't independent columns PostgreSQL lets you ADD/DROP on a
+	// typed table anyway.
+	if o.OfType.Name != "" {
+		return nil, nil, nil, nil
+	}
 	var ops []pipeline.DiffOp
 
 	// notNullConstrainedCols tracks columns whose NOT NULL is governed by a

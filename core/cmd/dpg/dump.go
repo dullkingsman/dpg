@@ -616,27 +616,41 @@ func renderObjectDPG(b *strings.Builder, obj pipeline.IRObject, fmtOpts format.O
 		case o.Foreign:
 			tableKW = kw("FOREIGN") + " " + kw("TABLE")
 		}
-		fmt.Fprintf(b, "\n%s %s (\n", tableKW, quoteIdentIfNeeded(o.Name))
-		hasContent := false
-		prevSection := "__none__"
-		for i, item := range items {
-			sep := ","
-			if i == len(items)-1 {
-				sep = ""
-			}
-			if item.section != prevSection {
-				if item.section != "" {
-					if hasContent {
-						b.WriteString("\n")
-					}
-					fmt.Fprintf(b, "%s-- %s\n", ind, item.section)
-				}
-				prevSection = item.section
-			}
-			fmt.Fprintf(b, "%s%s\n", item.text, sep)
-			hasContent = true
+		fmt.Fprintf(b, "\n%s %s", tableKW, quoteIdentIfNeeded(o.Name))
+		if o.OfType.Name != "" {
+			// RFC Section 7.1's "Form 2" typed table. Real PostgreSQL
+			// rejects empty parens outright ("... OF ty ()" is a syntax
+			// error), so they're omitted entirely when items (populated
+			// only from table-level constraints for a typed table — see
+			// ir.Table.OfType's doc comment) is empty.
+			fmt.Fprintf(b, " %s %s", kw("OF"), o.OfType.String())
 		}
-		b.WriteString(")")
+		if o.OfType.Name == "" || len(items) > 0 {
+			b.WriteString(" (\n")
+			hasContent := false
+			prevSection := "__none__"
+			for i, item := range items {
+				sep := ","
+				if i == len(items)-1 {
+					sep = ""
+				}
+				if item.section != prevSection {
+					if item.section != "" {
+						if hasContent {
+							b.WriteString("\n")
+						}
+						fmt.Fprintf(b, "%s-- %s\n", ind, item.section)
+					}
+					prevSection = item.section
+				}
+				fmt.Fprintf(b, "%s%s\n", item.text, sep)
+				hasContent = true
+			}
+			b.WriteString(")")
+		}
+		if o.AccessMethod != "" {
+			fmt.Fprintf(b, " %s %s", kw("USING"), o.AccessMethod)
+		}
 		if o.PartitionBy != nil {
 			fmt.Fprintf(b, " %s %s %s (%s)", kw("PARTITION"), kw("BY"), kw(o.PartitionBy.Strategy), strings.Join(o.PartitionBy.Columns, ", "))
 		}

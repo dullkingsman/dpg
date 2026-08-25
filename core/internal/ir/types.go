@@ -116,12 +116,12 @@ type Column struct {
 	// means unspecified/default. Table columns have no COLLATE feature in
 	// DPG's grammar, so this is always "" when Column represents one —
 	// diffColumns never reads it, only diffCompositeAttrs does.
-	Collation string
-	Grants               []Grant
-	Revocations          []Revocation
-	SecurityLabels       []pipeline.SecurityLabel
-	NameMaps             []pipeline.NameMapEntry
-	SrcPos               pipeline.SourcePos
+	Collation      string
+	Grants         []Grant
+	Revocations    []Revocation
+	SecurityLabels []pipeline.SecurityLabel
+	NameMaps       []pipeline.NameMapEntry
+	SrcPos         pipeline.SourcePos
 }
 
 // Generated holds a GENERATED ALWAYS AS (expr) STORED/VIRTUAL column spec.
@@ -465,6 +465,24 @@ type Table struct {
 	ForeignOptions []pipeline.StorageParam
 	Owner          *string
 	Comment        *string
+	// OfType is RFC Section 7.1's "Form 2" typed table (`CREATE TABLE name
+	// OF type_name`), backing the table's row type with a previously-
+	// declared composite type instead of an independent column list.
+	// Zero value (Name == "") means an ordinary table. Scoped to the bare
+	// association plus table-level constraints (which already parse as
+	// ordinary Constraints, e.g. a CHECK) — real PostgreSQL's per-attribute
+	// "col WITH OPTIONS ..." constraint-narrowing form (further restricting
+	// an inherited attribute, never adding a new column) is a deliberately
+	// unmodeled corner case, not attempted here. Changing it post-creation
+	// is Section 7.11's `OF type_name`/`NOT OF` ALTER, CAUTION (PostgreSQL
+	// validates every column against the type's attributes at execution
+	// time), not a DROP+CREATE.
+	OfType TypeRef
+	// AccessMethod is RFC Section 7.1's `USING method` table-access-method
+	// clause; "" means PostgreSQL's own cluster default. Changing it post-
+	// creation is Section 7.11's `SET ACCESS METHOD`, CAUTION (rewrites the
+	// table's storage).
+	AccessMethod   string
 	Columns        []*Column
 	Constraints    []*Constraint
 	Indexes        []*Index

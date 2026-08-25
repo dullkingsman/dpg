@@ -202,6 +202,197 @@ func TestDiffCreateTable(t *testing.T) {
 	}
 }
 
+// TestDiffCreateTypedTableBareForm proves a fresh typed table (RFC Section
+// 7.1's "Form 2") with no declared constraints emits "CREATE TABLE ... OF
+// type" with no parenthesized list at all — real PostgreSQL rejects empty
+// parens on this form outright.
+func TestDiffCreateTypedTableBareForm(t *testing.T) {
+	d := New()
+	desired := []pipeline.IRObject{
+		&ir.Table{Schema: "public", Name: "shipping_address", OfType: ir.TypeRef{Name: "address"}},
+	}
+	ops, err := d.Diff(desired, &pipeline.Snapshot{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsSQL(ops, `CREATE TABLE "public"."shipping_address" OF address;`) {
+		t.Errorf("expected bare OF-type CREATE TABLE with no parens, got: %v", sqlList(ops))
+	}
+}
+
+// TestDiffCreateTypedTableWithConstraint proves a typed table declaring a
+// table-level constraint renders it inside the OF-type parenthesized list.
+func TestDiffCreateTypedTableWithConstraint(t *testing.T) {
+	d := New()
+	desired := []pipeline.IRObject{
+		&ir.Table{
+			Schema: "public", Name: "shipping_address", OfType: ir.TypeRef{Name: "address"},
+			Constraints: []*ir.Constraint{
+				{Name: "zip_format", Type: "CHECK", Expr: "CHECK (zip ~ '^[0-9]{5}$')"},
+			},
+		},
+	}
+	ops, err := d.Diff(desired, &pipeline.Snapshot{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsSQL(ops, `CREATE TABLE "public"."shipping_address" OF address (`) {
+		t.Errorf("expected OF-type CREATE TABLE with a parenthesized constraint list, got: %v", sqlList(ops))
+	}
+	if !containsSQL(ops, `CONSTRAINT "zip_format" CHECK (zip ~ '^[0-9]{5}$')`) {
+		t.Errorf("expected the constraint rendered inside it, got: %v", sqlList(ops))
+	}
+}
+
+// TestDiffCreateTableWithAccessMethod proves a declared USING method
+// (Section 7.1) renders on a fresh CREATE TABLE.
+func TestDiffCreateTableWithAccessMethod(t *testing.T) {
+	d := New()
+	desired := []pipeline.IRObject{
+		&ir.Table{
+			Schema: "public", Name: "events", AccessMethod: "heap2",
+			Columns: []*ir.Column{{Name: "id", Type: ir.TypeRef{Name: "integer"}}},
+		},
+	}
+	ops, err := d.Diff(desired, &pipeline.Snapshot{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsSQL(ops, "USING heap2") {
+		t.Errorf("expected USING heap2, got: %v", sqlList(ops))
+	}
+}
+
+// TestDiffTypedTableSkipsColumnDiffing proves a typed table's Columns are
+// never compared: a live-introspected typed table's snapshot genuinely
+// carries the type's inherited attributes (introspectColumns has no
+// reloftype awareness), while the desired side is always empty (buildTable
+// rejects WITH OPTIONS narrowing). Without this guard, every plan against
+// an already-applied typed table would propose dropping and re-adding every
+// one of its columns.
+func TestDiffTypedTableSkipsColumnDiffing(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.shipping_address", &snapshot.SnapObject{
+		Kind: "table",
+		Table: &snapshot.SnapTable{
+			Schema: "public", Name: "shipping_address", OfType: "address",
+			Columns: []snapshot.SnapColumn{
+				{Name: "street", Type: "text"},
+				{Name: "city", Type: "text"},
+			},
+		},
+	})
+	desired := []pipeline.IRObject{
+		&ir.Table{Schema: "public", Name: "shipping_address", OfType: ir.TypeRef{Name: "address"}},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ops) != 0 {
+		t.Errorf("expected no ops for an unchanged typed table (columns must never be diffed), got: %v", sqlList(ops))
+	}
+}
+
+// TestDiffTableOfTypeChangedIsCaution proves gaining/switching a typed
+// table's OF type_name association (Section 7.11) emits a targeted ALTER,
+// not a DROP+CREATE — PostgreSQL validates columns against the new type at
+// execution time, so it's CAUTION, not SAFE.
+func TestDiffTableOfTypeChangedIsCaution(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.t", &snapshot.SnapObject{
+		Kind:  "table",
+		Table: &snapshot.SnapTable{Schema: "public", Name: "t"},
+	})
+	desired := []pipeline.IRObject{
+		&ir.Table{Schema: "public", Name: "t", OfType: ir.TypeRef{Name: "address"}},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsSQL(ops, `ALTER TABLE "public"."t" OF address;`) {
+		t.Errorf("expected ALTER TABLE ... OF address, got: %v", sqlList(ops))
+	}
+	for _, op := range ops {
+		if strings.Contains(op.SQL(), " OF address") && op.Safety() != pipeline.Caution {
+			t.Errorf("OF type_name safety = %v, want Caution", op.Safety())
+		}
+	}
+}
+
+// TestDiffTableOfTypeRemovedEmitsNotOf proves removing a previously-declared
+// OF type_name association emits ALTER TABLE ... NOT OF.
+func TestDiffTableOfTypeRemovedEmitsNotOf(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.t", &snapshot.SnapObject{
+		Kind:  "table",
+		Table: &snapshot.SnapTable{Schema: "public", Name: "t", OfType: "address"},
+	})
+	desired := []pipeline.IRObject{
+		&ir.Table{Schema: "public", Name: "t"},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsSQL(ops, `ALTER TABLE "public"."t" NOT OF;`) {
+		t.Errorf("expected ALTER TABLE ... NOT OF, got: %v", sqlList(ops))
+	}
+}
+
+// TestDiffTableAccessMethodChangedIsCaution proves a changed USING method
+// (Section 7.11's SET ACCESS METHOD) emits a targeted ALTER, CAUTION
+// (rewrites the table's storage) rather than a recreate.
+func TestDiffTableAccessMethodChangedIsCaution(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.t", &snapshot.SnapObject{
+		Kind:  "table",
+		Table: &snapshot.SnapTable{Schema: "public", Name: "t", AccessMethod: "heap"},
+	})
+	desired := []pipeline.IRObject{
+		&ir.Table{Schema: "public", Name: "t", AccessMethod: "columnar"},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsSQL(ops, `ALTER TABLE "public"."t" SET ACCESS METHOD columnar;`) {
+		t.Errorf("expected ALTER TABLE ... SET ACCESS METHOD columnar, got: %v", sqlList(ops))
+	}
+	for _, op := range ops {
+		if strings.Contains(op.SQL(), "SET ACCESS METHOD") && op.Safety() != pipeline.Caution {
+			t.Errorf("SET ACCESS METHOD safety = %v, want Caution", op.Safety())
+		}
+	}
+}
+
+// TestDiffTableAccessMethodRemovedEmitsDefault proves clearing a previously-
+// declared USING method emits SET ACCESS METHOD DEFAULT, not a no-op —
+// there is no bare "unset" form in real PostgreSQL's grammar.
+func TestDiffTableAccessMethodRemovedEmitsDefault(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.t", &snapshot.SnapObject{
+		Kind:  "table",
+		Table: &snapshot.SnapTable{Schema: "public", Name: "t", AccessMethod: "columnar"},
+	})
+	desired := []pipeline.IRObject{
+		&ir.Table{Schema: "public", Name: "t"},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsSQL(ops, `ALTER TABLE "public"."t" SET ACCESS METHOD DEFAULT;`) {
+		t.Errorf("expected ALTER TABLE ... SET ACCESS METHOD DEFAULT, got: %v", sqlList(ops))
+	}
+}
+
 // TestDiffCreateTableWithExcludeConstraint proves a fresh CREATE TABLE
 // carrying a named EXCLUDE constraint emits the constraint's real SQL body
 // (via createTable's generic table-level rendering path — EXCLUDE isn't in

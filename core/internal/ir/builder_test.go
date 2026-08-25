@@ -564,6 +564,83 @@ func TestBuildSimpleTable(t *testing.T) {
 	}
 }
 
+// TestBuildTypedTableSetsOfType guards RFC Section 7.1's "Form 2" typed
+// table (CREATE TABLE ... OF type_name) — real PG grammar directly on
+// CreateStmt.OfTypename, no DPG-specific parsing needed. The bare form (no
+// parenthesized list at all) is real PostgreSQL's own valid syntax.
+func TestBuildTypedTableSetsOfType(t *testing.T) {
+	obj := buildObject(t, pipeline.KindTable, `shipping_address OF address`, ``)
+	tbl, ok := obj.(*ir.Table)
+	if !ok {
+		t.Fatalf("expected *ir.Table, got %T", obj)
+	}
+	if tbl.OfType.Name != "address" {
+		t.Errorf("OfType.Name: got %q, want %q", tbl.OfType.Name, "address")
+	}
+	if len(tbl.Columns) != 0 {
+		t.Errorf("Columns: expected 0 for a typed table, got %d", len(tbl.Columns))
+	}
+}
+
+// TestBuildTypedTableWithConstraint guards a typed table's parenthesized
+// list containing only a table-level constraint (RFC Section 7.1's own
+// worked example) — this parses identically to a regular table's CONSTRAINT
+// clause, needing no typed-table-specific handling in buildTable.
+func TestBuildTypedTableWithConstraint(t *testing.T) {
+	obj := buildObject(t, pipeline.KindTable,
+		`shipping_address OF address (CONSTRAINT zip_format CHECK (zip ~ '^[0-9]{5}$'))`,
+		``,
+	)
+	tbl, ok := obj.(*ir.Table)
+	if !ok {
+		t.Fatalf("expected *ir.Table, got %T", obj)
+	}
+	if tbl.OfType.Name != "address" {
+		t.Errorf("OfType.Name: got %q, want %q", tbl.OfType.Name, "address")
+	}
+	if len(tbl.Constraints) != 1 || tbl.Constraints[0].Name != "zip_format" {
+		t.Fatalf("Constraints: got %+v", tbl.Constraints)
+	}
+}
+
+// TestBuildTypedTableWithOptionsColumnErrors guards the deliberate scoping
+// decision documented on ir.Table.OfType: real PostgreSQL's "col WITH
+// OPTIONS constraint..." per-attribute narrowing form (further restricting
+// an inherited attribute, never adding a new column) parses as a plain
+// ColumnDef with no type_name — buildTable must reject it explicitly rather
+// than silently building a Column that createTable/dump would then never
+// render at all (since neither renders a typed table's Columns, only its
+// OfType + Constraints).
+func TestBuildTypedTableWithOptionsColumnErrors(t *testing.T) {
+	p := pgparser.New()
+	pgResult, err := p.Parse(pipeline.KindTable, `shipping_address OF address (street WITH OPTIONS NOT NULL)`, zeroPos)
+	if err != nil {
+		t.Fatalf("pg parse error: %v", err)
+	}
+	bp := blockparser.New()
+	blockAST, err := bp.Parse(pipeline.KindTable, ``, zeroPos)
+	if err != nil {
+		t.Fatalf("block parse error: %v", err)
+	}
+	builder := ir.NewBuilder()
+	if _, err := builder.Build(pgResult, blockAST); err == nil {
+		t.Fatal("expected a build error for an unsupported WITH OPTIONS narrowing column")
+	}
+}
+
+// TestBuildTableAccessMethod guards RFC Section 7.1's USING method (table
+// access method) clause — real PG grammar directly on CreateStmt.AccessMethod.
+func TestBuildTableAccessMethod(t *testing.T) {
+	obj := buildObject(t, pipeline.KindTable, `t (a INTEGER) USING heap2`, ``)
+	tbl, ok := obj.(*ir.Table)
+	if !ok {
+		t.Fatalf("expected *ir.Table, got %T", obj)
+	}
+	if tbl.AccessMethod != "heap2" {
+		t.Errorf("AccessMethod: got %q, want %q", tbl.AccessMethod, "heap2")
+	}
+}
+
 func TestBuildTableWithBlock(t *testing.T) {
 	obj := buildObject(t, pipeline.KindTable,
 		`users (

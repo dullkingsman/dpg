@@ -473,6 +473,95 @@ func TestRenderUnloggedTableCompiles(t *testing.T) {
 	}
 }
 
+// TestRenderTypedTableCompiles guards RFC Section 7.1's "Form 2" typed
+// table (CREATE TABLE ... OF type_name) dump-and-recompile round trip, both
+// the bare form (no parenthesized list — real PostgreSQL rejects empty
+// parens on this form outright) and with a table-level constraint declared.
+func TestRenderTypedTableCompiles(t *testing.T) {
+	fmtOpts := format.Options{IndentSize: 4, KeywordCase: "upper"}
+	bare := &ir.Table{Schema: "public", Name: "shipping_address", OfType: ir.TypeRef{Name: "address"}}
+	withCst := &ir.Table{
+		Schema: "public", Name: "billing_address", OfType: ir.TypeRef{Name: "address"},
+		Constraints: []*ir.Constraint{
+			{Name: "zip_format", Type: "CHECK", Expr: "CHECK (zip ~ '^[0-9]{5}$')"},
+		},
+	}
+
+	var b strings.Builder
+	renderObjectDPG(&b, bare, fmtOpts)
+	renderObjectDPG(&b, withCst, fmtOpts)
+	rendered := b.String()
+
+	if !strings.Contains(rendered, "TABLE shipping_address OF address") {
+		t.Errorf("expected bare OF-type rendering with no parens, got:\n%s", rendered)
+	}
+	if strings.Contains(rendered, "shipping_address OF address (") {
+		t.Errorf("bare typed table must not render empty parens, got:\n%s", rendered)
+	}
+	if !strings.Contains(rendered, "TABLE billing_address OF address (") {
+		t.Errorf("expected OF-type rendering with a parenthesized constraint list, got:\n%s", rendered)
+	}
+
+	dir := t.TempDir()
+	f := filepath.Join(dir, "objects.dpg")
+	if err := os.WriteFile(f, []byte(rendered), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	compiled, _, err := compiler.Compile([]string{f}, dir, pipeline.Default)
+	if err != nil {
+		t.Fatalf("dumped typed tables failed to recompile: %v\n---\n%s", err, rendered)
+	}
+	found := map[string]*ir.Table{}
+	for _, o := range compiled {
+		if tb, ok := o.(*ir.Table); ok {
+			found[tb.Name] = tb
+		}
+	}
+	if found["shipping_address"] == nil || found["shipping_address"].OfType.Name != "address" {
+		t.Errorf("shipping_address OfType did not round-trip: %+v", found["shipping_address"])
+	}
+	if found["billing_address"] == nil || len(found["billing_address"].Constraints) != 1 {
+		t.Errorf("billing_address constraint did not round-trip: %+v", found["billing_address"])
+	}
+}
+
+// TestRenderTableAccessMethodCompiles guards RFC Section 7.1's USING method
+// (table access method) dump-and-recompile round trip.
+func TestRenderTableAccessMethodCompiles(t *testing.T) {
+	fmtOpts := format.Options{IndentSize: 4, KeywordCase: "upper"}
+	tbl := &ir.Table{
+		Schema: "public", Name: "events", AccessMethod: "heap2",
+		Columns: []*ir.Column{{Name: "id", Type: ir.TypeRef{Name: "bigint"}}},
+	}
+
+	var b strings.Builder
+	renderObjectDPG(&b, tbl, fmtOpts)
+	rendered := b.String()
+
+	if !strings.Contains(rendered, "USING heap2") {
+		t.Errorf("expected USING heap2, got:\n%s", rendered)
+	}
+
+	dir := t.TempDir()
+	f := filepath.Join(dir, "objects.dpg")
+	if err := os.WriteFile(f, []byte(rendered), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	compiled, _, err := compiler.Compile([]string{f}, dir, pipeline.Default)
+	if err != nil {
+		t.Fatalf("dumped table failed to recompile: %v\n---\n%s", err, rendered)
+	}
+	var found *ir.Table
+	for _, o := range compiled {
+		if tb, ok := o.(*ir.Table); ok && tb.Name == "events" {
+			found = tb
+		}
+	}
+	if found == nil || found.AccessMethod != "heap2" {
+		t.Errorf("AccessMethod did not round-trip: %+v", found)
+	}
+}
+
 // TestRenderTableAndIndexTablespaceCompiles guards a real bug found live-
 // testing a demo project: case *ir.Table in renderObjectDPG had no
 // TABLESPACE rendering at all, table-level or per-index, despite both being
