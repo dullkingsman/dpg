@@ -475,6 +475,29 @@ func TestSequence(t *testing.T) {
 	assertPart1Contains(t, obj, "order_number_seq")
 }
 
+// TestUnloggedSequence guards RFC Section 10's UNLOGGED prefix — CREATE
+// SEQUENCE and CREATE UNLOGGED SEQUENCE parse to the identical pg_query
+// node, distinguished only by Sequence.Relpersistence, so the scanner
+// (which decides Kind purely from the leading keyword text, before
+// pg_query ever sees it) must recognize the prefix explicitly, mirroring
+// UNLOGGED TABLE's identical mechanism.
+func TestUnloggedSequence(t *testing.T) {
+	obj := assertOne(t, scan(t, `UNLOGGED SEQUENCE session_counter;`))
+	assertKind(t, obj, pipeline.KindUnloggedSequence)
+	assertPart1Contains(t, obj, "session_counter")
+}
+
+// TestUnloggedRejectsUnknownFollower guards the corrected error message
+// after UNLOGGED gained a second valid follower (SEQUENCE, alongside
+// TABLE) — some other keyword must still error clearly, not silently
+// misparse.
+func TestUnloggedRejectsUnknownFollower(t *testing.T) {
+	err := scanErr(t, `UNLOGGED VIEW v AS SELECT 1;`)
+	if err == nil {
+		t.Fatal("expected an error for UNLOGGED VIEW")
+	}
+}
+
 func TestRole(t *testing.T) {
 	obj := assertOne(t, scan(t, `ROLE app_readonly {
     NOLOGIN;

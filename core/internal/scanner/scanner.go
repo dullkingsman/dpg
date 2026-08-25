@@ -508,10 +508,15 @@ func (s *state) detectKind(pos pipeline.SourcePos) (pipeline.ObjectKind, error) 
 		return pipeline.KindTable, nil
 	case "UNLOGGED":
 		s.skipWS()
-		if next := s.readWord(); strings.ToUpper(next) != "TABLE" {
-			return pipeline.KindUnknown, pipeline.Errorf(pos, "expected TABLE after UNLOGGED, got %q", next)
+		next := s.readWord()
+		switch strings.ToUpper(next) {
+		case "TABLE":
+			return pipeline.KindUnloggedTable, nil
+		case "SEQUENCE":
+			return pipeline.KindUnloggedSequence, nil
+		default:
+			return pipeline.KindUnknown, pipeline.Errorf(pos, "expected TABLE or SEQUENCE after UNLOGGED, got %q", next)
 		}
-		return pipeline.KindUnloggedTable, nil
 	case "FOREIGN":
 		s.skipWS()
 		next := s.readWord()
@@ -968,6 +973,7 @@ func KindNames() []string {
 		pipeline.KindDomainType.String(),
 		pipeline.KindBaseType.String(),
 		pipeline.KindSequence.String(),
+		pipeline.KindUnloggedSequence.String(),
 		pipeline.KindRole.String(),
 		pipeline.KindTablespace.String(),
 		pipeline.KindFDW.String(),

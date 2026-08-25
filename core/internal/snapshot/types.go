@@ -545,8 +545,11 @@ type SnapType struct {
 }
 
 type SnapSequence struct {
-	Schema      string      `json:"schema"`
-	Name        string      `json:"name"`
+	Schema string `json:"schema"`
+	Name   string `json:"name"`
+	// Unlogged is RFC Section 10's UNLOGGED prefix (ir.Sequence.Unlogged's
+	// doc comment).
+	Unlogged    bool        `json:"unlogged,omitempty"`
 	Owner       *string     `json:"owner,omitempty"`
 	Comment     *string     `json:"comment,omitempty"`
 	Grants      []SnapGrant `json:"grants,omitempty"`

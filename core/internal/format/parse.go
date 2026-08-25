@@ -44,6 +44,8 @@ func kindKeyword(k pipeline.ObjectKind) string {
 		return "EXTENSION"
 	case pipeline.KindSequence:
 		return "SEQUENCE"
+	case pipeline.KindUnloggedSequence:
+		return "UNLOGGED SEQUENCE"
 	case pipeline.KindRole:
 		return "ROLE"
 	case pipeline.KindTablespace:

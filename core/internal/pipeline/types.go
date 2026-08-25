@@ -66,6 +66,7 @@ const (
 	KindParameterPrivileges
 	KindVirtualType
 	KindMacro
+	KindUnloggedSequence
 )
 
 func (k ObjectKind) String() string {
@@ -104,6 +105,8 @@ func (k ObjectKind) String() string {
 		return "BASE TYPE"
 	case KindSequence:
 		return "SEQUENCE"
+	case KindUnloggedSequence:
+		return "UNLOGGED SEQUENCE"
 	case KindRole:
 		return "ROLE"
 	case KindTablespace:

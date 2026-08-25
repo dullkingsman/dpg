@@ -9552,6 +9552,69 @@ func TestDiffCreateSequence(t *testing.T) {
 	}
 }
 
+// TestDiffCreateUnloggedSequence guards RFC Section 10's UNLOGGED prefix —
+// createSequence never rendered it at all before this.
+func TestDiffCreateUnloggedSequence(t *testing.T) {
+	d := New()
+	desired := []pipeline.IRObject{
+		&ir.Sequence{Schema: "public", Name: "session_counter", Unlogged: true},
+	}
+	ops, err := d.Diff(desired, &pipeline.Snapshot{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsSQL(ops, "CREATE UNLOGGED SEQUENCE IF NOT EXISTS") {
+		t.Errorf("expected CREATE UNLOGGED SEQUENCE, got: %v", sqlList(ops))
+	}
+}
+
+// TestDiffSequenceUnloggedToggledIsCautionAlter proves toggling UNLOGGED on
+// an existing sequence (Section 10's own diffing table) emits a targeted
+// CAUTION ALTER SEQUENCE ... SET UNLOGGED/LOGGED, not a recreate — the same
+// mechanism as an unlogged table's identical toggle (Section 7.12).
+func TestDiffSequenceUnloggedToggledIsCautionAlter(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.seq_id", &snapshot.SnapObject{
+		Kind:     "sequence",
+		Sequence: &snapshot.SnapSequence{Schema: "public", Name: "seq_id"},
+	})
+	desired := []pipeline.IRObject{
+		&ir.Sequence{Schema: "public", Name: "seq_id", Unlogged: true},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsSQL(ops, `ALTER SEQUENCE "public"."seq_id" SET UNLOGGED;`) {
+		t.Errorf("expected ALTER SEQUENCE ... SET UNLOGGED, got: %v", sqlList(ops))
+	}
+	for _, op := range ops {
+		if strings.Contains(op.SQL(), "SET UNLOGGED") && op.Safety() != pipeline.Caution {
+			t.Errorf("SET UNLOGGED safety = %v, want Caution", op.Safety())
+		}
+	}
+}
+
+func TestDiffSequenceLoggedToggledEmitsSetLogged(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.seq_id", &snapshot.SnapObject{
+		Kind:     "sequence",
+		Sequence: &snapshot.SnapSequence{Schema: "public", Name: "seq_id", Unlogged: true},
+	})
+	desired := []pipeline.IRObject{
+		&ir.Sequence{Schema: "public", Name: "seq_id"},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsSQL(ops, `ALTER SEQUENCE "public"."seq_id" SET LOGGED;`) {
+		t.Errorf("expected ALTER SEQUENCE ... SET LOGGED, got: %v", sqlList(ops))
+	}
+}
+
 // TestDiffCreateSequenceAsTypeAndOwnedBy guards RFC audit item #14: AS type
 // and OWNED BY were completely unimplemented — breaking the RFC's own
 // canonical example verbatim.

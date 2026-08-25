@@ -2203,6 +2203,30 @@ func TestBuildSequenceAllOptions(t *testing.T) {
 // "AS type" and "OWNED BY" were completely unimplemented (no IR field, no
 // builder handling) — breaking the RFC's own canonical example
 // ("SEQUENCE ... AS BIGINT ... OWNED BY orders.order_number;") verbatim.
+// TestBuildUnloggedSequenceSetsFlag guards RFC Section 10's UNLOGGED prefix
+// — CREATE SEQUENCE and CREATE UNLOGGED SEQUENCE parse to the identical
+// CreateSeqStmt node, distinguished only by Sequence.Relpersistence ("u"),
+// the same convention already used for CREATE TABLE (see
+// TestBuildUnloggedTableSetsFlag).
+func TestBuildUnloggedSequenceSetsFlag(t *testing.T) {
+	obj := buildObject(t, pipeline.KindUnloggedSequence, `session_counter`, ``)
+	s, ok := obj.(*ir.Sequence)
+	if !ok {
+		t.Fatalf("expected *ir.Sequence, got %T", obj)
+	}
+	if !s.Unlogged {
+		t.Error("expected Unlogged = true")
+	}
+}
+
+func TestBuildSequenceLoggedByDefault(t *testing.T) {
+	obj := buildObject(t, pipeline.KindSequence, `order_number_seq`, ``)
+	s := obj.(*ir.Sequence)
+	if s.Unlogged {
+		t.Error("expected Unlogged = false for a plain SEQUENCE")
+	}
+}
+
 func TestBuildSequenceAsTypeAndOwnedBy(t *testing.T) {
 	obj := buildObject(t, pipeline.KindSequence,
 		`order_number_seq AS BIGINT OWNED BY orders.order_number`, ``)

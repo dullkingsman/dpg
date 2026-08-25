@@ -1149,6 +1149,10 @@ func renderObjectDPG(b *strings.Builder, obj pipeline.IRObject, fmtOpts format.O
 
 	case *ir.Sequence:
 		b.WriteString("\n")
+		if o.Unlogged {
+			b.WriteString(kw("UNLOGGED"))
+			b.WriteString(" ")
+		}
 		b.WriteString(kw("SEQUENCE"))
 		b.WriteString(" ")
 		b.WriteString(quoteIdentIfNeeded(o.Name))

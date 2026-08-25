@@ -863,6 +863,7 @@ func toSnapSequence(o *ir.Sequence) *SnapSequence {
 	ss := &SnapSequence{
 		Schema:         o.Schema,
 		Name:           o.Name,
+		Unlogged:       o.Unlogged,
 		Owner:          o.Owner,
 		Comment:        o.Comment,
 		IncrementBy:    o.IncrementBy,

@@ -808,11 +808,17 @@ func (t *Type) irObject()               {}
 
 // Sequence is a CREATE SEQUENCE declaration.
 type Sequence struct {
-	Schema  string
-	Name    string
-	Owner   *string
-	Comment *string
-	Grants  []Grant
+	Schema string
+	Name   string
+	// Unlogged is RFC Section 10's UNLOGGED prefix — trades crash-safety
+	// (the sequence's current value is not WAL-logged) for reduced write
+	// overhead, the same tradeoff as an unlogged table (Section 7.12).
+	// Toggling it post-creation is ALTER SEQUENCE name SET LOGGED/
+	// UNLOGGED, CAUTION — a targeted ALTER, not a recreate.
+	Unlogged bool
+	Owner    *string
+	Comment  *string
+	Grants   []Grant
 	// Revocations is RFC §11.3's explicit REVOCATION block support (RFC
 	// audit item #24) — Grants was already populated by the builder, but
 	// neither createSequence/diffSequence ever referenced Grants (a total

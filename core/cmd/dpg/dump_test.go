@@ -473,6 +473,41 @@ func TestRenderUnloggedTableCompiles(t *testing.T) {
 	}
 }
 
+// TestRenderUnloggedSequenceCompiles guards RFC Section 10's UNLOGGED
+// prefix on sequences, mirroring TestRenderUnloggedTableCompiles's identical
+// table-side round trip.
+func TestRenderUnloggedSequenceCompiles(t *testing.T) {
+	fmtOpts := format.Options{IndentSize: 4, KeywordCase: "upper"}
+	seq := &ir.Sequence{Schema: "public", Name: "session_counter", Unlogged: true}
+
+	var b strings.Builder
+	renderObjectDPG(&b, seq, fmtOpts)
+	rendered := b.String()
+
+	if !strings.Contains(rendered, "UNLOGGED SEQUENCE session_counter") {
+		t.Errorf("rendered sequence does not use the UNLOGGED SEQUENCE keyword: %q", rendered)
+	}
+
+	dir := t.TempDir()
+	f := filepath.Join(dir, "objects.dpg")
+	if err := os.WriteFile(f, []byte(rendered), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	compiled, _, err := compiler.Compile([]string{f}, dir, pipeline.Default)
+	if err != nil {
+		t.Fatalf("dumped unlogged sequence failed to recompile: %v\n---\n%s", err, rendered)
+	}
+	var found *ir.Sequence
+	for _, o := range compiled {
+		if s, ok := o.(*ir.Sequence); ok && s.Name == "session_counter" {
+			found = s
+		}
+	}
+	if found == nil || !found.Unlogged {
+		t.Errorf("Unlogged did not round-trip: %+v", found)
+	}
+}
+
 // TestRenderTypedTableCompiles guards RFC Section 7.1's "Form 2" typed
 // table (CREATE TABLE ... OF type_name) dump-and-recompile round trip, both
 // the bare form (no parenthesized list — real PostgreSQL rejects empty

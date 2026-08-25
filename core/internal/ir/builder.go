@@ -1965,7 +1965,13 @@ func (b *Builder) buildSequence(cs *pg_query.CreateSeqStmt, block pipeline.Block
 	s := &Sequence{
 		Schema: rangeVarSchema(cs.Sequence),
 		Name:   cs.Sequence.Relname,
-		SrcPos: pos,
+		// CREATE SEQUENCE and CREATE UNLOGGED SEQUENCE parse to the
+		// identical CreateSeqStmt node — pg_query distinguishes them only
+		// via Sequence.Relpersistence ("u" for unlogged), the same
+		// convention already used for CREATE TABLE (see the CreateStmt
+		// dispatch case's identical comment).
+		Unlogged: cs.Sequence != nil && cs.Sequence.Relpersistence == "u",
+		SrcPos:   pos,
 	}
 	if block.Comment != nil {
 		s.Comment = &block.Comment.Value

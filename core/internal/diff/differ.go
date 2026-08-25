@@ -4037,7 +4037,11 @@ func buildDomainSQL(o *ir.Type) string {
 func createSequence(o *ir.Sequence) []pipeline.DiffOp {
 	ident := qualIdent(o.Schema, o.Name)
 	var b strings.Builder
-	b.WriteString("CREATE SEQUENCE IF NOT EXISTS ")
+	b.WriteString("CREATE ")
+	if o.Unlogged {
+		b.WriteString("UNLOGGED ")
+	}
+	b.WriteString("SEQUENCE IF NOT EXISTS ")
 	b.WriteString(ident)
 	if o.AsType != nil {
 		// AS type must come first, right after the sequence name, per real
@@ -5189,6 +5193,16 @@ func diffSequence(o *ir.Sequence, snap *snapshot.SnapSequence) []pipeline.DiffOp
 	}
 
 	var ops []pipeline.DiffOp
+
+	// UNLOGGED toggled (Section 10) — same targeted CAUTION ALTER as an
+	// unlogged table's identical toggle (Section 7.12), not a recreate.
+	if o.Unlogged != snap.Unlogged {
+		if o.Unlogged {
+			ops = append(ops, cautionOp(fmt.Sprintf("ALTER SEQUENCE %s SET UNLOGGED;", ident), pos))
+		} else {
+			ops = append(ops, cautionOp(fmt.Sprintf("ALTER SEQUENCE %s SET LOGGED;", ident), pos))
+		}
+	}
 
 	// Check if any explicitly-specified sequence params differ from the snapshot.
 	// Only compare params that the user set (non-nil in desired IR).

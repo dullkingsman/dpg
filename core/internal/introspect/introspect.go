@@ -2796,7 +2796,8 @@ SELECT n.nspname, c.relname,
        r.rolname AS owner,
        obj_description(c.oid, 'pg_class') AS comment,
        s.seqincrement, s.seqmin, s.seqmax, s.seqstart, s.seqcache, s.seqcycle,
-       format_type(s.seqtypid, NULL) AS as_type
+       format_type(s.seqtypid, NULL) AS as_type,
+       c.relpersistence::text
 FROM   pg_class c
 JOIN   pg_namespace n  ON n.oid = c.relnamespace
 JOIN   pg_roles r      ON r.oid = c.relowner
@@ -2842,12 +2843,14 @@ ORDER  BY n.nspname, c.relname`
 		var increment, min, max, start, cache int64
 		var cycle bool
 		var asType string
-		if err := rs.Scan(&schema, &name, &owner, &comment, &increment, &min, &max, &start, &cache, &cycle, &asType); err != nil {
+		var persistence string
+		if err := rs.Scan(&schema, &name, &owner, &comment, &increment, &min, &max, &start, &cache, &cycle, &asType, &persistence); err != nil {
 			return nil, err
 		}
 		seq := &ir.Sequence{
 			Schema:      schema,
 			Name:        name,
+			Unlogged:    persistence == "u",
 			Owner:       &owner,
 			Comment:     comment,
 			IncrementBy: &increment,

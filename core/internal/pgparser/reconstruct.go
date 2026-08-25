@@ -44,6 +44,8 @@ func Reconstruct(kind pipeline.ObjectKind, part1 string) string {
 		return "CREATE EXTENSION " + part1
 	case pipeline.KindSequence:
 		return "CREATE SEQUENCE " + part1
+	case pipeline.KindUnloggedSequence:
+		return "CREATE UNLOGGED SEQUENCE " + part1
 	case pipeline.KindRole:
 		return "CREATE ROLE " + part1
 	case pipeline.KindTablespace:
