@@ -3171,10 +3171,6 @@ func createTable(o *ir.Table, vtypes map[string]string) []pipeline.DiffOp {
 			}
 			b.WriteString("\n)")
 		}
-		if o.AccessMethod != "" {
-			b.WriteString(" USING ")
-			b.WriteString(o.AccessMethod)
-		}
 		return finishCreateTable(&b, o)
 	}
 
@@ -3351,10 +3347,6 @@ func createTable(o *ir.Table, vtypes map[string]string) []pipeline.DiffOp {
 		}
 	}
 	b.WriteString("\n)")
-	if o.AccessMethod != "" {
-		b.WriteString(" USING ")
-		b.WriteString(o.AccessMethod)
-	}
 	return finishCreateTable(&b, o)
 }
 
@@ -3380,6 +3372,32 @@ func finishCreateTable(b *strings.Builder, o *ir.Table) []pipeline.DiffOp {
 		b.WriteString(o.PartitionBy.Strategy)
 		b.WriteString(" (")
 		b.WriteString(strings.Join(o.PartitionBy.Columns, ", "))
+		b.WriteString(")")
+	}
+	// USING method then WITH (...) storage params — real PostgreSQL's own
+	// fixed CREATE TABLE clause order, confirmed live via pg_query.Parse:
+	// INHERITS/PARTITION BY must precede USING (moved here from each
+	// caller's own tail, which rendered USING BEFORE calling this function
+	// — a real bug found while adding WITH's own ordering, live-verified as
+	// producing an outright syntax error whenever a table declared both
+	// USING and INHERITS/PARTITION BY together: "CREATE TABLE t (...)
+	// USING heap INHERITS (p)" is rejected, "... INHERITS (p) ... USING
+	// heap" is not). Meaningless for a foreign table (no local storage),
+	// matching Tablespace's identical guard below.
+	if o.AccessMethod != "" && !o.Foreign {
+		b.WriteString(" USING ")
+		b.WriteString(o.AccessMethod)
+	}
+	if len(o.StorageParams) > 0 && !o.Foreign {
+		b.WriteString(" WITH (")
+		for i, p := range o.StorageParams {
+			if i > 0 {
+				b.WriteString(", ")
+			}
+			b.WriteString(p.Key)
+			b.WriteString("=")
+			b.WriteString(p.Value)
+		}
 		b.WriteString(")")
 	}
 	if o.Foreign {
@@ -6604,6 +6622,14 @@ func diffTable(o *ir.Table, snap *snapshot.SnapTable, fullSnap *pipeline.Snapsho
 		}
 	}
 
+	// WITH (...) storage params (Section 7.11) — SET/RESET, no rewrite: real
+	// PostgreSQL applies both in place. Meaningless for a foreign table (its
+	// OPTIONS clause, diffed separately above via diffForeignOptions, is a
+	// distinct grammar with its own ADD/SET/DROP verbs).
+	if !o.Foreign {
+		ops = append(ops, diffTableStorageParams(tbl, o.StorageParams, snap.StorageParams, pos)...)
+	}
+
 	colOps, renamedCols, droppedCols, err := diffColumns(tbl, o, snap, vtypes)
 	if err != nil {
 		return nil, err
@@ -6682,6 +6708,57 @@ func diffForeignOptions(tbl string, desired []pipeline.StorageParam, snapFlat st
 		fmt.Sprintf("ALTER FOREIGN TABLE %s OPTIONS (%s);", tbl, strings.Join(actions, ", ")),
 		pos,
 	)}
+}
+
+// diffTableStorageParams computes ALTER TABLE ... SET (...)/RESET (...) for
+// a changed WITH (...) storage-params clause (Section 7.11). Unlike
+// diffForeignOptions' single ADD/SET/DROP OPTIONS statement, real PostgreSQL
+// splits this into two independently-valid clauses — a changed/added key
+// goes through SET, a removed one through RESET, and either may be omitted
+// when empty (confirmed live: "ALTER TABLE t RESET ()" is a syntax error).
+// snapFlat is the snapshot's flattened "key=value, key=value" form (see
+// flattenParams); desired is the live IR's ordered param list. CAUTION, not
+// SAFE: reloptions like fillfactor/autovacuum_* alter storage/maintenance
+// behavior, not pure metadata.
+func diffTableStorageParams(tbl string, desired []pipeline.StorageParam, snapFlat string, pos pipeline.SourcePos) []pipeline.DiffOp {
+	snapMap := make(map[string]string)
+	for _, kv := range strings.Split(snapFlat, ", ") {
+		if kv == "" {
+			continue
+		}
+		if k, v, ok := strings.Cut(kv, "="); ok {
+			snapMap[k] = v
+		}
+	}
+
+	desiredKeys := make(map[string]bool, len(desired))
+	var sets []string
+	for _, p := range desired {
+		desiredKeys[p.Key] = true
+		old, existed := snapMap[p.Key]
+		if !existed || old != p.Value {
+			sets = append(sets, fmt.Sprintf("%s=%s", p.Key, p.Value))
+		}
+	}
+	var resets []string
+	for _, kv := range strings.Split(snapFlat, ", ") {
+		if kv == "" {
+			continue
+		}
+		k, _, _ := strings.Cut(kv, "=")
+		if !desiredKeys[k] {
+			resets = append(resets, k)
+		}
+	}
+
+	var ops []pipeline.DiffOp
+	if len(sets) > 0 {
+		ops = append(ops, cautionOp(fmt.Sprintf("ALTER TABLE %s SET (%s);", tbl, strings.Join(sets, ", ")), pos))
+	}
+	if len(resets) > 0 {
+		ops = append(ops, cautionOp(fmt.Sprintf("ALTER TABLE %s RESET (%s);", tbl, strings.Join(resets, ", ")), pos))
+	}
+	return ops
 }
 
 // createPartitionOps emits "CREATE TABLE child PARTITION OF parent

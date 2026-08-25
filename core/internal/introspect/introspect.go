@@ -802,7 +802,8 @@ SELECT c.relname, n.nspname, c.relpersistence::text, c.relkind::text,
        (SELECT ic2.relname FROM pg_index pi2 JOIN pg_class ic2 ON ic2.oid = pi2.indexrelid
           WHERE pi2.indrelid = c.oid AND pi2.indisclustered) AS cluster_index,
        CASE WHEN c.reloftype <> 0 THEN pg_catalog.format_type(c.reloftype, NULL) END AS of_type,
-       am.amname AS access_method
+       am.amname AS access_method,
+       c.reloptions
 FROM   pg_class c
 JOIN   pg_namespace n ON n.oid = c.relnamespace
 JOIN   pg_roles r     ON r.oid = c.relowner
@@ -830,8 +831,8 @@ ORDER  BY n.nspname, c.relname`
 		var comment, server, tablespace, replidentIndex, clusterIndex *string
 		var ofType, accessMethod *string
 		var rlsEnabled, rlsForced bool
-		var ftoptions []string
-		if err := rs.Scan(&name, &schema, &persistence, &relkind, &owner, &comment, &rlsEnabled, &rlsForced, &server, &ftoptions, &tablespace, &replident, &replidentIndex, &clusterIndex, &ofType, &accessMethod); err != nil {
+		var ftoptions, reloptions []string
+		if err := rs.Scan(&name, &schema, &persistence, &relkind, &owner, &comment, &rlsEnabled, &rlsForced, &server, &ftoptions, &tablespace, &replident, &replidentIndex, &clusterIndex, &ofType, &accessMethod, &reloptions); err != nil {
 			return nil, err
 		}
 		t := &ir.Table{
@@ -864,6 +865,11 @@ ORDER  BY n.nspname, c.relname`
 		// regardless of whether USING was ever explicitly declared.
 		if accessMethod != nil && *accessMethod != "heap" {
 			t.AccessMethod = *accessMethod
+		}
+		for _, kv := range reloptions {
+			if k, v, ok := strings.Cut(kv, "="); ok {
+				t.StorageParams = append(t.StorageParams, pipeline.StorageParam{Key: k, Value: v})
+			}
 		}
 		if t.Foreign {
 			t.ForeignServer = server

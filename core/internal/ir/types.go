@@ -522,7 +522,11 @@ type Table struct {
 	Inherits      []string
 	PartitionBy   *PartitionSpec
 	Partitions    []*Partition
-	StorageParams map[string]string
+	// StorageParams is a WITH (...) clause's key=value pairs, source order
+	// preserved (a slice, not a map, matching Index.With — deterministic
+	// re-emission needs a stable order, both at CREATE time and for SET/RESET
+	// diffing against a snapshot).
+	StorageParams []pipeline.StorageParam
 	Tablespace    *string
 	NameMaps      []pipeline.NameMapEntry
 	// LikeClauses holds unresolved `LIKE source_table [INCLUDING/EXCLUDING

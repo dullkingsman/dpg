@@ -272,7 +272,7 @@ func (b *Builder) buildTable(cs *pg_query.CreateStmt, block pipeline.BlockAST, p
 
 	// Storage params (WITH clause)
 	if len(cs.Options) > 0 {
-		tbl.StorageParams = buildStorageParams(cs.Options)
+		tbl.StorageParams = buildOrderedOptions(cs.Options)
 	}
 
 	// OF type_name (Section 7.1's typed-table "Form 2") and USING method
@@ -1070,23 +1070,9 @@ func buildPartitionSpec(ps *pg_query.PartitionSpec) *PartitionSpec {
 	return spec
 }
 
-func buildStorageParams(options []*pg_query.Node) map[string]string {
-	m := make(map[string]string)
-	for _, opt := range options {
-		if de := opt.GetDefElem(); de != nil {
-			val := ""
-			if de.Arg != nil {
-				val = nodeToText(de.Arg)
-			}
-			m[de.Defname] = val
-		}
-	}
-	return m
-}
-
-// buildOrderedOptions parses a DefElem OPTIONS (...) list preserving source
-// order — used for FOREIGN TABLE's OPTIONS clause, where (unlike
-// buildStorageParams' WITH-clause map) deterministic re-emission needs a
+// buildOrderedOptions parses a DefElem OPTIONS (...)/WITH (...) list
+// preserving source order — used for FOREIGN TABLE's OPTIONS clause and
+// TABLE's WITH (...) storage params, where deterministic re-emission needs a
 // stable order, the same reason Index.With is a slice, not a map.
 func buildOrderedOptions(options []*pg_query.Node) []pipeline.StorageParam {
 	var params []pipeline.StorageParam

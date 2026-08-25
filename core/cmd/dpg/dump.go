@@ -648,11 +648,33 @@ func renderObjectDPG(b *strings.Builder, obj pipeline.IRObject, fmtOpts format.O
 			}
 			b.WriteString(")")
 		}
-		if o.AccessMethod != "" {
-			fmt.Fprintf(b, " %s %s", kw("USING"), o.AccessMethod)
+		// INHERITS, then PARTITION BY, then USING, then WITH (...): real
+		// PostgreSQL's own fixed CREATE TABLE clause order (confirmed live
+		// via pg_query.Parse) — INHERITS/PARTITION BY must precede USING,
+		// which must precede WITH. The reverse ordering of any of these is
+		// an outright syntax error whenever a table declares more than one
+		// of them together, so a `dpg dump` round-trip of such a table
+		// previously produced unparseable DPG source (INHERITS was rendered
+		// after Foreign/Tablespace, USING before PARTITION BY).
+		if len(o.Inherits) > 0 {
+			parents := make([]string, len(o.Inherits))
+			for i, p := range o.Inherits {
+				parents[i] = quoteQualIdentIfNeeded(p)
+			}
+			fmt.Fprintf(b, " %s (%s)", kw("INHERITS"), strings.Join(parents, ", "))
 		}
 		if o.PartitionBy != nil {
 			fmt.Fprintf(b, " %s %s %s (%s)", kw("PARTITION"), kw("BY"), kw(o.PartitionBy.Strategy), strings.Join(o.PartitionBy.Columns, ", "))
+		}
+		if o.AccessMethod != "" {
+			fmt.Fprintf(b, " %s %s", kw("USING"), o.AccessMethod)
+		}
+		if len(o.StorageParams) > 0 {
+			parts := make([]string, len(o.StorageParams))
+			for i, p := range o.StorageParams {
+				parts[i] = fmt.Sprintf("%s=%s", p.Key, p.Value)
+			}
+			fmt.Fprintf(b, " %s (%s)", kw("WITH"), strings.Join(parts, ", "))
 		}
 		if o.Foreign {
 			if o.ForeignServer != nil {
@@ -667,13 +689,6 @@ func renderObjectDPG(b *strings.Builder, obj pipeline.IRObject, fmtOpts format.O
 			}
 		} else if o.Tablespace != nil {
 			fmt.Fprintf(b, " %s %s", kw("TABLESPACE"), quoteIdentIfNeeded(*o.Tablespace))
-		}
-		if len(o.Inherits) > 0 {
-			parents := make([]string, len(o.Inherits))
-			for i, p := range o.Inherits {
-				parents[i] = quoteQualIdentIfNeeded(p)
-			}
-			fmt.Fprintf(b, " %s (%s)", kw("INHERITS"), strings.Join(parents, ", "))
 		}
 		var colsWithAttrs []*ir.Column
 		for _, col := range o.Columns {

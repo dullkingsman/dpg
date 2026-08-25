@@ -263,6 +263,110 @@ func TestDiffCreateTableWithAccessMethod(t *testing.T) {
 	}
 }
 
+// TestDiffCreateTableAccessMethodAndPartitionByOrdering guards a real
+// pre-existing bug: real PostgreSQL's CREATE TABLE grammar requires
+// PARTITION BY to precede USING ("CREATE TABLE t (...) USING heap PARTITION
+// BY RANGE (a)" is a confirmed live syntax error; the reverse order is not),
+// but createTable previously rendered USING before calling finishCreateTable
+// (whose own body renders PARTITION BY), producing invalid SQL whenever a
+// table declared both together.
+func TestDiffCreateTableAccessMethodAndPartitionByOrdering(t *testing.T) {
+	d := New()
+	desired := []pipeline.IRObject{
+		&ir.Table{
+			Schema: "public", Name: "events", AccessMethod: "heap2",
+			Columns:     []*ir.Column{{Name: "id", Type: ir.TypeRef{Name: "integer"}}, {Name: "created_at", Type: ir.TypeRef{Name: "date"}}},
+			PartitionBy: &ir.PartitionSpec{Strategy: "RANGE", Columns: []string{"created_at"}},
+		},
+	}
+	ops, err := d.Diff(desired, &pipeline.Snapshot{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsSQL(ops, `PARTITION BY RANGE (created_at) USING heap2`) {
+		t.Errorf("expected PARTITION BY before USING, got: %v", sqlList(ops))
+	}
+}
+
+// TestDiffCreateTableWithStorageParams proves a declared WITH (...) clause
+// (Section 7.11) renders on a fresh CREATE TABLE, in source order, after
+// PARTITION BY/USING per real PostgreSQL's own fixed clause order.
+func TestDiffCreateTableWithStorageParams(t *testing.T) {
+	d := New()
+	desired := []pipeline.IRObject{
+		&ir.Table{
+			Schema: "public", Name: "events",
+			Columns:       []*ir.Column{{Name: "id", Type: ir.TypeRef{Name: "integer"}}},
+			StorageParams: []pipeline.StorageParam{{Key: "fillfactor", Value: "70"}, {Key: "autovacuum_enabled", Value: "false"}},
+		},
+	}
+	ops, err := d.Diff(desired, &pipeline.Snapshot{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsSQL(ops, `WITH (fillfactor=70, autovacuum_enabled=false)`) {
+		t.Errorf("expected WITH (fillfactor=70, autovacuum_enabled=false), got: %v", sqlList(ops))
+	}
+}
+
+// TestDiffTableStorageParamsSetAndReset proves a changed WITH (...) clause
+// (Section 7.11) against an existing table emits ALTER TABLE ... SET (...)
+// for added/changed keys and RESET (...) for removed ones, CAUTION (alters
+// storage/maintenance behavior) rather than a recreate.
+func TestDiffTableStorageParamsSetAndReset(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.t", &snapshot.SnapObject{
+		Kind: "table",
+		Table: &snapshot.SnapTable{
+			Schema: "public", Name: "t",
+			StorageParams: "fillfactor=70, autovacuum_enabled=false",
+		},
+	})
+	desired := []pipeline.IRObject{
+		&ir.Table{
+			Schema: "public", Name: "t",
+			StorageParams: []pipeline.StorageParam{{Key: "fillfactor", Value: "90"}, {Key: "toast_tuple_target", Value: "512"}},
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsSQL(ops, `ALTER TABLE "public"."t" SET (fillfactor=90, toast_tuple_target=512);`) {
+		t.Errorf("expected SET with changed+new keys, got: %v", sqlList(ops))
+	}
+	if !containsSQL(ops, `ALTER TABLE "public"."t" RESET (autovacuum_enabled);`) {
+		t.Errorf("expected RESET with removed key, got: %v", sqlList(ops))
+	}
+	for _, op := range ops {
+		if (strings.Contains(op.SQL(), " SET (") || strings.Contains(op.SQL(), " RESET (")) && op.Safety() != pipeline.Caution {
+			t.Errorf("storage-params op safety = %v, want Caution: %s", op.Safety(), op.SQL())
+		}
+	}
+}
+
+// TestDiffTableStorageParamsUnchangedIsNoop proves an unchanged WITH (...)
+// clause produces no SET/RESET op at all.
+func TestDiffTableStorageParamsUnchangedIsNoop(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.t", &snapshot.SnapObject{
+		Kind:  "table",
+		Table: &snapshot.SnapTable{Schema: "public", Name: "t", StorageParams: "fillfactor=70"},
+	})
+	desired := []pipeline.IRObject{
+		&ir.Table{Schema: "public", Name: "t", StorageParams: []pipeline.StorageParam{{Key: "fillfactor", Value: "70"}}},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ops) != 0 {
+		t.Errorf("expected no ops for unchanged storage params, got: %v", sqlList(ops))
+	}
+}
+
 // TestDiffTypedTableSkipsColumnDiffing proves a typed table's Columns are
 // never compared: a live-introspected typed table's snapshot genuinely
 // carries the type's inherited attributes (introspectColumns has no

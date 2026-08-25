@@ -641,6 +641,23 @@ func TestBuildTableAccessMethod(t *testing.T) {
 	}
 }
 
+// TestBuildTableStorageParams guards RFC Section 7.11's WITH (...) storage
+// params clause: buildTable must switch from buildStorageParams' map (no
+// deterministic order — dropped entirely in favor of this) to
+// buildOrderedOptions, matching Index.With/FOREIGN TABLE OPTIONS' identical
+// "source order preserved" convention.
+func TestBuildTableStorageParams(t *testing.T) {
+	obj := buildObject(t, pipeline.KindTable, `t (a INTEGER) WITH (fillfactor=70, autovacuum_enabled=false)`, ``)
+	tbl, ok := obj.(*ir.Table)
+	if !ok {
+		t.Fatalf("expected *ir.Table, got %T", obj)
+	}
+	want := []pipeline.StorageParam{{Key: "fillfactor", Value: "70"}, {Key: "autovacuum_enabled", Value: "false"}}
+	if !slices.Equal(tbl.StorageParams, want) {
+		t.Errorf("StorageParams: got %v, want %v", tbl.StorageParams, want)
+	}
+}
+
 func TestBuildTableWithBlock(t *testing.T) {
 	obj := buildObject(t, pipeline.KindTable,
 		`users (

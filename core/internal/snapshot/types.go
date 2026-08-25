@@ -282,6 +282,9 @@ type SnapTable struct {
 	// (Section 7.1); "" means unset (ordinary table / cluster default).
 	OfType       string  `json:"of_type,omitempty"`
 	AccessMethod string  `json:"access_method,omitempty"`
+	// StorageParams is a WITH (...) clause's key=value pairs, flattened via
+	// flattenParams the same way ForeignOptions is — see its doc comment.
+	StorageParams string `json:"storage_params,omitempty"`
 	RenamedFrom  *string `json:"renamed_from,omitempty"`
 	// RenamedFromSchema is the schema the RENAMED FROM name lived in, when the
 	// directive was schema-qualified (a rename combined with a SET SCHEMA

@@ -597,6 +597,52 @@ func TestRenderTableAccessMethodCompiles(t *testing.T) {
 	}
 }
 
+// TestRenderTableInheritsPartitionByUsingWithOrderingCompiles guards a real
+// bug: renderObjectDPG previously wrote INHERITS after Foreign/Tablespace and
+// USING before PARTITION BY — real PostgreSQL's own fixed CREATE TABLE
+// clause order is INHERITS, then PARTITION BY, then USING, then WITH (...),
+// then TABLESPACE (confirmed live via pg_query.Parse: the reverse ordering of
+// USING/PARTITION BY is an outright syntax error), so a `dpg dump` of a table
+// declaring more than one of these together produced DPG source that failed
+// to recompile.
+func TestRenderTableInheritsPartitionByUsingWithOrderingCompiles(t *testing.T) {
+	fmtOpts := format.Options{IndentSize: 4, KeywordCase: "upper"}
+	tbl := &ir.Table{
+		Schema: "public", Name: "events", AccessMethod: "heap2",
+		Columns:       []*ir.Column{{Name: "id", Type: ir.TypeRef{Name: "bigint"}}, {Name: "created_at", Type: ir.TypeRef{Name: "date"}}},
+		PartitionBy:   &ir.PartitionSpec{Strategy: "RANGE", Columns: []string{"created_at"}},
+		StorageParams: []pipeline.StorageParam{{Key: "fillfactor", Value: "70"}},
+	}
+
+	var b strings.Builder
+	renderObjectDPG(&b, tbl, fmtOpts)
+	rendered := b.String()
+
+	if !strings.Contains(rendered, "PARTITION BY RANGE (created_at) USING heap2 WITH (fillfactor=70)") {
+		t.Errorf("expected PARTITION BY before USING before WITH, got:\n%s", rendered)
+	}
+
+	dir := t.TempDir()
+	f := filepath.Join(dir, "objects.dpg")
+	if err := os.WriteFile(f, []byte(rendered), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	compiled, _, err := compiler.Compile([]string{f}, dir, pipeline.Default)
+	if err != nil {
+		t.Fatalf("dumped table failed to recompile: %v\n---\n%s", err, rendered)
+	}
+	var found *ir.Table
+	for _, o := range compiled {
+		if tb, ok := o.(*ir.Table); ok && tb.Name == "events" {
+			found = tb
+		}
+	}
+	if found == nil || found.AccessMethod != "heap2" || found.PartitionBy == nil ||
+		len(found.StorageParams) != 1 || found.StorageParams[0].Key != "fillfactor" {
+		t.Errorf("AccessMethod/PartitionBy/StorageParams did not round-trip: %+v", found)
+	}
+}
+
 // TestRenderTableAndIndexTablespaceCompiles guards a real bug found live-
 // testing a demo project: case *ir.Table in renderObjectDPG had no
 // TABLESPACE rendering at all, table-level or per-index, despite both being

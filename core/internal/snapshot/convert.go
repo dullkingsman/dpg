@@ -510,6 +510,7 @@ func toSnapTable(o *ir.Table) *SnapTable {
 		Inherits:             append([]string(nil), o.Inherits...),
 		OfType:               o.OfType.String(),
 		AccessMethod:         o.AccessMethod,
+		StorageParams:        flattenParams(o.StorageParams),
 	}
 	if o.PartitionBy != nil {
 		t.PartitionBy = o.PartitionBy.Strategy + " (" + strings.Join(o.PartitionBy.Columns, ", ") + ")"
