@@ -488,6 +488,12 @@ var defaclObjTypeNames = map[string]string{
 // nil InSchema, matching how the compiler leaves it unset when no "IN
 // SCHEMA" clause was declared.
 func introspectDefaultPrivileges(ctx context.Context, conn pipeline.Querier) ([]pipeline.IRObject, error) {
+	// grantor <> grantee excludes the self-grant PostgreSQL materializes for
+	// the default-privilege owner the moment an explicit ALTER DEFAULT
+	// PRIVILEGES ... GRANT touches the entry (same mechanism as relacl/
+	// proacl/typacl self-grants elsewhere in this file) — without this, that
+	// synthesized entry reads back as an "extra" live grant and corrupts
+	// dpg dump with a phantom GRANTS {} block.
 	const q = `
 SELECT r.rolname AS for_role, n.nspname AS in_schema, d.defaclobjtype::text,
        CASE WHEN a.grantee = 0 THEN 'PUBLIC' ELSE pg_get_userbyid(a.grantee) END AS grantee,
@@ -496,7 +502,8 @@ FROM   pg_default_acl d
 JOIN   pg_roles r ON r.oid = d.defaclrole
 LEFT   JOIN pg_namespace n ON n.oid = NULLIF(d.defaclnamespace, 0),
        LATERAL aclexplode(d.defaclacl) a
-WHERE  n.nspname IS NULL OR n.nspname NOT IN ('pg_catalog', 'information_schema', 'pg_toast')
+WHERE  (n.nspname IS NULL OR n.nspname NOT IN ('pg_catalog', 'information_schema', 'pg_toast'))
+AND    a.grantor <> a.grantee
 ORDER  BY r.rolname, n.nspname, d.defaclobjtype, grantee, a.privilege_type`
 
 	rs, err := conn.QueryRows(ctx, q)

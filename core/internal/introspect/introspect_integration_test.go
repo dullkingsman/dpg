@@ -362,6 +362,60 @@ func TestIntrospectDefaultPrivileges(t *testing.T) {
 	}
 }
 
+// TestIntrospectDefaultPrivilegesExcludesSelfGrant guards a real bug: unlike
+// every sibling *Grants query (table/column/sequence/function/schema/type/
+// FDW), introspectDefaultPrivileges had no "grantor <> grantee" filter.
+// PostgreSQL materializes a self-grant aclitem for the defaclrole the moment
+// ANY explicit ALTER DEFAULT PRIVILEGES ... GRANT touches the entry (same
+// mechanism as the relacl/proacl owner self-grant), and without the filter
+// that phantom entry read back as a real grant, corrupting dpg dump with a
+// bogus extra GRANTS {} block.
+func TestIntrospectDefaultPrivilegesExcludesSelfGrant(t *testing.T) {
+	connStr := testpg.Start(t)
+	ctx := context.Background()
+
+	conn, err := executor.Connect(ctx, connStr)
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	defer conn.Close(ctx)
+
+	stmts := []string{
+		`CREATE ROLE dpsg_admin`,
+		`CREATE ROLE dpsg_reader`,
+		`ALTER DEFAULT PRIVILEGES FOR ROLE dpsg_admin GRANT SELECT ON TABLES TO dpsg_reader`,
+	}
+	for _, stmt := range stmts {
+		if _, err := conn.Exec(ctx, stmt); err != nil {
+			t.Fatalf("exec %q: %v", stmt, err)
+		}
+	}
+
+	ci := introspect.New()
+	objects, err := ci.Introspect(ctx, conn)
+	if err != nil {
+		t.Fatalf("introspect: %v", err)
+	}
+
+	var dp *ir.DefaultPrivileges
+	for _, obj := range objects {
+		if d, ok := obj.(*ir.DefaultPrivileges); ok && d.ForRole != nil && *d.ForRole == "dpsg_admin" && d.ObjectType == "TABLES" {
+			dp = d
+		}
+	}
+	if dp == nil {
+		t.Fatal("missing DefaultPrivileges for dpsg_admin/TABLES")
+	}
+	for _, g := range dp.Grants {
+		if slices.Contains(g.Roles, "dpsg_admin") {
+			t.Fatalf("phantom self-grant to dpsg_admin leaked into Grants: %+v", dp.Grants)
+		}
+	}
+	if len(dp.Grants) != 1 || dp.Grants[0].Roles[0] != "dpsg_reader" {
+		t.Fatalf("expected exactly one grant to dpsg_reader, got %+v", dp.Grants)
+	}
+}
+
 // TestIntrospectColumnGrantsExcludesTableInheritedPrivileges guards a real
 // bug found live-testing a demo project: introspectColumnGrants used to
 // query information_schema.column_privileges, which PostgreSQL defines to
