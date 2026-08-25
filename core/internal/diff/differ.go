@@ -944,6 +944,47 @@ func roleList(roles []string) string {
 	return strings.Join(quoted, ", ")
 }
 
+// roleSpecSQL renders a role-spec (Appendix A's shared production): the
+// three fixed keywords CURRENT_ROLE/CURRENT_USER/SESSION_USER render bare
+// (uppercase, matching parseRoleSpec's own normalisation), any other value
+// is a plain role name and gets quoted like any other identifier.
+func roleSpecSQL(s string) string {
+	switch strings.ToUpper(s) {
+	case "CURRENT_ROLE", "CURRENT_USER", "SESSION_USER":
+		return strings.ToUpper(s)
+	default:
+		return quoteIdent(s)
+	}
+}
+
+// grantOptSuffix renders a Grant's optional trailing clauses, shared by
+// every GRANT statement this codebase emits: WITH GRANT OPTION (RFC
+// Section 11.2) and GRANTED BY role-spec (RFC Section 7.10/11.3, audit item
+// #90).
+func grantOptSuffix(g ir.Grant) string {
+	s := ""
+	if g.WithGrant {
+		s += " WITH GRANT OPTION"
+	}
+	if g.GrantedBy != nil {
+		s += " GRANTED BY " + roleSpecSQL(*g.GrantedBy)
+	}
+	return s
+}
+
+// revokeOptSuffix is grantOptSuffix's REVOKE counterpart: GRANTED BY
+// role-spec then CASCADE, matching RFC's revoke-entry clause order.
+func revokeOptSuffix(r ir.Revocation) string {
+	s := ""
+	if r.GrantedBy != nil {
+		s += " GRANTED BY " + roleSpecSQL(*r.GrantedBy)
+	}
+	if r.Cascade {
+		s += " CASCADE"
+	}
+	return s
+}
+
 // diffGrantSet diffs two grant lists and emits GRANT/REVOKE ops.
 // onClause is the SQL object specifier after ON, e.g. "TABLE \"public\".\"users\"".
 func diffGrantSet(
@@ -977,11 +1018,23 @@ func diffGrantSet(
 		}
 	}
 	for k, g := range desiredByKey {
-		if _, ok := snapByKey[k]; !ok {
+		sg, matched := snapByKey[k]
+		if !matched {
 			sql := fmt.Sprintf("GRANT %s ON %s TO %s", privStr(g.Privileges), onClause, roleList(g.Roles))
-			if g.WithGrant {
-				sql += " WITH GRANT OPTION"
-			}
+			sql += grantOptSuffix(g)
+			ops = append(ops, safeOp(sql+";", pos))
+			continue
+		}
+		// Matched: GrantedBy isn't part of grantKey (see grantKey's own doc
+		// comment) — only re-GRANT when the desired side explicitly
+		// declares a GrantedBy that differs from the snapshot's own
+		// declared value. An undeclared GrantedBy (nil) is never compared,
+		// the same "declared, so managed" rule already used for Function
+		// Cost/Rows — a live-introspected concrete grantor must never
+		// cause spurious drift here (RFC audit item #90).
+		if g.GrantedBy != nil && !ptrEq(g.GrantedBy, sg.GrantedBy) {
+			sql := fmt.Sprintf("GRANT %s ON %s TO %s", privStr(g.Privileges), onClause, roleList(g.Roles))
+			sql += grantOptSuffix(g)
 			ops = append(ops, safeOp(sql+";", pos))
 		}
 	}
@@ -1026,13 +1079,19 @@ func diffRevocationSet(
 		}
 	}
 	for k, r := range desiredByKey {
-		if _, ok := snapByKey[k]; !ok {
-			cascade := ""
-			if r.Cascade {
-				cascade = " CASCADE"
-			}
+		sr, matched := snapByKey[k]
+		if !matched {
 			ops = append(ops, cautionOp(
-				fmt.Sprintf("REVOKE %s ON %s FROM %s%s;", privStr(r.Privileges), onClause, roleList(r.Roles), cascade),
+				fmt.Sprintf("REVOKE %s ON %s FROM %s%s;", privStr(r.Privileges), onClause, roleList(r.Roles), revokeOptSuffix(r)),
+				pos,
+			))
+			continue
+		}
+		// Matched: same "declared, so managed" GrantedBy re-check as
+		// diffGrantSet's identical branch (RFC audit item #90).
+		if r.GrantedBy != nil && !ptrEq(r.GrantedBy, sr.GrantedBy) {
+			ops = append(ops, cautionOp(
+				fmt.Sprintf("REVOKE %s ON %s FROM %s%s;", privStr(r.Privileges), onClause, roleList(r.Roles), revokeOptSuffix(r)),
 				pos,
 			))
 		}
@@ -2716,9 +2775,7 @@ func createProcedure(o *ir.Procedure) []pipeline.DiffOp {
 	}
 	for _, g := range o.Grants {
 		sql := fmt.Sprintf("GRANT %s ON PROCEDURE %s TO %s", privStr(g.Privileges), sig, roleList(g.Roles))
-		if g.WithGrant {
-			sql += " WITH GRANT OPTION"
-		}
+		sql += grantOptSuffix(g)
 		ops = append(ops, safeOp(sql+";", o.SrcPos))
 	}
 	for _, r := range o.Revocations {
@@ -2756,9 +2813,7 @@ func createAggregate(o *ir.Aggregate) ([]pipeline.DiffOp, error) {
 	}
 	for _, g := range o.Grants {
 		sql := fmt.Sprintf("GRANT %s ON FUNCTION %s TO %s", privStr(g.Privileges), sig, roleList(g.Roles))
-		if g.WithGrant {
-			sql += " WITH GRANT OPTION"
-		}
+		sql += grantOptSuffix(g)
 		ops = append(ops, safeOp(sql+";", o.SrcPos))
 	}
 	for _, r := range o.Revocations {
@@ -2859,18 +2914,12 @@ func createDefaultPrivileges(o *ir.DefaultPrivileges) []pipeline.DiffOp {
 	for _, g := range o.Grants {
 		sql := fmt.Sprintf("%s GRANT %s ON %s TO %s",
 			prefix, privStr(g.Privileges), o.ObjectType, roleList(g.Roles))
-		if g.WithGrant {
-			sql += " WITH GRANT OPTION"
-		}
+		sql += grantOptSuffix(g)
 		ops = append(ops, safeOp(sql+";", pos))
 	}
 	for _, r := range o.Revocations {
-		cascade := ""
-		if r.Cascade {
-			cascade = " CASCADE"
-		}
 		sql := fmt.Sprintf("%s REVOKE %s ON %s FROM %s%s",
-			prefix, privStr(r.Privileges), o.ObjectType, roleList(r.Roles), cascade)
+			prefix, privStr(r.Privileges), o.ObjectType, roleList(r.Roles), revokeOptSuffix(r))
 		ops = append(ops, cautionOp(sql+";", pos))
 	}
 	return ops
@@ -2907,9 +2956,7 @@ func diffDefaultPrivileges(o *ir.DefaultPrivileges, snap *snapshot.SnapDefaultPr
 		if _, ok := snapGrantsByKey[k]; !ok {
 			sql := fmt.Sprintf("%s GRANT %s ON %s TO %s",
 				prefix, privStr(g.Privileges), o.ObjectType, roleList(g.Roles))
-			if g.WithGrant {
-				sql += " WITH GRANT OPTION"
-			}
+			sql += grantOptSuffix(g)
 			ops = append(ops, safeOp(sql+";", pos))
 		}
 	}
@@ -2936,13 +2983,9 @@ func diffDefaultPrivileges(o *ir.DefaultPrivileges, snap *snapshot.SnapDefaultPr
 	}
 	for k, r := range desiredRevsByKey {
 		if _, ok := snapRevsByKey[k]; !ok {
-			cascade := ""
-			if r.Cascade {
-				cascade = " CASCADE"
-			}
 			ops = append(ops, cautionOp(
 				fmt.Sprintf("%s REVOKE %s ON %s FROM %s%s;",
-					prefix, privStr(r.Privileges), o.ObjectType, roleList(r.Roles), cascade),
+					prefix, privStr(r.Privileges), o.ObjectType, roleList(r.Roles), revokeOptSuffix(r)),
 				pos,
 			))
 		}
@@ -3109,9 +3152,7 @@ func createSchema(o *ir.Schema) []pipeline.DiffOp {
 	schemaIdent := quoteIdent(o.Name)
 	for _, g := range o.Grants {
 		sql := fmt.Sprintf("GRANT %s ON SCHEMA %s TO %s", privStr(g.Privileges), schemaIdent, roleList(g.Roles))
-		if g.WithGrant {
-			sql += " WITH GRANT OPTION"
-		}
+		sql += grantOptSuffix(g)
 		ops = append(ops, safeOp(sql+";", o.SrcPos))
 	}
 	for _, r := range o.Revocations {
@@ -3810,9 +3851,7 @@ func tableGrantOp(g ir.Grant, tblIdent string, pos pipeline.SourcePos) *op {
 		privs = strings.Join(g.Privileges, ", ")
 	}
 	sql := fmt.Sprintf("GRANT %s ON TABLE %s TO %s", privs, tblIdent, roleList(g.Roles))
-	if g.WithGrant {
-		sql += " WITH GRANT OPTION"
-	}
+	sql += grantOptSuffix(g)
 	sql += ";"
 	return safeOp(sql, pos)
 }
@@ -3828,9 +3867,7 @@ func colGrantOp(g ir.Grant, tbl, col string, pos pipeline.SourcePos) pipeline.Di
 		}
 	}
 	sql := "GRANT " + strings.Join(privParts, ", ") + " ON TABLE " + tbl + " TO " + roleList(g.Roles)
-	if g.WithGrant {
-		sql += " WITH GRANT OPTION"
-	}
+	sql += grantOptSuffix(g)
 	return safeOp(sql+";", pos)
 }
 
@@ -3849,9 +3886,7 @@ func explicitRevokeOp(r ir.Revocation, onClause string, pos pipeline.SourcePos) 
 		privs = strings.Join(r.Privileges, ", ")
 	}
 	sql := fmt.Sprintf("REVOKE %s ON %s FROM %s", privs, onClause, roleList(r.Roles))
-	if r.Cascade {
-		sql += " CASCADE"
-	}
+	sql += revokeOptSuffix(r)
 	sql += ";"
 	return cautionOp(sql, pos)
 }
@@ -3869,9 +3904,7 @@ func colExplicitRevokeOp(r ir.Revocation, tbl, col string, pos pipeline.SourcePo
 		}
 	}
 	sql := "REVOKE " + strings.Join(privParts, ", ") + " ON TABLE " + tbl + " FROM " + roleList(r.Roles)
-	if r.Cascade {
-		sql += " CASCADE"
-	}
+	sql += revokeOptSuffix(r)
 	return cautionOp(sql+";", pos)
 }
 
@@ -3982,9 +4015,7 @@ func createView(o *ir.View) []pipeline.DiffOp {
 	viewIdent := qualIdent(o.Schema, o.Name)
 	for _, g := range o.Grants {
 		sql := fmt.Sprintf("GRANT %s ON TABLE %s TO %s", privStr(g.Privileges), viewIdent, roleList(g.Roles))
-		if g.WithGrant {
-			sql += " WITH GRANT OPTION"
-		}
+		sql += grantOptSuffix(g)
 		ops = append(ops, safeOp(sql+";", o.SrcPos))
 	}
 	for _, r := range o.Revocations {
@@ -4015,9 +4046,7 @@ func createFunction(o *ir.Function) []pipeline.DiffOp {
 	}
 	for _, g := range o.Grants {
 		sql := fmt.Sprintf("GRANT %s ON FUNCTION %s TO %s", privStr(g.Privileges), sig, roleList(g.Roles))
-		if g.WithGrant {
-			sql += " WITH GRANT OPTION"
-		}
+		sql += grantOptSuffix(g)
 		ops = append(ops, safeOp(sql+";", o.SrcPos))
 	}
 	for _, r := range o.Revocations {
@@ -4109,9 +4138,7 @@ func createTypeGrantOps(o *ir.Type) []pipeline.DiffOp {
 	typeIdent := qualIdent(o.Schema, o.Name)
 	for _, g := range o.Grants {
 		sql := fmt.Sprintf("GRANT %s ON TYPE %s TO %s", privStr(g.Privileges), typeIdent, roleList(g.Roles))
-		if g.WithGrant {
-			sql += " WITH GRANT OPTION"
-		}
+		sql += grantOptSuffix(g)
 		ops = append(ops, safeOp(sql+";", o.SrcPos))
 	}
 	for _, r := range o.Revocations {
@@ -4135,9 +4162,7 @@ func createSimpleGrantOps(grantKind, ident string, grants []ir.Grant, revocation
 	var ops []pipeline.DiffOp
 	for _, g := range grants {
 		sql := fmt.Sprintf("GRANT %s ON %s %s TO %s", privStr(g.Privileges), grantKind, ident, roleList(g.Roles))
-		if g.WithGrant {
-			sql += " WITH GRANT OPTION"
-		}
+		sql += grantOptSuffix(g)
 		if manual {
 			ops = append(ops, manualOp(sql+";", pos))
 		} else {
@@ -4248,9 +4273,7 @@ func createSequence(o *ir.Sequence) []pipeline.DiffOp {
 	}
 	for _, g := range o.Grants {
 		sql := fmt.Sprintf("GRANT %s ON SEQUENCE %s TO %s", privStr(g.Privileges), ident, roleList(g.Roles))
-		if g.WithGrant {
-			sql += " WITH GRANT OPTION"
-		}
+		sql += grantOptSuffix(g)
 		ops = append(ops, safeOp(sql+";", o.SrcPos))
 	}
 	for _, r := range o.Revocations {
@@ -4443,6 +4466,13 @@ func createRole(o *ir.Role) []pipeline.DiffOp {
 			fmt.Sprintf("COMMENT ON ROLE %s IS %s;", quoteIdent(o.Name), quoteLit(*o.Comment)),
 			o.SrcPos,
 		))
+	}
+	ident := quoteIdent(o.Name)
+	for _, c := range o.Configs {
+		// RFC audit item #74: real CREATE ROLE has no inline SET/RESET
+		// clause at all (confirmed live) — every entry, even for a
+		// brand-new role, needs its own follow-up ALTER ROLE.
+		ops = append(ops, safeOp(roleConfigSQL(ident, c), o.SrcPos))
 	}
 	ops = append(ops, createSecurityLabelOps(o.SecurityLabels, "ROLE "+quoteIdent(o.Name), o.SrcPos)...)
 	return ops
@@ -5786,7 +5816,108 @@ func diffRole(o *ir.Role, snap *snapshot.SnapRole) []pipeline.DiffOp {
 	}
 
 	ops = append(ops, diffRoleMembership(o, snap, pos)...)
+	ops = append(ops, diffRoleConfigs(o, snap, pos)...)
 	ops = append(ops, diffSecurityLabelSet(snap.SecurityLabels, o.SecurityLabels, "ROLE "+ident, pos)...)
+	return ops
+}
+
+// roleConfigKey identifies a role-config-dir entry (RFC audit item #74) for
+// diffing purposes: the (param-or-ALL, database) pair — real PostgreSQL
+// tracks per-role session config per-database independently via
+// pg_db_role_setting, so the same param SET differently IN DATABASE a vs IN
+// DATABASE b vs cluster-wide are three genuinely distinct settings, not one.
+func roleConfigKey(param string, resetAll bool, inDatabase *string) string {
+	db := ""
+	if inDatabase != nil {
+		db = *inDatabase
+	}
+	if resetAll {
+		return "\x00ALL|" + db
+	}
+	return strings.ToLower(param) + "|" + db
+}
+
+// roleConfigSQL renders one role-config-dir entry as ALTER ROLE ... [IN
+// DATABASE db] SET/RESET ... — param is real PostgreSQL var_name grammar
+// (ColId ('.' ColId)*, e.g. a namespaced GUC like pg_stat_statements.track),
+// never quoted like an ordinary identifier.
+func roleConfigSQL(ident string, c ir.RoleConfig) string {
+	var b strings.Builder
+	b.WriteString("ALTER ROLE ")
+	b.WriteString(ident)
+	if c.InDatabase != nil {
+		b.WriteString(" IN DATABASE ")
+		b.WriteString(quoteIdent(*c.InDatabase))
+	}
+	if c.Reset {
+		b.WriteString(" RESET ")
+		if c.ResetAll {
+			b.WriteString("ALL")
+		} else {
+			b.WriteString(c.Param)
+		}
+	} else {
+		b.WriteString(" SET ")
+		b.WriteString(c.Param)
+		if c.FromCurrent {
+			b.WriteString(" FROM CURRENT")
+		} else {
+			b.WriteString(" = ")
+			if c.Value != nil {
+				b.WriteString(*c.Value)
+			}
+		}
+	}
+	b.WriteString(";")
+	return b.String()
+}
+
+// normalizeConfigValue strips one optional layer of surrounding single
+// quotes for comparison purposes only, mirroring flattenParams' identical
+// reasoning for Table.StorageParams: a live-introspected value always comes
+// back bare/resolved (PostgreSQL doesn't preserve original quote style, see
+// introspectRoleConfigs' doc comment), while a hand-written declaration may
+// or may not quote it — both spellings must compare equal.
+func normalizeConfigValue(v *string) string {
+	if v == nil {
+		return ""
+	}
+	s := *v
+	if len(s) >= 2 && s[0] == '\'' && s[len(s)-1] == '\'' {
+		return s[1 : len(s)-1]
+	}
+	return s
+}
+
+// roleConfigEqual reports whether a desired role-config-dir entry already
+// matches its snapshot counterpart — content only, not identity (the caller
+// has already matched them by roleConfigKey).
+func roleConfigEqual(c ir.RoleConfig, s snapshot.SnapRoleConfig) bool {
+	return c.FromCurrent == s.FromCurrent && c.Reset == s.Reset && c.ResetAll == s.ResetAll &&
+		normalizeConfigValue(c.Value) == normalizeConfigValue(s.Value)
+}
+
+// diffRoleConfigs diffs RFC audit item #74's role-config-dir set (Section
+// 11.1). Matches diffGrantSet's additive spirit: a new or changed entry
+// emits the ALTER ROLE SET/RESET; an entry simply removed from source emits
+// nothing (RESET is itself an explicit, available directive — the same
+// "declared, so managed" convention already used throughout, not an
+// oversight).
+func diffRoleConfigs(o *ir.Role, snap *snapshot.SnapRole, pos pipeline.SourcePos) []pipeline.DiffOp {
+	var ops []pipeline.DiffOp
+	ident := quoteIdent(o.Name)
+
+	snapByKey := make(map[string]snapshot.SnapRoleConfig, len(snap.Configs))
+	for _, s := range snap.Configs {
+		snapByKey[roleConfigKey(s.Param, s.ResetAll, s.InDatabase)] = s
+	}
+	for _, c := range o.Configs {
+		k := roleConfigKey(c.Param, c.ResetAll, c.InDatabase)
+		if s, ok := snapByKey[k]; ok && roleConfigEqual(c, s) {
+			continue
+		}
+		ops = append(ops, safeOp(roleConfigSQL(ident, c), pos))
+	}
 	return ops
 }
 

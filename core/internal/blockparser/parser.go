@@ -474,6 +474,15 @@ func (b *blockParser) parseBlock(pos pipeline.SourcePos) (pipeline.BlockAST, err
 			ast.ClusterOn, err = b.parseClusterOn(dirPos)
 		case "DETACHED":
 			ast.DetachedFrom, err = b.parseDetachedFrom(dirPos)
+		case "SET":
+			// RFC audit item #74 (Section 11.1) — Role-only in practice.
+			var rc pipeline.RoleConfigDir
+			rc, err = b.parseRoleConfigSet(dirPos)
+			ast.RoleConfigs = append(ast.RoleConfigs, rc)
+		case "RESET":
+			var rc pipeline.RoleConfigDir
+			rc, err = b.parseRoleConfigReset(dirPos)
+			ast.RoleConfigs = append(ast.RoleConfigs, rc)
 		case "RENAME":
 			var r pipeline.EnumValueRenameDir
 			r, err = b.parseEnumValueRename(dirPos)
@@ -768,6 +777,128 @@ func (b *blockParser) parseIdentDirective(pos pipeline.SourcePos) (*pipeline.Ide
 		return nil, err
 	}
 	return &pipeline.Identifier{Name: name}, nil
+}
+
+// parseConfigValue reads a role-config-dir config-value (Appendix A): a
+// single-quoted string literal or a bare token (integer/boolean/
+// identifier) — returned as literal SQL text exactly as written (a string
+// literal keeps its quotes), the same passthrough convention
+// pipeline.StorageParam.Value already uses, rendered back verbatim rather
+// than re-interpreted.
+func (b *blockParser) parseConfigValue() (string, error) {
+	b.skipWS()
+	start := b.pos
+	if b.peek() == '\'' {
+		if _, err := b.readSingleQuotedString(); err != nil {
+			return "", err
+		}
+		return string(b.src[start:b.pos]), nil
+	}
+	for !b.eof() {
+		c := b.peek()
+		if c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == ';' {
+			break
+		}
+		b.advance()
+	}
+	if b.pos == start {
+		return "", b.errorf("expected a config value")
+	}
+	return string(b.src[start:b.pos]), nil
+}
+
+// parseOptionalInDatabase reads an optional trailing "IN DATABASE db"
+// qualifier shared by every role-config-dir form, setting d.InDatabase.
+func (b *blockParser) parseOptionalInDatabase(d *pipeline.RoleConfigDir) error {
+	b.skipWS()
+	if strings.ToUpper(b.peekWord()) != "IN" {
+		return nil
+	}
+	b.readWord()
+	if err := b.expect("DATABASE"); err != nil {
+		return err
+	}
+	b.skipWS()
+	db, err := b.readIdentifier()
+	if err != nil {
+		return err
+	}
+	name := db.String()
+	d.InDatabase = &name
+	return nil
+}
+
+// parseRoleConfigSet parses RFC audit item #74's "SET param {TO|=} value
+// [IN DATABASE db];" / "SET param FROM CURRENT [IN DATABASE db];" block
+// directive (the "SET" keyword itself already consumed by the caller's
+// dispatch).
+func (b *blockParser) parseRoleConfigSet(pos pipeline.SourcePos) (pipeline.RoleConfigDir, error) {
+	d := pipeline.RoleConfigDir{Pos: pos}
+	b.skipWS()
+	param, err := b.readIdentifier()
+	if err != nil {
+		return d, err
+	}
+	d.Param = param.String()
+
+	b.skipWS()
+	c := b.cur()
+	if strings.ToUpper(b.peekWord()) == "FROM" {
+		b.readWord()
+		if err := b.expect("CURRENT"); err != nil {
+			return d, err
+		}
+		d.FromCurrent = true
+	} else {
+		b.restore(c)
+		b.skipWS()
+		if b.peek() == '=' {
+			b.advance()
+		} else if err := b.expect("TO"); err != nil {
+			return d, err
+		}
+		val, err := b.parseConfigValue()
+		if err != nil {
+			return d, err
+		}
+		d.Value = &val
+	}
+
+	if err := b.parseOptionalInDatabase(&d); err != nil {
+		return d, err
+	}
+	if err := b.expectSemi(); err != nil {
+		return d, err
+	}
+	return d, nil
+}
+
+// parseRoleConfigReset parses RFC audit item #74's "RESET param [IN
+// DATABASE db];" / "RESET ALL [IN DATABASE db];" block directive (the
+// "RESET" keyword itself already consumed by the caller's dispatch).
+func (b *blockParser) parseRoleConfigReset(pos pipeline.SourcePos) (pipeline.RoleConfigDir, error) {
+	d := pipeline.RoleConfigDir{Pos: pos, Reset: true}
+	b.skipWS()
+	c := b.cur()
+	if strings.ToUpper(b.peekWord()) == "ALL" {
+		b.readWord()
+		d.ResetAll = true
+	} else {
+		b.restore(c)
+		param, err := b.readIdentifier()
+		if err != nil {
+			return d, err
+		}
+		d.Param = param.String()
+	}
+
+	if err := b.parseOptionalInDatabase(&d); err != nil {
+		return d, err
+	}
+	if err := b.expectSemi(); err != nil {
+		return d, err
+	}
+	return d, nil
 }
 
 // parseEnumValueRename reads: VALUE 'old' TO 'new'; (the "RENAME" directive
@@ -2283,11 +2414,50 @@ func (b *blockParser) parseOneGrant(pos pipeline.SourcePos) (pipeline.GrantEntry
 		}
 	}
 
+	// Optional GRANTED BY role-spec (RFC audit item #90, Section 7.10) —
+	// real PostgreSQL restricts the effective grantor to current_user in
+	// practice, but the clause itself is genuine, accepted grammar.
+	b.skipWS()
+	c = b.cur()
+	if strings.ToUpper(b.peekWord()) == "GRANTED" {
+		b.readWord()
+		if err := b.expect("BY"); err != nil {
+			return g, err
+		}
+		spec, err := b.parseRoleSpec()
+		if err != nil {
+			return g, err
+		}
+		g.GrantedBy = &spec
+	} else {
+		b.restore(c)
+	}
+
 	b.skipWS()
 	if b.peek() == ';' {
 		b.advance()
 	}
 	return g, nil
+}
+
+// parseRoleSpec reads the shared role-spec production (Appendix A,
+// referenced by GRANTED BY here and by Role membership WITH clauses):
+// either a plain (possibly quoted) identifier, or one of the three fixed
+// keywords CURRENT_ROLE/CURRENT_USER/SESSION_USER (returned upper-cased —
+// PostgreSQL's own RoleSpec AST node treats these as keywords, not names).
+func (b *blockParser) parseRoleSpec() (string, error) {
+	b.skipWS()
+	c := b.cur()
+	switch strings.ToUpper(b.peekWord()) {
+	case "CURRENT_ROLE", "CURRENT_USER", "SESSION_USER":
+		return strings.ToUpper(b.readWord()), nil
+	}
+	b.restore(c)
+	id, err := b.readIdentifier()
+	if err != nil {
+		return "", err
+	}
+	return id.String(), nil
 }
 
 // ── REVOCATIONS ───────────────────────────────────────────────────────────────
@@ -2373,6 +2543,24 @@ func (b *blockParser) parseOneRevocation(pos pipeline.SourcePos) (pipeline.Revoc
 		if strings.ToUpper(b.peekWord()) == "CASCADE" {
 			break
 		}
+	}
+
+	// Optional GRANTED BY role-spec — see parseOneGrant's identical clause;
+	// grammar order here is GRANTED BY before CASCADE (RFC's revoke-entry).
+	b.skipWS()
+	c = b.cur()
+	if strings.ToUpper(b.peekWord()) == "GRANTED" {
+		b.readWord()
+		if err := b.expect("BY"); err != nil {
+			return r, err
+		}
+		spec, err := b.parseRoleSpec()
+		if err != nil {
+			return r, err
+		}
+		r.GrantedBy = &spec
+	} else {
+		b.restore(c)
 	}
 
 	b.skipWS()

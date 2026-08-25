@@ -479,6 +479,14 @@ type SnapGrant struct {
 	Privileges []string `json:"privileges,omitempty"` // nil = ALL
 	Roles      []string `json:"roles"`
 	WithGrant  bool     `json:"with_grant,omitempty"`
+	// GrantedBy is RFC audit item #90's optional GRANTED BY role-spec
+	// diffing input — see ir.Grant.GrantedBy's doc comment. Deliberately
+	// excluded from grantKey (identity): nil here always exactly mirrors
+	// whatever the desired side last declared (this snapshot is built from
+	// desired state, not live introspection), so comparing it is safe and
+	// only diffGrantSet/diffRevocationSet's own "declared, so managed"
+	// check needs it.
+	GrantedBy *string `json:"granted_by,omitempty"`
 }
 
 // SnapSecurityLabel is one SECURITY LABEL entry (RFC §14.11) — the
@@ -640,23 +648,36 @@ type SnapSequence struct {
 // §11.1's "Password drift detection" for why hashing the declared text
 // (not just a boolean has_password) is safe and enables rotation detection.
 type SnapRole struct {
-	Name            string              `json:"name"`
-	CanLogin        *bool               `json:"can_login,omitempty"`
-	Superuser       *bool               `json:"superuser,omitempty"`
-	CreateDB        *bool               `json:"create_db,omitempty"`
-	CreateRole      *bool               `json:"create_role,omitempty"`
-	Inherit         *bool               `json:"inherit,omitempty"`
-	IsReplication   *bool               `json:"is_replication,omitempty"`
-	BypassRLS       *bool               `json:"bypass_rls,omitempty"`
-	ConnectionLimit *int                `json:"connection_limit,omitempty"`
-	PasswordHash    string              `json:"password_hash,omitempty"`
-	ValidUntil      *string             `json:"valid_until,omitempty"`
-	InRole          []string            `json:"in_role,omitempty"`
-	RoleMembers     []string            `json:"role_members,omitempty"`
-	AdminRoles      []string            `json:"admin_roles,omitempty"`
-	Comment         *string             `json:"comment,omitempty"`
-	SecurityLabels  []SnapSecurityLabel `json:"security_labels,omitempty"`
-	NameMaps        []SnapNameMapEntry  `json:"name_maps,omitempty"`
+	Name            string   `json:"name"`
+	CanLogin        *bool    `json:"can_login,omitempty"`
+	Superuser       *bool    `json:"superuser,omitempty"`
+	CreateDB        *bool    `json:"create_db,omitempty"`
+	CreateRole      *bool    `json:"create_role,omitempty"`
+	Inherit         *bool    `json:"inherit,omitempty"`
+	IsReplication   *bool    `json:"is_replication,omitempty"`
+	BypassRLS       *bool    `json:"bypass_rls,omitempty"`
+	ConnectionLimit *int     `json:"connection_limit,omitempty"`
+	PasswordHash    string   `json:"password_hash,omitempty"`
+	ValidUntil      *string  `json:"valid_until,omitempty"`
+	InRole          []string `json:"in_role,omitempty"`
+	RoleMembers     []string `json:"role_members,omitempty"`
+	AdminRoles      []string `json:"admin_roles,omitempty"`
+	Comment         *string  `json:"comment,omitempty"`
+	// Configs is RFC audit item #74's role-config-dir diffing input — see
+	// ir.RoleConfig's doc comment.
+	Configs        []SnapRoleConfig    `json:"configs,omitempty"`
+	SecurityLabels []SnapSecurityLabel `json:"security_labels,omitempty"`
+	NameMaps       []SnapNameMapEntry  `json:"name_maps,omitempty"`
+}
+
+// SnapRoleConfig is the snapshot form of ir.RoleConfig.
+type SnapRoleConfig struct {
+	Param       string  `json:"param,omitempty"`
+	Value       *string `json:"value,omitempty"`
+	FromCurrent bool    `json:"from_current,omitempty"`
+	Reset       bool    `json:"reset,omitempty"`
+	ResetAll    bool    `json:"reset_all,omitempty"`
+	InDatabase  *string `json:"in_database,omitempty"`
 }
 
 // SnapVtypeBody is the serialised form of an ir.VtypeBody discriminated union.

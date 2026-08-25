@@ -3124,7 +3124,67 @@ ORDER  BY r.rolname`
 	if err := introspectRoleSecurityLabels(ctx, conn, out); err != nil {
 		return nil, err
 	}
+	if err := introspectRoleConfigs(ctx, conn, out); err != nil {
+		return nil, err
+	}
 	return out, nil
+}
+
+// introspectRoleConfigs populates Role.Configs (RFC audit item #74) from
+// pg_db_role_setting. setdatabase = 0 means cluster-wide (InDatabase stays
+// nil); each setconfig array element is a "param=value" pair, split at the
+// first '=' (a GUC name can never itself contain one). Values come back
+// resolved/bare — e.g. a role declared with "SET x FROM CURRENT" is
+// indistinguishable here from "SET x = '<resolved value>'" (confirmed live:
+// pg_db_role_setting stores only the final resolved value either way, no
+// record of which form was used) — so FromCurrent-declared entries never
+// match on a live comparison; a known, narrow, SAFE-severity limitation
+// (re-applies the same idempotent SET FROM CURRENT every time), the same
+// class of CREATE/declare-time-only gap already accepted for Collation's
+// CopyFrom.
+func introspectRoleConfigs(ctx context.Context, conn pipeline.Querier, roles []pipeline.IRObject) error {
+	idx := make(map[string]*ir.Role, len(roles))
+	for _, o := range roles {
+		if r, ok := o.(*ir.Role); ok {
+			idx[r.Name] = r
+		}
+	}
+	if len(idx) == 0 {
+		return nil
+	}
+	const q = `
+SELECT r.rolname, d.datname, s.setconfig
+FROM   pg_db_role_setting s
+JOIN   pg_roles r ON r.oid = s.setrole
+LEFT   JOIN pg_database d ON d.oid = s.setdatabase AND s.setdatabase <> 0
+ORDER  BY r.rolname, d.datname`
+
+	rs, err := conn.QueryRows(ctx, q)
+	if err != nil {
+		return fmt.Errorf("introspect role configs: %w", err)
+	}
+	defer rs.Close()
+	for rs.Next() {
+		var name string
+		var database *string
+		var setconfig []string
+		if err := rs.Scan(&name, &database, &setconfig); err != nil {
+			return err
+		}
+		r, ok := idx[name]
+		if !ok {
+			continue
+		}
+		for _, kv := range setconfig {
+			i := strings.IndexByte(kv, '=')
+			if i < 0 {
+				continue
+			}
+			param, value := kv[:i], kv[i+1:]
+			r.Configs = append(r.Configs, ir.RoleConfig{Param: param, Value: &value, InDatabase: database})
+		}
+	}
+	return rs.Err()
 }
 
 var _ pipeline.Introspector = (*CatalogIntrospector)(nil)

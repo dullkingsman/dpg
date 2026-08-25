@@ -764,6 +764,7 @@ func toSnapGrant(g ir.Grant) SnapGrant {
 		Privileges: g.Privileges,
 		Roles:      g.Roles,
 		WithGrant:  g.WithGrant,
+		GrantedBy:  g.GrantedBy,
 	}
 }
 
@@ -776,6 +777,7 @@ func toSnapRevocation(r ir.Revocation) SnapGrant {
 	return SnapGrant{
 		Privileges: r.Privileges,
 		Roles:      r.Roles,
+		GrantedBy:  r.GrantedBy,
 	}
 }
 
@@ -940,7 +942,15 @@ func toSnapRole(o *ir.Role) *SnapRole {
 	if o.Password != nil {
 		pwHash = hashBodyStr(*o.Password)
 	}
+	var configs []SnapRoleConfig
+	for _, c := range o.Configs {
+		configs = append(configs, SnapRoleConfig{
+			Param: c.Param, Value: c.Value, FromCurrent: c.FromCurrent,
+			Reset: c.Reset, ResetAll: c.ResetAll, InDatabase: c.InDatabase,
+		})
+	}
 	return &SnapRole{
+		Configs:         configs,
 		Name:            o.Name,
 		CanLogin:        o.CanLogin,
 		Superuser:       o.Superuser,

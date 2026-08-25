@@ -556,6 +556,135 @@ func TestGrantAllPrivileges(t *testing.T) {
 	}
 }
 
+// TestGrantGrantedBy guards RFC audit item #90: GRANTED BY role-spec on a
+// grant-entry, both the WITH GRANT OPTION + GRANTED BY combination (grammar
+// order matters — WITH GRANT OPTION first) and GRANTED BY alone.
+// TestRoleConfigSet guards RFC audit item #74: "SET param TO value;" and
+// "SET param = value;" forms, plain and IN DATABASE-qualified.
+func TestRoleConfigSet(t *testing.T) {
+	ast := parse(t, `SET statement_timeout TO '5s'; SET work_mem = '64MB' IN DATABASE mydb;`)
+	if len(ast.RoleConfigs) != 2 {
+		t.Fatalf("expected 2 role configs, got %d", len(ast.RoleConfigs))
+	}
+	c0 := ast.RoleConfigs[0]
+	if c0.Param != "statement_timeout" || c0.Value == nil || *c0.Value != "'5s'" {
+		t.Errorf("config 0: got %+v", c0)
+	}
+	if c0.InDatabase != nil {
+		t.Errorf("config 0: expected nil InDatabase (cluster-wide), got %v", c0.InDatabase)
+	}
+	c1 := ast.RoleConfigs[1]
+	if c1.Param != "work_mem" || c1.Value == nil || *c1.Value != "'64MB'" {
+		t.Errorf("config 1: got %+v", c1)
+	}
+	if c1.InDatabase == nil || *c1.InDatabase != "mydb" {
+		t.Errorf("config 1 InDatabase: got %v", c1.InDatabase)
+	}
+}
+
+// TestRoleConfigSetFromCurrent guards the "SET param FROM CURRENT;" form.
+func TestRoleConfigSetFromCurrent(t *testing.T) {
+	ast := parse(t, `SET search_path FROM CURRENT;`)
+	if len(ast.RoleConfigs) != 1 {
+		t.Fatalf("expected 1 role config, got %d", len(ast.RoleConfigs))
+	}
+	c := ast.RoleConfigs[0]
+	if c.Param != "search_path" || !c.FromCurrent || c.Value != nil {
+		t.Errorf("got %+v", c)
+	}
+}
+
+// TestRoleConfigReset guards "RESET param;" and "RESET ALL;", including the
+// IN DATABASE qualifier.
+func TestRoleConfigReset(t *testing.T) {
+	ast := parse(t, `RESET statement_timeout; RESET ALL IN DATABASE mydb;`)
+	if len(ast.RoleConfigs) != 2 {
+		t.Fatalf("expected 2 role configs, got %d", len(ast.RoleConfigs))
+	}
+	c0 := ast.RoleConfigs[0]
+	if !c0.Reset || c0.ResetAll || c0.Param != "statement_timeout" {
+		t.Errorf("config 0: got %+v", c0)
+	}
+	c1 := ast.RoleConfigs[1]
+	if !c1.Reset || !c1.ResetAll || c1.Param != "" {
+		t.Errorf("config 1: got %+v", c1)
+	}
+	if c1.InDatabase == nil || *c1.InDatabase != "mydb" {
+		t.Errorf("config 1 InDatabase: got %v", c1.InDatabase)
+	}
+}
+
+// TestRoleConfigNamespacedParam guards a dotted, extension-namespaced GUC
+// name (e.g. pg_stat_statements.track), real PostgreSQL var_name grammar.
+func TestRoleConfigNamespacedParam(t *testing.T) {
+	ast := parse(t, `SET pg_stat_statements.track = 'all';`)
+	if len(ast.RoleConfigs) != 1 || ast.RoleConfigs[0].Param != "pg_stat_statements.track" {
+		t.Fatalf("got %+v", ast.RoleConfigs)
+	}
+}
+
+func TestGrantGrantedBy(t *testing.T) {
+	ast := parse(t, `GRANTS { SELECT TO reader WITH GRANT OPTION GRANTED BY admin; INSERT TO writer GRANTED BY admin2; }`)
+	if len(ast.Grants) != 2 {
+		t.Fatalf("expected 2 grants, got %d", len(ast.Grants))
+	}
+	g0 := ast.Grants[0]
+	if !g0.WithGrant {
+		t.Error("grant 0: expected WithGrant=true")
+	}
+	if g0.GrantedBy == nil || *g0.GrantedBy != "admin" {
+		t.Errorf("grant 0 GrantedBy: got %v", g0.GrantedBy)
+	}
+	g1 := ast.Grants[1]
+	if g1.WithGrant {
+		t.Error("grant 1: expected WithGrant=false")
+	}
+	if g1.GrantedBy == nil || *g1.GrantedBy != "admin2" {
+		t.Errorf("grant 1 GrantedBy: got %v", g1.GrantedBy)
+	}
+}
+
+// TestGrantGrantedByRoleSpecKeywords guards role-spec's three fixed
+// keyword forms (CURRENT_ROLE/CURRENT_USER/SESSION_USER), not just a plain
+// identifier.
+func TestGrantGrantedByRoleSpecKeywords(t *testing.T) {
+	ast := parse(t, `GRANTS { SELECT TO reader GRANTED BY CURRENT_ROLE; INSERT TO writer GRANTED BY session_user; }`)
+	if len(ast.Grants) != 2 {
+		t.Fatalf("expected 2 grants, got %d", len(ast.Grants))
+	}
+	if ast.Grants[0].GrantedBy == nil || *ast.Grants[0].GrantedBy != "CURRENT_ROLE" {
+		t.Errorf("grant 0 GrantedBy: got %v", ast.Grants[0].GrantedBy)
+	}
+	if ast.Grants[1].GrantedBy == nil || *ast.Grants[1].GrantedBy != "SESSION_USER" {
+		t.Errorf("grant 1 GrantedBy: got %v", ast.Grants[1].GrantedBy)
+	}
+}
+
+// TestGrantNoGrantedByLeavesNil guards the common (unspecified) case: no
+// GRANTED BY clause must leave the field nil, not a zero-value empty string.
+func TestGrantNoGrantedByLeavesNil(t *testing.T) {
+	ast := parse(t, `GRANTS { SELECT TO reader; }`)
+	if ast.Grants[0].GrantedBy != nil {
+		t.Errorf("expected nil GrantedBy, got %v", ast.Grants[0].GrantedBy)
+	}
+}
+
+// TestRevocationGrantedByAndCascade guards RFC audit item #90's
+// revoke-entry: GRANTED BY role-spec, ordered before CASCADE.
+func TestRevocationGrantedByAndCascade(t *testing.T) {
+	ast := parse(t, `REVOCATIONS { SELECT FROM reader GRANTED BY admin CASCADE; }`)
+	if len(ast.Revocations) != 1 {
+		t.Fatalf("expected 1 revocation, got %d", len(ast.Revocations))
+	}
+	r := ast.Revocations[0]
+	if r.GrantedBy == nil || *r.GrantedBy != "admin" {
+		t.Errorf("GrantedBy: got %v", r.GrantedBy)
+	}
+	if !r.Cascade {
+		t.Error("expected Cascade=true")
+	}
+}
+
 func TestRevocations(t *testing.T) {
 	src := `REVOCATIONS { ALL PRIVILEGES FROM PUBLIC; }`
 	ast := parse(t, src)

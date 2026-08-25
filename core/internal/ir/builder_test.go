@@ -972,6 +972,26 @@ func TestBuildRecursiveViewSetsFlag(t *testing.T) {
 // ir.Tablespace/ForeignDataWrapper/ForeignServer had no Grants/Revocations
 // field at all — the same missing-field shape as the already-fixed
 // Schema-grants pattern, never generalized to these three kinds.
+// TestBuildTableGrantedBy guards RFC audit item #90: GRANTED BY role-spec
+// on a grant-entry/revoke-entry, wired through blockGrantToIR/
+// blockRevocationToIR into ir.Grant.GrantedBy/ir.Revocation.GrantedBy.
+func TestBuildTableGrantedBy(t *testing.T) {
+	obj := buildObject(t, pipeline.KindTable,
+		`orders (id INT)`,
+		`GRANTS { SELECT TO reader GRANTED BY admin; } REVOCATIONS { SELECT FROM reader GRANTED BY admin; }`,
+	)
+	tbl, ok := obj.(*ir.Table)
+	if !ok {
+		t.Fatalf("expected *ir.Table, got %T", obj)
+	}
+	if len(tbl.Grants) != 1 || tbl.Grants[0].GrantedBy == nil || *tbl.Grants[0].GrantedBy != "admin" {
+		t.Errorf("Grants[0].GrantedBy: got %+v", tbl.Grants)
+	}
+	if len(tbl.Revocations) != 1 || tbl.Revocations[0].GrantedBy == nil || *tbl.Revocations[0].GrantedBy != "admin" {
+		t.Errorf("Revocations[0].GrantedBy: got %+v", tbl.Revocations)
+	}
+}
+
 func TestBuildTablespaceGrantsAndRevocations(t *testing.T) {
 	obj := buildObject(t, pipeline.KindTablespace,
 		`gl_ts LOCATION '/var/lib/postgresql/ts1'`,
@@ -3883,6 +3903,31 @@ func TestBuildRoleComment(t *testing.T) {
 	}
 	if r.CanLogin == nil || *r.CanLogin {
 		t.Errorf("CanLogin: got %v, want false (NOLOGIN)", r.CanLogin)
+	}
+}
+
+// TestBuildRoleConfigs guards RFC audit item #74: role-config-dir block
+// directives (SET/RESET, with FROM CURRENT and IN DATABASE variants) wired
+// through buildRole into ir.Role.Configs.
+func TestBuildRoleConfigs(t *testing.T) {
+	obj := buildObject(t, pipeline.KindRole, `app_readonly NOLOGIN`,
+		`SET statement_timeout = '5s'; SET work_mem TO '64MB' IN DATABASE mydb; SET search_path FROM CURRENT; RESET ALL;`,
+	)
+	r := obj.(*ir.Role)
+	if len(r.Configs) != 4 {
+		t.Fatalf("expected 4 configs, got %d: %+v", len(r.Configs), r.Configs)
+	}
+	if r.Configs[0].Param != "statement_timeout" || r.Configs[0].Value == nil || *r.Configs[0].Value != "'5s'" {
+		t.Errorf("config 0: got %+v", r.Configs[0])
+	}
+	if r.Configs[1].Param != "work_mem" || r.Configs[1].InDatabase == nil || *r.Configs[1].InDatabase != "mydb" {
+		t.Errorf("config 1: got %+v", r.Configs[1])
+	}
+	if r.Configs[2].Param != "search_path" || !r.Configs[2].FromCurrent {
+		t.Errorf("config 2: got %+v", r.Configs[2])
+	}
+	if !r.Configs[3].Reset || !r.Configs[3].ResetAll {
+		t.Errorf("config 3: got %+v", r.Configs[3])
 	}
 }
 

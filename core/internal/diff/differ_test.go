@@ -7253,6 +7253,134 @@ func TestDiffFunctionGrantAdded(t *testing.T) {
 	}
 }
 
+// TestDiffFunctionGrantGrantedByNewGrant guards RFC audit item #90: a
+// brand-new grant declared with GRANTED BY renders the clause.
+func TestDiffFunctionGrantGrantedByNewGrant(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.get_user()", &snapshot.SnapObject{
+		Kind: "function",
+		Function: &snapshot.SnapFunction{
+			Schema: "public", Name: "get_user", ReturnType: "void",
+			Language: "plpgsql", Volatility: "VOLATILE", BodyHash: "abc",
+		},
+	})
+	grantedBy := "admin"
+	desired := []pipeline.IRObject{
+		&ir.Function{
+			Schema: "public", Name: "get_user",
+			ReturnType: ir.TypeRef{Name: "void"},
+			BodyHash:   "abc",
+			Attrs:      ir.FuncAttrs{Language: "plpgsql", Volatility: "VOLATILE", Body: "BEGIN END;"},
+			Grants:     []ir.Grant{{Privileges: []string{"EXECUTE"}, Roles: []string{"app"}, GrantedBy: &grantedBy}},
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsSQL(ops, "GRANTED BY \"admin\"") {
+		t.Errorf("expected GRANTED BY \"admin\", got: %v", sqlList(ops))
+	}
+}
+
+// TestDiffFunctionGrantGrantedByChanged guards the "matched grant, GrantedBy
+// changed" branch: same privileges/roles/WithGrant identity, but the
+// desired side declares a different GrantedBy than the snapshot — must
+// re-GRANT to apply it (real PostgreSQL treats a repeated GRANT as
+// updating in place), even though grantKey itself doesn't include
+// GrantedBy.
+func TestDiffFunctionGrantGrantedByChanged(t *testing.T) {
+	d := New()
+	oldGrantedBy := "old_admin"
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.get_user()", &snapshot.SnapObject{
+		Kind: "function",
+		Function: &snapshot.SnapFunction{
+			Schema: "public", Name: "get_user", ReturnType: "void",
+			Language: "plpgsql", Volatility: "VOLATILE", BodyHash: "abc",
+			Grants: []snapshot.SnapGrant{{Privileges: []string{"EXECUTE"}, Roles: []string{"app"}, GrantedBy: &oldGrantedBy}},
+		},
+	})
+	newGrantedBy := "new_admin"
+	desired := []pipeline.IRObject{
+		&ir.Function{
+			Schema: "public", Name: "get_user",
+			ReturnType: ir.TypeRef{Name: "void"},
+			BodyHash:   "abc",
+			Attrs:      ir.FuncAttrs{Language: "plpgsql", Volatility: "VOLATILE", Body: "BEGIN END;"},
+			Grants:     []ir.Grant{{Privileges: []string{"EXECUTE"}, Roles: []string{"app"}, GrantedBy: &newGrantedBy}},
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsSQL(ops, "GRANTED BY \"new_admin\"") {
+		t.Errorf("expected a re-GRANT with GRANTED BY \"new_admin\", got: %v", sqlList(ops))
+	}
+}
+
+// TestDiffFunctionGrantGrantedByUnspecifiedIsNoop guards the "declared, so
+// managed" rule: when the desired side never mentions GRANTED BY at all
+// (nil), a snapshot carrying some other value (e.g. from an earlier
+// declaration since removed from source) must NOT be treated as drift —
+// matching Cost/Rows' identical suppress-when-unspecified precedent.
+func TestDiffFunctionGrantGrantedByUnspecifiedIsNoop(t *testing.T) {
+	d := New()
+	priorGrantedBy := "old_admin"
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.get_user()", &snapshot.SnapObject{
+		Kind: "function",
+		Function: &snapshot.SnapFunction{
+			Schema: "public", Name: "get_user", ReturnType: "void",
+			Language: "plpgsql", Volatility: "VOLATILE", BodyHash: "abc",
+			Grants: []snapshot.SnapGrant{{Privileges: []string{"EXECUTE"}, Roles: []string{"app"}, GrantedBy: &priorGrantedBy}},
+		},
+	})
+	desired := []pipeline.IRObject{
+		&ir.Function{
+			Schema: "public", Name: "get_user",
+			ReturnType: ir.TypeRef{Name: "void"},
+			BodyHash:   "abc",
+			Attrs:      ir.FuncAttrs{Language: "plpgsql", Volatility: "VOLATILE", Body: "BEGIN END;"},
+			Grants:     []ir.Grant{{Privileges: []string{"EXECUTE"}, Roles: []string{"app"}}},
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ops) != 0 {
+		t.Errorf("expected no ops (GrantedBy not declared, don't compare), got: %v", sqlList(ops))
+	}
+}
+
+// TestDiffFunctionRevocationGrantedBy guards RFC audit item #90's
+// revoke-entry: GRANTED BY on an explicit REVOCATIONS declaration.
+func TestDiffFunctionRevocationGrantedBy(t *testing.T) {
+	d := New()
+	grantedBy := "admin"
+	desired := []pipeline.IRObject{
+		&ir.Function{
+			Schema: "public", Name: "get_user",
+			ReturnType: ir.TypeRef{Name: "void"},
+			BodyHash:   "abc",
+			Attrs:      ir.FuncAttrs{Language: "plpgsql", Volatility: "VOLATILE", Body: "BEGIN END;"},
+			Revocations: []ir.Revocation{
+				{Privileges: []string{"EXECUTE"}, Roles: []string{"app"}, GrantedBy: &grantedBy, Cascade: true},
+			},
+		},
+	}
+	ops, err := d.Diff(desired, &pipeline.Snapshot{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsSQL(ops, "REVOKE EXECUTE ON FUNCTION") || !containsSQL(ops, "GRANTED BY \"admin\" CASCADE") {
+		t.Errorf("expected REVOKE ... GRANTED BY \"admin\" CASCADE, got: %v", sqlList(ops))
+	}
+}
+
 func TestDiffFunctionGrantRemoved(t *testing.T) {
 	d := New()
 	snap := &pipeline.Snapshot{}
@@ -11103,6 +11231,186 @@ func TestDiffRoleCommentAdded(t *testing.T) {
 	}
 	if !containsSQL(ops, "COMMENT ON ROLE") || !containsSQL(ops, "'application role'") {
 		t.Errorf("expected COMMENT ON ROLE with new comment, got: %v", sqlList(ops))
+	}
+}
+
+// TestCreateRoleConfigsEmitsAlterRole guards RFC audit item #74: a
+// brand-new role with declared SET/RESET config entries needs its own
+// follow-up ALTER ROLE for each — real CREATE ROLE has no inline SET/RESET
+// clause at all.
+func TestCreateRoleConfigsEmitsAlterRole(t *testing.T) {
+	d := New()
+	value := "'5s'"
+	desired := []pipeline.IRObject{
+		&ir.Role{Name: "app_role", Configs: []ir.RoleConfig{
+			{Param: "statement_timeout", Value: &value},
+		}},
+	}
+	ops, err := d.Diff(desired, &pipeline.Snapshot{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsSQL(ops, `ALTER ROLE "app_role" SET statement_timeout = '5s';`) {
+		t.Errorf("expected ALTER ROLE SET statement_timeout, got: %v", sqlList(ops))
+	}
+}
+
+// TestDiffRoleConfigNewEntry guards a new SET entry declared against a role
+// that already exists (no prior configs in the snapshot).
+func TestDiffRoleConfigNewEntry(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("app_role", &snapshot.SnapObject{
+		Kind: "role",
+		Role: &snapshot.SnapRole{Name: "app_role"},
+	})
+	value := "'64MB'"
+	desired := []pipeline.IRObject{
+		&ir.Role{Name: "app_role", Configs: []ir.RoleConfig{{Param: "work_mem", Value: &value}}},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsSQL(ops, `ALTER ROLE "app_role" SET work_mem = '64MB';`) {
+		t.Errorf("expected ALTER ROLE SET work_mem, got: %v", sqlList(ops))
+	}
+}
+
+// TestDiffRoleConfigUnchangedIsNoop guards the core idempotency case: the
+// same entry already recorded in the snapshot must not re-emit.
+func TestDiffRoleConfigUnchangedIsNoop(t *testing.T) {
+	d := New()
+	value := "'64MB'"
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("app_role", &snapshot.SnapObject{
+		Kind: "role",
+		Role: &snapshot.SnapRole{Name: "app_role", Configs: []snapshot.SnapRoleConfig{{Param: "work_mem", Value: &value}}},
+	})
+	desired := []pipeline.IRObject{
+		&ir.Role{Name: "app_role", Configs: []ir.RoleConfig{{Param: "work_mem", Value: &value}}},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ops) != 0 {
+		t.Errorf("expected no ops for unchanged config, got: %v", sqlList(ops))
+	}
+}
+
+// TestDiffRoleConfigValueQuoteStyleNormalized guards a real, deliberate
+// design point: a live-introspected value always comes back bare/resolved
+// (e.g. "64MB", no quotes — see introspectRoleConfigs), while a hand-
+// written declaration might quote it ('64MB') or not. Both spellings must
+// compare equal, or every role with any declared config would show
+// permanent spurious drift against live-introspected state.
+func TestDiffRoleConfigValueQuoteStyleNormalized(t *testing.T) {
+	d := New()
+	declaredValue := "'64MB'"
+	introspectedValue := "64MB"
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("app_role", &snapshot.SnapObject{
+		Kind: "role",
+		Role: &snapshot.SnapRole{Name: "app_role", Configs: []snapshot.SnapRoleConfig{{Param: "work_mem", Value: &introspectedValue}}},
+	})
+	desired := []pipeline.IRObject{
+		&ir.Role{Name: "app_role", Configs: []ir.RoleConfig{{Param: "work_mem", Value: &declaredValue}}},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ops) != 0 {
+		t.Errorf("expected no ops (quoted vs bare value must compare equal), got: %v", sqlList(ops))
+	}
+}
+
+// TestDiffRoleConfigValueChanged guards a genuine value change.
+func TestDiffRoleConfigValueChanged(t *testing.T) {
+	d := New()
+	oldValue := "'32MB'"
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("app_role", &snapshot.SnapObject{
+		Kind: "role",
+		Role: &snapshot.SnapRole{Name: "app_role", Configs: []snapshot.SnapRoleConfig{{Param: "work_mem", Value: &oldValue}}},
+	})
+	newValue := "'64MB'"
+	desired := []pipeline.IRObject{
+		&ir.Role{Name: "app_role", Configs: []ir.RoleConfig{{Param: "work_mem", Value: &newValue}}},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsSQL(ops, `SET work_mem = '64MB'`) {
+		t.Errorf("expected re-SET to the new value, got: %v", sqlList(ops))
+	}
+}
+
+// TestDiffRoleConfigRemovedFromSourceIsNoop guards the additive-model
+// treatment: an entry simply disappearing from source must not emit a
+// RESET — matching diffGrantSet's identical "removing a declaration emits
+// nothing" convention (RESET is itself an explicit, available directive).
+func TestDiffRoleConfigRemovedFromSourceIsNoop(t *testing.T) {
+	d := New()
+	value := "'64MB'"
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("app_role", &snapshot.SnapObject{
+		Kind: "role",
+		Role: &snapshot.SnapRole{Name: "app_role", Configs: []snapshot.SnapRoleConfig{{Param: "work_mem", Value: &value}}},
+	})
+	desired := []pipeline.IRObject{
+		&ir.Role{Name: "app_role"},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ops) != 0 {
+		t.Errorf("expected no ops (declaration removed, additive model), got: %v", sqlList(ops))
+	}
+}
+
+// TestDiffRoleConfigInDatabaseIsDistinctKey guards roleConfigKey's own
+// reasoning: the same param SET differently IN DATABASE a vs cluster-wide
+// are two independent settings, not one — declaring both must emit both,
+// and each must diff independently.
+func TestDiffRoleConfigInDatabaseIsDistinctKey(t *testing.T) {
+	d := New()
+	clusterValue := "'30s'"
+	dbValue := "'5s'"
+	db := "mydb"
+	desired := []pipeline.IRObject{
+		&ir.Role{Name: "app_role", Configs: []ir.RoleConfig{
+			{Param: "statement_timeout", Value: &clusterValue},
+			{Param: "statement_timeout", Value: &dbValue, InDatabase: &db},
+		}},
+	}
+	ops, err := d.Diff(desired, &pipeline.Snapshot{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsSQL(ops, `ALTER ROLE "app_role" SET statement_timeout = '30s';`) {
+		t.Errorf("expected cluster-wide SET, got: %v", sqlList(ops))
+	}
+	if !containsSQL(ops, `ALTER ROLE "app_role" IN DATABASE "mydb" SET statement_timeout = '5s';`) {
+		t.Errorf("expected IN DATABASE SET, got: %v", sqlList(ops))
+	}
+}
+
+// TestDiffRoleConfigResetAll guards the RESET ALL form specifically.
+func TestDiffRoleConfigResetAll(t *testing.T) {
+	d := New()
+	desired := []pipeline.IRObject{
+		&ir.Role{Name: "app_role", Configs: []ir.RoleConfig{{Reset: true, ResetAll: true}}},
+	}
+	ops, err := d.Diff(desired, &pipeline.Snapshot{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsSQL(ops, `ALTER ROLE "app_role" RESET ALL;`) {
+		t.Errorf("expected RESET ALL, got: %v", sqlList(ops))
 	}
 }
 

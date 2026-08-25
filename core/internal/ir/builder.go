@@ -2223,6 +2223,12 @@ func (b *Builder) buildRole(cs *pg_query.CreateRoleStmt, block pipeline.BlockAST
 	if block.RenamedFrom != nil {
 		r.RenamedFrom = &block.RenamedFrom.Name
 	}
+	for _, rc := range block.RoleConfigs {
+		r.Configs = append(r.Configs, RoleConfig{
+			Param: rc.Param, Value: rc.Value, FromCurrent: rc.FromCurrent,
+			Reset: rc.Reset, ResetAll: rc.ResetAll, InDatabase: rc.InDatabase, Pos: rc.Pos,
+		})
+	}
 	r.SecurityLabels = block.SecurityLabels
 	r.NameMaps = block.NameMaps
 	return r, nil
@@ -3540,7 +3546,7 @@ func walkColumnRefs(m protoreflect.Message, seen map[string]bool) {
 }
 
 func blockGrantToIR(g pipeline.GrantEntry) Grant {
-	gr := Grant{WithGrant: g.WithGrant, Privileges: g.Privileges, Pos: g.Pos}
+	gr := Grant{WithGrant: g.WithGrant, Privileges: g.Privileges, GrantedBy: g.GrantedBy, Pos: g.Pos}
 	for _, r := range g.Roles {
 		gr.Roles = append(gr.Roles, r.String())
 	}
@@ -3548,7 +3554,7 @@ func blockGrantToIR(g pipeline.GrantEntry) Grant {
 }
 
 func blockRevocationToIR(r pipeline.RevocationEntry) Revocation {
-	rev := Revocation{Cascade: r.Cascade, Privileges: r.Privileges, Pos: r.Pos}
+	rev := Revocation{Cascade: r.Cascade, Privileges: r.Privileges, GrantedBy: r.GrantedBy, Pos: r.Pos}
 	for _, role := range r.Roles {
 		rev.Roles = append(rev.Roles, role.String())
 	}

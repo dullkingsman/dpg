@@ -2028,6 +2028,65 @@ func TestRenderRoleAttributesCompile(t *testing.T) {
 	}
 }
 
+// TestRenderRoleConfigsCompile guards RFC audit item #74's dump-and-
+// recompile round trip: a live-introspected Role with SET/RESET config
+// entries (as introspectRoleConfigs would populate — bare, unquoted
+// values) must render into valid, recompilable .dpg source.
+func TestRenderRoleConfigsCompile(t *testing.T) {
+	fmtOpts := format.Options{IndentSize: 4, KeywordCase: "upper"}
+	timeoutVal := "5s"
+	memVal := "64MB"
+	db := "mydb"
+	role := &ir.Role{
+		Name: "app_service",
+		Configs: []ir.RoleConfig{
+			{Param: "statement_timeout", Value: &timeoutVal},
+			{Param: "work_mem", Value: &memVal, InDatabase: &db},
+			{Reset: true, ResetAll: true},
+		},
+	}
+
+	var b strings.Builder
+	renderObjectDPG(&b, role, fmtOpts)
+	rendered := b.String()
+
+	if !strings.Contains(rendered, "SET statement_timeout = '5s'") {
+		t.Errorf("rendered role missing SET statement_timeout: %q", rendered)
+	}
+	if !strings.Contains(rendered, "SET work_mem = '64MB' IN DATABASE") {
+		t.Errorf("rendered role missing SET work_mem IN DATABASE: %q", rendered)
+	}
+	if !strings.Contains(rendered, "RESET ALL") {
+		t.Errorf("rendered role missing RESET ALL: %q", rendered)
+	}
+
+	dir := t.TempDir()
+	f := filepath.Join(dir, "roles.dpg")
+	if err := os.WriteFile(f, []byte(rendered), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	compiled, _, err := compiler.Compile([]string{f}, dir, pipeline.Default)
+	if err != nil {
+		t.Fatalf("dumped role failed to recompile: %v\n---\n%s", err, rendered)
+	}
+	got, ok := compiled[0].(*ir.Role)
+	if !ok {
+		t.Fatalf("expected *ir.Role, got %T", compiled[0])
+	}
+	if len(got.Configs) != 3 {
+		t.Fatalf("Configs did not round-trip: got %d entries: %+v", len(got.Configs), got.Configs)
+	}
+	if got.Configs[0].Param != "statement_timeout" || got.Configs[0].Value == nil || *got.Configs[0].Value != "'5s'" {
+		t.Errorf("Configs[0]: got %+v", got.Configs[0])
+	}
+	if got.Configs[1].Param != "work_mem" || got.Configs[1].InDatabase == nil || *got.Configs[1].InDatabase != "mydb" {
+		t.Errorf("Configs[1]: got %+v", got.Configs[1])
+	}
+	if !got.Configs[2].Reset || !got.Configs[2].ResetAll {
+		t.Errorf("Configs[2]: got %+v", got.Configs[2])
+	}
+}
+
 // TestRenderBareRoleCompile guards the minimal case: a role with no
 // attributes set at all (every pointer/slice nil) must still render valid,
 // recompilable source — the pre-existing "ROLE name;" behavior, unchanged.

@@ -1290,10 +1290,43 @@ func renderObjectDPG(b *strings.Builder, obj pipeline.IRObject, fmtOpts format.O
 		if len(o.AdminRoles) > 0 {
 			fmt.Fprintf(&opts, " %s %s", kw("ADMIN"), joinIdentsIfNeeded(o.AdminRoles))
 		}
-		if o.Comment != nil || len(o.SecurityLabels) > 0 {
+		if o.Comment != nil || len(o.SecurityLabels) > 0 || len(o.Configs) > 0 {
 			fmt.Fprintf(b, "\n%s %s%s\n{\n", kw("ROLE"), name, opts.String())
 			if o.Comment != nil {
 				fmt.Fprintf(b, "%s%s %s;\n", ind, kw("COMMENT"), sqlStringLit(*o.Comment))
+			}
+			// RFC audit item #74: rendered from live state via
+			// introspectRoleConfigs, which always returns a bare, resolved
+			// value — quoting it here is always valid SQL regardless of
+			// how the original declaration (if any) was written. A live-
+			// introspected entry is never rendered as FROM CURRENT either:
+			// see introspectRoleConfigs' doc comment — PostgreSQL's own
+			// catalog can't distinguish it from an ordinary resolved value.
+			for _, c := range o.Configs {
+				fmt.Fprintf(b, "%s", ind)
+				if c.Reset {
+					b.WriteString(kw("RESET"))
+					b.WriteString(" ")
+					if c.ResetAll {
+						b.WriteString(kw("ALL"))
+					} else {
+						b.WriteString(c.Param)
+					}
+				} else {
+					b.WriteString(kw("SET"))
+					b.WriteString(" ")
+					b.WriteString(c.Param)
+					b.WriteString(" = ")
+					if c.Value != nil {
+						b.WriteString(sqlStringLit(*c.Value))
+					} else {
+						b.WriteString("''")
+					}
+				}
+				if c.InDatabase != nil {
+					fmt.Fprintf(b, " %s %s %s", kw("IN"), kw("DATABASE"), quoteIdentIfNeeded(*c.InDatabase))
+				}
+				b.WriteString(";\n")
 			}
 			writeSecurityLabels(b, ind, fmtOpts, o.SecurityLabels)
 			b.WriteString("}\n")

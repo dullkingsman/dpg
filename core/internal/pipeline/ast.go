@@ -85,15 +85,22 @@ type GrantEntry struct {
 	Privileges []string // "SELECT", "INSERT", etc.; nil = ALL
 	Roles      []Identifier
 	WithGrant  bool
-	Pos        SourcePos
+	// GrantedBy is RFC audit item #90's optional "GRANTED BY role-spec"
+	// clause — nil when not declared. A role-spec is either a plain
+	// identifier or one of the fixed keywords CURRENT_ROLE/CURRENT_USER/
+	// SESSION_USER (stored upper-cased for the keyword forms).
+	GrantedBy *string
+	Pos       SourcePos
 }
 
 // RevocationEntry is a single REVOCATIONS directive.
 type RevocationEntry struct {
 	Privileges []string
 	Roles      []Identifier
-	Cascade    bool
-	Pos        SourcePos
+	// GrantedBy — see GrantEntry.GrantedBy's identical doc comment.
+	GrantedBy *string
+	Cascade   bool
+	Pos       SourcePos
 }
 
 // PolicyDef is a single row-security policy definition.
@@ -518,6 +525,36 @@ type BlockAST struct {
 	// trigger-decl ABNF placement doesn't hold live, the same
 	// RFC-documents-unparseable-PG-syntax gap domain NOT VALID had.
 	TriggerEnableState string
+	// RoleConfigs is RFC audit item #74's role-config-dir block directive
+	// (Section 11.1), repeatable: `SET param {TO|=} value / SET param FROM
+	// CURRENT / RESET param / RESET ALL`, each optionally `IN DATABASE db`.
+	// Role-only in practice (the only object kind whose builder reads it),
+	// but parsed generically here like every other block directive.
+	RoleConfigs []RoleConfigDir
+}
+
+// RoleConfigDir is Section 11.1's `ALTER ROLE ... [IN DATABASE db] SET
+// param {TO|=} value` / `SET param FROM CURRENT` / `RESET param` / `RESET
+// ALL` block directive.
+type RoleConfigDir struct {
+	// Param is the GUC name; empty when ResetAll is true.
+	Param string
+	// Value is the config-value text for the "SET param TO/= value" form,
+	// exactly as written (a string-literal keeps its quotes, an integer/
+	// boolean/identifier stays bare) — rendered back verbatim, the same
+	// passthrough convention pipeline.StorageParam.Value already uses. nil
+	// for FromCurrent and both RESET forms.
+	Value *string
+	// FromCurrent is the "SET param FROM CURRENT" form — Value is nil.
+	FromCurrent bool
+	// Reset marks either RESET form; ResetAll distinguishes "RESET ALL"
+	// (Param empty) from "RESET param" (Param set).
+	Reset    bool
+	ResetAll bool
+	// InDatabase is the optional "IN DATABASE db" qualifier — nil means
+	// cluster-wide (every database).
+	InDatabase *string
+	Pos        SourcePos
 }
 
 // ReplicaIdentityDir is Section 7.11's REPLICA IDENTITY block directive.

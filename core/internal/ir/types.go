@@ -365,7 +365,15 @@ type Grant struct {
 	Privileges []string // nil = ALL
 	Roles      []string
 	WithGrant  bool
-	Pos        pipeline.SourcePos
+	// GrantedBy is RFC audit item #90's optional GRANTED BY role-spec — nil
+	// when not declared (the overwhelming common case; real PostgreSQL
+	// restricts the effective grantor to current_user in practice
+	// regardless of what's named here). Diffed only when the desired side
+	// explicitly declares it (see diffGrantSet) — never compared against a
+	// live-introspected concrete grantor when unset, the same "declared, so
+	// managed" rule already used for Function Cost/Rows.
+	GrantedBy *string
+	Pos       pipeline.SourcePos
 }
 
 // Revocation is a single REVOKE directive.
@@ -373,7 +381,9 @@ type Revocation struct {
 	Privileges []string // nil = ALL
 	Roles      []string
 	Cascade    bool
-	Pos        pipeline.SourcePos
+	// GrantedBy — see Grant.GrantedBy's identical doc comment.
+	GrantedBy *string
+	Pos       pipeline.SourcePos
 }
 
 // FuncArg is a function/procedure/aggregate parameter.
@@ -978,7 +988,13 @@ type Role struct {
 	// 11.1) — schema-agnostic, unlike Table/View/Type/Collation's identical
 	// field: roles are cluster-level, not schema-scoped, so there is no
 	// RenamedFromSchema counterpart here.
-	RenamedFrom    *string
+	RenamedFrom *string
+	// Configs is RFC audit item #74's role-config-dir block directive set
+	// (Section 11.1) — ALTER ROLE ... [IN DATABASE db] SET/RESET session
+	// config parameters. Declared, so managed: only entries actually
+	// present here are diffed; nothing else about a role's live session
+	// config is inspected.
+	Configs        []RoleConfig
 	SecurityLabels []pipeline.SecurityLabel
 	NameMaps       []pipeline.NameMapEntry
 	SrcPos         pipeline.SourcePos
@@ -987,6 +1003,29 @@ type Role struct {
 func (r *Role) QualifiedName() string   { return r.Name }
 func (r *Role) Pos() pipeline.SourcePos { return r.SrcPos }
 func (r *Role) irObject()               {}
+
+// RoleConfig is one ALTER ROLE ... SET/RESET session-config entry (RFC
+// audit item #74, Section 11.1): "[IN DATABASE db] SET param {TO|=} value",
+// "SET param FROM CURRENT", "RESET param", or "RESET ALL".
+type RoleConfig struct {
+	// Param is the GUC name; empty when ResetAll is true.
+	Param string
+	// Value is the config-value text for the "SET param TO/= value" form,
+	// exactly as declared (quotes preserved for a string literal) — see
+	// pipeline.RoleConfigDir.Value's identical doc comment. nil for
+	// FromCurrent and both RESET forms.
+	Value *string
+	// FromCurrent is the "SET param FROM CURRENT" form.
+	FromCurrent bool
+	// Reset marks either RESET form; ResetAll distinguishes "RESET ALL"
+	// (Param empty) from "RESET param" (Param set).
+	Reset    bool
+	ResetAll bool
+	// InDatabase is the optional "IN DATABASE db" qualifier — nil means
+	// cluster-wide (every database).
+	InDatabase *string
+	Pos        pipeline.SourcePos
+}
 
 // Tablespace is a CREATE TABLESPACE declaration.
 type Tablespace struct {
