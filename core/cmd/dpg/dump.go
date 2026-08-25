@@ -2403,6 +2403,9 @@ func renderIndex(b *strings.Builder, idx *ir.Index, fmtOpts format.Options) {
 	if idx.Concurrently {
 		fmt.Fprintf(b, "%s ", kw("CONCURRENTLY"))
 	}
+	if idx.Only {
+		fmt.Fprintf(b, "%s ", kw("ONLY"))
+	}
 	b.WriteString(quoteIdentIfNeeded(idx.Name))
 	if idx.Method != "" && idx.Method != "btree" {
 		fmt.Fprintf(b, " %s %s", kw("USING"), idx.Method)
@@ -2413,12 +2416,35 @@ func renderIndex(b *strings.Builder, idx *ir.Index, fmtOpts format.Options) {
 			b.WriteString(", ")
 		}
 		if col.Expr != nil {
+			// RFC Section 7.7's own grammar requires an expression column's
+			// extra wrapping parens ("(" expr ")", distinct from the
+			// column-list's own) to unambiguously distinguish it from a
+			// column name optionally followed by an opclass (also
+			// commonly written "name(params)"-shaped, e.g.
+			// "doc tsvector_ops(siglen = 32)") — parseIndexColumnEntry
+			// only recognizes a leading '(' as the expression marker,
+			// matching real PostgreSQL's own identical requirement.
+			b.WriteString("(")
 			b.WriteString(col.Expr.Text)
+			b.WriteString(")")
 		} else {
 			// Index column names are emitted bare: the blockparser stores the
 			// column text verbatim and the differ's createIndex quotes it when
 			// generating SQL, so quoting here would double-quote it.
 			b.WriteString(col.Name)
+		}
+		if col.Collation != nil {
+			fmt.Fprintf(b, " %s %s", kw("COLLATE"), quoteIdentIfNeeded(col.Collation.Name))
+		}
+		if col.OpClass != nil {
+			fmt.Fprintf(b, " %s", col.OpClass.Name)
+			if len(col.OpClassParams) > 0 {
+				parts := make([]string, len(col.OpClassParams))
+				for i, p := range col.OpClassParams {
+					parts[i] = fmt.Sprintf("%s = %s", p.Key, p.Value)
+				}
+				fmt.Fprintf(b, "(%s)", strings.Join(parts, ", "))
+			}
 		}
 		if col.SortOrder != "" {
 			b.WriteString(" ")

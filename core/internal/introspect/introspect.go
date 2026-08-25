@@ -1417,17 +1417,7 @@ func parseIndexWith(def string) []pipeline.StorageParam {
 	if end < 0 {
 		return nil
 	}
-	var params []pipeline.StorageParam
-	for _, part := range strings.Split(rest[:end], ",") {
-		part = strings.TrimSpace(part)
-		if kv := strings.SplitN(part, "=", 2); len(kv) == 2 {
-			params = append(params, pipeline.StorageParam{
-				Key:   strings.TrimSpace(kv[0]),
-				Value: strings.TrimSpace(kv[1]),
-			})
-		}
-	}
-	return params
+	return parseIndexWithParams(rest[:end])
 }
 
 func splitIndexColumns(s string) []pipeline.IndexColumn {
@@ -1462,37 +1452,200 @@ func splitIndexColumns(s string) []pipeline.IndexColumn {
 	return cols
 }
 
+// splitIndexIdentToken reads one identifier token from the front of s: a
+// double-quoted identifier (with "" escaping) or a bare word up to the next
+// whitespace or '(' — mirrors blockparser's identically-named helper.
+// Returns the raw token (quotes included when quoted; callers Trim them)
+// and the remaining text, both with surrounding whitespace stripped.
+func splitIndexIdentToken(s string) (token, rest string) {
+	s = strings.TrimSpace(s)
+	if strings.HasPrefix(s, `"`) {
+		i := 1
+		for i < len(s) {
+			if s[i] == '"' {
+				if i+1 < len(s) && s[i+1] == '"' {
+					i += 2
+					continue
+				}
+				i++
+				break
+			}
+			i++
+		}
+		return s[:i], strings.TrimSpace(s[i:])
+	}
+	i := strings.IndexAny(s, " \t\n\r(")
+	if i < 0 {
+		return s, ""
+	}
+	return s[:i], strings.TrimSpace(s[i:])
+}
+
+// splitIndexParenGroup finds s's leading "(...)" group (s must start with
+// '(') and returns its inner text and everything after the closing paren.
+func splitIndexParenGroup(s string) (inner, rest string, ok bool) {
+	depth := 0
+	for i, ch := range s {
+		switch ch {
+		case '(':
+			depth++
+		case ')':
+			depth--
+			if depth == 0 {
+				return s[1:i], strings.TrimSpace(s[i+1:]), true
+			}
+		}
+	}
+	return "", "", false
+}
+
+func isIndexColTrailingKeyword(word string) bool {
+	switch strings.ToUpper(word) {
+	case "ASC", "DESC", "NULLS":
+		return true
+	default:
+		return false
+	}
+}
+
+// parseIndexColumn parses one index-col entry from a pg_get_indexdef()
+// reconstruction, in real PostgreSQL's own actual clause order (confirmed
+// live via pg_query.Parse): column name or expression, then optional
+// COLLATE identifier, then optional opclass [(params)], then optional
+// ASC/DESC, then optional NULLS FIRST/LAST — mirrors blockparser's
+// identically-rewritten parseIndexColumnEntry (see its doc comment for the
+// bug this replaced: any entry containing '(' anywhere, including a bare
+// opclass with parameters, e.g. "doc tsvector_ops(siglen = 32)", used to be
+// swallowed whole into one bogus expression column).
+//
+// Unlike blockparser's version, the captured Expr.Text here is left exactly
+// as pg_get_indexdef wrote it (parens included, un-stripped) rather than
+// normalized — confirmed live that PostgreSQL's own deparser is
+// inconsistent about wrapping: a raw "(a+b)" reconstructs with an extra
+// defensive layer ("((a + b))" as the whole list item), while a function
+// call like "lower(email)" does not gain one. This matches this codebase's
+// existing "never change what's stored, only what's used to decide drift"
+// precedent (see stripOuterParens/normalizeExprForCompare) — diffIndexes
+// does not currently apply that normalization to index-column expressions
+// specifically (only to WHERE), a separate, pre-existing gap out of this
+// item's scope, not introduced or fixed here.
 func parseIndexColumn(s string) pipeline.IndexColumn {
 	col := pipeline.IndexColumn{}
-	upper := strings.ToUpper(s)
+	s = strings.TrimSpace(s)
 
-	if strings.HasSuffix(upper, " NULLS LAST") {
-		col.Nulls = "LAST"
-		s = strings.TrimSpace(s[:len(s)-len(" NULLS LAST")])
-		upper = strings.ToUpper(s)
-	} else if strings.HasSuffix(upper, " NULLS FIRST") {
-		col.Nulls = "FIRST"
-		s = strings.TrimSpace(s[:len(s)-len(" NULLS FIRST")])
-		upper = strings.ToUpper(s)
+	switch {
+	case strings.HasPrefix(s, "("):
+		// A parenthesized expression — find ITS matching close paren
+		// (not necessarily the end of s: a trailing DESC/NULLS can still
+		// follow, e.g. pg_get_indexdef's own "((a + b)) DESC" reconstruction)
+		// and keep everything up to and including it, verbatim.
+		if end, ok := matchingParenEnd(s, 0); ok {
+			col.Expr = &pipeline.RawExpr{Text: stripStringLiteralCasts(s[:end+1])}
+			s = strings.TrimSpace(s[end+1:])
+		} else {
+			col.Expr = &pipeline.RawExpr{Text: stripStringLiteralCasts(s)}
+			return col
+		}
+	default:
+		i := strings.IndexAny(s, " \t\n\r(")
+		if i >= 0 && s[i] == '(' {
+			// An identifier immediately followed by '(' with no
+			// intervening whitespace: real PostgreSQL's func_expr_
+			// windowless index_elem alternative (confirmed live) — the
+			// identifier and its call are one inseparable expression, not
+			// a column name followed by an opclass (which pg_get_indexdef
+			// always reconstructs with an intervening space before its own
+			// optional "(params)", e.g. "tsvector_ops (siglen='32')").
+			if end, ok := matchingParenEnd(s, i); ok {
+				col.Expr = &pipeline.RawExpr{Text: stripStringLiteralCasts(s[:end+1])}
+				s = strings.TrimSpace(s[end+1:])
+			} else {
+				col.Expr = &pipeline.RawExpr{Text: stripStringLiteralCasts(s)}
+				return col
+			}
+		} else {
+			var name string
+			name, s = splitIndexIdentToken(s)
+			col.Name = strings.Trim(name, `"`)
+		}
 	}
 
-	if strings.HasSuffix(upper, " DESC") {
+	// COLLATE/opclass never follow an expression column in this parser —
+	// same deliberate scoping as blockparser's mirrored function.
+	if col.Expr == nil {
+		if word, rest := splitIndexIdentToken(s); strings.ToUpper(word) == "COLLATE" {
+			var collName string
+			collName, s = splitIndexIdentToken(rest)
+			col.Collation = &pipeline.Identifier{Name: strings.Trim(collName, `"`)}
+		}
+
+		if s != "" {
+			if word, rest := splitIndexIdentToken(s); !isIndexColTrailingKeyword(word) {
+				col.OpClass = &pipeline.Identifier{Name: strings.Trim(word, `"`)}
+				s = rest
+				if strings.HasPrefix(s, "(") {
+					if inner, rest2, ok := splitIndexParenGroup(s); ok {
+						col.OpClassParams = parseIndexWithParams(inner)
+						s = rest2
+					}
+				}
+			}
+		}
+	}
+
+	if word, rest := splitIndexIdentToken(s); strings.ToUpper(word) == "DESC" {
 		col.SortOrder = "DESC"
-		s = strings.TrimSpace(s[:len(s)-len(" DESC")])
-	} else if strings.HasSuffix(upper, " ASC") {
+		s = rest
+	} else if strings.ToUpper(word) == "ASC" {
 		col.SortOrder = "ASC"
-		s = strings.TrimSpace(s[:len(s)-len(" ASC")])
+		s = rest
 	}
 
-	if strings.ContainsRune(s, '(') {
-		// Strip PG-added ::typename casts (e.g. to_tsvector('english'::regconfig, e)
-		// vs hand-written to_tsvector('english', e)) so an unchanged expression
-		// index doesn't show as spurious drift against a live catalog.
-		col.Expr = &pipeline.RawExpr{Text: stripStringLiteralCasts(s)}
-	} else {
-		col.Name = strings.Trim(s, `"`)
+	if word, rest := splitIndexIdentToken(s); strings.ToUpper(word) == "NULLS" {
+		if word2, _ := splitIndexIdentToken(rest); strings.ToUpper(word2) == "FIRST" {
+			col.Nulls = "FIRST"
+		} else if strings.ToUpper(word2) == "LAST" {
+			col.Nulls = "LAST"
+		}
 	}
+
 	return col
+}
+
+// matchingParenEnd returns the index (within s) of the ')' that closes the
+// '(' at s[open], or ok=false if unbalanced.
+func matchingParenEnd(s string, open int) (end int, ok bool) {
+	depth := 0
+	for i := open; i < len(s); i++ {
+		switch s[i] {
+		case '(':
+			depth++
+		case ')':
+			depth--
+			if depth == 0 {
+				return i, true
+			}
+		}
+	}
+	return 0, false
+}
+
+// parseIndexWithParams parses a plain "key = value, key2 = value2" list —
+// an opclass parameter list's shape, same as WITH (...)'s but without any
+// quoting stripped (opclass parameter values are typically bare numbers or
+// identifiers, e.g. siglen = 32).
+func parseIndexWithParams(raw string) []pipeline.StorageParam {
+	var params []pipeline.StorageParam
+	for _, part := range strings.Split(raw, ",") {
+		part = strings.TrimSpace(part)
+		if kv := strings.SplitN(part, "=", 2); len(kv) == 2 {
+			params = append(params, pipeline.StorageParam{
+				Key:   strings.TrimSpace(kv[0]),
+				Value: strings.TrimSpace(kv[1]),
+			})
+		}
+	}
+	return params
 }
 
 func introspectPolicies(ctx context.Context, conn pipeline.Querier, idx map[string]*ir.Table) error {

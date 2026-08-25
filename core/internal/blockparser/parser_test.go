@@ -1933,6 +1933,123 @@ func TestIndexSortOrderAndInclude(t *testing.T) {
 	}
 }
 
+// TestIndexOnlyPrefix guards RFC Section 7.7's ON ONLY prefix keyword —
+// positioned exactly where real PostgreSQL's CREATE INDEX ... ON ONLY table
+// puts it, after CONCURRENTLY and before the index name.
+func TestIndexOnlyPrefix(t *testing.T) {
+	ast := parse(t, `INDICES { ONLY idx_p (a); }`)
+	idx := ast.Indices[0]
+	if !idx.Only {
+		t.Error("expected Only = true")
+	}
+}
+
+func TestIndexUniqueConcurrentlyOnlyPrefixOrder(t *testing.T) {
+	ast := parse(t, `INDICES { UNIQUE CONCURRENTLY ONLY idx_p (a); }`)
+	idx := ast.Indices[0]
+	if !idx.Unique || !idx.Concurrently || !idx.Only {
+		t.Errorf("expected Unique/Concurrently/Only all true, got %+v", idx)
+	}
+}
+
+// TestIndexOpclassWithParams is the regression guard for RFC audit item
+// #10: real PostgreSQL's own index_elem grammar order is "column [COLLATE
+// collation] [opclass[(params)]] [ASC|DESC] [NULLS FIRST|LAST]" (confirmed
+// live via pg_query.Parse — RFC Section 7.7's own ABNF lists them in the
+// reverse order, which real PostgreSQL's parser rejects). The previous
+// parser never recognized COLLATE or opclass at all: any entry containing
+// '(' anywhere, including "doc tsvector_ops(siglen = 32)" (a column name
+// plus an opclass with parameters, RFC Section 7.7's own worked example),
+// was silently swallowed whole into one bogus expression column.
+func TestIndexOpclassWithParams(t *testing.T) {
+	ast := parse(t, `INDICES { idx_doc USING gist (doc tsvector_ops(siglen = 32)); }`)
+	idx := ast.Indices[0]
+	if len(idx.Columns) != 1 {
+		t.Fatalf("expected 1 column, got %d: %+v", len(idx.Columns), idx.Columns)
+	}
+	col := idx.Columns[0]
+	if col.Name != "doc" {
+		t.Errorf("Name: got %q, want %q", col.Name, "doc")
+	}
+	if col.OpClass == nil || col.OpClass.Name != "tsvector_ops" {
+		t.Fatalf("OpClass: got %+v", col.OpClass)
+	}
+	if len(col.OpClassParams) != 1 || col.OpClassParams[0].Key != "siglen" || col.OpClassParams[0].Value != "32" {
+		t.Errorf("OpClassParams: got %+v", col.OpClassParams)
+	}
+}
+
+// TestIndexOpclassBareNoParams guards the simpler, far more common bare-
+// opclass form (no parameters) still works after the rewrite.
+func TestIndexOpclassBareNoParams(t *testing.T) {
+	ast := parse(t, `INDICES { idx_a (a varchar_pattern_ops); }`)
+	col := ast.Indices[0].Columns[0]
+	if col.Name != "a" {
+		t.Errorf("Name: got %q", col.Name)
+	}
+	if col.OpClass == nil || col.OpClass.Name != "varchar_pattern_ops" {
+		t.Fatalf("OpClass: got %+v", col.OpClass)
+	}
+	if len(col.OpClassParams) != 0 {
+		t.Errorf("OpClassParams: expected none, got %+v", col.OpClassParams)
+	}
+}
+
+// TestIndexCollateOpclassSortOrder guards the full clause combination in
+// real PostgreSQL's own fixed order: name, COLLATE, opclass, DESC, NULLS
+// LAST all on one column.
+func TestIndexCollateOpclassSortOrder(t *testing.T) {
+	ast := parse(t, `INDICES { idx_a (a COLLATE "en_US" text_pattern_ops DESC NULLS LAST); }`)
+	col := ast.Indices[0].Columns[0]
+	if col.Name != "a" {
+		t.Errorf("Name: got %q", col.Name)
+	}
+	if col.Collation == nil || col.Collation.Name != "en_US" {
+		t.Fatalf("Collation: got %+v", col.Collation)
+	}
+	if col.OpClass == nil || col.OpClass.Name != "text_pattern_ops" {
+		t.Fatalf("OpClass: got %+v", col.OpClass)
+	}
+	if col.SortOrder != "DESC" || col.Nulls != "LAST" {
+		t.Errorf("SortOrder/Nulls: got %q/%q", col.SortOrder, col.Nulls)
+	}
+}
+
+// TestIndexExpressionColumnStillParses guards the pre-existing expression-
+// column form (RFC Section 7.7's "(" expr ")") still works after the
+// rewrite from suffix-stripping to left-to-right parsing — including a
+// trailing DESC after the expression's own closing paren.
+func TestIndexExpressionColumnStillParses(t *testing.T) {
+	ast := parse(t, `INDICES { idx_e ((lower(email)) DESC); }`)
+	col := ast.Indices[0].Columns[0]
+	if col.Expr == nil || col.Expr.Text != "lower(email)" {
+		t.Fatalf("Expr: got %+v", col.Expr)
+	}
+	if col.SortOrder != "DESC" {
+		t.Errorf("SortOrder: got %q, want DESC", col.SortOrder)
+	}
+}
+
+// TestIndexExpressionColumnBareFunctionCall guards a bare function-call
+// expression written WITHOUT the RFC-recommended extra wrapping parens
+// (e.g. "lower(email)" instead of "(lower(email))") still parses as one
+// expression rather than being silently misread as a column named "lower"
+// followed by a bogus empty opclass — real PostgreSQL's own
+// func_expr_windowless index_elem alternative allows this form directly.
+func TestIndexExpressionColumnBareFunctionCall(t *testing.T) {
+	ast := parse(t, `INDICES { idx_e (lower(email) DESC); }`)
+	col := ast.Indices[0].Columns[0]
+	if col.Name != "" {
+		t.Errorf("Name: got %q, want empty (this must parse as an expression)", col.Name)
+	}
+	if col.Expr == nil || col.Expr.Text != "lower(email)" {
+		t.Fatalf("Expr: got %+v", col.Expr)
+	}
+	if col.SortOrder != "DESC" {
+		t.Errorf("SortOrder: got %q, want DESC", col.SortOrder)
+	}
+}
+
 // ── OPERATOR FAMILY loose members (RFC §14.4) ─────────────────────────────────
 
 // TestOpFamilyMemberCommaSeparatedList guards the approved source style: a

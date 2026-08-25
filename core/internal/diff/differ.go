@@ -3388,6 +3388,9 @@ func createIndex(schema, table string, idx *ir.Index, concurrent bool) []pipelin
 	}
 	b.WriteString(quoteIdent(idx.Name))
 	b.WriteString(" ON ")
+	if idx.Only {
+		b.WriteString("ONLY ")
+	}
 	b.WriteString(qualIdent(schema, table))
 	if idx.Method != "" && idx.Method != "btree" {
 		b.WriteString(" USING ")
@@ -3404,6 +3407,30 @@ func createIndex(schema, table string, idx *ir.Index, concurrent bool) []pipelin
 			b.WriteString("(")
 			b.WriteString(col.Expr.Text)
 			b.WriteString(")")
+		}
+		// COLLATE and opclass[(params)] come immediately after the column/
+		// expression, before ASC/DESC/NULLS — real PostgreSQL's own fixed
+		// index_elem clause order (confirmed live: "a DESC COLLATE x" is a
+		// syntax error, "a COLLATE x DESC" is not).
+		if col.Collation != nil {
+			b.WriteString(" COLLATE ")
+			b.WriteString(quoteIdent(col.Collation.Name))
+		}
+		if col.OpClass != nil {
+			b.WriteString(" ")
+			b.WriteString(col.OpClass.Name)
+			if len(col.OpClassParams) > 0 {
+				b.WriteString("(")
+				for i, p := range col.OpClassParams {
+					if i > 0 {
+						b.WriteString(", ")
+					}
+					b.WriteString(p.Key)
+					b.WriteString(" = ")
+					b.WriteString(p.Value)
+				}
+				b.WriteString(")")
+			}
 		}
 		if col.SortOrder != "" {
 			b.WriteString(" ")

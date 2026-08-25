@@ -632,6 +632,19 @@ func ToSnapIndex(idx *ir.Index) SnapIndex {
 		} else if c.Expr != nil {
 			s = "(" + c.Expr.Text + ")"
 		}
+		// Collation/OpClass(Params) must be part of this comparison string
+		// too, or a changed one is invisible to diffing — matching real
+		// PostgreSQL's own index_elem clause order (COLLATE/opclass come
+		// before ASC/DESC/NULLS, confirmed live).
+		if c.Collation != nil {
+			s += " COLLATE " + c.Collation.Name
+		}
+		if c.OpClass != nil {
+			s += " " + c.OpClass.Name
+			if len(c.OpClassParams) > 0 {
+				s += "(" + flattenParams(c.OpClassParams) + ")"
+			}
+		}
 		if c.SortOrder != "" {
 			s += " " + c.SortOrder
 		}

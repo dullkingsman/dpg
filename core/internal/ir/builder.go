@@ -3465,6 +3465,7 @@ func blockIndexToIR(idx pipeline.IndexDef) *Index {
 		Name:         idx.Name.Name,
 		Unique:       idx.Unique,
 		Concurrently: idx.Concurrently,
+		Only:         idx.Only,
 		Columns:      idx.Columns,
 		Pos:          idx.Pos,
 	}

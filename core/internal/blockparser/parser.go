@@ -966,11 +966,26 @@ func (b *blockParser) parseOneIndex(presetUnique bool) (pipeline.IndexDef, error
 		b.restore(c)
 	}
 
+	// [ONLY] is a bare presence keyword too (RFC Section 7.7), positioned
+	// exactly where real PostgreSQL's own CREATE [UNIQUE] INDEX
+	// [CONCURRENTLY] [ONLY] table_name puts it — after CONCURRENTLY,
+	// before the index name (DPG's INDICES block omits the implicit
+	// "ON table_name" itself, but keeps every prefix keyword's own order).
+	b.skipWS()
+	c = b.cur()
+	w = strings.ToUpper(b.readWord())
+	only := false
+	if w == "ONLY" {
+		only = true
+	} else {
+		b.restore(c)
+	}
+
 	name, err := b.readIdentifier()
 	if err != nil {
 		return pipeline.IndexDef{}, err
 	}
-	idx := pipeline.IndexDef{Name: name, Unique: unique, Concurrently: concurrently, Pos: pos}
+	idx := pipeline.IndexDef{Name: name, Unique: unique, Concurrently: concurrently, Only: only, Pos: pos}
 
 	// Check optional USING method — mirrors real PostgreSQL's own
 	// CREATE INDEX name ON table USING method (columns) order, and matches
@@ -1167,36 +1182,173 @@ func splitTopLevel(s string, sep rune) []string {
 	return parts
 }
 
-// parseIndexColumnEntry parses one index-column entry: an expression "(…)" or a
-// (possibly quoted) column name, followed by optional ASC/DESC and NULLS
-// FIRST/LAST. It mirrors the introspector's parseIndexColumn so a dumped index
-// column ("col DESC NULLS LAST") round-trips to the same IndexColumn rather than
-// being stored — and then quoted — as one literal identifier.
+// splitIndexIdentToken reads one identifier token from the front of s: a
+// double-quoted identifier (with "" escaping) or a bare word up to the next
+// whitespace or '(' — used by parseIndexColumnEntry's left-to-right walk
+// over an index-col entry's trailing clauses. Returns the raw token
+// (quotes included when quoted; callers Trim them) and the remaining text,
+// both with surrounding whitespace already stripped.
+func splitIndexIdentToken(s string) (token, rest string) {
+	s = strings.TrimSpace(s)
+	if strings.HasPrefix(s, `"`) {
+		i := 1
+		for i < len(s) {
+			if s[i] == '"' {
+				if i+1 < len(s) && s[i+1] == '"' {
+					i += 2
+					continue
+				}
+				i++
+				break
+			}
+			i++
+		}
+		return s[:i], strings.TrimSpace(s[i:])
+	}
+	i := strings.IndexAny(s, " \t\n\r(")
+	if i < 0 {
+		return s, ""
+	}
+	return s[:i], strings.TrimSpace(s[i:])
+}
+
+// splitIndexParenGroup finds s's leading "(...)" group (s must start with
+// '(') and returns its inner text and everything after the closing paren.
+// ok is false for an unbalanced/missing group, in which case rest is
+// unspecified.
+func splitIndexParenGroup(s string) (inner, rest string, ok bool) {
+	depth := 0
+	for i, ch := range s {
+		switch ch {
+		case '(':
+			depth++
+		case ')':
+			depth--
+			if depth == 0 {
+				return s[1:i], strings.TrimSpace(s[i+1:]), true
+			}
+		}
+	}
+	return "", "", false
+}
+
+// parseIndexColumnEntry parses one index-col entry per real PostgreSQL's own
+// CREATE INDEX grammar and left-to-right clause order (verified live via
+// direct pg_query.Parse — RFC §7.7's own ABNF lists ASC/DESC/NULLS before
+// COLLATE/opclass, the reverse of what PostgreSQL's parser actually accepts,
+// e.g. "a DESC COLLATE x" is a syntax error but "a COLLATE x DESC" is not):
+// column name or "(expr)", then optional COLLATE identifier, then optional
+// opclass [(params)], then optional ASC/DESC, then optional NULLS
+// FIRST/LAST. It mirrors the introspector's parseIndexColumn so a dumped
+// index column round-trips to the same IndexColumn rather than being stored
+// — and then quoted — as one literal identifier.
+//
+// The previous version only ever stripped a trailing ASC/DESC/NULLS suffix
+// and treated anything else containing '(' as one opaque expression — which
+// silently mishandled COLLATE and swallowed an opclass with parameters
+// (e.g. "doc tsvector_ops(siglen = 32)") into a single bogus expression
+// column, producing invalid SQL. COLLATE/opclass were declared on
+// IndexColumn already but never reached by this parser at all.
 func parseIndexColumnEntry(s string) pipeline.IndexColumn {
 	col := pipeline.IndexColumn{}
-	upper := strings.ToUpper(s)
-	if strings.HasSuffix(upper, " NULLS LAST") {
-		col.Nulls = "LAST"
-		s = strings.TrimSpace(s[:len(s)-len(" NULLS LAST")])
-		upper = strings.ToUpper(s)
-	} else if strings.HasSuffix(upper, " NULLS FIRST") {
-		col.Nulls = "FIRST"
-		s = strings.TrimSpace(s[:len(s)-len(" NULLS FIRST")])
-		upper = strings.ToUpper(s)
+	s = strings.TrimSpace(s)
+
+	switch {
+	case strings.HasPrefix(s, "("):
+		// A fully parenthesized expression (RFC's "(" expr ")" production).
+		// The stored Expr.Text is the INNER text only, without the marker
+		// parens — dump.go's renderIndex re-adds exactly one wrapping
+		// layer when rendering back to DPG source, so this round-trips.
+		if inner, rest, ok := splitIndexParenGroup(s); ok {
+			col.Expr = &pipeline.RawExpr{Text: inner}
+			s = rest
+		} else {
+			col.Expr = &pipeline.RawExpr{Text: s}
+			return col
+		}
+	default:
+		i := strings.IndexAny(s, " \t\n\r(")
+		if i >= 0 && s[i] == '(' {
+			// An identifier immediately followed by '(' with no
+			// intervening whitespace: real PostgreSQL's func_expr_
+			// windowless index_elem alternative (confirmed live) — the
+			// identifier and its call are one inseparable expression, not
+			// a column name that happens to be followed by an opclass
+			// (which always has at least one space before it, e.g.
+			// pg_get_indexdef's own "tsvector_ops (siglen='32')"
+			// reconstruction). Not stripped/re-wrapped like the leading-
+			// paren case above: dump.go writes col.Expr.Text verbatim for
+			// this shape (see its own doc comment).
+			if inner, rest, ok := splitIndexParenGroup(s[i:]); ok {
+				col.Expr = &pipeline.RawExpr{Text: s[:i] + "(" + inner + ")"}
+				s = rest
+			} else {
+				col.Expr = &pipeline.RawExpr{Text: s}
+				return col
+			}
+		} else {
+			var name string
+			name, s = splitIndexIdentToken(s)
+			col.Name = strings.Trim(name, `"`)
+		}
 	}
-	if strings.HasSuffix(upper, " DESC") {
+
+	// COLLATE/opclass never follow an expression column in this parser
+	// (RFC audit item #10's own worked example, like every other case
+	// this codebase has needed so far, pairs opclass with a plain column
+	// name — a deliberately unmodeled corner case, not a limitation of
+	// the grammar itself).
+	if col.Expr == nil {
+		if word, rest := splitIndexIdentToken(s); strings.ToUpper(word) == "COLLATE" {
+			var collName string
+			collName, s = splitIndexIdentToken(rest)
+			col.Collation = &pipeline.Identifier{Name: strings.Trim(collName, `"`)}
+		}
+
+		if s != "" {
+			if word, rest := splitIndexIdentToken(s); !isIndexColTrailingKeyword(word) {
+				col.OpClass = &pipeline.Identifier{Name: strings.Trim(word, `"`)}
+				s = rest
+				if strings.HasPrefix(s, "(") {
+					if inner, rest2, ok := splitIndexParenGroup(s); ok {
+						col.OpClassParams = parseStorageParams(inner)
+						s = rest2
+					}
+				}
+			}
+		}
+	}
+
+	if word, rest := splitIndexIdentToken(s); strings.ToUpper(word) == "DESC" {
 		col.SortOrder = "DESC"
-		s = strings.TrimSpace(s[:len(s)-len(" DESC")])
-	} else if strings.HasSuffix(upper, " ASC") {
+		s = rest
+	} else if strings.ToUpper(word) == "ASC" {
 		col.SortOrder = "ASC"
-		s = strings.TrimSpace(s[:len(s)-len(" ASC")])
+		s = rest
 	}
-	if strings.ContainsRune(s, '(') {
-		col.Expr = &pipeline.RawExpr{Text: s}
-	} else {
-		col.Name = strings.Trim(s, `"`)
+
+	if word, rest := splitIndexIdentToken(s); strings.ToUpper(word) == "NULLS" {
+		if word2, _ := splitIndexIdentToken(rest); strings.ToUpper(word2) == "FIRST" {
+			col.Nulls = "FIRST"
+		} else if strings.ToUpper(word2) == "LAST" {
+			col.Nulls = "LAST"
+		}
 	}
+
 	return col
+}
+
+// isIndexColTrailingKeyword reports whether word is one of index-col's
+// trailing clause keywords (ASC/DESC/NULLS) rather than an opclass name —
+// used to decide whether the text remaining after a column/COLLATE is an
+// opclass at all.
+func isIndexColTrailingKeyword(word string) bool {
+	switch strings.ToUpper(word) {
+	case "ASC", "DESC", "NULLS":
+		return true
+	default:
+		return false
+	}
 }
 
 func parseStorageParams(raw string) []pipeline.StorageParam {

@@ -155,6 +155,16 @@ type Index struct {
 	With             []pipeline.StorageParam
 	Tablespace       *string
 	Concurrently     bool
+	// Only is RFC Section 7.7's ON ONLY prefix — suppresses recursion into
+	// a partitioned table's own partitions. A one-time CREATE-time
+	// modifier only, like Concurrently: PostgreSQL has no catalog column
+	// recording whether a given index was originally created with ONLY
+	// (its effect on whether child-partition indexes exist is a
+	// consequence, not a stored flag), so introspection never sets this
+	// and it deliberately has no SnapIndex counterpart — including it in
+	// the definition-comparison diffIndexes runs would create permanent
+	// spurious drift against every already-applied index declaring it.
+	Only bool
 	// RenamedFrom names the index's prior identity (RENAMED FROM, Section
 	// 7.7) — matched within the same table's index list; a bare name, no
 	// cross-schema form (see pipeline.IndexDef.RenamedFrom's doc comment).

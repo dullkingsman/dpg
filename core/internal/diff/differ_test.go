@@ -393,6 +393,84 @@ func TestDiffTableAccessMethodRemovedEmitsDefault(t *testing.T) {
 	}
 }
 
+// TestDiffCreateIndexWithOpclassParams is the regression guard for RFC
+// audit item #10: createIndex never rendered Collation/OpClass/
+// OpClassParams at all before this — a declared opclass with parameters
+// (RFC Section 7.7's own worked example) was silently dropped from the
+// generated SQL.
+func TestDiffCreateIndexWithOpclassParams(t *testing.T) {
+	d := New()
+	desired := []pipeline.IRObject{
+		&ir.Table{
+			Schema: "public", Name: "t",
+			Columns: []*ir.Column{{Name: "doc", Type: ir.TypeRef{Name: "tsvector"}}},
+			Indexes: []*ir.Index{
+				{
+					Name: "idx_doc", Method: "gist",
+					Columns: []pipeline.IndexColumn{{
+						Name:          "doc",
+						OpClass:       &pipeline.Identifier{Name: "tsvector_ops"},
+						OpClassParams: []pipeline.StorageParam{{Key: "siglen", Value: "32"}},
+					}},
+				},
+			},
+		},
+	}
+	ops, err := d.Diff(desired, &pipeline.Snapshot{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsSQL(ops, `"doc" tsvector_ops(siglen = 32)`) {
+		t.Errorf("expected opclass with params rendered, got: %v", sqlList(ops))
+	}
+}
+
+// TestDiffCreateIndexOnOnly proves RFC Section 7.7's ON ONLY prefix renders
+// into the generated CREATE INDEX statement.
+func TestDiffCreateIndexOnOnly(t *testing.T) {
+	d := New()
+	desired := []pipeline.IRObject{
+		&ir.Table{
+			Schema: "public", Name: "t",
+			Columns: []*ir.Column{{Name: "a", Type: ir.TypeRef{Name: "int4"}}},
+			Indexes: []*ir.Index{
+				{Name: "idx_a", Only: true, Columns: []pipeline.IndexColumn{{Name: "a"}}},
+			},
+		},
+	}
+	ops, err := d.Diff(desired, &pipeline.Snapshot{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsSQL(ops, `CREATE INDEX "idx_a" ON ONLY "public"."t"`) {
+		t.Errorf("expected ON ONLY, got: %v", sqlList(ops))
+	}
+}
+
+// TestDiffIndexOnlyNotComparedAsDrift proves Only is deliberately excluded
+// from diffIndexes' definition comparison (see ir.Index.Only's doc
+// comment): PostgreSQL has no catalog column recording it, so treating it
+// as ongoing drift would propose a spurious recreate on every plan against
+// an already-applied index.
+func TestDiffIndexOnlyNotComparedAsDrift(t *testing.T) {
+	d := New()
+	idx := baseFullIndex()
+	idx.Only = false
+	snap := &pipeline.Snapshot{}
+	if err := snapshot.Populate(snap, []pipeline.IRObject{baseFullIndexTable(idx)}); err != nil {
+		t.Fatal(err)
+	}
+	desiredIdx := baseFullIndex()
+	desiredIdx.Only = true
+	ops, err := d.Diff([]pipeline.IRObject{baseFullIndexTable(desiredIdx)}, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ops) != 0 {
+		t.Errorf("expected 0 ops (Only is not diffable drift), got: %v", sqlList(ops))
+	}
+}
+
 // TestDiffCreateTableWithExcludeConstraint proves a fresh CREATE TABLE
 // carrying a named EXCLUDE constraint emits the constraint's real SQL body
 // (via createTable's generic table-level rendering path — EXCLUDE isn't in
@@ -13397,6 +13475,12 @@ func TestDiffIndexContentChangeRecreates(t *testing.T) {
 			idx.With = []pipeline.StorageParam{{Key: "fillfactor", Value: "50"}}
 		}, "WITH (fillfactor=50)"},
 		{"nulls_not_distinct", func(idx *ir.Index) { idx.NullsNotDistinct = true }, "NULLS NOT DISTINCT"},
+		{"opclass", func(idx *ir.Index) {
+			idx.Columns[0].OpClass = &pipeline.Identifier{Name: "int4_ops"}
+		}, `"a" int4_ops`},
+		{"collation", func(idx *ir.Index) {
+			idx.Columns[0].Collation = &pipeline.Identifier{Name: "C"}
+		}, `"a" COLLATE "C"`},
 	}
 
 	for _, tc := range cases {

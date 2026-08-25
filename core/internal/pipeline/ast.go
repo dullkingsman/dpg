@@ -42,8 +42,13 @@ type IndexColumn struct {
 	Expr      *RawExpr
 	Collation *Identifier
 	OpClass   *Identifier
-	Nulls     string // "FIRST", "LAST", or ""
-	SortOrder string // "ASC", "DESC", or ""
+	// OpClassParams is RFC Section 7.7's opclass(param = value, ...) form —
+	// only meaningful when OpClass is set. Reuses StorageParam (the same
+	// shape a WITH (...) clause already uses) rather than inventing a
+	// parallel key/value type.
+	OpClassParams []StorageParam
+	Nulls         string // "FIRST", "LAST", or ""
+	SortOrder     string // "ASC", "DESC", or ""
 }
 
 // IndexDef is a DPG INDICES { } entry.
@@ -58,6 +63,13 @@ type IndexDef struct {
 	With             []StorageParam
 	Tablespace       *Identifier
 	Concurrently     bool
+	// Only is RFC Section 7.7's ON ONLY prefix — suppresses recursion into
+	// a partitioned table's own partitions, mirroring real PostgreSQL's
+	// CREATE INDEX ... ON ONLY table exactly. Meaningful only when the
+	// enclosing table has a PARTITION BY clause; combination validity is
+	// left to PostgreSQL's own parser, same passthrough principle used
+	// throughout this codebase.
+	Only bool
 	// RenamedFrom names the index's prior identity (RENAMED FROM, RFC
 	// Section 7.7) — real PostgreSQL's ALTER INDEX ... RENAME TO takes a
 	// bare new name only (moving schemas is a separate ALTER INDEX ... SET

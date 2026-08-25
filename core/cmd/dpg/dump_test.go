@@ -2505,6 +2505,14 @@ func TestRenderIndexVariantsRoundtrip(t *testing.T) {
 			{Name: "i_gin", Method: "gin", Columns: []pipeline.IndexColumn{{Expr: &pipeline.RawExpr{Text: "to_tsvector('english', \"MixedCol\")"}}}},
 			{Name: "i_nulls_nd", Unique: true, Columns: []pipeline.IndexColumn{{Name: "a"}}, NullsNotDistinct: true},
 			{Name: "i_with", Columns: []pipeline.IndexColumn{{Name: "a"}}, With: []pipeline.StorageParam{{Key: "fillfactor", Value: "70"}}},
+			{Name: "i_opclass", Columns: []pipeline.IndexColumn{{
+				Name:          "MixedCol",
+				Collation:     &pipeline.Identifier{Name: "C"},
+				OpClass:       &pipeline.Identifier{Name: "text_pattern_ops"},
+				OpClassParams: []pipeline.StorageParam{{Key: "siglen", Value: "32"}},
+				SortOrder:     "DESC",
+			}}},
+			{Name: "i_only", Only: true, Columns: []pipeline.IndexColumn{{Name: "a"}}},
 		},
 	}
 	var b strings.Builder
@@ -2527,7 +2535,7 @@ func TestRenderIndexVariantsRoundtrip(t *testing.T) {
 	byName := map[string]string{}
 	for _, o := range ops {
 		sql := o.SQL()
-		for _, n := range []string{"i_uniq", "i_sort", "i_partial", "i_cover", "i_expr", "i_gin", "i_nulls_nd", "i_with"} {
+		for _, n := range []string{"i_uniq", "i_sort", "i_partial", "i_cover", "i_expr", "i_gin", "i_nulls_nd", "i_with", "i_opclass", "i_only"} {
 			if strings.Contains(sql, `"`+n+`"`) {
 				byName[n] = sql
 			}
@@ -2544,6 +2552,8 @@ func TestRenderIndexVariantsRoundtrip(t *testing.T) {
 		"i_gin":      {`USING gin`, `to_tsvector('english', "MixedCol")`},
 		"i_nulls_nd": {`CREATE UNIQUE INDEX "i_nulls_nd"`, `NULLS NOT DISTINCT`},
 		"i_with":     {`("a")`, `WITH (fillfactor=70)`},
+		"i_opclass":  {`"MixedCol" COLLATE "C" text_pattern_ops(siglen = 32) DESC`},
+		"i_only":     {`ON ONLY "public"."t"`},
 	}
 	for name, wants := range checks {
 		sql, ok := byName[name]

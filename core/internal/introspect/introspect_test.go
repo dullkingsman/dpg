@@ -251,3 +251,57 @@ func TestSplitIndexColumns(t *testing.T) {
 		t.Errorf("col[1]: want {Name:c SortOrder:DESC}, got %+v", cols[1])
 	}
 }
+
+// TestParseIndexColumnOpclassWithParams is the regression guard for RFC
+// audit item #10, live-verified via pg_get_indexdef's own reconstruction
+// (confirmed: PostgreSQL always inserts a space before an opclass's own
+// "(params)", e.g. "tsvector_ops (siglen='32')") — previously any entry
+// containing '(' anywhere, including this shape, was swallowed whole into
+// one bogus expression column.
+func TestParseIndexColumnOpclassWithParams(t *testing.T) {
+	got := parseIndexColumn(`doc tsvector_ops (siglen='32')`)
+	if got.Name != "doc" {
+		t.Errorf("Name: got %q, want %q", got.Name, "doc")
+	}
+	if got.OpClass == nil || got.OpClass.Name != "tsvector_ops" {
+		t.Fatalf("OpClass: got %+v", got.OpClass)
+	}
+	if len(got.OpClassParams) != 1 || got.OpClassParams[0].Key != "siglen" || got.OpClassParams[0].Value != "'32'" {
+		t.Errorf("OpClassParams: got %+v", got.OpClassParams)
+	}
+}
+
+// TestParseIndexColumnCollateOpclassSortOrder guards the full clause
+// combination in pg_get_indexdef's own reconstructed order, confirmed live:
+// "email COLLATE \"C\" varchar_pattern_ops DESC NULLS LAST".
+func TestParseIndexColumnCollateOpclassSortOrder(t *testing.T) {
+	got := parseIndexColumn(`email COLLATE "C" varchar_pattern_ops DESC NULLS LAST`)
+	if got.Name != "email" {
+		t.Errorf("Name: got %q", got.Name)
+	}
+	if got.Collation == nil || got.Collation.Name != "C" {
+		t.Fatalf("Collation: got %+v", got.Collation)
+	}
+	if got.OpClass == nil || got.OpClass.Name != "varchar_pattern_ops" {
+		t.Fatalf("OpClass: got %+v", got.OpClass)
+	}
+	if got.SortOrder != "DESC" || got.Nulls != "LAST" {
+		t.Errorf("SortOrder/Nulls: got %q/%q", got.SortOrder, got.Nulls)
+	}
+}
+
+// TestParseIndexColumnDoubleWrappedExpressionWithSortOrder guards
+// pg_get_indexdef's confirmed-live inconsistency: a raw operator expression
+// like "a+b" reconstructs with an extra defensive wrapping layer as a whole
+// list item ("((a + b))"), unlike a function call ("lower(email)", which
+// gets none) — and a trailing DESC after that expression's own closing
+// paren must still be recognized, not swallowed into Expr.Text.
+func TestParseIndexColumnDoubleWrappedExpressionWithSortOrder(t *testing.T) {
+	got := parseIndexColumn(`((a + b)) DESC`)
+	if got.Expr == nil || got.Expr.Text != "((a + b))" {
+		t.Fatalf("Expr: got %+v, want Text = \"((a + b))\"", got.Expr)
+	}
+	if got.SortOrder != "DESC" {
+		t.Errorf("SortOrder: got %q, want DESC", got.SortOrder)
+	}
+}
