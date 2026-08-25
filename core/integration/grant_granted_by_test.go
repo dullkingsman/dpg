@@ -26,8 +26,16 @@ import (
 // environment, and is what this test exercises. Proves: (a) a declared
 // GRANT ... GRANTED BY CURRENT_USER actually applies without error and the
 // live ACL entry's grantor is the connecting role, (b) a second plan
-// against the same declaration is a genuine no-op, and (c) an explicit
+// against the same declaration is a genuine no-op both offline (against the
+// stored snapshot) and against live-introspected state, and (c) an explicit
 // REVOCATIONS entry with GRANTED BY CURRENT_USER actually revokes it live.
+//
+// The live-introspection no-op check in particular guards a real regression:
+// introspectTableGrants now populates ir.Grant.GrantedBy from the real
+// resolved grantor (pg_get_userbyid(a.grantor)), which is a concrete role
+// name like "postgres", never the symbolic "CURRENT_USER" declared in
+// source — diffGrantSet's grantedByMatches helper is what keeps that from
+// looking like drift.
 func TestRoundtripGrantGrantedBy(t *testing.T) {
 	connStr := testpg.Start(t)
 	ctx := context.Background()
@@ -97,15 +105,7 @@ TABLE orders (id INT) {
 
 	// The offline dpg plan path (desired vs. the stored snapshot of last-
 	// declared state, not live introspection) must already be a no-op for
-	// the unchanged declaration. Deliberately not checking live-introspection
-	// drift here (e.g. via assertNoLiveDrift): introspectTableGrants never
-	// captures grantor into ir.Grant.GrantedBy at all (a separate, still-open
-	// gap from the self-grant filter fixed alongside this test — see
-	// TestRoundtripTableGrantSelfGrantNoLiveDrift), so a live-introspected
-	// Grant for this table always has GrantedBy == nil; diffGrantSet's
-	// "declared, so managed" rule then sees the declared GRANTED BY
-	// CURRENT_USER as mismatched against that nil and proposes a spurious
-	// REVOKE+GRANT. Flagged separately; out of scope for GRANTED BY itself.
+	// the unchanged declaration.
 	desired, _, err := compiler.Compile([]string{f}, dir, pipeline.Default)
 	if err != nil {
 		t.Fatalf("compile: %v", err)
@@ -118,6 +118,11 @@ TABLE orders (id INT) {
 	if len(replanOps) != 0 {
 		t.Errorf("expected no ops replanning the unchanged declaration, got: %v", replanOps)
 	}
+
+	// Also no-op against live-introspected state, not just the stored
+	// snapshot — see this test's own doc comment for why this specifically
+	// exercises grantedByMatches.
+	assertNoLiveDrift(t, ctx, conn, []string{f}, dir, differ, store)
 
 	// v2: an explicit REVOCATIONS entry with GRANTED BY CURRENT_USER must
 	// actually revoke it live.
@@ -136,20 +141,19 @@ TABLE orders (id INT) {
 	}
 }
 
-// TestRoundtripTableGrantSelfGrantNoLiveDrift guards a bug found flagged
-// (not by GRANTED BY itself, which needs a separate, still-open gap in
-// introspectTableGrants worked around above): introspectTableGrants had no
-// grantor<>grantee filter, unlike introspectColumnGrants. PostgreSQL
-// materializes the object owner's own full privilege set into a real
-// aclitem row the moment ANY explicit GRANT touches a table (confirmed live
-// via direct psql: an untouched table's relacl is NULL, but gains a real
-// "owner=<privs>/owner" entry alongside the first explicit GRANT); without
-// the filter, introspection read that synthesized self-grant back as an
-// "extra" live grant and diffGrantSet's live-comparison path proposed
-// REVOKEing it — contradicting RFC Section 11.2's own explicit "does NOT
-// report extra grants present in the live catalog but absent from DPG
-// source" text. This test uses a plain GRANT with no GRANTED BY, so it
-// isolates the self-grant fix from the separate GrantedBy-introspection gap.
+// TestRoundtripTableGrantSelfGrantNoLiveDrift guards a bug found separately
+// from GRANTED BY itself: introspectTableGrants had no grantor<>grantee
+// filter, unlike introspectColumnGrants. PostgreSQL materializes the object
+// owner's own full privilege set into a real aclitem row the moment ANY
+// explicit GRANT touches a table (confirmed live via direct psql: an
+// untouched table's relacl is NULL, but gains a real "owner=<privs>/owner"
+// entry alongside the first explicit GRANT); without the filter,
+// introspection read that synthesized self-grant back as an "extra" live
+// grant and diffGrantSet's live-comparison path proposed REVOKEing it —
+// contradicting RFC Section 11.2's own explicit "does NOT report extra
+// grants present in the live catalog but absent from DPG source" text. This
+// test uses a plain GRANT with no GRANTED BY, isolating the self-grant fix
+// from the GrantedBy-introspection fix TestRoundtripGrantGrantedBy exercises.
 func TestRoundtripTableGrantSelfGrantNoLiveDrift(t *testing.T) {
 	connStr := testpg.Start(t)
 	ctx := context.Background()

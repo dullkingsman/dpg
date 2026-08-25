@@ -377,6 +377,7 @@ func introspectAggregateGrants(ctx context.Context, conn pipeline.Querier, idx m
 SELECT n.nspname, p.proname,
        pg_get_function_identity_arguments(p.oid) AS args,
        CASE WHEN a.grantee = 0 THEN 'PUBLIC' ELSE pg_get_userbyid(a.grantee) END AS grantee,
+       pg_get_userbyid(a.grantor) AS grantor,
        a.privilege_type, a.is_grantable
 FROM   pg_proc p
 JOIN   pg_namespace n ON n.oid = p.pronamespace,
@@ -392,7 +393,7 @@ ORDER  BY n.nspname, p.proname, args, grantee, a.privilege_type`
 	}
 	defer rs.Close()
 
-	type grantKey struct{ schema, name, args, grantee string }
+	type grantKey struct{ schema, name, args, grantee, grantor string }
 	type grantEntry struct {
 		privs     []string
 		grantable bool
@@ -401,12 +402,12 @@ ORDER  BY n.nspname, p.proname, args, grantee, a.privilege_type`
 	var order []grantKey
 
 	for rs.Next() {
-		var schema, name, args, grantee, priv string
+		var schema, name, args, grantee, grantor, priv string
 		var grantable bool
-		if err := rs.Scan(&schema, &name, &args, &grantee, &priv, &grantable); err != nil {
+		if err := rs.Scan(&schema, &name, &args, &grantee, &grantor, &priv, &grantable); err != nil {
 			return err
 		}
-		k := grantKey{schema, name, args, grantee}
+		k := grantKey{schema, name, args, grantee, grantor}
 		e, ok := grants[k]
 		if !ok {
 			e = &grantEntry{}
@@ -428,10 +429,12 @@ ORDER  BY n.nspname, p.proname, args, grantee, a.privilege_type`
 			continue
 		}
 		e := grants[k]
+		grantor := k.grantor
 		agg.Grants = append(agg.Grants, ir.Grant{
 			Privileges: e.privs,
 			Roles:      []string{k.grantee},
 			WithGrant:  e.grantable,
+			GrantedBy:  &grantor,
 		})
 	}
 
@@ -675,6 +678,7 @@ func introspectSchemaGrants(ctx context.Context, conn pipeline.Querier, objs []p
 	const q = `
 SELECT n.nspname,
        CASE WHEN a.grantee = 0 THEN 'PUBLIC' ELSE pg_get_userbyid(a.grantee) END AS grantee,
+       pg_get_userbyid(a.grantor) AS grantor,
        a.privilege_type, a.is_grantable
 FROM   pg_namespace n,
        LATERAL aclexplode(n.nspacl) a
@@ -689,7 +693,7 @@ ORDER  BY n.nspname, grantee, a.privilege_type`
 	}
 	defer rs.Close()
 
-	type grantKey struct{ schema, grantee string }
+	type grantKey struct{ schema, grantee, grantor string }
 	type grantEntry struct {
 		privs     []string
 		grantable bool
@@ -698,12 +702,12 @@ ORDER  BY n.nspname, grantee, a.privilege_type`
 	var order []grantKey
 
 	for rs.Next() {
-		var schema, grantee, priv string
+		var schema, grantee, grantor, priv string
 		var grantable bool
-		if err := rs.Scan(&schema, &grantee, &priv, &grantable); err != nil {
+		if err := rs.Scan(&schema, &grantee, &grantor, &priv, &grantable); err != nil {
 			return err
 		}
-		k := grantKey{schema, grantee}
+		k := grantKey{schema, grantee, grantor}
 		e, ok := grants[k]
 		if !ok {
 			e = &grantEntry{}
@@ -725,10 +729,12 @@ ORDER  BY n.nspname, grantee, a.privilege_type`
 			continue
 		}
 		e := grants[k]
+		grantor := k.grantor
 		s.Grants = append(s.Grants, ir.Grant{
 			Privileges: e.privs,
 			Roles:      []string{k.grantee},
 			WithGrant:  e.grantable,
+			GrantedBy:  &grantor,
 		})
 	}
 	return nil
@@ -2390,6 +2396,7 @@ func introspectTypeGrants(ctx context.Context, conn pipeline.Querier, types []pi
 	const q = `
 SELECT n.nspname, t.typname,
        CASE WHEN a.grantee = 0 THEN 'PUBLIC' ELSE pg_get_userbyid(a.grantee) END AS grantee,
+       pg_get_userbyid(a.grantor) AS grantor,
        a.privilege_type, a.is_grantable
 FROM   pg_type t
 JOIN   pg_namespace n ON n.oid = t.typnamespace,
@@ -2405,7 +2412,7 @@ ORDER  BY n.nspname, t.typname, grantee, a.privilege_type`
 	}
 	defer rs.Close()
 
-	type grantKey struct{ schema, name, grantee string }
+	type grantKey struct{ schema, name, grantee, grantor string }
 	type grantEntry struct {
 		privs     []string
 		grantable bool
@@ -2414,12 +2421,12 @@ ORDER  BY n.nspname, t.typname, grantee, a.privilege_type`
 	var order []grantKey
 
 	for rs.Next() {
-		var schema, name, grantee, priv string
+		var schema, name, grantee, grantor, priv string
 		var grantable bool
-		if err := rs.Scan(&schema, &name, &grantee, &priv, &grantable); err != nil {
+		if err := rs.Scan(&schema, &name, &grantee, &grantor, &priv, &grantable); err != nil {
 			return err
 		}
-		k := grantKey{schema, name, grantee}
+		k := grantKey{schema, name, grantee, grantor}
 		e, ok := grants[k]
 		if !ok {
 			e = &grantEntry{}
@@ -2441,10 +2448,12 @@ ORDER  BY n.nspname, t.typname, grantee, a.privilege_type`
 			continue
 		}
 		e := grants[k]
+		grantor := k.grantor
 		t.Grants = append(t.Grants, ir.Grant{
 			Privileges: e.privs,
 			Roles:      []string{k.grantee},
 			WithGrant:  e.grantable,
+			GrantedBy:  &grantor,
 		})
 	}
 	return nil
@@ -3002,6 +3011,7 @@ func introspectSequenceGrants(ctx context.Context, conn pipeline.Querier, idx ma
 	const q = `
 SELECT n.nspname, c.relname,
        CASE WHEN a.grantee = 0 THEN 'PUBLIC' ELSE pg_get_userbyid(a.grantee) END AS grantee,
+       pg_get_userbyid(a.grantor) AS grantor,
        a.privilege_type, a.is_grantable
 FROM   pg_class c
 JOIN   pg_namespace n ON n.oid = c.relnamespace,
@@ -3017,7 +3027,7 @@ ORDER  BY n.nspname, c.relname, grantee, a.privilege_type`
 	}
 	defer rs.Close()
 
-	type grantKey struct{ schema, name, grantee string }
+	type grantKey struct{ schema, name, grantee, grantor string }
 	type grantEntry struct {
 		privs     []string
 		grantable bool
@@ -3026,12 +3036,12 @@ ORDER  BY n.nspname, c.relname, grantee, a.privilege_type`
 	var order []grantKey
 
 	for rs.Next() {
-		var schema, name, grantee, priv string
+		var schema, name, grantee, grantor, priv string
 		var grantable bool
-		if err := rs.Scan(&schema, &name, &grantee, &priv, &grantable); err != nil {
+		if err := rs.Scan(&schema, &name, &grantee, &grantor, &priv, &grantable); err != nil {
 			return err
 		}
-		k := grantKey{schema, name, grantee}
+		k := grantKey{schema, name, grantee, grantor}
 		e, ok := grants[k]
 		if !ok {
 			e = &grantEntry{}
@@ -3053,10 +3063,12 @@ ORDER  BY n.nspname, c.relname, grantee, a.privilege_type`
 			continue
 		}
 		e := grants[k]
+		grantor := k.grantor
 		s.Grants = append(s.Grants, ir.Grant{
 			Privileges: e.privs,
 			Roles:      []string{k.grantee},
 			WithGrant:  e.grantable,
+			GrantedBy:  &grantor,
 		})
 	}
 	return nil
@@ -3387,6 +3399,7 @@ func introspectTableGrants(ctx context.Context, conn pipeline.Querier, idx map[s
 	const q = `
 SELECT n.nspname, c.relname,
        CASE WHEN a.grantee = 0 THEN 'PUBLIC' ELSE pg_get_userbyid(a.grantee) END AS grantee,
+       pg_get_userbyid(a.grantor) AS grantor,
        a.privilege_type, a.is_grantable
 FROM   pg_class c
 JOIN   pg_namespace n ON n.oid = c.relnamespace,
@@ -3403,7 +3416,12 @@ ORDER  BY n.nspname, c.relname, grantee, a.privilege_type`
 	}
 	defer rs.Close()
 
-	type grantKey struct{ schema, name, grantee string }
+	// grantor is part of the key (not just carried alongside privs) so that
+	// the rare case of the same grantee receiving different privileges from
+	// different grantors on the same object produces one ir.Grant per
+	// distinct grantor, each with its own accurate GrantedBy — rather than
+	// silently collapsing them under a single arbitrary grantor.
+	type grantKey struct{ schema, name, grantee, grantor string }
 	type grantEntry struct {
 		privs     []string
 		grantable bool
@@ -3412,12 +3430,12 @@ ORDER  BY n.nspname, c.relname, grantee, a.privilege_type`
 	var order []grantKey
 
 	for rs.Next() {
-		var schema, name, grantee, priv string
+		var schema, name, grantee, grantor, priv string
 		var grantable bool
-		if err := rs.Scan(&schema, &name, &grantee, &priv, &grantable); err != nil {
+		if err := rs.Scan(&schema, &name, &grantee, &grantor, &priv, &grantable); err != nil {
 			return err
 		}
-		k := grantKey{schema, name, grantee}
+		k := grantKey{schema, name, grantee, grantor}
 		e, ok := grants[k]
 		if !ok {
 			e = &grantEntry{}
@@ -3439,10 +3457,12 @@ ORDER  BY n.nspname, c.relname, grantee, a.privilege_type`
 			continue
 		}
 		e := grants[k]
+		grantor := k.grantor
 		t.Grants = append(t.Grants, ir.Grant{
 			Privileges: e.privs,
 			Roles:      []string{k.grantee},
 			WithGrant:  e.grantable,
+			GrantedBy:  &grantor,
 		})
 	}
 	return nil
@@ -3454,6 +3474,7 @@ func introspectViewGrants(ctx context.Context, conn pipeline.Querier, idx map[st
 	const q = `
 SELECT n.nspname, c.relname,
        CASE WHEN a.grantee = 0 THEN 'PUBLIC' ELSE pg_get_userbyid(a.grantee) END AS grantee,
+       pg_get_userbyid(a.grantor) AS grantor,
        a.privilege_type, a.is_grantable
 FROM   pg_class c
 JOIN   pg_namespace n ON n.oid = c.relnamespace,
@@ -3469,7 +3490,7 @@ ORDER  BY n.nspname, c.relname, grantee, a.privilege_type`
 	}
 	defer rs.Close()
 
-	type grantKey struct{ schema, name, grantee string }
+	type grantKey struct{ schema, name, grantee, grantor string }
 	type grantEntry struct {
 		privs     []string
 		grantable bool
@@ -3478,12 +3499,12 @@ ORDER  BY n.nspname, c.relname, grantee, a.privilege_type`
 	var order []grantKey
 
 	for rs.Next() {
-		var schema, name, grantee, priv string
+		var schema, name, grantee, grantor, priv string
 		var grantable bool
-		if err := rs.Scan(&schema, &name, &grantee, &priv, &grantable); err != nil {
+		if err := rs.Scan(&schema, &name, &grantee, &grantor, &priv, &grantable); err != nil {
 			return err
 		}
-		k := grantKey{schema, name, grantee}
+		k := grantKey{schema, name, grantee, grantor}
 		e, ok := grants[k]
 		if !ok {
 			e = &grantEntry{}
@@ -3505,10 +3526,12 @@ ORDER  BY n.nspname, c.relname, grantee, a.privilege_type`
 			continue
 		}
 		e := grants[k]
+		grantor := k.grantor
 		v.Grants = append(v.Grants, ir.Grant{
 			Privileges: e.privs,
 			Roles:      []string{k.grantee},
 			WithGrant:  e.grantable,
+			GrantedBy:  &grantor,
 		})
 	}
 	return nil
@@ -3521,6 +3544,7 @@ func introspectFunctionGrants(ctx context.Context, conn pipeline.Querier, idx ma
 SELECT n.nspname, p.proname,
        pg_get_function_identity_arguments(p.oid) AS args,
        CASE WHEN a.grantee = 0 THEN 'PUBLIC' ELSE pg_get_userbyid(a.grantee) END AS grantee,
+       pg_get_userbyid(a.grantor) AS grantor,
        a.privilege_type, a.is_grantable
 FROM   pg_proc p
 JOIN   pg_namespace n ON n.oid = p.pronamespace,
@@ -3536,7 +3560,7 @@ ORDER  BY n.nspname, p.proname, args, grantee, a.privilege_type`
 	}
 	defer rs.Close()
 
-	type grantKey struct{ schema, name, args, grantee string }
+	type grantKey struct{ schema, name, args, grantee, grantor string }
 	type grantEntry struct {
 		privs     []string
 		grantable bool
@@ -3545,12 +3569,12 @@ ORDER  BY n.nspname, p.proname, args, grantee, a.privilege_type`
 	var order []grantKey
 
 	for rs.Next() {
-		var schema, name, args, grantee, priv string
+		var schema, name, args, grantee, grantor, priv string
 		var grantable bool
-		if err := rs.Scan(&schema, &name, &args, &grantee, &priv, &grantable); err != nil {
+		if err := rs.Scan(&schema, &name, &args, &grantee, &grantor, &priv, &grantable); err != nil {
 			return err
 		}
-		k := grantKey{schema, name, args, grantee}
+		k := grantKey{schema, name, args, grantee, grantor}
 		e, ok := grants[k]
 		if !ok {
 			e = &grantEntry{}
@@ -3572,10 +3596,12 @@ ORDER  BY n.nspname, p.proname, args, grantee, a.privilege_type`
 			continue
 		}
 		e := grants[k]
+		grantor := k.grantor
 		fn.Grants = append(fn.Grants, ir.Grant{
 			Privileges: e.privs,
 			Roles:      []string{k.grantee},
 			WithGrant:  e.grantable,
+			GrantedBy:  &grantor,
 		})
 	}
 
@@ -3599,6 +3625,7 @@ func introspectProcedureGrants(ctx context.Context, conn pipeline.Querier, idx m
 SELECT n.nspname, p.proname,
        pg_get_function_identity_arguments(p.oid) AS args,
        CASE WHEN a.grantee = 0 THEN 'PUBLIC' ELSE pg_get_userbyid(a.grantee) END AS grantee,
+       pg_get_userbyid(a.grantor) AS grantor,
        a.privilege_type, a.is_grantable
 FROM   pg_proc p
 JOIN   pg_namespace n ON n.oid = p.pronamespace,
@@ -3614,7 +3641,7 @@ ORDER  BY n.nspname, p.proname, args, grantee, a.privilege_type`
 	}
 	defer rs.Close()
 
-	type grantKey struct{ schema, name, args, grantee string }
+	type grantKey struct{ schema, name, args, grantee, grantor string }
 	type grantEntry struct {
 		privs     []string
 		grantable bool
@@ -3623,12 +3650,12 @@ ORDER  BY n.nspname, p.proname, args, grantee, a.privilege_type`
 	var order []grantKey
 
 	for rs.Next() {
-		var schema, name, args, grantee, priv string
+		var schema, name, args, grantee, grantor, priv string
 		var grantable bool
-		if err := rs.Scan(&schema, &name, &args, &grantee, &priv, &grantable); err != nil {
+		if err := rs.Scan(&schema, &name, &args, &grantee, &grantor, &priv, &grantable); err != nil {
 			return err
 		}
-		k := grantKey{schema, name, args, grantee}
+		k := grantKey{schema, name, args, grantee, grantor}
 		e, ok := grants[k]
 		if !ok {
 			e = &grantEntry{}
@@ -3650,10 +3677,12 @@ ORDER  BY n.nspname, p.proname, args, grantee, a.privilege_type`
 			continue
 		}
 		e := grants[k]
+		grantor := k.grantor
 		proc.Grants = append(proc.Grants, ir.Grant{
 			Privileges: e.privs,
 			Roles:      []string{k.grantee},
 			WithGrant:  e.grantable,
+			GrantedBy:  &grantor,
 		})
 	}
 
@@ -3696,6 +3725,7 @@ func introspectColumnGrants(ctx context.Context, conn pipeline.Querier, idx map[
 	const q = `
 SELECT n.nspname, c.relname, a.attname,
        CASE WHEN acl.grantee = 0 THEN 'PUBLIC' ELSE pg_get_userbyid(acl.grantee) END AS grantee,
+       pg_get_userbyid(acl.grantor) AS grantor,
        acl.privilege_type, acl.is_grantable
 FROM   pg_attribute a
 JOIN   pg_class c ON c.oid = a.attrelid
@@ -3712,8 +3742,9 @@ ORDER  BY n.nspname, c.relname, a.attname, grantee, acl.privilege_type`
 	}
 	defer rs.Close()
 
-	// Accumulate per-(table, column, grantee) privilege lists, then convert.
-	type colGrantKey struct{ schema, table, col, grantee string }
+	// Accumulate per-(table, column, grantee, grantor) privilege lists, then
+	// convert.
+	type colGrantKey struct{ schema, table, col, grantee, grantor string }
 	type colGrantEntry struct {
 		privs     []string
 		grantable bool
@@ -3722,12 +3753,12 @@ ORDER  BY n.nspname, c.relname, a.attname, grantee, acl.privilege_type`
 	var order []colGrantKey // insertion order for determinism
 
 	for rs.Next() {
-		var schema, table, col, grantee, priv string
+		var schema, table, col, grantee, grantor, priv string
 		var isGrantable bool
-		if err := rs.Scan(&schema, &table, &col, &grantee, &priv, &isGrantable); err != nil {
+		if err := rs.Scan(&schema, &table, &col, &grantee, &grantor, &priv, &isGrantable); err != nil {
 			return err
 		}
-		k := colGrantKey{schema, table, col, grantee}
+		k := colGrantKey{schema, table, col, grantee, grantor}
 		e, ok := grants[k]
 		if !ok {
 			e = &colGrantEntry{}
@@ -3749,10 +3780,12 @@ ORDER  BY n.nspname, c.relname, a.attname, grantee, acl.privilege_type`
 			continue
 		}
 		e := grants[k]
+		grantor := k.grantor
 		g := ir.Grant{
 			Privileges: e.privs,
 			Roles:      []string{k.grantee},
 			WithGrant:  e.grantable,
+			GrantedBy:  &grantor,
 		}
 		for i := range t.Columns {
 			if t.Columns[i].Name == k.col {

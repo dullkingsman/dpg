@@ -280,6 +280,7 @@ func introspectSimpleGrants(ctx context.Context, conn pipeline.Querier, table, n
 	q := fmt.Sprintf(`
 SELECT t.%s,
        CASE WHEN a.grantee = 0 THEN 'PUBLIC' ELSE pg_get_userbyid(a.grantee) END AS grantee,
+       pg_get_userbyid(a.grantor) AS grantor,
        a.privilege_type, a.is_grantable
 FROM   %s t,
        LATERAL aclexplode(t.%s) a
@@ -292,7 +293,7 @@ ORDER  BY t.%s, grantee, a.privilege_type`, nameCol, table, aclCol, nameCol)
 	}
 	defer rs.Close()
 
-	type grantKey struct{ name, grantee string }
+	type grantKey struct{ name, grantee, grantor string }
 	type grantEntry struct {
 		privs     []string
 		grantable bool
@@ -301,12 +302,12 @@ ORDER  BY t.%s, grantee, a.privilege_type`, nameCol, table, aclCol, nameCol)
 	var order []grantKey
 
 	for rs.Next() {
-		var name, grantee, priv string
+		var name, grantee, grantor, priv string
 		var grantable bool
-		if err := rs.Scan(&name, &grantee, &priv, &grantable); err != nil {
+		if err := rs.Scan(&name, &grantee, &grantor, &priv, &grantable); err != nil {
 			return err
 		}
-		k := grantKey{name, grantee}
+		k := grantKey{name, grantee, grantor}
 		e, ok := grants[k]
 		if !ok {
 			e = &grantEntry{}
@@ -324,10 +325,12 @@ ORDER  BY t.%s, grantee, a.privilege_type`, nameCol, table, aclCol, nameCol)
 
 	for _, k := range order {
 		e := grants[k]
+		grantor := k.grantor
 		addGrant(k.name, ir.Grant{
 			Privileges: e.privs,
 			Roles:      []string{k.grantee},
 			WithGrant:  e.grantable,
+			GrantedBy:  &grantor,
 		})
 	}
 	return nil

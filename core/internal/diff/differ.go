@@ -985,6 +985,34 @@ func revokeOptSuffix(r ir.Revocation) string {
 	return s
 }
 
+// grantedByMatches reports whether a declared GrantedBy role-spec (desired,
+// nil when not declared) is satisfied by an already-applied grant's known
+// GrantedBy (live, nil when introspection couldn't determine one — e.g. a
+// pre-existing snapshot from before grantor capture, or a Revocation, which
+// is never introspected from live state at all).
+//
+// desired == nil is the "declared, so managed" skip: never compared, see
+// diffGrantSet's own comment. Otherwise, the three fixed role-spec keywords
+// (roleSpecSQL's identical list) never mismatch against any live grantor:
+// confirmed live via direct psql that PostgreSQL unconditionally restricts a
+// GRANT's effective grantor to whichever role executes the statement
+// ("grantor must be current user" naming anyone else, even for a
+// superuser), so once introspection reports ANY concrete grantor for an
+// already-applied grant, a declared symbolic role-spec is proven satisfied
+// — there is no other value it could have resolved to. A literal role-name
+// declaration has no such guarantee, so it's compared for real equality.
+func grantedByMatches(desired, live *string) bool {
+	if desired == nil {
+		return true
+	}
+	switch strings.ToUpper(*desired) {
+	case "CURRENT_ROLE", "CURRENT_USER", "SESSION_USER":
+		return live != nil
+	default:
+		return ptrEq(desired, live)
+	}
+}
+
 // diffGrantSet diffs two grant lists and emits GRANT/REVOKE ops.
 // onClause is the SQL object specifier after ON, e.g. "TABLE \"public\".\"users\"".
 func diffGrantSet(
@@ -1027,12 +1055,14 @@ func diffGrantSet(
 		}
 		// Matched: GrantedBy isn't part of grantKey (see grantKey's own doc
 		// comment) — only re-GRANT when the desired side explicitly
-		// declares a GrantedBy that differs from the snapshot's own
-		// declared value. An undeclared GrantedBy (nil) is never compared,
-		// the same "declared, so managed" rule already used for Function
-		// Cost/Rows — a live-introspected concrete grantor must never
-		// cause spurious drift here (RFC audit item #90).
-		if g.GrantedBy != nil && !ptrEq(g.GrantedBy, sg.GrantedBy) {
+		// declares a GrantedBy that isn't satisfied by the snapshot's own
+		// value. An undeclared GrantedBy (nil) is never compared, the same
+		// "declared, so managed" rule already used for Function Cost/Rows —
+		// a live-introspected concrete grantor must never cause spurious
+		// drift here (RFC audit item #90). See grantedByMatches for why a
+		// symbolic role-spec (CURRENT_USER etc.) is never itself drift
+		// against a live grantor.
+		if !grantedByMatches(g.GrantedBy, sg.GrantedBy) {
 			sql := fmt.Sprintf("GRANT %s ON %s TO %s", privStr(g.Privileges), onClause, roleList(g.Roles))
 			sql += grantOptSuffix(g)
 			ops = append(ops, safeOp(sql+";", pos))
@@ -1089,7 +1119,7 @@ func diffRevocationSet(
 		}
 		// Matched: same "declared, so managed" GrantedBy re-check as
 		// diffGrantSet's identical branch (RFC audit item #90).
-		if r.GrantedBy != nil && !ptrEq(r.GrantedBy, sr.GrantedBy) {
+		if !grantedByMatches(r.GrantedBy, sr.GrantedBy) {
 			ops = append(ops, cautionOp(
 				fmt.Sprintf("REVOKE %s ON %s FROM %s%s;", privStr(r.Privileges), onClause, roleList(r.Roles), revokeOptSuffix(r)),
 				pos,

@@ -7426,6 +7426,46 @@ func TestDiffFunctionGrantGrantedByUnspecifiedIsNoop(t *testing.T) {
 	}
 }
 
+// TestDiffFunctionGrantGrantedBySymbolicRoleSpecNeverDrifts guards
+// grantedByMatches: a declared symbolic role-spec (CURRENT_USER etc.) must
+// never be treated as drift against a live-introspected concrete grantor —
+// PostgreSQL restricts a GRANT's effective grantor to whichever role
+// executes it regardless of what's named, so any non-nil live grantor
+// already proves the declaration was satisfied. Without this, fixing
+// introspection to actually populate GrantedBy from the real grantor would
+// have turned "GRANTED BY CURRENT_USER" into a permanent spurious re-GRANT
+// on every live plan.
+func TestDiffFunctionGrantGrantedBySymbolicRoleSpecNeverDrifts(t *testing.T) {
+	d := New()
+	liveGrantor := "postgres"
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.get_user()", &snapshot.SnapObject{
+		Kind: "function",
+		Function: &snapshot.SnapFunction{
+			Schema: "public", Name: "get_user", ReturnType: "void",
+			Language: "plpgsql", Volatility: "VOLATILE", BodyHash: "abc",
+			Grants: []snapshot.SnapGrant{{Privileges: []string{"EXECUTE"}, Roles: []string{"app"}, GrantedBy: &liveGrantor}},
+		},
+	})
+	grantedBy := "CURRENT_USER"
+	desired := []pipeline.IRObject{
+		&ir.Function{
+			Schema: "public", Name: "get_user",
+			ReturnType: ir.TypeRef{Name: "void"},
+			BodyHash:   "abc",
+			Attrs:      ir.FuncAttrs{Language: "plpgsql", Volatility: "VOLATILE", Body: "BEGIN END;"},
+			Grants:     []ir.Grant{{Privileges: []string{"EXECUTE"}, Roles: []string{"app"}, GrantedBy: &grantedBy}},
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ops) != 0 {
+		t.Errorf("expected no ops (symbolic GRANTED BY satisfied by any concrete live grantor), got: %v", sqlList(ops))
+	}
+}
+
 // TestDiffFunctionRevocationGrantedBy guards RFC audit item #90's
 // revoke-entry: GRANTED BY on an explicit REVOCATIONS declaration.
 func TestDiffFunctionRevocationGrantedBy(t *testing.T) {

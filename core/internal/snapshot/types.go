@@ -481,11 +481,14 @@ type SnapGrant struct {
 	WithGrant  bool     `json:"with_grant,omitempty"`
 	// GrantedBy is RFC audit item #90's optional GRANTED BY role-spec
 	// diffing input — see ir.Grant.GrantedBy's doc comment. Deliberately
-	// excluded from grantKey (identity): nil here always exactly mirrors
-	// whatever the desired side last declared (this snapshot is built from
-	// desired state, not live introspection), so comparing it is safe and
-	// only diffGrantSet/diffRevocationSet's own "declared, so managed"
-	// check needs it.
+	// excluded from grantKey (identity). Built from either side: on a
+	// stored (desired-state) snapshot this exactly mirrors whatever was
+	// last declared; on a live-introspected snapshot (see
+	// snapshot.Populate) it's the real resolved grantor role name
+	// (introspect*Grants captures pg_get_userbyid(a.grantor)), never a
+	// symbolic role-spec keyword. diffGrantSet/diffRevocationSet's
+	// grantedByMatches helper is what makes comparing these two different
+	// possible shapes safe.
 	GrantedBy *string `json:"granted_by,omitempty"`
 }
 
