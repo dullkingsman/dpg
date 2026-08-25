@@ -6371,6 +6371,17 @@ func diffTable(o *ir.Table, snap *snapshot.SnapTable, fullSnap *pipeline.Snapsho
 	if !ptrEq(o.Tablespace, snap.Tablespace) && o.Tablespace != nil {
 		ops = append(ops, safeOp(fmt.Sprintf("ALTER TABLE %s SET TABLESPACE %s;", tbl, quoteIdent(*o.Tablespace)), pos))
 	}
+	// LOGGED/UNLOGGED toggled (Section 7.12) — a targeted CAUTION ALTER
+	// (rewrites the table's storage), not a recreate. Meaningless for a
+	// foreign table (no local storage), matching createTable's own
+	// mutually-exclusive Unlogged/Foreign switch.
+	if !o.Foreign && o.Unlogged != snap.Unlogged {
+		if o.Unlogged {
+			ops = append(ops, cautionOp(fmt.Sprintf("ALTER TABLE %s SET UNLOGGED;", tbl), pos))
+		} else {
+			ops = append(ops, cautionOp(fmt.Sprintf("ALTER TABLE %s SET LOGGED;", tbl), pos))
+		}
+	}
 	// PROTECTED has no PG DDL equivalent — it's pure DPG-side bookkeeping
 	// (see the Pass-2 deletion check's DPG-E022 guard) — but it must still
 	// appear as an op, or a PROTECTED-only removal produces zero DiffOps and

@@ -9615,6 +9615,80 @@ func TestDiffSequenceLoggedToggledEmitsSetLogged(t *testing.T) {
 	}
 }
 
+// TestDiffTableUnloggedToggledIsCautionAlter is the regression guard for
+// RFC Section 7.12's LOGGED/UNLOGGED toggle: diffTable had zero handling
+// for Unlogged at all — createTable read it at CREATE time, but a change on
+// an already-applied table was a silent no-op — despite the RFC's own E.13
+// changelog entry claiming this was already "folded in" as a
+// DESTRUCTIVE-to-safe-ALTER swap. Mirrors Sequence's identical toggle
+// (Section 10, TestDiffSequenceUnloggedToggledIsCautionAlter).
+func TestDiffTableUnloggedToggledIsCautionAlter(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.t", &snapshot.SnapObject{
+		Kind:  "table",
+		Table: &snapshot.SnapTable{Schema: "public", Name: "t"},
+	})
+	desired := []pipeline.IRObject{
+		&ir.Table{Schema: "public", Name: "t", Unlogged: true},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsSQL(ops, `ALTER TABLE "public"."t" SET UNLOGGED;`) {
+		t.Errorf("expected ALTER TABLE ... SET UNLOGGED, got: %v", sqlList(ops))
+	}
+	for _, op := range ops {
+		if strings.Contains(op.SQL(), "SET UNLOGGED") && op.Safety() != pipeline.Caution {
+			t.Errorf("SET UNLOGGED safety = %v, want Caution", op.Safety())
+		}
+	}
+}
+
+func TestDiffTableLoggedToggledEmitsSetLogged(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.t", &snapshot.SnapObject{
+		Kind:  "table",
+		Table: &snapshot.SnapTable{Schema: "public", Name: "t", Unlogged: true},
+	})
+	desired := []pipeline.IRObject{
+		&ir.Table{Schema: "public", Name: "t"},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsSQL(ops, `ALTER TABLE "public"."t" SET LOGGED;`) {
+		t.Errorf("expected ALTER TABLE ... SET LOGGED, got: %v", sqlList(ops))
+	}
+}
+
+// TestDiffForeignTableUnloggedNeverCompared proves a foreign table (which
+// has no local storage, so LOGGED/UNLOGGED is meaningless) never emits the
+// toggle even if Unlogged somehow differs — matching createTable's own
+// mutually-exclusive Unlogged/Foreign switch.
+func TestDiffForeignTableUnloggedNeverCompared(t *testing.T) {
+	d := New()
+	server := "srv"
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.t", &snapshot.SnapObject{
+		Kind:  "table",
+		Table: &snapshot.SnapTable{Schema: "public", Name: "t", Foreign: true, ForeignServer: &server},
+	})
+	desired := []pipeline.IRObject{
+		&ir.Table{Schema: "public", Name: "t", Foreign: true, ForeignServer: &server, Unlogged: true},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if containsSQL(ops, "SET UNLOGGED") || containsSQL(ops, "SET LOGGED") {
+		t.Errorf("expected no LOGGED/UNLOGGED toggle for a foreign table, got: %v", sqlList(ops))
+	}
+}
+
 // TestDiffCreateSequenceAsTypeAndOwnedBy guards RFC audit item #14: AS type
 // and OWNED BY were completely unimplemented — breaking the RFC's own
 // canonical example verbatim.
