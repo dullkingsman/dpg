@@ -327,6 +327,12 @@ type SnapColumn struct {
 	Identity       *string             `json:"identity,omitempty"` // "ALWAYS" or "BY DEFAULT"
 	Serial         *string             `json:"serial,omitempty"`   // "SMALLSERIAL"/"SERIAL"/"BIGSERIAL"
 	Generated      *string             `json:"generated,omitempty"`
+	// GeneratedVirtual is true when Generated is VIRTUAL (PG18+) rather
+	// than STORED — meaningless when Generated is nil. Kept as a sibling
+	// bool rather than folding into Generated's own shape, matching this
+	// struct's existing flat-field convention (e.g. Identity/Serial are
+	// each a bare *string, not a nested struct).
+	GeneratedVirtual bool `json:"generated_virtual,omitempty"`
 	Comment        *string             `json:"comment,omitempty"`
 	Statistics     *int                `json:"statistics,omitempty"`
 	Compression    *string             `json:"compression,omitempty"`

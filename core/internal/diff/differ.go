@@ -6683,7 +6683,11 @@ func diffColumns(tbl string, o *ir.Table, snap *snapshot.SnapTable, vtypes map[s
 			if col.Generated != nil {
 				b.WriteString(" GENERATED ALWAYS AS (")
 				b.WriteString(col.Generated.Expr)
-				b.WriteString(") STORED")
+				if col.Generated.Stored {
+					b.WriteString(") STORED")
+				} else {
+					b.WriteString(") VIRTUAL")
+				}
 			}
 			b.WriteString(";")
 			// NOT NULL without a volatile default risks failing on existing
@@ -6765,6 +6769,7 @@ func diffColumns(tbl string, o *ir.Table, snap *snapshot.SnapTable, vtypes map[s
 				txn:    true,
 			})
 		}
+		ops = append(ops, diffGeneratedColumn(tbl, col, sc, resolvedType)...)
 		if col.NotNull && !sc.NotNull {
 			ops = append(ops, cautionOp(
 				fmt.Sprintf("ALTER TABLE %s ALTER COLUMN %s SET NOT NULL;", tbl, quoteIdent(col.Name)),
@@ -6837,6 +6842,120 @@ func diffColumns(tbl string, o *ir.Table, snap *snapshot.SnapTable, vtypes map[s
 	}
 
 	return ops, renamedFrom, droppedCols, nil
+}
+
+// diffGeneratedColumn diffs col.Generated (desired) against sc.Generated/
+// sc.GeneratedVirtual (snapshot) — RFC Section 7.4's generated-column
+// diffing table, referenced from Section 7.2's VIRTUAL documentation but
+// not previously implemented at all (diffColumns never compared Generated
+// against the snapshot before this — any change to a generated column's
+// expression, or a STORED/VIRTUAL switch, was silently undetected).
+//
+// Real PostgreSQL's actual ALTER COLUMN surface for generated columns
+// (confirmed live against a PostgreSQL 18 container, not assumed from the
+// RFC's own pre-existing text — see the "genuinely new" case below for why
+// that mattered): SET EXPRESSION changes an existing generated column's
+// expression in place without touching attgenerated (the STORED/VIRTUAL
+// kind is immutable via that path); DROP EXPRESSION converts a generated
+// column back to a plain one, freezing its last computed value. There is
+// no ALTER COLUMN form that turns an already-existing plain column into a
+// generated one, or that changes STORED<->VIRTUAL — confirmed live
+// (ALTER COLUMN c ADD GENERATED ALWAYS AS (expr) STORED is not valid syntax
+// at all; ADD GENERATED only ever applies to ...AS IDENTITY). Both of
+// those transitions need the column dropped and re-added.
+func diffGeneratedColumn(tbl string, col *ir.Column, sc *snapshot.SnapColumn, resolvedType string) []pipeline.DiffOp {
+	var ops []pipeline.DiffOp
+
+	genExpr := func(g *ir.Generated) string {
+		kw := "STORED"
+		if !g.Stored {
+			kw = "VIRTUAL"
+		}
+		return fmt.Sprintf("GENERATED ALWAYS AS (%s) %s", g.Expr, kw)
+	}
+
+	dropAndReadd := func() {
+		ops = append(ops, destructiveOp(
+			fmt.Sprintf("ALTER TABLE %s DROP COLUMN %s;", tbl, quoteIdent(col.Name)),
+			col.SrcPos,
+		))
+		ops = append(ops, destructiveOp(
+			fmt.Sprintf("ALTER TABLE %s ADD COLUMN %s %s;", tbl, quoteIdent(col.Name), resolvedType),
+			col.SrcPos,
+		))
+	}
+
+	switch {
+	case col.Generated == nil && sc.Generated == nil:
+		// No generated column on either side — nothing to do.
+		return nil
+
+	case col.Generated == nil && sc.Generated != nil && sc.GeneratedVirtual:
+		// "removed, column kept" for a VIRTUAL column — confirmed live
+		// against a real PostgreSQL 18 server that DROP EXPRESSION is
+		// flatly rejected for VIRTUAL ("ALTER TABLE / DROP EXPRESSION is
+		// not supported for virtual generated columns"), unlike STORED
+		// just below. A VIRTUAL column has no stored value to freeze in
+		// the first place (it's computed on read), so the only path is
+		// dropping and re-adding as plain — DESTRUCTIVE, since any value a
+		// prior read would have computed is simply gone, not preserved.
+		dropAndReadd()
+
+	case col.Generated == nil && sc.Generated != nil:
+		// "removed, column kept" for a STORED column (RFC Section 7.4) —
+		// real PostgreSQL's DROP EXPRESSION freezes the column's current
+		// values with no rewrite, hence SAFE.
+		ops = append(ops, safeOp(
+			fmt.Sprintf("ALTER TABLE %s ALTER COLUMN %s DROP EXPRESSION IF EXISTS;", tbl, quoteIdent(col.Name)),
+			col.SrcPos,
+		))
+
+	case col.Generated != nil && sc.Generated == nil:
+		// "added where none existed" — genuinely no in-place ALTER path in
+		// real PostgreSQL (see doc comment above), so this drops and
+		// re-adds the column as generated. DESTRUCTIVE: the column's prior
+		// stored values are discarded, not merely rewritten in place.
+		ops = append(ops, destructiveOp(
+			fmt.Sprintf("ALTER TABLE %s DROP COLUMN %s;", tbl, quoteIdent(col.Name)),
+			col.SrcPos,
+		))
+		ops = append(ops, destructiveOp(
+			fmt.Sprintf("ALTER TABLE %s ADD COLUMN %s %s %s;", tbl, quoteIdent(col.Name), resolvedType, genExpr(col.Generated)),
+			col.SrcPos,
+		))
+
+	case col.Generated.Stored != !sc.GeneratedVirtual:
+		// STORED/VIRTUAL kind changed — part of the column's identity (see
+		// doc comment above), same drop-and-recreate treatment as a
+		// freshly-added generated column.
+		ops = append(ops, destructiveOp(
+			fmt.Sprintf("ALTER TABLE %s DROP COLUMN %s;", tbl, quoteIdent(col.Name)),
+			col.SrcPos,
+		))
+		ops = append(ops, destructiveOp(
+			fmt.Sprintf("ALTER TABLE %s ADD COLUMN %s %s %s;", tbl, quoteIdent(col.Name), resolvedType, genExpr(col.Generated)),
+			col.SrcPos,
+		))
+
+	case normalizeWS(normalizeExprForCompare(col.Generated.Expr)) != normalizeWS(normalizeExprForCompare(*sc.Generated)):
+		// Same STORED/VIRTUAL kind, expression text changed — real
+		// PostgreSQL's targeted SET EXPRESSION, CAUTION (rewrites the
+		// column's stored values in place for STORED; recomputes on next
+		// read for VIRTUAL, but still a real behavioral change).
+		//
+		// normalizeExprForCompare (not just normalizeWS) matters here:
+		// confirmed live that pg_get_expr wraps the introspected expression
+		// in an extra outer paren pair ("(amount * 1.08)" for a source
+		// "amount * 1.08") — without stripping it, every plan after a
+		// dump/introspect round-trip would see a spurious expression
+		// change and re-run SET EXPRESSION for no real reason.
+		ops = append(ops, cautionOp(
+			fmt.Sprintf("ALTER TABLE %s ALTER COLUMN %s SET EXPRESSION AS (%s);", tbl, quoteIdent(col.Name), col.Generated.Expr),
+			col.SrcPos,
+		))
+	}
+
+	return ops
 }
 
 func diffConstraints(tbl string, o *ir.Table, snap *snapshot.SnapTable, fullSnap *pipeline.Snapshot, pos pipeline.SourcePos, renamedCols map[string]string, droppedCols map[string]bool) ([]pipeline.DiffOp, error) {

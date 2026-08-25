@@ -566,6 +566,7 @@ func toSnapColumn(col *ir.Column) SnapColumn {
 	}
 	if col.Generated != nil {
 		sc.Generated = &col.Generated.Expr
+		sc.GeneratedVirtual = !col.Generated.Stored
 	}
 	for _, g := range col.Grants {
 		sc.Grants = append(sc.Grants, toSnapGrant(g))

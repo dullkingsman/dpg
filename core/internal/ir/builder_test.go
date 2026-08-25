@@ -88,6 +88,46 @@ func TestBuildTableAndIndexTablespace(t *testing.T) {
 	}
 }
 
+// TestBuildGeneratedColumnStoredAndVirtual guards the builder's
+// pg_query.ConstrType_CONSTR_GENERATED handling distinguishing STORED from
+// VIRTUAL (PostgreSQL 18+, RFC Section 7.2) via cst.GeneratedKind — "s" vs
+// "v" — populating ir.Generated.Stored accordingly.
+func TestBuildGeneratedColumnStoredAndVirtual(t *testing.T) {
+	obj := buildObject(t, pipeline.KindTable,
+		`orders (
+			amount          NUMERIC,
+			amount_stored   NUMERIC GENERATED ALWAYS AS (amount * 1.08) STORED,
+			amount_virtual  NUMERIC GENERATED ALWAYS AS (amount * 1.08) VIRTUAL
+		)`,
+		``,
+	)
+	tbl, ok := obj.(*ir.Table)
+	if !ok {
+		t.Fatalf("expected *ir.Table, got %T", obj)
+	}
+	var stored, virtual *ir.Column
+	for _, c := range tbl.Columns {
+		switch c.Name {
+		case "amount_stored":
+			stored = c
+		case "amount_virtual":
+			virtual = c
+		}
+	}
+	if stored == nil || stored.Generated == nil {
+		t.Fatal("expected amount_stored to have a Generated clause")
+	}
+	if !stored.Generated.Stored {
+		t.Error("expected amount_stored.Generated.Stored = true")
+	}
+	if virtual == nil || virtual.Generated == nil {
+		t.Fatal("expected amount_virtual to have a Generated clause")
+	}
+	if virtual.Generated.Stored {
+		t.Error("expected amount_virtual.Generated.Stored = false")
+	}
+}
+
 func TestBuildSimpleTable(t *testing.T) {
 	obj := buildObject(t, pipeline.KindTable,
 		`users (

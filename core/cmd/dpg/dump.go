@@ -546,7 +546,11 @@ func renderObjectDPG(b *strings.Builder, obj pipeline.IRObject, fmtOpts format.O
 				}
 			}
 			if col.Generated != nil {
-				fmt.Fprintf(&sb, " %s %s %s (%s) %s", kw("GENERATED"), kw("ALWAYS"), kw("AS"), col.Generated.Expr, kw("STORED"))
+				genKw := kw("STORED")
+				if !col.Generated.Stored {
+					genKw = kw("VIRTUAL")
+				}
+				fmt.Fprintf(&sb, " %s %s %s (%s) %s", kw("GENERATED"), kw("ALWAYS"), kw("AS"), col.Generated.Expr, genKw)
 			}
 			for _, clause := range inlinedByCol[col.Name] {
 				fmt.Fprintf(&sb, " %s", clause)

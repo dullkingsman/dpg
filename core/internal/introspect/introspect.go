@@ -1015,8 +1015,13 @@ ORDER  BY n.nspname, c.relname, a.attnum`
 				stripped := stripStringLiteralCasts(*def)
 				col.Default = &stripped
 			}
-		case generatedKind != nil && *generatedKind == "s" && def != nil:
-			col.Generated = &ir.Generated{Expr: *def, Stored: true}
+		case generatedKind != nil && (*generatedKind == "s" || *generatedKind == "v") && def != nil:
+			// "s" = STORED, "v" = VIRTUAL (PG18+, RFC Section 7.2) — both
+			// populate pg_attrdef identically (confirmed live: a VIRTUAL
+			// column's generation expression is retrievable via
+			// pg_get_expr(d.adbin, d.adrelid) the same way a STORED one's
+			// is, despite VIRTUAL never occupying physical storage).
+			col.Generated = &ir.Generated{Expr: *def, Stored: *generatedKind == "s"}
 		default:
 			if def != nil {
 				stripped := stripStringLiteralCasts(*def)

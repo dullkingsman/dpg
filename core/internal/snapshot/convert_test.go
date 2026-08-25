@@ -63,6 +63,44 @@ func TestPopulateColumnSerial(t *testing.T) {
 	}
 }
 
+// TestPopulateColumnGeneratedVirtual proves Column.Generated's Stored=false
+// (VIRTUAL, PostgreSQL 18+) threads through toSnapColumn into
+// SnapColumn.GeneratedVirtual and survives a JSON round-trip, the same way
+// TestPopulateColumnSerial proves it for Serial above.
+func TestPopulateColumnGeneratedVirtual(t *testing.T) {
+	snap := &pipeline.Snapshot{}
+	objects := []pipeline.IRObject{
+		&ir.Table{Schema: "public", Name: "orders", Columns: []*ir.Column{
+			{Name: "amount", Type: ir.TypeRef{Name: "numeric"}},
+			{
+				Name: "amount_with_tax", Type: ir.TypeRef{Name: "numeric"},
+				Generated: &ir.Generated{Expr: "amount * 1.08", Stored: false},
+			},
+		}},
+	}
+	if err := Populate(snap, objects); err != nil {
+		t.Fatal(err)
+	}
+	raw, ok := snap.Objects["public.orders"]
+	if !ok {
+		t.Fatal("expected public.orders in snapshot")
+	}
+	var obj SnapObject
+	if err := json.Unmarshal(raw, &obj); err != nil {
+		t.Fatal(err)
+	}
+	if obj.Table == nil || len(obj.Table.Columns) != 2 {
+		t.Fatal("expected two columns after round-trip")
+	}
+	col := obj.Table.Columns[1]
+	if col.Generated == nil || *col.Generated != "amount * 1.08" {
+		t.Errorf("Generated got %v after round-trip, want \"amount * 1.08\"", col.Generated)
+	}
+	if !col.GeneratedVirtual {
+		t.Error("GeneratedVirtual got false after round-trip, want true")
+	}
+}
+
 func TestPopulateView(t *testing.T) {
 	snap := &pipeline.Snapshot{}
 	objects := []pipeline.IRObject{

@@ -18,7 +18,22 @@ import (
 // when Start returns.
 func Start(t *testing.T) string {
 	t.Helper()
-	connStr, _ := startContainer(t, nil)
+	connStr, _ := startContainer(t, "postgres:17", nil)
+	return connStr
+}
+
+// Start18 is Start against postgres:18 instead of the suite's default 17 —
+// for live-verifying PG18-only grammar (VIRTUAL generated columns, ENFORCED/
+// NOT ENFORCED, table-level NOT NULL constraints and their ALTER CONSTRAINT
+// [NO] INHERIT lifecycle, WITHOUT OVERLAPS/PERIOD temporal keys) that a
+// PG17 server would reject at apply time regardless of what DPG's own
+// parser now accepts syntactically. Every other integration test
+// deliberately stays pinned to postgres:17 (this project's RFC floor,
+// Section 1.4) — use this only for a test whose whole point is a construct
+// that doesn't exist before PG18.
+func Start18(t *testing.T) string {
+	t.Helper()
+	connStr, _ := startContainer(t, "postgres:18", nil)
 	return connStr
 }
 
@@ -29,7 +44,7 @@ func Start(t *testing.T) string {
 // way specifically (the subscriber side has no such requirement).
 func StartLogical(t *testing.T) string {
 	t.Helper()
-	connStr, _ := startContainer(t, []string{"postgres", "-c", "wal_level=logical"})
+	connStr, _ := startContainer(t, "postgres:17", []string{"postgres", "-c", "wal_level=logical"})
 	return connStr
 }
 
@@ -40,17 +55,18 @@ func StartLogical(t *testing.T) string {
 // no SQL statement can create it).
 func StartWithContainer(t *testing.T) (string, testcontainers.Container) {
 	t.Helper()
-	return startContainer(t, nil)
+	return startContainer(t, "postgres:17", nil)
 }
 
-// startContainer starts a fresh postgres:17 testcontainer. cmd overrides the
-// container's default command when non-nil (e.g. to set wal_level).
-func startContainer(t *testing.T, cmd []string) (string, testcontainers.Container) {
+// startContainer starts a fresh Postgres testcontainer using image. cmd
+// overrides the container's default command when non-nil (e.g. to set
+// wal_level).
+func startContainer(t *testing.T, image string, cmd []string) (string, testcontainers.Container) {
 	t.Helper()
 	ctx := context.Background()
 
 	req := testcontainers.ContainerRequest{
-		Image:        "postgres:17",
+		Image:        image,
 		ExposedPorts: []string{"5432/tcp"},
 		Env: map[string]string{
 			"POSTGRES_USER":     "dpg",

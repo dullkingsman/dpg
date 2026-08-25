@@ -118,10 +118,18 @@ type Column struct {
 	SrcPos               pipeline.SourcePos
 }
 
-// Generated holds a GENERATED ALWAYS AS (expr) STORED column spec.
+// Generated holds a GENERATED ALWAYS AS (expr) STORED/VIRTUAL column spec.
 type Generated struct {
-	Expr   string // the generating expression
-	Stored bool   // always true in PG currently
+	Expr string // the generating expression
+	// Stored is true for STORED (computed on write, occupies physical
+	// storage), false for VIRTUAL (computed on read, PostgreSQL 18+ — RFC
+	// Section 7.2). The keyword itself is part of the generated column's
+	// identity, not just a storage hint: switching between them requires
+	// dropping and re-adding the column (real PostgreSQL has no ALTER path
+	// that changes it in place — confirmed live: SET EXPRESSION leaves
+	// pg_attribute.attgenerated unchanged), the same as any other identity
+	// change, not treated as a mere property tweak.
+	Stored bool
 }
 
 // Identity holds a GENERATED [ALWAYS|BY DEFAULT] AS IDENTITY column spec.

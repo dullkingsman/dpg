@@ -19,6 +19,14 @@ func sha256Sum(s string) [32]byte {
 	return sha256.Sum256([]byte(strings.TrimSpace(s)))
 }
 
+func opsSQL(ops []pipeline.DiffOp) []string {
+	out := make([]string, len(ops))
+	for i, o := range ops {
+		out[i] = o.SQL()
+	}
+	return out
+}
+
 func TestDiffEmptyDesiredEmptySnap(t *testing.T) {
 	d := New()
 	ops, err := d.Diff(nil, &pipeline.Snapshot{})
@@ -359,6 +367,383 @@ func TestDiffAddGeneratedColumn(t *testing.T) {
 	}
 	if !strings.Contains(addOp.SQL(), "GENERATED ALWAYS AS (amount * 1.08) STORED") {
 		t.Errorf("expected GENERATED ALWAYS AS (...) STORED clause, got: %s", addOp.SQL())
+	}
+}
+
+// TestDiffAddVirtualGeneratedColumn is TestDiffAddGeneratedColumn's VIRTUAL
+// counterpart (PostgreSQL 18+, RFC Section 7.2) — guards the ADD COLUMN
+// branch emitting VIRTUAL rather than always hardcoding STORED.
+func TestDiffAddVirtualGeneratedColumn(t *testing.T) {
+	d := New()
+
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.orders", &snapshot.SnapObject{
+		Kind: "table",
+		Table: &snapshot.SnapTable{
+			Schema:  "public",
+			Name:    "orders",
+			Columns: []snapshot.SnapColumn{{Name: "amount", Type: "numeric"}},
+		},
+	})
+
+	desired := []pipeline.IRObject{
+		&ir.Table{
+			Schema: "public",
+			Name:   "orders",
+			Columns: []*ir.Column{
+				{Name: "amount", Type: ir.TypeRef{Name: "numeric"}},
+				{
+					Name: "amount_with_tax", Type: ir.TypeRef{Name: "numeric"},
+					Generated: &ir.Generated{Expr: "amount * 1.08", Stored: false},
+				},
+			},
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var addOp pipeline.DiffOp
+	for _, o := range ops {
+		if strings.Contains(o.SQL(), "ADD COLUMN") {
+			addOp = o
+			break
+		}
+	}
+	if addOp == nil {
+		t.Fatal("expected ADD COLUMN op")
+	}
+	if !strings.Contains(addOp.SQL(), "GENERATED ALWAYS AS (amount * 1.08) VIRTUAL") {
+		t.Errorf("expected GENERATED ALWAYS AS (...) VIRTUAL clause, got: %s", addOp.SQL())
+	}
+}
+
+// baseGeneratedSnap returns a snapshot with one table ("public.orders")
+// containing a plain "amount" column and a generated "amount_with_tax"
+// column, matching genCol/genVirtual. Shared fixture for the
+// diffGeneratedColumn transition tests below.
+func baseGeneratedSnap(expr string, virtual bool) *pipeline.Snapshot {
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.orders", &snapshot.SnapObject{
+		Kind: "table",
+		Table: &snapshot.SnapTable{
+			Schema: "public",
+			Name:   "orders",
+			Columns: []snapshot.SnapColumn{
+				{Name: "amount", Type: "numeric"},
+				{Name: "amount_with_tax", Type: "numeric", Generated: &expr, GeneratedVirtual: virtual},
+			},
+		},
+	})
+	return snap
+}
+
+// TestDiffGeneratedColumnExpressionChanged guards RFC Section 7.4's "existing
+// generated expression text changed, STORED/VIRTUAL kind unchanged" row —
+// real PostgreSQL 18's SET EXPRESSION AS (...), confirmed live to leave
+// attgenerated (the STORED/VIRTUAL kind) untouched, so this must be CAUTION,
+// not a DROP+ADD.
+func TestDiffGeneratedColumnExpressionChanged(t *testing.T) {
+	d := New()
+	snap := baseGeneratedSnap("amount * 1.08", false) // snapshot: STORED, matching desired's Stored:true below
+
+	desired := []pipeline.IRObject{
+		&ir.Table{
+			Schema: "public",
+			Name:   "orders",
+			Columns: []*ir.Column{
+				{Name: "amount", Type: ir.TypeRef{Name: "numeric"}},
+				{
+					Name: "amount_with_tax", Type: ir.TypeRef{Name: "numeric"},
+					Generated: &ir.Generated{Expr: "amount * 1.10", Stored: true},
+				},
+			},
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var setExprOp pipeline.DiffOp
+	for _, o := range ops {
+		if strings.Contains(o.SQL(), "SET EXPRESSION") {
+			setExprOp = o
+		}
+		if strings.Contains(o.SQL(), "DROP COLUMN") || strings.Contains(o.SQL(), "ADD COLUMN") {
+			t.Errorf("expression-only change should not drop/re-add the column, got: %s", o.SQL())
+		}
+	}
+	if setExprOp == nil {
+		t.Fatal("expected an ALTER COLUMN ... SET EXPRESSION op")
+	}
+	if !strings.Contains(setExprOp.SQL(), "SET EXPRESSION AS (amount * 1.10)") {
+		t.Errorf("expected new expression in SET EXPRESSION clause, got: %s", setExprOp.SQL())
+	}
+	if setExprOp.Safety() != pipeline.Caution {
+		t.Errorf("expected Caution, got %s", setExprOp.Safety())
+	}
+}
+
+// TestDiffGeneratedColumnExpressionUnchangedIsNoop guards against
+// diffGeneratedColumn firing spuriously when nothing actually changed —
+// whitespace-only differences in the expression text must not trigger a
+// SET EXPRESSION op (same normalizeWS treatment other expression-bearing
+// diffs already get).
+func TestDiffGeneratedColumnExpressionUnchangedIsNoop(t *testing.T) {
+	d := New()
+	snap := baseGeneratedSnap("amount * 1.08", false) // snapshot: STORED, matching desired's Stored:true below
+
+	desired := []pipeline.IRObject{
+		&ir.Table{
+			Schema: "public",
+			Name:   "orders",
+			Columns: []*ir.Column{
+				{Name: "amount", Type: ir.TypeRef{Name: "numeric"}},
+				{
+					Name: "amount_with_tax", Type: ir.TypeRef{Name: "numeric"},
+					Generated: &ir.Generated{Expr: "amount  *  1.08", Stored: true},
+				},
+			},
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, o := range ops {
+		if strings.Contains(o.SQL(), "amount_with_tax") {
+			t.Errorf("expected no op for amount_with_tax, got: %s", o.SQL())
+		}
+	}
+}
+
+// TestDiffGeneratedColumnIntrospectedOuterParensIsNoop guards a real bug
+// found live-testing against a PostgreSQL 18 container: introspection reads
+// a generated column's expression via pg_get_expr, which wraps it in an
+// extra outer paren pair — a source "amount * 1.08" reads back as
+// "(amount * 1.08)" — so without stripping that pair before comparing (the
+// same normalizeExprForCompare treatment policy USING/index WHERE/trigger
+// WHEN already get), every `dpg plan` immediately after a `dpg dump` or
+// live-drift check would spuriously re-run SET EXPRESSION for no real
+// change.
+func TestDiffGeneratedColumnIntrospectedOuterParensIsNoop(t *testing.T) {
+	d := New()
+	snap := baseGeneratedSnap("(amount * 1.08)", false) // as pg_get_expr would report it, STORED
+
+	desired := []pipeline.IRObject{
+		&ir.Table{
+			Schema: "public",
+			Name:   "orders",
+			Columns: []*ir.Column{
+				{Name: "amount", Type: ir.TypeRef{Name: "numeric"}},
+				{
+					Name: "amount_with_tax", Type: ir.TypeRef{Name: "numeric"},
+					Generated: &ir.Generated{Expr: "amount * 1.08", Stored: true}, // as the source declares it
+				},
+			},
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, o := range ops {
+		if strings.Contains(o.SQL(), "amount_with_tax") {
+			t.Errorf("expected no op for amount_with_tax, got: %s", o.SQL())
+		}
+	}
+}
+
+// TestDiffGeneratedColumnKindChanged guards RFC Section 7.4's
+// "STORED<->VIRTUAL changed, expression unchanged" row — confirmed live that
+// SET EXPRESSION never changes a column's STORED/VIRTUAL kind, so switching
+// kind requires DROP COLUMN + ADD COLUMN, hence DESTRUCTIVE.
+func TestDiffGeneratedColumnKindChanged(t *testing.T) {
+	d := New()
+	snap := baseGeneratedSnap("amount * 1.08", true) // snapshot: VIRTUAL
+
+	desired := []pipeline.IRObject{
+		&ir.Table{
+			Schema: "public",
+			Name:   "orders",
+			Columns: []*ir.Column{
+				{Name: "amount", Type: ir.TypeRef{Name: "numeric"}},
+				{
+					Name: "amount_with_tax", Type: ir.TypeRef{Name: "numeric"},
+					Generated: &ir.Generated{Expr: "amount * 1.08", Stored: true}, // desired: STORED
+				},
+			},
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var dropOp, addOp pipeline.DiffOp
+	for _, o := range ops {
+		if strings.Contains(o.SQL(), "DROP COLUMN") && strings.Contains(o.SQL(), "amount_with_tax") {
+			dropOp = o
+		}
+		if strings.Contains(o.SQL(), "ADD COLUMN") && strings.Contains(o.SQL(), "amount_with_tax") {
+			addOp = o
+		}
+		if strings.Contains(o.SQL(), "SET EXPRESSION") {
+			t.Errorf("kind change must not use SET EXPRESSION, got: %s", o.SQL())
+		}
+	}
+	if dropOp == nil || addOp == nil {
+		t.Fatalf("expected DROP COLUMN + ADD COLUMN ops for amount_with_tax, got ops: %v", opsSQL(ops))
+	}
+	if dropOp.Safety() != pipeline.Destructive || addOp.Safety() != pipeline.Destructive {
+		t.Errorf("expected both ops Destructive, got drop=%s add=%s", dropOp.Safety(), addOp.Safety())
+	}
+	if !strings.Contains(addOp.SQL(), "GENERATED ALWAYS AS (amount * 1.08) STORED") {
+		t.Errorf("expected re-added column to carry the STORED clause, got: %s", addOp.SQL())
+	}
+}
+
+// TestDiffGeneratedColumnAddedToExistingPlainColumn guards RFC Section 7.4's
+// "GENERATED ... AS (expr) added where none existed" row for a column that
+// already exists as plain (not the create-table-time or brand-new-ADD-COLUMN
+// path already covered by TestDiffAddGeneratedColumn/
+// TestDiffAddVirtualGeneratedColumn) — confirmed live that PostgreSQL has no
+// ALTER COLUMN ... ADD GENERATED AS (expr) form at all, so this also
+// requires DROP+ADD, hence DESTRUCTIVE.
+func TestDiffGeneratedColumnAddedToExistingPlainColumn(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.orders", &snapshot.SnapObject{
+		Kind: "table",
+		Table: &snapshot.SnapTable{
+			Schema: "public",
+			Name:   "orders",
+			Columns: []snapshot.SnapColumn{
+				{Name: "amount", Type: "numeric"},
+				{Name: "amount_with_tax", Type: "numeric"}, // plain, not generated
+			},
+		},
+	})
+
+	desired := []pipeline.IRObject{
+		&ir.Table{
+			Schema: "public",
+			Name:   "orders",
+			Columns: []*ir.Column{
+				{Name: "amount", Type: ir.TypeRef{Name: "numeric"}},
+				{
+					Name: "amount_with_tax", Type: ir.TypeRef{Name: "numeric"},
+					Generated: &ir.Generated{Expr: "amount * 1.08", Stored: true},
+				},
+			},
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var dropOp, addOp pipeline.DiffOp
+	for _, o := range ops {
+		if strings.Contains(o.SQL(), "DROP COLUMN") && strings.Contains(o.SQL(), "amount_with_tax") {
+			dropOp = o
+		}
+		if strings.Contains(o.SQL(), "ADD COLUMN") && strings.Contains(o.SQL(), "amount_with_tax") {
+			addOp = o
+		}
+	}
+	if dropOp == nil || addOp == nil {
+		t.Fatalf("expected DROP COLUMN + ADD COLUMN ops for amount_with_tax, got ops: %v", opsSQL(ops))
+	}
+	if dropOp.Safety() != pipeline.Destructive || addOp.Safety() != pipeline.Destructive {
+		t.Errorf("expected both ops Destructive, got drop=%s add=%s", dropOp.Safety(), addOp.Safety())
+	}
+}
+
+// TestDiffGeneratedColumnRemovedStored guards RFC Section 7.4's "GENERATED
+// ... AS (expr) removed, column kept" row for a STORED column — DROP
+// EXPRESSION IF EXISTS freezes the column's current values with no rewrite,
+// hence SAFE.
+func TestDiffGeneratedColumnRemovedStored(t *testing.T) {
+	d := New()
+	snap := baseGeneratedSnap("amount * 1.08", false) // STORED
+
+	desired := []pipeline.IRObject{
+		&ir.Table{
+			Schema: "public",
+			Name:   "orders",
+			Columns: []*ir.Column{
+				{Name: "amount", Type: ir.TypeRef{Name: "numeric"}},
+				{Name: "amount_with_tax", Type: ir.TypeRef{Name: "numeric"}}, // no longer generated
+			},
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var dropExprOp pipeline.DiffOp
+	for _, o := range ops {
+		if strings.Contains(o.SQL(), "DROP EXPRESSION") {
+			dropExprOp = o
+		}
+		if strings.Contains(o.SQL(), "DROP COLUMN") {
+			t.Errorf("removing GENERATED from a STORED column should use DROP EXPRESSION, not DROP COLUMN, got: %s", o.SQL())
+		}
+	}
+	if dropExprOp == nil {
+		t.Fatal("expected an ALTER COLUMN ... DROP EXPRESSION IF EXISTS op")
+	}
+	if !strings.Contains(dropExprOp.SQL(), `ALTER COLUMN "amount_with_tax" DROP EXPRESSION IF EXISTS`) {
+		t.Errorf("unexpected SQL: %s", dropExprOp.SQL())
+	}
+	if dropExprOp.Safety() != pipeline.Safe {
+		t.Errorf("expected Safe, got %s", dropExprOp.Safety())
+	}
+}
+
+// TestDiffGeneratedColumnRemovedVirtual guards the VIRTUAL counterpart of
+// the row above — confirmed live against a real PostgreSQL 18 server that
+// DROP EXPRESSION is flatly rejected for a VIRTUAL generated column ("ALTER
+// TABLE / DROP EXPRESSION is not supported for virtual generated columns"),
+// so removing generation from a VIRTUAL column must drop and re-add it as
+// plain, hence DESTRUCTIVE (unlike the STORED case above).
+func TestDiffGeneratedColumnRemovedVirtual(t *testing.T) {
+	d := New()
+	snap := baseGeneratedSnap("amount * 1.08", true) // VIRTUAL
+
+	desired := []pipeline.IRObject{
+		&ir.Table{
+			Schema: "public",
+			Name:   "orders",
+			Columns: []*ir.Column{
+				{Name: "amount", Type: ir.TypeRef{Name: "numeric"}},
+				{Name: "amount_with_tax", Type: ir.TypeRef{Name: "numeric"}}, // no longer generated
+			},
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var dropOp, addOp pipeline.DiffOp
+	for _, o := range ops {
+		if strings.Contains(o.SQL(), "DROP EXPRESSION") {
+			t.Errorf("removing GENERATED from a VIRTUAL column must not use DROP EXPRESSION (real PostgreSQL rejects it), got: %s", o.SQL())
+		}
+		if strings.Contains(o.SQL(), "DROP COLUMN") && strings.Contains(o.SQL(), "amount_with_tax") {
+			dropOp = o
+		}
+		if strings.Contains(o.SQL(), "ADD COLUMN") && strings.Contains(o.SQL(), "amount_with_tax") {
+			addOp = o
+		}
+	}
+	if dropOp == nil || addOp == nil {
+		t.Fatalf("expected DROP COLUMN + ADD COLUMN ops for amount_with_tax, got ops: %v", opsSQL(ops))
+	}
+	if strings.Contains(addOp.SQL(), "GENERATED") {
+		t.Errorf("re-added column should be plain, not generated, got: %s", addOp.SQL())
+	}
+	if dropOp.Safety() != pipeline.Destructive || addOp.Safety() != pipeline.Destructive {
+		t.Errorf("expected both ops Destructive, got drop=%s add=%s", dropOp.Safety(), addOp.Safety())
 	}
 }
 

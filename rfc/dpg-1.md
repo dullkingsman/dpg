@@ -1895,14 +1895,7 @@ table-decl  = [ "UNLOGGED" WSP ] "TABLE" WSP schema-table-name WSP
               [ "{" table-block "}" ]
 
 column-list = column-item *( "," WSP column-item )
-column-item = column-def / table-constraint / like-clause / period-clause
-
-; PostgreSQL 18+ temporal PRIMARY KEY/UNIQUE/FOREIGN KEY support
-; (WITHOUT OVERLAPS/PERIOD, Section 7.3) name a generated validity range via
-; this column-list entry instead of referencing a physical range column
-; directly.
-period-clause = "PERIOD FOR" WSP identifier WSP
-                "(" col-name "," WSP col-name ")"
+column-item = column-def / table-constraint / like-clause
 
 ; CREATE TABLE ... (LIKE source_table [{INCLUDING|EXCLUDING} ...]) — a
 ; column-list item copying another table's column definitions (and,
@@ -2057,11 +2050,16 @@ enforced-clause = "ENFORCED" / "NOT ENFORCED"
 
    **`VIRTUAL` generated columns** (PostgreSQL 18+): computed on read
    rather than stored — the alternative to the existing `STORED` form.
-   Diffed as a normal generated-column expression (Section 7.4's diffing
-   table) — the `STORED`/`VIRTUAL` keyword itself is part of the
-   generated-column identity the differ compares, so switching between
-   them is a change like any other, going through the same `ADD
-   GENERATED`/`SET EXPRESSION`/`DROP EXPRESSION` paths.
+   Diffed per Section 7.4's generated-column diffing table — the
+   `STORED`/`VIRTUAL` keyword itself is part of the generated-column
+   identity the differ compares, so switching between them is a change
+   like any other, but real PostgreSQL's own `ALTER` surface is narrower
+   for `VIRTUAL` than for `STORED`: there is no in-place path for adding
+   generation to a plain column or for switching `STORED`↔`VIRTUAL`
+   (both always drop-and-recreate the column, regardless of kind), `SET
+   EXPRESSION` works identically for either kind, and `DROP EXPRESSION`
+   — unlike `STORED` — is rejected outright for `VIRTUAL` (see Section
+   7.4's table for the exact transitions and DDL).
 
    **`NOT NULL ... NO INHERIT`:** By default a `NOT NULL` constraint is
    inherited by child tables (`INHERITS`/partitions).  `NO INHERIT`
@@ -2300,24 +2298,33 @@ table-constraint-body
 
    **Temporal keys (`WITHOUT OVERLAPS`/`PERIOD`, PostgreSQL 18+):** A
    trailing `col_name WITHOUT OVERLAPS` on `PRIMARY KEY`/`UNIQUE`
-   marks that column (a range or multirange type, or a `PERIOD`) as
-   the temporal-overlap comparison key — real PostgreSQL implements
-   this as an exclusion constraint under the hood.  A `FOREIGN KEY`'s
-   trailing `PERIOD col_name` in both the local and `REFERENCES`
-   column lists declares a temporal foreign key, valid only for the
-   referenced row's *own* validity period. `PERIOD FOR name (start_col,
-   end_col)` — declared directly in the column list alongside ordinary
-   columns via `period-clause`, a new `column-item` alternative added
-   in Section 7.1 — names the generated range spanning two existing columns
-   that `WITHOUT OVERLAPS`/`PERIOD` then reference by that name instead
-   of a physical column:
+   marks an existing range or multirange column as the temporal-overlap
+   comparison key. Under the hood, real PostgreSQL enforces this via an
+   exclusion search using the range type's own operators (populated into
+   `pg_constraint.conexclop`), but the constraint itself is still
+   catalogued as an ordinary `PRIMARY KEY`/`UNIQUE` (`contype` `'p'`/`'u'`),
+   *not* reclassified as `EXCLUDE` (`contype` `'x'`) — confirmed live
+   against a PostgreSQL 18 server. A `FOREIGN KEY`'s trailing `PERIOD
+   col_name` in both the local and `REFERENCES` column lists declares a
+   temporal foreign key, valid only for the referenced row's *own*
+   validity period; that column, too, must already exist as a range or
+   multirange type — real PostgreSQL 18 has no `PERIOD FOR name
+   (start_col, end_col)` construct for declaring a generated range from
+   two plain columns (confirmed live: `PERIOD FOR` is a syntax error
+   against a real PostgreSQL 18 server, and the official PostgreSQL 18
+   documentation defines no such clause). This document previously
+   described such a construct in error; declaring the range or multirange
+   column itself (directly, or via `EXCLUDE`/a generated column, Section
+   7.4) is the only way to get one. Non-range key columns (e.g. a bare
+   `DATE` pair) need `CREATE EXTENSION btree_gist` for the exclusion
+   search to have an applicable operator class — PostgreSQL's own error,
+   left to it per the passthrough-validation principle used throughout
+   this document:
 
 ```sql
 TABLE room_bookings (
-    room_id    BIGINT NOT NULL,
-    valid_from DATE NOT NULL,
-    valid_to   DATE NOT NULL,
-    PERIOD FOR valid_at (valid_from, valid_to),
+    room_id  BIGINT NOT NULL,
+    valid_at DATERANGE NOT NULL,
     CONSTRAINT no_double_booking
         PRIMARY KEY (room_id, valid_at WITHOUT OVERLAPS)
 );
@@ -2443,16 +2450,20 @@ col-block-directive
    compiled with LZ4 support).
 
    **Generated-column expression changes:** No separate directive is
-   needed — the `GENERATED ALWAYS AS ( expr ) STORED` clause is already
-   part of `column-def` (Section 7.2).  The differ recognises three distinct
-   transitions on it and emits the matching targeted `ALTER`, instead
-   of falling through to the generic "column type changed" row:
+   needed — the `GENERATED ALWAYS AS ( expr ) STORED`/`VIRTUAL` clause is
+   already part of `column-def` (Section 7.2).  The differ recognises
+   four distinct transitions on it and emits the matching targeted
+   `ALTER` (or, where real PostgreSQL has no in-place `ALTER` path at
+   all, a drop-and-recreate of the column), instead of falling through
+   to the generic "column type changed" row:
 
    | Change | DDL emitted | Safety |
    |--------|-------------|--------|
-   | `GENERATED ... AS (expr)` added where none existed | `ALTER TABLE t ALTER COLUMN c ADD GENERATED ALWAYS AS (expr) STORED` | `CAUTION` (rewrites the column) |
-   | Existing generated expression text changed | `ALTER TABLE t ALTER COLUMN c SET EXPRESSION AS (expr)` — PG18+ only; older targets fall back to drop-and-recreate of the column | `CAUTION` |
-   | `GENERATED ... AS (expr)` removed, column kept | `ALTER TABLE t ALTER COLUMN c DROP EXPRESSION [IF EXISTS]` | `SAFE` (freezes the column's current values, no rewrite) |
+   | `GENERATED ... AS (expr)` added where none existed | `ALTER TABLE t DROP COLUMN c; ALTER TABLE t ADD COLUMN c type GENERATED ALWAYS AS (expr) STORED\|VIRTUAL` — confirmed live that real PostgreSQL has no `ALTER COLUMN ... ADD GENERATED AS (expr)` form at all (unlike `ADD GENERATED ... AS IDENTITY`, Section 7.4's own Identity table below, which is real); turning an existing plain column into a generated one always requires dropping and re-adding it | `DESTRUCTIVE` (the column's prior values are discarded, not merely rewritten in place) |
+   | `STORED`↔`VIRTUAL` changed, expression unchanged | Same drop-and-recreate as above — confirmed live that `SET EXPRESSION` never changes a column's `STORED`/`VIRTUAL` kind, only its expression text | `DESTRUCTIVE` |
+   | Existing generated expression text changed, `STORED`/`VIRTUAL` kind unchanged | `ALTER TABLE t ALTER COLUMN c SET EXPRESSION AS (expr)` (PostgreSQL 18+; confirmed live working against a generated column of either kind) | `CAUTION` |
+   | `GENERATED ... AS (expr)` removed, column kept (`STORED`) | `ALTER TABLE t ALTER COLUMN c DROP EXPRESSION IF EXISTS` | `SAFE` (freezes the column's current values, no rewrite) |
+   | `GENERATED ... AS (expr)` removed, column kept (`VIRTUAL`) | Same drop-and-recreate as the "added" row above, re-adding the column as plain — confirmed live that real PostgreSQL 18 rejects `DROP EXPRESSION` outright for a `VIRTUAL` column ("ALTER TABLE / DROP EXPRESSION is not supported for virtual generated columns"), unlike `STORED` just above | `DESTRUCTIVE` (a `VIRTUAL` column has no stored value to freeze in the first place; the re-added column comes back `NULL`, not the last computed value) |
 
    **Identity-column changes:** Likewise driven entirely by `column-def`'s
    already-declarative `GENERATED ALWAYS/BY DEFAULT AS IDENTITY
@@ -7246,7 +7257,7 @@ serial_sequence_declared      = "off"
    | `EXCLUSION` constraints | Declared, Diffed | In `()` or `{}` block; on partitioned tables since PG17 (Section 7.3, passthrough) |
    | `NOT VALID` / `VALIDATE CONSTRAINT` | Declared, Diffed | Multi-migration lifecycle; extended to `NOT NULL` constraints in PG18 (Section 7.3) |
    | `ENFORCED`/`NOT ENFORCED` (`CHECK`/`FOREIGN KEY`) | Declared, Diffed | PG18+ (Sections 7.2/7.3) |
-   | Temporal keys (`WITHOUT OVERLAPS`/`PERIOD FOR`) | Declared, Diffed | PG18+; implemented as an exclusion constraint under the hood (Section 7.3) |
+   | Temporal keys (`WITHOUT OVERLAPS`/`PERIOD`) | Declared, Diffed | PG18+; references an existing range/multirange column, catalogued as an ordinary `PRIMARY KEY`/`UNIQUE`/`FOREIGN KEY`, not `EXCLUDE` (Section 7.3) |
    | FK `ON DELETE`/`ON UPDATE SET NULL`/`SET DEFAULT (col-list)` | Declared, Diffed | PG15+, column-scoped variant of the existing bare form (Section 7.2) |
    | Indexes — all access methods | Declared, Diffed | btree, hash, gin, gist, brin, spgist, bloom |
    | Indexes — partial | Declared, Diffed | `WHERE` predicate as text |
@@ -8676,6 +8687,7 @@ ENUM user_status ('active', 'inactive', 'banned') {
    | E.18 | 2026-08-23 | Closed the RFC-completeness audit's final mop-up items and a structural defect: Section 11.2 documents GRANT's untyped, cross-object-kind-shared privilege list as an accepted offline validation limitation (every real privilege word is expressible; nothing is unexpressable, but DPG performs no offline "wrong privilege for this object kind" check); Section 14.6 confirms Extended Statistics on an expression (not just plain columns, PG14+) passes through cleanly as `opaque-object-decl` Part 1 text; Sections 8.1/25 note temporary views are excluded on the same terms as temporary tables (Section 7.12). Also: this document's own physical section order was corrected to match its Table of Contents — Normative References/Informative References/Author's Address, previously sandwiched between Appendix C and Appendix D, now correctly follow Appendix F as the final sections (standard IETF convention), matching how every other RFC-style document in this family is laid out. |
    | E.19 | 2026-08-23 | Sections 7.8/7.9/7.13/12.1/25 updated, closing four gaps found during a full audit of `RENAMED FROM` coverage across every object kind DPG models (following that day's fix of the generic cross-schema rename mechanism in `core/`). Policy gains `RENAMED FROM` (`ALTER POLICY ... RENAME TO`, `SAFE`, matching Constraint/Index's sub-object precedent — not the `CAUTION` classification used for independently-referenceable top-level objects), with the real PostgreSQL restriction documented that `RENAME TO` cannot combine with a `TO`/`USING`/`WITH CHECK` change in one statement (two `ALTER POLICY` statements emitted when both differ). Trigger gains `RENAMED FROM` (`ALTER TRIGGER ... RENAME TO`, `SAFE`, same sub-object precedent), with the identical real-PostgreSQL restriction against `[NO] DEPENDS ON EXTENSION` documented. Partitioned Tables gain `RENAMED FROM` on a partition entry (`ALTER TABLE ... RENAME TO`, `CAUTION` — the same classification as a plain table rename, since a partition is an ordinary table under the hood); the previously example-only recursive sub-partitioning shape is also formalized in `partition-decl`'s own ABNF for the first time, so `RENAMED FROM` (and the grammar generally) is unambiguously available at any nesting depth. Text Search Configuration gains `RENAMED FROM`/`SET SCHEMA` (`renamed-from-dir`, `CAUTION`/`SAFE` matching Dictionary's existing precedent) — closing a spec-only inconsistency where Configuration was the only Full-Text-Search kind without it, despite Dictionary/Parser/Template all already having it. Section 7.6's cross-schema `renamed-from-dir` kind list corrected to include Section 12. All four additions verified against PostgreSQL's own official documentation before drafting, not assumed. |
    | E.20 | 2026-08-24 | `min_pg_version` promoted out of Section 23 ("Deferred Features") now that the reference implementation has it working: new Section 3.8 (resolution order — database overrides cluster overrides project root, most specific wins; validation against this specification's own floor of 14; enforcement via the new `min-pg-version` linter rule) and matching `[compiler]` config additions to Sections 3.2-3.4. Section 1.4's Tenet 3 paragraph's forward reference to the old Section 23 placeholder corrected to point at Section 3.8. Appendix D.3 gains the `min-pg-version` rule entry. Appendix F refreshed: new `Min PG Version` column added across the entire table (blank = available since the floor of PostgreSQL 14, this specification's own supported minimum), and 14 rows added for constructs documented by E.13-E.19 that had never been given their own Tenet-3 classification at all — `PARAMETER PRIVILEGES` (Section 11.6), Collation `REFRESH VERSION`/`RULES` (Section 14.2), Event Trigger's `login` event (Section 14.1), `GRANTED BY role` (Section 7.10), table-level named `NOT NULL` and temporal keys (Section 7.3), `NOT NULL ... NO INHERIT`/`ENFORCED`/`NOT ENFORCED`/FK column-scoped `SET NULL`/`SET DEFAULT` (Section 7.2), and Column `STATISTICS DEFAULT` (Section 7.4); the pre-existing generated-columns row split into `STORED` (floor-14) and `VIRTUAL` (PG18) since the two variants now carry different version gates. This documentation-only revision intentionally lands after the reference implementation (`core/`, commit `56ae62e`) rather than before it — the user's own explicit sequencing choice for this feature, so the RFC describes proven behavior rather than a plan. |
+   | E.21 | 2026-08-25 | Section 7.4's generated-column diffing table implemented in the reference implementation (`core/`) for the first time — previously referenced from Section 7.2's `VIRTUAL` text but not actually wired into the differ at all, so any change to a generated column's expression, or a `STORED`/`VIRTUAL` switch, was silently undetected. Corrected two factual errors found live-testing that implementation against a real PostgreSQL 18 server: (1) Section 7.4's "removed, column kept" row split into separate `STORED` (`DROP EXPRESSION`, `SAFE`) and `VIRTUAL` (drop-and-recreate, `DESTRUCTIVE`) variants — PostgreSQL 18 flatly rejects `DROP EXPRESSION` for a `VIRTUAL` column, which this document previously didn't distinguish from `STORED`; Section 7.2's `VIRTUAL` paragraph updated to match. (2) Section 7.1's `period-clause` grammar production and Section 7.3's `PERIOD FOR name (start_col, end_col)` generated-period-column construct removed entirely — confirmed live that no such syntax exists in real PostgreSQL 18 (a syntax error against a real server, and absent from PostgreSQL's own official documentation); this document had described it in error. `WITHOUT OVERLAPS`/`PERIOD` temporal keys (Section 7.3) now correctly documented as referencing an *already-existing* range/multirange column directly, with no generated-range declaration form. Also corrected Section 7.3's claim that a temporal key is "implemented as an exclusion constraint under the hood" — confirmed live (`pg_constraint.contype`) that it stays catalogued as an ordinary `PRIMARY KEY`/`UNIQUE`/`FOREIGN KEY`, not reclassified to `EXCLUDE`; only the internal enforcement mechanism (`pg_constraint.conexclop`) is exclusion-based. Appendix F's temporal-keys row and Tenet-3 classification row updated to match. |
 
 ---
 
@@ -8743,7 +8755,7 @@ ENUM user_status ('active', 'inactive', 'banned') {
    | Section 7.2 | `ENFORCED`/`NOT ENFORCED` (`CHECK`/`FOREIGN KEY`) | PGSpecific | 18 | PostgreSQL's own catalog-recorded-but-unchecked constraint mode; no SQL-standard citation for this exact clause. |
    | Section 7.2 | FK `ON DELETE`/`ON UPDATE SET NULL`/`SET DEFAULT (col-list)` | PGSpecific | 15 | Column-scoped refinement of the standard bare `SET NULL`/`SET DEFAULT` form (the bare form is covered by the `CREATE TABLE` core row above); the column-list itself has no SQL-standard equivalent. |
    | Section 7.3 | Table-level named `NOT NULL` constraint | Standard | 18 | PostgreSQL 18 gave `NOT NULL` the same named, catalogued constraint treatment `CHECK`/`PRIMARY KEY`/`UNIQUE`/`FOREIGN KEY` already had; additive to the pre-existing inline column-level form (Section 7.2 row above), not a replacement. |
-   | Section 7.3 | Temporal keys (`WITHOUT OVERLAPS`/`PERIOD FOR`, incl. temporal `FOREIGN KEY`) | Mixed | 18 | SQL:2011 standardizes temporal `PRIMARY KEY`/`UNIQUE`; PostgreSQL implements it as an exclusion constraint under the hood — the concept is standard, the grammar and mechanism are PostgreSQL's own dialect. |
+   | Section 7.3 | Temporal keys (`WITHOUT OVERLAPS`/`PERIOD`, incl. temporal `FOREIGN KEY`) | Mixed | 18 | SQL:2011 standardizes temporal `PRIMARY KEY`/`UNIQUE`; PostgreSQL enforces it via an exclusion search under the hood while keeping the constraint catalogued as an ordinary `PRIMARY KEY`/`UNIQUE`/`FOREIGN KEY` — the concept is standard, the grammar and mechanism are PostgreSQL's own dialect. |
    | Section 7.4 | Column `STATISTICS n` / `STATISTICS DEFAULT` | PGSpecific | 17 (`DEFAULT` keyword only; numeric target is floor-14) | Planner statistics-target tuning; no standard equivalent. |
    | Section 7.7 | `CREATE INDEX` core | Mixed | — | Indexes exist informally across all vendors but are not in ISO/IEC 9075 at all — classified PGSpecific as a whole (see next row), since "index" is not a standard DDL concept, only a near-universal vendor extension. |
    | Section 7.7 | `CREATE INDEX` (all forms: access methods, partial, expression, covering, opclass) | PGSpecific | — | No SQL-standard `CREATE INDEX` statement exists; every vendor's index DDL is proprietary. |

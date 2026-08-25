@@ -54,6 +54,45 @@ func TestRenderColumnSerialCompiles(t *testing.T) {
 	}
 }
 
+// TestRenderGeneratedColumnVirtualCompiles guards a real bug found while
+// implementing VIRTUAL generated-column diffing (RFC Section 7.2, PG18+):
+// renderObjectDPG's column-rendering loop hardcoded the STORED keyword for
+// every generated column regardless of col.Generated.Stored, so dumping a
+// table with a VIRTUAL generated column silently rewrote it as STORED.
+func TestRenderGeneratedColumnVirtualCompiles(t *testing.T) {
+	fmtOpts := format.Options{IndentSize: 4, KeywordCase: "upper"}
+	tbl := &ir.Table{
+		Schema: "public", Name: "orders",
+		Columns: []*ir.Column{
+			{Name: "amount", Type: ir.TypeRef{Name: "numeric"}},
+			{
+				Name: "amount_with_tax", Type: ir.TypeRef{Name: "numeric"},
+				Generated: &ir.Generated{Expr: "amount * 1.08", Stored: false},
+			},
+		},
+	}
+
+	var b strings.Builder
+	renderObjectDPG(&b, tbl, fmtOpts)
+	rendered := b.String()
+
+	if !strings.Contains(rendered, "GENERATED ALWAYS AS (amount * 1.08) VIRTUAL") {
+		t.Errorf("rendered column does not use VIRTUAL: %q", rendered)
+	}
+	if strings.Contains(rendered, ") STORED") {
+		t.Errorf("rendered column must not fall back to STORED for a VIRTUAL generated column: %q", rendered)
+	}
+
+	dir := t.TempDir()
+	f := filepath.Join(dir, "objects.dpg")
+	if err := os.WriteFile(f, []byte(rendered), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := compiler.Compile([]string{f}, dir, pipeline.Default); err != nil {
+		t.Fatalf("dumped table with a VIRTUAL generated column failed to recompile: %v\n---\n%s", err, rendered)
+	}
+}
+
 // TestRenderIndexUsingMethodCompiles guards a real bug found live-testing a
 // demo project: the RFC's ABNF and every one of its worked examples
 // (rfc/dpg-1.md §7.7, e.g. "idx_location USING gist (location);") place

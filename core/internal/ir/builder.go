@@ -339,7 +339,13 @@ func (b *Builder) buildColumn(cd *pg_query.ColumnDef, pos pipeline.SourcePos) (*
 		case pg_query.ConstrType_CONSTR_GENERATED:
 			if cst.RawExpr != nil {
 				expr := nodeToText(cst.RawExpr)
-				col.Generated = &Generated{Expr: expr, Stored: true}
+				// GeneratedKind is "s" (STORED) or "v" (VIRTUAL, PG18+) —
+				// real PostgreSQL always sets one of the two for this
+				// constraint type, but default to STORED (true) on an
+				// empty/unrecognized value rather than silently building a
+				// half-formed Generated, matching this codebase's general
+				// "unknown falls back to the pre-existing default" pattern.
+				col.Generated = &Generated{Expr: expr, Stored: cst.GeneratedKind != "v"}
 			}
 
 		case pg_query.ConstrType_CONSTR_IDENTITY:
