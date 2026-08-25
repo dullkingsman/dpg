@@ -238,11 +238,18 @@ func TestHashFunctionBodyPlpgsqlArraySubscriptAssignmentTargetWhitespaceIsNoop(t
 // TestHashFunctionBodyPlpgsqlArrayOfCompositeAssignmentTargetWhitespaceIsNoop
 // covers a target with two indirection levels (subscript + field,
 // "arr[1].field") — a shape distinct from the plain dotted-name case
-// already covered elsewhere.
+// already covered elsewhere. Uses pg_class as the composite element type —
+// a real, always-resolvable system catalog row type, available even to
+// this offline parser with no live catalog connection — rather than the
+// fictional "t_composite" this test used before: PostgreSQL 18 tightened
+// plpgsql's type resolution to reject "array of an unresolvable composite"
+// altogether ("PL/pgSQL functions cannot return type _record" / "variable
+// ... has pseudo-type _record", confirmed empirically against both the pre-
+// and post-upgrade parser directly), where PG17 had silently tolerated it.
 func TestHashFunctionBodyPlpgsqlArrayOfCompositeAssignmentTargetWhitespaceIsNoop(t *testing.T) {
-	a := "DECLARE arr t_composite[]; BEGIN arr[1].field := arr[1].field + 1; RETURN arr; END;"
-	b := "DECLARE arr t_composite[]; BEGIN arr[1].field  :=  arr[1].field+1; RETURN arr; END;"
-	full := func(body string) string { return plpgsqlShim("", "t_composite[]", body) }
+	a := "DECLARE arr pg_class[]; BEGIN arr[1].relpages := arr[1].relpages + 1; RETURN arr; END;"
+	b := "DECLARE arr pg_class[]; BEGIN arr[1].relpages  :=  arr[1].relpages+1; RETURN arr; END;"
+	full := func(body string) string { return plpgsqlShim("", "pg_class[]", body) }
 	if ir.HashFunctionBody("plpgsql", a, full(a)) != ir.HashFunctionBody("plpgsql", b, full(b)) {
 		t.Errorf("whitespace-only change in an array-of-composite assignment target should hash equal: %q vs %q", a, b)
 	}
