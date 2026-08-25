@@ -1304,6 +1304,40 @@ func TestBuildMaterializedViewWithNoData(t *testing.T) {
 	}
 }
 
+// TestBuildMaterializedViewTablespaceAndStorageParams guards RFC Section
+// 8.2's own worked example (WITH (fillfactor = 90) TABLESPACE
+// analytics_space) — buildMaterializedView previously never read
+// cta.Into.TableSpaceName/Options at all, silently dropping both.
+func TestBuildMaterializedViewTablespaceAndStorageParams(t *testing.T) {
+	obj := buildObject(t, pipeline.KindMaterializedView,
+		`product_stats WITH (fillfactor = 90) TABLESPACE analytics_space AS SELECT product_id, count(*) AS purchases FROM order_items GROUP BY product_id WITH NO DATA`,
+		``,
+	)
+	v := obj.(*ir.View)
+	if v.Tablespace == nil || *v.Tablespace != "analytics_space" {
+		t.Errorf("Tablespace: got %v, want analytics_space", v.Tablespace)
+	}
+	if len(v.StorageParams) != 1 || v.StorageParams[0].Key != "fillfactor" || v.StorageParams[0].Value != "90" {
+		t.Errorf("StorageParams: got %+v, want [{fillfactor 90}]", v.StorageParams)
+	}
+}
+
+// TestBuildViewNoTablespaceOrStorageParams guards the common case (neither
+// clause declared) leaving both fields at their nil/empty zero value.
+func TestBuildViewNoTablespaceOrStorageParams(t *testing.T) {
+	obj := buildObject(t, pipeline.KindMaterializedView,
+		`order_status_summary AS SELECT status, count(*) AS order_count FROM orders GROUP BY status`,
+		``,
+	)
+	v := obj.(*ir.View)
+	if v.Tablespace != nil {
+		t.Errorf("Tablespace: got %v, want nil", v.Tablespace)
+	}
+	if len(v.StorageParams) != 0 {
+		t.Errorf("StorageParams: got %+v, want empty", v.StorageParams)
+	}
+}
+
 // TestBuildMaterializedViewIndices guards RFC §8.2's matview-block: a
 // materialized view's { } block MAY contain INDICES { } — previously
 // entirely unimplemented (no IR field existed to hold it, and the

@@ -538,16 +538,22 @@ type SnapSecurityLabel struct {
 }
 
 type SnapView struct {
-	Schema      string      `json:"schema"`
-	Name        string      `json:"name"`
-	Query       string      `json:"query"`
-	Owner       *string     `json:"owner,omitempty"`
-	Comment     *string     `json:"comment,omitempty"`
-	Deprecated  *string     `json:"deprecated,omitempty"`
-	Recursive   bool        `json:"recursive,omitempty"`
-	WithNoData  bool        `json:"with_no_data,omitempty"`
-	Grants      []SnapGrant `json:"grants,omitempty"`
-	Revocations []SnapGrant `json:"revocations,omitempty"`
+	Schema     string  `json:"schema"`
+	Name       string  `json:"name"`
+	Query      string  `json:"query"`
+	Owner      *string `json:"owner,omitempty"`
+	Comment    *string `json:"comment,omitempty"`
+	Deprecated *string `json:"deprecated,omitempty"`
+	Recursive  bool    `json:"recursive,omitempty"`
+	WithNoData bool    `json:"with_no_data,omitempty"`
+	// Tablespace/StorageParams are Section 8.2's materialized-view
+	// TABLESPACE/WITH (...) diffing inputs — see ir.View.Tablespace's doc
+	// comment. StorageParams is flattened via flattenParams the same way
+	// SnapTable.StorageParams is.
+	Tablespace    *string     `json:"tablespace,omitempty"`
+	StorageParams string      `json:"storage_params,omitempty"`
+	Grants        []SnapGrant `json:"grants,omitempty"`
+	Revocations   []SnapGrant `json:"revocations,omitempty"`
 	// Indexes is only meaningful when Materialized (see ir.View.Indexes).
 	Indexes        []SnapIndex         `json:"indexes,omitempty"`
 	SecurityLabels []SnapSecurityLabel `json:"security_labels,omitempty"`

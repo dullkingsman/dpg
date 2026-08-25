@@ -844,14 +844,16 @@ func toSnapParamRevocation(r ir.ParameterRevocation) SnapParamGrant {
 
 func toSnapView(o *ir.View) *SnapView {
 	sv := &SnapView{
-		Schema:     o.Schema,
-		Name:       o.Name,
-		Query:      o.Query,
-		Owner:      o.Owner,
-		Comment:    o.Comment,
-		Deprecated: o.Deprecated,
-		Recursive:  o.Recursive,
-		WithNoData: o.WithNoData,
+		Schema:        o.Schema,
+		Name:          o.Name,
+		Query:         o.Query,
+		Owner:         o.Owner,
+		Comment:       o.Comment,
+		Deprecated:    o.Deprecated,
+		Recursive:     o.Recursive,
+		WithNoData:    o.WithNoData,
+		Tablespace:    o.Tablespace,
+		StorageParams: flattenParams(o.StorageParams),
 	}
 	for _, g := range o.Grants {
 		sv.Grants = append(sv.Grants, toSnapGrant(g))

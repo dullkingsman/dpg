@@ -2081,6 +2081,137 @@ func TestDiffViewChanged(t *testing.T) {
 	}
 }
 
+// TestCreateMaterializedViewTablespaceAndStorageParams guards createView's
+// rendering of RFC Section 8.2's own worked example (WITH (fillfactor = 90)
+// TABLESPACE analytics_space) — previously never read at all, so a declared
+// TABLESPACE/WITH clause silently vanished from the emitted CREATE
+// MATERIALIZED VIEW.
+func TestCreateMaterializedViewTablespaceAndStorageParams(t *testing.T) {
+	d := New()
+	ts := "analytics_space"
+	desired := []pipeline.IRObject{
+		&ir.View{
+			Schema: "public", Name: "product_stats", Materialized: true,
+			Query:         "SELECT product_id FROM order_items",
+			Tablespace:    &ts,
+			StorageParams: []pipeline.StorageParam{{Key: "fillfactor", Value: "90"}},
+		},
+	}
+	ops, err := d.Diff(desired, &pipeline.Snapshot{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var createOp pipeline.DiffOp
+	for _, o := range ops {
+		if strings.Contains(o.SQL(), "CREATE MATERIALIZED VIEW") {
+			createOp = o
+		}
+	}
+	if createOp == nil {
+		t.Fatalf("expected a CREATE MATERIALIZED VIEW op, got: %v", sqlList(ops))
+	}
+	if !strings.Contains(createOp.SQL(), "WITH (fillfactor=90)") {
+		t.Errorf("expected WITH (fillfactor=90), got: %s", createOp.SQL())
+	}
+	if !strings.Contains(createOp.SQL(), `TABLESPACE "analytics_space"`) {
+		t.Errorf("expected TABLESPACE clause, got: %s", createOp.SQL())
+	}
+	// TABLESPACE must precede AS (real PostgreSQL grammar order).
+	if strings.Index(createOp.SQL(), "TABLESPACE") > strings.Index(createOp.SQL(), " AS ") {
+		t.Errorf("expected TABLESPACE before AS, got: %s", createOp.SQL())
+	}
+}
+
+// TestDiffMaterializedViewTablespaceChanged guards the targeted, SAFE
+// ALTER MATERIALIZED VIEW ... SET TABLESPACE path — confirmed live against
+// PostgreSQL 17 — instead of a drop+recreate.
+func TestDiffMaterializedViewTablespaceChanged(t *testing.T) {
+	d := New()
+	oldTS := "ts1"
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.mv", &snapshot.SnapObject{
+		Kind: "view",
+		View: &snapshot.SnapView{
+			Schema: "public", Name: "mv", Query: "SELECT 1", Recursive: false,
+			Tablespace: &oldTS,
+		},
+	})
+	newTS := "ts2"
+	desired := []pipeline.IRObject{
+		&ir.View{Schema: "public", Name: "mv", Materialized: true, Query: "SELECT 1", Tablespace: &newTS},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, o := range ops {
+		if strings.Contains(o.SQL(), "DROP MATERIALIZED VIEW") {
+			t.Errorf("tablespace-only change must not drop/recreate, got: %s", o.SQL())
+		}
+	}
+	if len(ops) != 1 || !strings.Contains(ops[0].SQL(), `ALTER MATERIALIZED VIEW "public"."mv" SET TABLESPACE "ts2";`) {
+		t.Fatalf("expected SET TABLESPACE op, got: %v", sqlList(ops))
+	}
+	if ops[0].Safety() != pipeline.Safe {
+		t.Errorf("expected Safe, got %s", ops[0].Safety())
+	}
+}
+
+// TestDiffMaterializedViewStorageParamsChanged guards the targeted, SAFE
+// ALTER MATERIALIZED VIEW ... SET (...)/RESET (...) path.
+func TestDiffMaterializedViewStorageParamsChanged(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.mv", &snapshot.SnapObject{
+		Kind: "view",
+		View: &snapshot.SnapView{
+			Schema: "public", Name: "mv", Query: "SELECT 1",
+			StorageParams: "fillfactor=90",
+		},
+	})
+	desired := []pipeline.IRObject{
+		&ir.View{
+			Schema: "public", Name: "mv", Materialized: true, Query: "SELECT 1",
+			StorageParams: []pipeline.StorageParam{{Key: "fillfactor", Value: "70"}},
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ops) != 1 || !strings.Contains(ops[0].SQL(), `ALTER MATERIALIZED VIEW "public"."mv" SET (fillfactor=70)`) {
+		t.Fatalf("expected SET (fillfactor=70), got: %v", sqlList(ops))
+	}
+}
+
+// TestDiffMaterializedViewTablespaceUnchangedIsNoop guards against spurious
+// ops when Tablespace/StorageParams match the snapshot exactly.
+func TestDiffMaterializedViewTablespaceUnchangedIsNoop(t *testing.T) {
+	d := New()
+	ts := "ts1"
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.mv", &snapshot.SnapObject{
+		Kind: "view",
+		View: &snapshot.SnapView{
+			Schema: "public", Name: "mv", Query: "SELECT 1",
+			Tablespace: &ts, StorageParams: "fillfactor=90",
+		},
+	})
+	desired := []pipeline.IRObject{
+		&ir.View{
+			Schema: "public", Name: "mv", Materialized: true, Query: "SELECT 1",
+			Tablespace: &ts, StorageParams: []pipeline.StorageParam{{Key: "fillfactor", Value: "90"}},
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ops) != 0 {
+		t.Errorf("expected no-op, got: %v", sqlList(ops))
+	}
+}
+
 // TestDiffViewUnaliasedColumnRenameDropsAndRecreates is the regression
 // guard for RFC audit item #29: DPG emitted CREATE OR REPLACE VIEW
 // unconditionally on any query-text change, but real PostgreSQL rejects a

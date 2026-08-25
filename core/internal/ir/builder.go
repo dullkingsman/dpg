@@ -1522,6 +1522,15 @@ func (b *Builder) buildMaterializedView(cta *pg_query.CreateTableAsStmt, block p
 		v.Schema = rangeVarSchema(cta.Into.Rel)
 		v.Name = cta.Into.Rel.Relname
 	}
+	if cta.Into != nil {
+		if cta.Into.TableSpaceName != "" {
+			ts := cta.Into.TableSpaceName
+			v.Tablespace = &ts
+		}
+		if len(cta.Into.Options) > 0 {
+			v.StorageParams = buildOrderedOptions(cta.Into.Options)
+		}
+	}
 	// Deparse the query as a full statement, not as a subexpression — same
 	// pattern as buildView.
 	if cta.Query != nil {

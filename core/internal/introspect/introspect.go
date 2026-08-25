@@ -1931,10 +1931,13 @@ SELECT n.nspname, c.relname,
        pg_get_viewdef(c.oid, true) AS query,
        obj_description(c.oid, 'pg_class') AS comment,
        c.relkind = 'm' AS materialized,
-       NOT c.relispopulated AS with_no_data
+       NOT c.relispopulated AS with_no_data,
+       ts.spcname AS tablespace,
+       c.reloptions
 FROM   pg_class c
 JOIN   pg_namespace n ON n.oid = c.relnamespace
 JOIN   pg_roles r     ON r.oid = c.relowner
+LEFT   JOIN pg_tablespace ts ON ts.oid = c.reltablespace
 WHERE  c.relkind IN ('v', 'm')
 AND    n.nspname NOT IN ('pg_catalog','information_schema','pg_toast')
 AND    NOT EXISTS (SELECT 1 FROM pg_depend d WHERE d.classid = 'pg_class'::regclass AND d.objid = c.oid AND d.deptype = 'e')
@@ -1950,9 +1953,10 @@ ORDER  BY n.nspname, c.relname`
 	var out []pipeline.IRObject
 	for rs.Next() {
 		var schema, name, owner, query string
-		var comment *string
+		var comment, tablespace *string
 		var materialized, withNoData bool
-		if err := rs.Scan(&schema, &name, &owner, &query, &comment, &materialized, &withNoData); err != nil {
+		var reloptions []string
+		if err := rs.Scan(&schema, &name, &owner, &query, &comment, &materialized, &withNoData, &tablespace, &reloptions); err != nil {
 			return nil, err
 		}
 		q := normalizeViewQuery(query)
@@ -1965,6 +1969,19 @@ ORDER  BY n.nspname, c.relname`
 			Materialized: materialized,
 			Recursive:    strings.HasPrefix(q, "WITH RECURSIVE"),
 			WithNoData:   materialized && withNoData,
+		}
+		// Tablespace/StorageParams (RFC Section 8.2) are only meaningful for
+		// a materialized view — real PostgreSQL rejects both on a plain
+		// view (pg_class.reltablespace/reloptions are always 0/NULL there
+		// anyway, so this guard is belt-and-suspenders, matching
+		// ir.View.Tablespace's doc comment).
+		if materialized {
+			v.Tablespace = tablespace
+			for _, kv := range reloptions {
+				if k, val, ok := strings.Cut(kv, "="); ok {
+					v.StorageParams = append(v.StorageParams, pipeline.StorageParam{Key: k, Value: val})
+				}
+			}
 		}
 		viewIdx[schema+"."+name] = v
 		out = append(out, v)

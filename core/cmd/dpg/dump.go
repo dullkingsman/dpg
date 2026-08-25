@@ -1000,7 +1000,21 @@ func renderObjectDPGWithRoleInheritDefaults(b *strings.Builder, obj pipeline.IRO
 		if o.Materialized {
 			viewKW = kw("MATERIALIZED") + " " + kw("VIEW")
 		}
-		fmt.Fprintf(b, "\n%s %s %s %s", viewKW, quoteIdentIfNeeded(o.Name), kw("AS"), o.Query)
+		fmt.Fprintf(b, "\n%s %s", viewKW, quoteIdentIfNeeded(o.Name))
+		if o.Materialized && len(o.StorageParams) > 0 {
+			fmt.Fprintf(b, " %s (", kw("WITH"))
+			for i, p := range o.StorageParams {
+				if i > 0 {
+					b.WriteString(", ")
+				}
+				fmt.Fprintf(b, "%s=%s", p.Key, p.Value)
+			}
+			b.WriteString(")")
+		}
+		if o.Materialized && o.Tablespace != nil {
+			fmt.Fprintf(b, " %s %s", kw("TABLESPACE"), quoteIdentIfNeeded(*o.Tablespace))
+		}
+		fmt.Fprintf(b, " %s %s", kw("AS"), o.Query)
 		if o.Materialized && o.WithNoData {
 			fmt.Fprintf(b, " %s %s %s", kw("WITH"), kw("NO"), kw("DATA"))
 		}

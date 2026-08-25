@@ -4148,6 +4148,22 @@ func createView(o *ir.View) []pipeline.DiffOp {
 	// requires an explicit column list DPG doesn't track separately from Query.
 	b.WriteString("VIEW ")
 	b.WriteString(qualIdent(o.Schema, o.Name))
+	if o.Materialized && len(o.StorageParams) > 0 {
+		b.WriteString(" WITH (")
+		for i, p := range o.StorageParams {
+			if i > 0 {
+				b.WriteString(", ")
+			}
+			b.WriteString(p.Key)
+			b.WriteString("=")
+			b.WriteString(p.Value)
+		}
+		b.WriteString(")")
+	}
+	if o.Materialized && o.Tablespace != nil {
+		b.WriteString(" TABLESPACE ")
+		b.WriteString(quoteIdent(*o.Tablespace))
+	}
 	b.WriteString(" AS ")
 	// Strip trailing semicolons from the query — we control the final delimiter.
 	b.WriteString(strings.TrimRight(strings.TrimSpace(o.Query), ";"))
@@ -6437,6 +6453,16 @@ func diffView(o *ir.View, snap *snapshot.SnapView) ([]pipeline.DiffOp, error) {
 				viewKind, tbl, tbl),
 			pos,
 		))
+	}
+
+	// TABLESPACE/WITH (...) (Section 8.2) — materialized-view-only, targeted
+	// SAFE ALTERs, confirmed live against a real PostgreSQL server, mirroring
+	// Table.Tablespace/StorageParams' identical treatment.
+	if o.Materialized {
+		if !ptrEq(o.Tablespace, snap.Tablespace) && o.Tablespace != nil {
+			ops = append(ops, safeOp(fmt.Sprintf("ALTER MATERIALIZED VIEW %s SET TABLESPACE %s;", tbl, quoteIdent(*o.Tablespace)), pos))
+		}
+		ops = append(ops, diffStorageParamsSetReset("ALTER MATERIALIZED VIEW", tbl, o.StorageParams, snap.StorageParams, pos)...)
 	}
 
 	if desiredTxt, snapTxt := effectiveComment(o.Comment, o.Deprecated), effectiveComment(snap.Comment, snap.Deprecated); !ptrEq(desiredTxt, snapTxt) {
