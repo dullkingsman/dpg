@@ -7297,7 +7297,10 @@ func diffStorageParamsSetReset(alterStmt, ident string, desired []pipeline.Stora
 }
 
 // createPartitionOps emits "CREATE TABLE child PARTITION OF parent
-// FOR VALUES ...;" for p, recursing into any sub-partitions (RFC §7.13). A
+// FOR VALUES ...;" for p (or "CREATE FOREIGN TABLE ... SERVER ... [OPTIONS
+// (...)]" when p.Foreign — Section 7.13's FOREIGN partition form),
+// recursing into any sub-partitions (a FOREIGN partition never has any:
+// real PostgreSQL rejects PARTITION BY on a foreign table). A
 // sub-partitioned child gets its own trailing "PARTITION BY strategy (cols)"
 // clause — real PostgreSQL allows this directly on a PARTITION OF statement —
 // then each of its sub-partitions is created as PARTITION OF the child.
@@ -7310,9 +7313,29 @@ func diffStorageParamsSetReset(alterStmt, ident string, desired []pipeline.Stora
 // has no FOR VALUES at all).
 func createPartitionOps(schema string, parent string, p *ir.Partition) []pipeline.DiffOp {
 	childTbl := qualIdent(schema, p.Name)
-	stmt := fmt.Sprintf("CREATE TABLE %s PARTITION OF %s %s", childTbl, parent, p.Bounds)
+	verb := "CREATE TABLE"
+	if p.Foreign {
+		verb = "CREATE FOREIGN TABLE"
+	}
+	stmt := fmt.Sprintf("%s %s PARTITION OF %s %s", verb, childTbl, parent, p.Bounds)
 	if p.PartitionBy != nil {
 		stmt += fmt.Sprintf(" PARTITION BY %s (%s)", p.PartitionBy.Strategy, strings.Join(p.PartitionBy.Columns, ", "))
+	}
+	if p.Foreign {
+		// Real PostgreSQL grammar: CREATE FOREIGN TABLE ... PARTITION OF
+		// parent bounds SERVER server_name [OPTIONS (...)] — SERVER is
+		// mandatory (enforced at parse time), so ForeignServer is always
+		// non-nil here.
+		if p.ForeignServer != nil {
+			stmt += " SERVER " + quoteIdent(*p.ForeignServer)
+		}
+		if len(p.ForeignOptions) > 0 {
+			var opts []string
+			for _, o := range p.ForeignOptions {
+				opts = append(opts, o.Key+" "+quoteLit(o.Value))
+			}
+			stmt += " OPTIONS (" + strings.Join(opts, ", ") + ")"
+		}
 	}
 	stmt += ";"
 
@@ -7321,6 +7344,17 @@ func createPartitionOps(schema string, parent string, p *ir.Partition) []pipelin
 		ops = append(ops, createPartitionOps(schema, childTbl, sub)...)
 	}
 	return ops
+}
+
+// dropPartitionVerb picks "DROP TABLE" or "DROP FOREIGN TABLE" for removing
+// an existing partition, based on its CURRENT (snapshot) relkind — real
+// PostgreSQL rejects DROP TABLE on a foreign table ("... is not a table",
+// confirmed live) and vice versa.
+func dropPartitionVerb(foreign bool) string {
+	if foreign {
+		return "DROP FOREIGN TABLE"
+	}
+	return "DROP TABLE"
 }
 
 func diffPartitions(tbl string, o *ir.Table, snap *snapshot.SnapTable, pos pipeline.SourcePos, skipDetachedChildren map[string]bool) ([]pipeline.DiffOp, error) {
@@ -7428,12 +7462,18 @@ func diffPartitionList(schema, parent string, desired []*ir.Partition, snap []sn
 			))
 		case !exists:
 			ops = append(ops, createPartitionOps(schema, parent, p)...)
-		case sp.Bound != p.Bounds:
-			// PG cannot alter partition bounds; requires DROP + CREATE. Drops
+		case sp.Bound != p.Bounds, sp.Foreign != p.Foreign:
+			// PG cannot alter partition bounds in place, and a partition's
+			// relkind (ordinary table vs. foreign table) can never be
+			// changed via ALTER either — both require DROP + CREATE. Drops
 			// the partition under its CURRENT (matched-snapshot) identity —
 			// sp.Name, not p.Name — since a RENAMED FROM match means those
-			// two can legitimately differ at this point in the diff.
-			ops = append(ops, destructiveOp(fmt.Sprintf("DROP TABLE %s;", qualIdent(sp.Schema, sp.Name)), p.SrcPos))
+			// two can legitimately differ at this point in the diff. Uses
+			// sp.Foreign (the CURRENT relkind) to pick DROP TABLE vs. DROP
+			// FOREIGN TABLE, since dropping under the wrong statement is a
+			// real PostgreSQL error ("... is not a table"/"... is not a
+			// foreign table"), confirmed live.
+			ops = append(ops, destructiveOp(fmt.Sprintf("%s %s;", dropPartitionVerb(sp.Foreign), qualIdent(sp.Schema, sp.Name)), p.SrcPos))
 			ops = append(ops, createPartitionOps(schema, parent, p)...)
 		case sp.PartitionBy != desiredPB:
 			// A sub-partition's own PARTITION BY strategy cannot be altered
@@ -7468,7 +7508,7 @@ func diffPartitionList(schema, parent string, desired []*ir.Partition, snap []sn
 		}
 		if !desiredHasName[sp.Name] {
 			ops = append(ops, destructiveOp(
-				fmt.Sprintf("DROP TABLE %s;", qualIdent(sp.Schema, sp.Name)),
+				fmt.Sprintf("%s %s;", dropPartitionVerb(sp.Foreign), qualIdent(sp.Schema, sp.Name)),
 				pos,
 			))
 		}

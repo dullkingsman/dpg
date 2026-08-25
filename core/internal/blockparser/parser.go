@@ -2740,6 +2740,114 @@ func unquoteRawIdent(s string) string {
 	return s
 }
 
+// parseForeignServerClause splits raw (a FOREIGN partition's captured bounds
+// text, with any RENAMED FROM/sub-partitioning suffix already stripped) into
+// the actual bounds expression and its trailing "SERVER ident [OPTIONS
+// (key 'value', ...)]" clause (RFC Section 7.13). Re-parses with a fresh
+// blockParser instance over just this substring (the same sub-parsing
+// convention ParseDefaultPrivileges already uses) rather than a regex: an
+// OPTIONS value is an arbitrary single-quoted string that may itself contain
+// commas, parens, or even the word SERVER, and only a real tokenizer (via
+// readSingleQuotedString's own '' escaping) can tell those apart from actual
+// clause punctuation. SERVER is mandatory here — confirmed live that
+// PostgreSQL's own CREATE FOREIGN TABLE grammar rejects the statement
+// outright with no SERVER clause at all ("syntax error at end of input"),
+// partition or not.
+func parseForeignServerClause(raw string, pos pipeline.SourcePos) (string, pipeline.Identifier, []pipeline.StorageParam, error) {
+	fp := &blockParser{src: []byte(raw), file: pos.File, line: pos.Line, col: pos.Col}
+	serverPos := findTopLevelWord(fp, "SERVER")
+	if serverPos < 0 {
+		return "", pipeline.Identifier{}, nil, fp.errorf("FOREIGN partition requires a SERVER clause")
+	}
+	boundsText := string(fp.src[:serverPos])
+	// fp's line/col drift during the scan above is never surfaced (this
+	// sub-parser's positions only feed its own error messages, not the
+	// returned bound's SourcePos), so resetting only pos is enough to
+	// resume reading forward correctly.
+	fp.pos = serverPos
+	if err := fp.expect("SERVER"); err != nil {
+		return "", pipeline.Identifier{}, nil, err
+	}
+	server, err := fp.readIdentifier()
+	if err != nil {
+		return "", pipeline.Identifier{}, nil, err
+	}
+	var opts []pipeline.StorageParam
+	fp.skipWS()
+	if strings.EqualFold(fp.peekWord(), "OPTIONS") {
+		fp.readWord()
+		fp.skipWS()
+		if fp.peek() != '(' {
+			return "", pipeline.Identifier{}, nil, fp.errorf("expected '(' after OPTIONS, got %q", fp.peek())
+		}
+		fp.advance()
+		fp.skipWS()
+		for fp.peek() != ')' {
+			key, err := fp.readIdentifier()
+			if err != nil {
+				return "", pipeline.Identifier{}, nil, err
+			}
+			fp.skipWS()
+			val, err := fp.readSingleQuotedString()
+			if err != nil {
+				return "", pipeline.Identifier{}, nil, err
+			}
+			opts = append(opts, pipeline.StorageParam{Key: key.Name, Value: val})
+			fp.skipWS()
+			switch fp.peek() {
+			case ',':
+				fp.advance()
+				fp.skipWS()
+			case ')':
+				// Loop condition below exits on the next check.
+			default:
+				return "", pipeline.Identifier{}, nil, fp.errorf("expected ',' or ')' in OPTIONS list, got %q", fp.peek())
+			}
+		}
+		fp.advance() // consume ')'
+	}
+	fp.skipWS()
+	if !fp.eof() {
+		return "", pipeline.Identifier{}, nil, fp.errorf("unexpected trailing text after SERVER clause: %q", string(fp.src[fp.pos:]))
+	}
+	return boundsText, server, opts, nil
+}
+
+// findTopLevelWord scans fp from its current position for word as a
+// case-insensitive whole word at paren depth 0, outside any single-quoted
+// string, and returns its starting offset (or -1 if not found). Mutates
+// fp's cursor as a side effect of the scan; callers that need the original
+// position afterward must restore it themselves.
+func findTopLevelWord(fp *blockParser, word string) int {
+	depth := 0
+	for !fp.eof() {
+		ch := fp.peek()
+		switch {
+		case ch == '(':
+			depth++
+			fp.advance()
+		case ch == ')':
+			if depth > 0 {
+				depth--
+			}
+			fp.advance()
+		case ch == '\'':
+			if _, err := fp.readSingleQuotedString(); err != nil {
+				return -1
+			}
+		case depth == 0 && isWordStart(ch):
+			start := fp.pos
+			w := fp.readWord()
+			if strings.EqualFold(w, word) {
+				return start
+			}
+		default:
+			fp.advance()
+		}
+	}
+	return -1
+}
+
 // parseOnePartitionBound parses a single "name bounds [PARTITION BY strategy
 // (cols) { PARTITIONS {...} }];" entry, shared by parsePartitionsBlock
 // (Mode A, inside a PARTITIONS { } block) and the PARTITION singular-keyword
@@ -2751,6 +2859,22 @@ func (b *blockParser) parseOnePartitionBound() (pipeline.PartitionBound, error) 
 	b.skipWS()
 	c := b.cur()
 	firstWord := strings.ToUpper(b.readWord())
+	// RFC Section 7.13's "FOREIGN partition-name ... SERVER server_name
+	// [OPTIONS (...)]" form — makes this partition a foreign table instead
+	// of a regular one. Checked before ATTACHED below: the two forms don't
+	// combine (attaching an already-existing table's own declaration
+	// already determines whether it's foreign; restating FOREIGN there
+	// would be redundant, and the RFC doesn't define the combination).
+	isForeign := false
+	if firstWord == "FOREIGN" {
+		isForeign = true
+		b.skipWS()
+		c = b.cur()
+		firstWord = strings.ToUpper(b.readWord())
+	}
+	if isForeign && firstWord == "ATTACHED" {
+		return pipeline.PartitionBound{}, b.errorf("FOREIGN cannot be combined with ATTACHED FROM — the referenced table's own declaration already determines whether it is a foreign table")
+	}
 	if firstWord == "ATTACHED" {
 		// RFC Section 7.13's "ATTACHED FROM existing_table" form — attaches
 		// an already-existing standalone table instead of creating a new
@@ -2822,6 +2946,23 @@ func (b *blockParser) parseOnePartitionBound() (pipeline.PartitionBound, error) 
 		renamed := unquoteRawIdent(rm[2])
 		bound.RenamedFrom = &renamed
 		boundsText = rm[1]
+	}
+	if isForeign {
+		// Foreign tables can never be further partitioned (confirmed live:
+		// real PostgreSQL rejects PARTITION BY on a foreign table with a
+		// syntax error), so the sub-partitioning suffix stripped above must
+		// never have matched here.
+		if hasSubPartition {
+			return pipeline.PartitionBound{}, b.errorf("FOREIGN partition %q cannot declare its own PARTITION BY — a foreign table cannot be further partitioned", name.Name)
+		}
+		bt, server, opts, serr := parseForeignServerClause(boundsText, pPos)
+		if serr != nil {
+			return pipeline.PartitionBound{}, serr
+		}
+		boundsText = bt
+		bound.Foreign = true
+		bound.Server = &server
+		bound.Options = opts
 	}
 	bound.Bounds = pipeline.RawExpr{Text: strings.TrimSpace(boundsText), Pos: pPos}
 

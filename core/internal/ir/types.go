@@ -457,8 +457,19 @@ type Partition struct {
 	// qualified "schema.name" or bare "name" string (same convention as
 	// Table.Inherits), resolved against the parent's own schema when bare.
 	AttachedFrom *string
-	Partitions   []*Partition
-	SrcPos       pipeline.SourcePos
+	// Foreign, ForeignServer, and ForeignOptions mirror Table's identical
+	// fields (RFC Section 7.13's "FOREIGN partition-name ... SERVER
+	// server_name [OPTIONS (...)]" form) — a partition made a foreign
+	// table via direct creation, distinct from AttachedFrom's "attach an
+	// already-existing standalone table" form (which may itself already be
+	// foreign, independently of this field). Foreign partitions can never
+	// be further sub-partitioned (confirmed live: PostgreSQL rejects
+	// PARTITION BY on a foreign table), so Partitions is always empty here.
+	Foreign        bool
+	ForeignServer  *string
+	ForeignOptions []pipeline.StorageParam
+	Partitions     []*Partition
+	SrcPos         pipeline.SourcePos
 }
 
 // ── concrete IR object types ──────────────────────────────────────────────────

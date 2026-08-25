@@ -365,6 +365,13 @@ type SnapPartition struct {
 	Bound       string          `json:"bound"` // raw FOR VALUES … expression
 	PartitionBy string          `json:"partition_by,omitempty"`
 	Partitions  []SnapPartition `json:"partitions,omitempty"`
+	// Foreign, ForeignServer, and ForeignOptions mirror SnapTable's
+	// identical fields (RFC Section 7.13's FOREIGN partition form),
+	// including ForeignOptions' flattened comma-separated key=value form
+	// (see SnapTable.ForeignOptions' doc comment).
+	Foreign        bool    `json:"foreign,omitempty"`
+	ForeignServer  *string `json:"foreign_server,omitempty"`
+	ForeignOptions string  `json:"foreign_options,omitempty"`
 }
 
 type SnapColumn struct {

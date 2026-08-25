@@ -3833,18 +3833,25 @@ ORDER  BY n.nspname, c.relname`
 
 	const childQ = `
 SELECT pn.nspname, pc.relname, cn.nspname, cc.relname,
-       pg_get_expr(cc.relpartbound, cc.oid) AS bound
+       pg_get_expr(cc.relpartbound, cc.oid) AS bound,
+       cc.relkind::text, fs.srvname, ft.ftoptions
 FROM   pg_class cc
 JOIN   pg_namespace cn  ON cn.oid = cc.relnamespace
 JOIN   pg_inherits i    ON i.inhrelid = cc.oid
 JOIN   pg_class pc      ON pc.oid = i.inhparent
 JOIN   pg_namespace pn  ON pn.oid = pc.relnamespace
+LEFT   JOIN pg_foreign_table ft  ON ft.ftrelid = cc.oid
+LEFT   JOIN pg_foreign_server fs ON fs.oid = ft.ftserver
 WHERE  cc.relispartition
 -- relispartition is also true for a child INDEX partition auto-created when
 -- an index exists directly on the partitioned parent (relkind 'i'), which
 -- has no partition bound (pg_get_expr returns NULL there, crashing the scan
--- into a non-nullable string below) — restrict to actual table partitions.
-AND    cc.relkind IN ('r', 'p')
+-- into a non-nullable string below) — restrict to actual table partitions,
+-- 'f' included: a foreign table can be a direct partition child too (RFC
+-- Section 7.13), and was previously invisible here entirely (relkind 'f'
+-- excluded), the same class of bug already fixed for introspectTables'
+-- top-level foreign-table handling.
+AND    cc.relkind IN ('r', 'p', 'f')
 AND    pn.nspname NOT IN ('pg_catalog','information_schema','pg_toast')
 ORDER  BY pn.nspname, pc.relname, cc.relname`
 
@@ -3855,8 +3862,10 @@ ORDER  BY pn.nspname, pc.relname, cc.relname`
 	childrenOf := make(map[string][]*ir.Partition)
 	byKey := make(map[string]*ir.Partition) // child qualified name -> its own Partition node
 	for rs2.Next() {
-		var parentSchema, parentName, childSchema, childName, bound string
-		if err := rs2.Scan(&parentSchema, &parentName, &childSchema, &childName, &bound); err != nil {
+		var parentSchema, parentName, childSchema, childName, bound, relkind string
+		var server *string
+		var ftoptions []string
+		if err := rs2.Scan(&parentSchema, &parentName, &childSchema, &childName, &bound, &relkind, &server, &ftoptions); err != nil {
 			rs2.Close()
 			return err
 		}
@@ -3865,6 +3874,15 @@ ORDER  BY pn.nspname, pc.relname, cc.relname`
 		part := &ir.Partition{Name: childName, Bounds: bound}
 		if keyDef, ok := partKeys[childKey]; ok {
 			part.PartitionBy = parsePartitionKey(keyDef)
+		}
+		if relkind == "f" {
+			part.Foreign = true
+			part.ForeignServer = server
+			for _, kv := range ftoptions {
+				if k, v, ok := strings.Cut(kv, "="); ok {
+					part.ForeignOptions = append(part.ForeignOptions, pipeline.StorageParam{Key: k, Value: v})
+				}
+			}
 		}
 		childrenOf[parentKey] = append(childrenOf[parentKey], part)
 		byKey[childKey] = part

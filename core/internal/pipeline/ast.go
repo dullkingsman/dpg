@@ -229,7 +229,17 @@ type PartitionBound struct {
 	// existing name-keyed lookup continues to work unchanged.
 	AttachedFrom  *Identifier
 	SubPartitions []PartitionBound
-	Pos           SourcePos
+	// Foreign is RFC Section 7.13's "FOREIGN partition-name ... SERVER
+	// server_name [OPTIONS (...)]" form — makes this partition a foreign
+	// table (CREATE FOREIGN TABLE ... PARTITION OF) instead of a regular
+	// one. Server/Options are only meaningful when Foreign is true; Server
+	// is mandatory whenever Foreign is set (confirmed live: PostgreSQL's
+	// own CREATE FOREIGN TABLE grammar rejects the statement outright with
+	// no SERVER clause, partition or not).
+	Foreign bool
+	Server  *Identifier
+	Options []StorageParam
+	Pos     SourcePos
 }
 
 // PartitionDef is the PARTITIONS { } directive.

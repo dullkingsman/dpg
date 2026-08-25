@@ -2445,13 +2445,34 @@ func renderVtypeBody(body ir.VtypeBody) string {
 	return ""
 }
 
-// renderPartitionEntry writes one "name bounds [PARTITION BY strategy (cols)
-// { PARTITIONS {...} }];" entry at the given indent, recursing into p's own
-// sub-partitions (RFC §7.13) when present.
+// renderPartitionEntry writes one "[FOREIGN] name bounds [SERVER ident
+// [OPTIONS (...)]] [PARTITION BY strategy (cols) { PARTITIONS {...} }];"
+// entry at the given indent, recursing into p's own sub-partitions (RFC
+// Section 7.13) when present. A FOREIGN partition never has sub-partitions
+// (real PostgreSQL rejects PARTITION BY on a foreign table), so the SERVER/
+// OPTIONS clause and the PARTITION BY suffix never both render for the same
+// entry in practice.
 func renderPartitionEntry(b *strings.Builder, p *ir.Partition, ind string, fmtOpts format.Options) {
 	kw := fmtOpts.Keyword
 	baseInd := fmtOpts.Indent()
-	fmt.Fprintf(b, "%s%s %s", ind, quoteIdentIfNeeded(p.Name), p.Bounds)
+	if p.Foreign {
+		fmt.Fprintf(b, "%s%s ", ind, kw("FOREIGN"))
+		fmt.Fprintf(b, "%s %s", quoteIdentIfNeeded(p.Name), p.Bounds)
+	} else {
+		fmt.Fprintf(b, "%s%s %s", ind, quoteIdentIfNeeded(p.Name), p.Bounds)
+	}
+	if p.Foreign {
+		if p.ForeignServer != nil {
+			fmt.Fprintf(b, " %s %s", kw("SERVER"), quoteIdentIfNeeded(*p.ForeignServer))
+		}
+		if len(p.ForeignOptions) > 0 {
+			parts := make([]string, len(p.ForeignOptions))
+			for i, o := range p.ForeignOptions {
+				parts[i] = o.Key + " " + sqlStringLit(o.Value)
+			}
+			fmt.Fprintf(b, " %s (%s)", kw("OPTIONS"), strings.Join(parts, ", "))
+		}
+	}
 	if p.PartitionBy != nil {
 		fmt.Fprintf(b, " %s %s %s (%s) {\n", kw("PARTITION"), kw("BY"), kw(p.PartitionBy.Strategy), strings.Join(p.PartitionBy.Columns, ", "))
 		fmt.Fprintf(b, "%s%s {\n", ind+baseInd, kw("PARTITIONS"))

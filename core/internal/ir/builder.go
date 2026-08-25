@@ -1312,6 +1312,14 @@ func buildPartitionBound(p pipeline.PartitionBound) *Partition {
 		s := p.AttachedFrom.String()
 		part.AttachedFrom = &s
 	}
+	if p.Foreign {
+		part.Foreign = true
+		if p.Server != nil {
+			s := p.Server.String()
+			part.ForeignServer = &s
+		}
+		part.ForeignOptions = p.Options
+	}
 	if p.SubStrategy != "" {
 		part.PartitionBy = &PartitionSpec{
 			Strategy: p.SubStrategy,

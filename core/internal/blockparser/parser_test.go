@@ -1925,6 +1925,126 @@ func TestPartitionModeBSubPartitioned(t *testing.T) {
 	}
 }
 
+// TestPartitionForeign guards RFC Section 7.13's "FOREIGN partition-name ...
+// SERVER server_name [OPTIONS (...)]" form — makes a partition a foreign
+// table instead of a regular one.
+func TestPartitionForeign(t *testing.T) {
+	src := `PARTITIONS {
+		FOREIGN events_archive DEFAULT SERVER archive_server OPTIONS (table_name 'events_archive');
+	}`
+	ast := parse(t, src)
+	if ast.Partitions == nil || len(ast.Partitions.Partitions) != 1 {
+		t.Fatalf("expected 1 partition, got %v", ast.Partitions)
+	}
+	p := ast.Partitions.Partitions[0]
+	if !p.Foreign {
+		t.Fatal("expected Foreign = true")
+	}
+	if p.Server == nil || p.Server.Name != "archive_server" {
+		t.Fatalf("Server: got %v", p.Server)
+	}
+	if len(p.Options) != 1 || p.Options[0].Key != "table_name" || p.Options[0].Value != "events_archive" {
+		t.Fatalf("Options: got %+v", p.Options)
+	}
+	if p.Bounds.Text != "DEFAULT" {
+		t.Errorf("Bounds.Text: got %q, want %q (SERVER/OPTIONS should be stripped out)", p.Bounds.Text, "DEFAULT")
+	}
+}
+
+// TestPartitionForeignNoOptions guards the OPTIONS-omitted case (OPTIONS is
+// optional; SERVER alone is enough).
+func TestPartitionForeignNoOptions(t *testing.T) {
+	src := `PARTITIONS {
+		FOREIGN events_us FOR VALUES IN ('us-east', 'us-west') SERVER srv;
+	}`
+	ast := parse(t, src)
+	if ast.Partitions == nil || len(ast.Partitions.Partitions) != 1 {
+		t.Fatalf("expected 1 partition, got %v", ast.Partitions)
+	}
+	p := ast.Partitions.Partitions[0]
+	if !p.Foreign || p.Server == nil || p.Server.Name != "srv" {
+		t.Fatalf("got %+v", p)
+	}
+	if len(p.Options) != 0 {
+		t.Fatalf("expected no options, got %+v", p.Options)
+	}
+	wantBounds := "FOR VALUES IN ('us-east', 'us-west')"
+	if p.Bounds.Text != wantBounds {
+		t.Errorf("Bounds.Text: got %q, want %q", p.Bounds.Text, wantBounds)
+	}
+}
+
+// TestPartitionForeignMultipleOptions guards a multi-entry OPTIONS list,
+// including a value containing a comma and parens — only a real tokenizer
+// (not a naive split on ',') can parse this correctly.
+func TestPartitionForeignMultipleOptions(t *testing.T) {
+	src := `PARTITIONS {
+		FOREIGN remote_events DEFAULT SERVER srv OPTIONS (table_name 'events', schema_name 'public', query 'SELECT a, b FROM (t)');
+	}`
+	ast := parse(t, src)
+	p := ast.Partitions.Partitions[0]
+	want := []pipeline.StorageParam{
+		{Key: "table_name", Value: "events"},
+		{Key: "schema_name", Value: "public"},
+		{Key: "query", Value: "SELECT a, b FROM (t)"},
+	}
+	if len(p.Options) != len(want) {
+		t.Fatalf("Options: got %+v, want %+v", p.Options, want)
+	}
+	for i, o := range want {
+		if p.Options[i] != o {
+			t.Errorf("Options[%d]: got %+v, want %+v", i, p.Options[i], o)
+		}
+	}
+}
+
+// TestPartitionForeignMissingServer guards the mandatory-SERVER validation:
+// real PostgreSQL rejects CREATE FOREIGN TABLE with no SERVER clause at all
+// ("syntax error at end of input", confirmed live) — DPG must reject the
+// same declaration at parse time rather than emitting invalid SQL later.
+func TestPartitionForeignMissingServer(t *testing.T) {
+	src := `PARTITIONS {
+		FOREIGN events_archive DEFAULT;
+	}`
+	err := parseErr(t, src)
+	if err == nil {
+		t.Fatal("expected an error for FOREIGN partition with no SERVER clause")
+	}
+}
+
+// TestPartitionForeignRejectsSubPartitioning guards a real PostgreSQL
+// restriction confirmed live: a foreign table can never itself be
+// PARTITION BY'd ("syntax error at or near PARTITION"). DPG must reject this
+// combination at parse time.
+func TestPartitionForeignRejectsSubPartitioning(t *testing.T) {
+	src := `PARTITIONS {
+		FOREIGN events_archive DEFAULT SERVER srv
+			PARTITION BY LIST (region) {
+				PARTITIONS {
+					x FOR VALUES IN ('a');
+				}
+			};
+	}`
+	err := parseErr(t, src)
+	if err == nil {
+		t.Fatal("expected an error for a FOREIGN partition declaring its own PARTITION BY")
+	}
+}
+
+// TestPartitionForeignRejectsAttachedFrom guards the FOREIGN+ATTACHED FROM
+// combination: ATTACHED FROM references an already-existing table whose own
+// declaration already determines whether it's foreign, so combining it with
+// FOREIGN here is rejected rather than silently ignored.
+func TestPartitionForeignRejectsAttachedFrom(t *testing.T) {
+	src := `PARTITIONS {
+		FOREIGN ATTACHED FROM legacy_events FOR VALUES FROM ('2023-01-01') TO ('2024-01-01');
+	}`
+	err := parseErr(t, src)
+	if err == nil {
+		t.Fatal("expected an error for FOREIGN combined with ATTACHED FROM")
+	}
+}
+
 // ── TEXT SEARCH MAPPING ───────────────────────────────────────────────────────
 
 // TestTSMappingSingleDictionary guards the common case: one dictionary per

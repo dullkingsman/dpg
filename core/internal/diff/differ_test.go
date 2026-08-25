@@ -9710,6 +9710,181 @@ func TestDiffPartitionUnchangedIsNoop(t *testing.T) {
 	}
 }
 
+// TestDiffCreateTableWithForeignPartition guards RFC Section 7.13's
+// "FOREIGN partition-name ... SERVER server_name [OPTIONS (...)]" form:
+// createPartitionOps must emit CREATE FOREIGN TABLE ... PARTITION OF, not
+// CREATE TABLE (a real PostgreSQL syntax error for a foreign table), with
+// SERVER/OPTIONS appended in PostgreSQL's own required clause order.
+func TestDiffCreateTableWithForeignPartition(t *testing.T) {
+	d := New()
+	desired := []pipeline.IRObject{
+		&ir.Table{
+			Schema: "public",
+			Name:   "events",
+			Columns: []*ir.Column{
+				{Name: "id", Type: ir.TypeRef{Name: "bigint"}},
+				{Name: "region", Type: ir.TypeRef{Name: "text"}},
+			},
+			PartitionBy: &ir.PartitionSpec{Strategy: "LIST", Columns: []string{"region"}},
+			Partitions: []*ir.Partition{
+				{
+					Name:          "events_archive",
+					Bounds:        "DEFAULT",
+					Foreign:       true,
+					ForeignServer: strPtr("archive_server"),
+					ForeignOptions: []pipeline.StorageParam{
+						{Key: "table_name", Value: "events_archive"},
+					},
+				},
+			},
+		},
+	}
+	ops, err := d.Diff(desired, &pipeline.Snapshot{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := `CREATE FOREIGN TABLE "public"."events_archive" PARTITION OF "public"."events" DEFAULT SERVER "archive_server" OPTIONS (table_name 'events_archive');`
+	if !containsSQL(ops, want) {
+		t.Errorf("expected exact partition CREATE statement %q, got: %v", want, sqlList(ops))
+	}
+}
+
+// TestDiffPartitionForeignUnchangedIsNoop mirrors
+// TestDiffPartitionUnchangedIsNoop for a FOREIGN partition: an already-
+// applied foreign partition (same bound, same Foreign flag) must not
+// generate any partition-recreate op on a second plan.
+func TestDiffPartitionForeignUnchangedIsNoop(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.events", &snapshot.SnapObject{
+		Kind: "table",
+		Table: &snapshot.SnapTable{
+			Schema:      "public",
+			Name:        "events",
+			PartitionBy: "LIST (region)",
+			Columns:     []snapshot.SnapColumn{{Name: "id", Type: "bigint"}, {Name: "region", Type: "text"}},
+			Partitions: []snapshot.SnapPartition{
+				{
+					Schema:         "public",
+					Name:           "events_archive",
+					Bound:          "DEFAULT",
+					Foreign:        true,
+					ForeignServer:  strPtr("archive_server"),
+					ForeignOptions: "table_name=events_archive",
+				},
+			},
+		},
+	})
+	desired := []pipeline.IRObject{
+		&ir.Table{
+			Schema:      "public",
+			Name:        "events",
+			PartitionBy: &ir.PartitionSpec{Strategy: "LIST", Columns: []string{"region"}},
+			Columns:     []*ir.Column{{Name: "id", Type: ir.TypeRef{Name: "bigint"}}, {Name: "region", Type: ir.TypeRef{Name: "text"}}},
+			Partitions: []*ir.Partition{
+				{
+					Name:          "events_archive",
+					Bounds:        "DEFAULT",
+					Foreign:       true,
+					ForeignServer: strPtr("archive_server"),
+					ForeignOptions: []pipeline.StorageParam{
+						{Key: "table_name", Value: "events_archive"},
+					},
+				},
+			},
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if containsSQL(ops, "PARTITION") {
+		t.Errorf("expected no partition ops when unchanged, got: %v", sqlList(ops))
+	}
+}
+
+// TestDiffPartitionForeignnessChangedDropsAndRecreates guards the case
+// where an existing partition's Foreign flag itself changes (declared
+// FOREIGN on a partition the snapshot has as an ordinary table, or vice
+// versa) — real PostgreSQL cannot ALTER a table's relkind in place, so this
+// must drop under the CURRENT (snapshot) kind and recreate under the new
+// one, exactly like a bound change.
+func TestDiffPartitionForeignnessChangedDropsAndRecreates(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.events", &snapshot.SnapObject{
+		Kind: "table",
+		Table: &snapshot.SnapTable{
+			Schema:      "public",
+			Name:        "events",
+			PartitionBy: "LIST (region)",
+			Columns:     []snapshot.SnapColumn{{Name: "id", Type: "bigint"}, {Name: "region", Type: "text"}},
+			Partitions: []snapshot.SnapPartition{
+				{Schema: "public", Name: "events_archive", Bound: "DEFAULT"},
+			},
+		},
+	})
+	desired := []pipeline.IRObject{
+		&ir.Table{
+			Schema:      "public",
+			Name:        "events",
+			PartitionBy: &ir.PartitionSpec{Strategy: "LIST", Columns: []string{"region"}},
+			Columns:     []*ir.Column{{Name: "id", Type: ir.TypeRef{Name: "bigint"}}, {Name: "region", Type: ir.TypeRef{Name: "text"}}},
+			Partitions: []*ir.Partition{
+				{Name: "events_archive", Bounds: "DEFAULT", Foreign: true, ForeignServer: strPtr("srv")},
+			},
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsSQL(ops, `DROP TABLE "public"."events_archive";`) {
+		t.Errorf("expected DROP TABLE (the CURRENT, non-foreign kind) for the Foreign-ness change, got: %v", sqlList(ops))
+	}
+	want := `CREATE FOREIGN TABLE "public"."events_archive" PARTITION OF "public"."events" DEFAULT SERVER "srv";`
+	if !containsSQL(ops, want) {
+		t.Errorf("expected exact partition CREATE statement %q, got: %v", want, sqlList(ops))
+	}
+}
+
+// TestDiffPartitionRemovedForeignUsesDropForeignTable guards the removal
+// path's DROP verb: real PostgreSQL rejects DROP TABLE on a foreign table
+// ("... is not a table", confirmed live) — a removed foreign partition must
+// be dropped via DROP FOREIGN TABLE, not the plain DROP TABLE a regular
+// partition removal gets.
+func TestDiffPartitionRemovedForeignUsesDropForeignTable(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.events", &snapshot.SnapObject{
+		Kind: "table",
+		Table: &snapshot.SnapTable{
+			Schema:      "public",
+			Name:        "events",
+			PartitionBy: "LIST (region)",
+			Columns:     []snapshot.SnapColumn{{Name: "id", Type: "bigint"}, {Name: "region", Type: "text"}},
+			Partitions: []snapshot.SnapPartition{
+				{Schema: "public", Name: "events_archive", Bound: "DEFAULT", Foreign: true, ForeignServer: strPtr("srv")},
+			},
+		},
+	})
+	desired := []pipeline.IRObject{
+		&ir.Table{
+			Schema:      "public",
+			Name:        "events",
+			PartitionBy: &ir.PartitionSpec{Strategy: "LIST", Columns: []string{"region"}},
+			Columns:     []*ir.Column{{Name: "id", Type: ir.TypeRef{Name: "bigint"}}, {Name: "region", Type: ir.TypeRef{Name: "text"}}},
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsSQL(ops, `DROP FOREIGN TABLE "public"."events_archive";`) {
+		t.Errorf("expected DROP FOREIGN TABLE for removed foreign partition, got: %v", sqlList(ops))
+	}
+}
+
 // ── MIGRATE REMOVE ─────────────────────────────────────────────────────────
 
 func TestDiffEnumRemoveRequiresMigrateRemoveBlock(t *testing.T) {

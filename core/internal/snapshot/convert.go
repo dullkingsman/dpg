@@ -505,6 +505,9 @@ func toSnapPartition(schema string, p *ir.Partition) SnapPartition {
 	if p.PartitionBy != nil {
 		sp.PartitionBy = p.PartitionBy.Strategy + " (" + strings.Join(p.PartitionBy.Columns, ", ") + ")"
 	}
+	sp.Foreign = p.Foreign
+	sp.ForeignServer = p.ForeignServer
+	sp.ForeignOptions = flattenParams(p.ForeignOptions)
 	for _, sub := range p.Partitions {
 		sp.Partitions = append(sp.Partitions, toSnapPartition(schema, sub))
 	}

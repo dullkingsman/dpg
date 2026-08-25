@@ -811,6 +811,37 @@ func TestBuildTableAttachedFromPartition(t *testing.T) {
 	}
 }
 
+// TestBuildTableForeignPartition guards RFC Section 7.13's "FOREIGN
+// partition-name ... SERVER server_name [OPTIONS (...)]" form: buildPartitionBound
+// must carry Foreign/ForeignServer/ForeignOptions through from the parsed
+// pipeline.PartitionBound into the IR.
+func TestBuildTableForeignPartition(t *testing.T) {
+	obj := buildObject(t, pipeline.KindTable,
+		`events (id BIGINT, region TEXT) PARTITION BY LIST (region)`,
+		`PARTITIONS {
+			events_us FOR VALUES IN ('us-east', 'us-west');
+			FOREIGN events_archive DEFAULT SERVER archive_server OPTIONS (table_name 'events_archive');
+		}`,
+	)
+	tbl := obj.(*ir.Table)
+	if len(tbl.Partitions) != 2 {
+		t.Fatalf("expected 2 partitions, got %d", len(tbl.Partitions))
+	}
+	regular, foreign := tbl.Partitions[0], tbl.Partitions[1]
+	if regular.Foreign {
+		t.Error("events_us: expected Foreign = false")
+	}
+	if !foreign.Foreign {
+		t.Fatal("events_archive: expected Foreign = true")
+	}
+	if foreign.ForeignServer == nil || *foreign.ForeignServer != "archive_server" {
+		t.Fatalf("ForeignServer: got %v", foreign.ForeignServer)
+	}
+	if len(foreign.ForeignOptions) != 1 || foreign.ForeignOptions[0].Key != "table_name" || foreign.ForeignOptions[0].Value != "events_archive" {
+		t.Fatalf("ForeignOptions: got %+v", foreign.ForeignOptions)
+	}
+}
+
 // TestBuildTableDetachedFrom guards RFC Section 7.13's DETACHED FROM block
 // directive on a standalone table declaration.
 func TestBuildTableDetachedFrom(t *testing.T) {
