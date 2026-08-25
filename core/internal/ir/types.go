@@ -141,6 +141,20 @@ type Generated struct {
 // Identity holds a GENERATED [ALWAYS|BY DEFAULT] AS IDENTITY column spec.
 type Identity struct {
 	Always bool // true = ALWAYS, false = BY DEFAULT
+	// Sequence options backing the identity column (nil = not declared,
+	// PostgreSQL applies its own default) — RFC Section 7.2's
+	// identity-opts grammar, the same option set CREATE SEQUENCE takes,
+	// mirroring Sequence's identical fields below.
+	IncrementBy *int64
+	MinValue    *int64
+	MaxValue    *int64
+	StartValue  *int64
+	Cache       *int64
+	Cycle       *bool
+	// NoMinValue/NoMaxValue distinguish an explicit "NO MINVALUE"/
+	// "NO MAXVALUE" from "not mentioned at all", the same nil-means-
+	// unspecified convention as Sequence.NoMinValue/NoMaxValue.
+	NoMinValue, NoMaxValue bool
 }
 
 // Index is a CREATE INDEX / INDICES entry.

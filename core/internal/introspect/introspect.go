@@ -1011,12 +1011,29 @@ SELECT n.nspname, c.relname,
              AND dep.refclassid = 'pg_class'::regclass
              AND dep.refobjid = a.attrelid
              AND dep.refobjsubid = a.attnum
-       ) AS serial_owned
+       ) AS serial_owned,
+       ids.seqincrement, ids.seqmin, ids.seqmax, ids.seqstart, ids.seqcache, ids.seqcycle
 FROM   pg_attribute a
 JOIN   pg_class c     ON c.oid = a.attrelid
 JOIN   pg_namespace n ON n.oid = c.relnamespace
 JOIN   pg_type t      ON t.oid = a.atttypid
 LEFT   JOIN pg_attrdef d ON d.adrelid = a.attrelid AND d.adnum = a.attnum
+-- ids resolves an identity column's backing sequence (deptype 'i', the
+-- catalog's own marker for GENERATED ... AS IDENTITY, distinct from
+-- SERIAL's 'a') to its live options — previously never selected at all, so
+-- a declared START WITH/INCREMENT BY/MINVALUE/MAXVALUE/CACHE/CYCLE was
+-- silently discarded on every parse and could never round-trip through
+-- dpg dump either (RFC audit finding: real data loss on identity columns).
+LEFT   JOIN LATERAL (
+           SELECT sq.seqincrement, sq.seqmin, sq.seqmax, sq.seqstart, sq.seqcache, sq.seqcycle
+           FROM   pg_depend dep
+           JOIN   pg_sequence sq ON sq.seqrelid = dep.objid
+           WHERE  dep.deptype = 'i'
+             AND  dep.classid = 'pg_class'::regclass
+             AND  dep.refclassid = 'pg_class'::regclass
+             AND  dep.refobjid = a.attrelid
+             AND  dep.refobjsubid = a.attnum
+       ) ids ON a.attidentity <> ''
 WHERE  a.attnum > 0
 AND    NOT a.attisdropped
 -- attislocal excludes columns present only via classic table INHERITS
@@ -1038,7 +1055,9 @@ ORDER  BY n.nspname, c.relname, a.attnum`
 		var notNull, storageIsDefault, serialOwned bool
 		var identityKind, generatedKind, def, comment, compression, storage *string
 		var stats *int
-		if err := rs.Scan(&schema, &table, &name, &dataType, &notNull, &identityKind, &generatedKind, &def, &comment, &stats, &compression, &storage, &storageIsDefault, &serialOwned); err != nil {
+		var idIncrement, idMin, idMax, idStart, idCache *int64
+		var idCycle *bool
+		if err := rs.Scan(&schema, &table, &name, &dataType, &notNull, &identityKind, &generatedKind, &def, &comment, &stats, &compression, &storage, &storageIsDefault, &serialOwned, &idIncrement, &idMin, &idMax, &idStart, &idCache, &idCycle); err != nil {
 			return err
 		}
 		t, ok := idx[schema+"."+table]
@@ -1055,10 +1074,22 @@ ORDER  BY n.nspname, c.relname, a.attnum`
 			StorageIsTypeDefault: storageIsDefault,
 		}
 		switch {
-		case identityKind != nil && *identityKind == "a":
-			col.Identity = &ir.Identity{Always: true}
-		case identityKind != nil && *identityKind == "d":
-			col.Identity = &ir.Identity{Always: false}
+		case identityKind != nil && (*identityKind == "a" || *identityKind == "d"):
+			// idMin/idMax always come back as concrete bounds from pg_sequence
+			// (PostgreSQL doesn't retain "an explicit NO MINVALUE/NO MAXVALUE
+			// was written" as a distinct catalog bit, same as Sequence's own
+			// introspection), so NoMinValue/NoMaxValue are never set here —
+			// only ever true for a source-declared identity, mirroring
+			// introspectSequences' identical asymmetry.
+			col.Identity = &ir.Identity{
+				Always:      *identityKind == "a",
+				IncrementBy: idIncrement,
+				MinValue:    idMin,
+				MaxValue:    idMax,
+				StartValue:  idStart,
+				Cache:       idCache,
+				Cycle:       idCycle,
+			}
 		case serialOwned && def != nil:
 			// dataType is already the real underlying type (format_type()
 			// on atttypid never returns "serial" — that's a source-syntax

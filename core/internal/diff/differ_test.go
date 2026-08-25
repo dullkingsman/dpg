@@ -688,6 +688,95 @@ func TestDiffAddColumn(t *testing.T) {
 	}
 }
 
+// TestCreateTableWithIdentityOptions guards createTable's identity-column
+// rendering path (differ.go's inline column-rendering loop): a declared
+// START WITH/INCREMENT BY/CACHE/CYCLE previously had no code path at all —
+// col.Identity carried only the ALWAYS/BY DEFAULT flag — so CREATE TABLE
+// always emitted a bare "GENERATED ALWAYS AS IDENTITY" regardless of what
+// options were declared.
+func TestCreateTableWithIdentityOptions(t *testing.T) {
+	d := New()
+	inc, start, cache := int64(10), int64(1000), int64(20)
+	cyc := true
+	desired := []pipeline.IRObject{
+		&ir.Table{
+			Schema: "public",
+			Name:   "orders",
+			Columns: []*ir.Column{
+				{
+					Name: "id", Type: ir.TypeRef{Name: "bigint"}, NotNull: true,
+					Identity: &ir.Identity{Always: true, IncrementBy: &inc, StartValue: &start, Cache: &cache, Cycle: &cyc},
+				},
+			},
+		},
+	}
+	ops, err := d.Diff(desired, &pipeline.Snapshot{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var createOp pipeline.DiffOp
+	for _, o := range ops {
+		if strings.Contains(o.SQL(), "CREATE TABLE") {
+			createOp = o
+		}
+	}
+	if createOp == nil {
+		t.Fatalf("expected a CREATE TABLE op, got ops: %v", opsSQL(ops))
+	}
+	want := "GENERATED ALWAYS AS IDENTITY (START WITH 1000 INCREMENT BY 10 CACHE 20 CYCLE)"
+	if !strings.Contains(createOp.SQL(), want) {
+		t.Errorf("expected identity options in CREATE TABLE, want substring %q, got: %s", want, createOp.SQL())
+	}
+}
+
+// TestDiffAddColumnWithIdentityOptions is TestCreateTableWithIdentityOptions'
+// ADD COLUMN counterpart — the differ's separate "new column on an existing
+// table" emission path had the identical gap.
+func TestDiffAddColumnWithIdentityOptions(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.orders", &snapshot.SnapObject{
+		Kind: "table",
+		Table: &snapshot.SnapTable{
+			Schema:  "public",
+			Name:    "orders",
+			Columns: []snapshot.SnapColumn{{Name: "amount", Type: "numeric"}},
+		},
+	})
+
+	inc, max := int64(5), int64(999999)
+	desired := []pipeline.IRObject{
+		&ir.Table{
+			Schema: "public",
+			Name:   "orders",
+			Columns: []*ir.Column{
+				{Name: "amount", Type: ir.TypeRef{Name: "numeric"}},
+				{
+					Name: "id", Type: ir.TypeRef{Name: "bigint"}, NotNull: true,
+					Identity: &ir.Identity{Always: true, IncrementBy: &inc, MaxValue: &max},
+				},
+			},
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var addOp pipeline.DiffOp
+	for _, o := range ops {
+		if strings.Contains(o.SQL(), "ADD COLUMN") && strings.Contains(o.SQL(), `"id"`) {
+			addOp = o
+		}
+	}
+	if addOp == nil {
+		t.Fatalf("expected an ADD COLUMN op for id, got ops: %v", opsSQL(ops))
+	}
+	want := "GENERATED ALWAYS AS IDENTITY (INCREMENT BY 5 MAXVALUE 999999)"
+	if !strings.Contains(addOp.SQL(), want) {
+		t.Errorf("expected identity options in ADD COLUMN, want substring %q, got: %s", want, addOp.SQL())
+	}
+}
+
 // TestDiffAddGeneratedColumn guards a real bug found live-testing a demo
 // project: createTable's column-rendering loop has always handled
 // col.Generated (GENERATED ALWAYS AS (expr) STORED), but the separate
@@ -1117,6 +1206,266 @@ func TestDiffGeneratedColumnRemovedVirtual(t *testing.T) {
 	}
 	if dropOp.Safety() != pipeline.Destructive || addOp.Safety() != pipeline.Destructive {
 		t.Errorf("expected both ops Destructive, got drop=%s add=%s", dropOp.Safety(), addOp.Safety())
+	}
+}
+
+// ── Identity-column diffing (RFC Section 7.4) ──────────────────────────────
+//
+// diffColumns' "alter existing column" branch previously never read
+// col.Identity at all, so every one of the RFC's 4 identity-change rows
+// (clause added, ALWAYS<->BY DEFAULT toggle, identity-opts changed, clause
+// removed) produced zero DiffOps — source and live database could silently
+// and permanently diverge. Same bug class as the generated-column tests
+// above (RFC E.21), which these mirror.
+
+// TestDiffIdentityAddedToExistingPlainColumn guards the "clause added where
+// none existed" row — real PostgreSQL has a genuine in-place ALTER path for
+// this (unlike GENERATED ... AS (expr), which has none), confirmed live:
+// ALTER TABLE t ALTER COLUMN c ADD GENERATED ... AS IDENTITY [(opts)],
+// CAUTION.
+func TestDiffIdentityAddedToExistingPlainColumn(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.orders", &snapshot.SnapObject{
+		Kind: "table",
+		Table: &snapshot.SnapTable{
+			Schema:  "public",
+			Name:    "orders",
+			Columns: []snapshot.SnapColumn{{Name: "id", Type: "bigint", NotNull: true}},
+		},
+	})
+
+	start := int64(1000)
+	desired := []pipeline.IRObject{
+		&ir.Table{
+			Schema: "public",
+			Name:   "orders",
+			Columns: []*ir.Column{
+				{
+					Name: "id", Type: ir.TypeRef{Name: "bigint"}, NotNull: true,
+					Identity: &ir.Identity{Always: true, StartValue: &start},
+				},
+			},
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var addOp pipeline.DiffOp
+	for _, o := range ops {
+		if strings.Contains(o.SQL(), "ADD GENERATED") {
+			addOp = o
+		}
+	}
+	if addOp == nil {
+		t.Fatalf("expected an ADD GENERATED ... AS IDENTITY op, got ops: %v", opsSQL(ops))
+	}
+	if !strings.Contains(addOp.SQL(), `ALTER COLUMN "id" ADD GENERATED ALWAYS AS IDENTITY (START WITH 1000)`) {
+		t.Errorf("unexpected SQL: %s", addOp.SQL())
+	}
+	if addOp.Safety() != pipeline.Caution {
+		t.Errorf("expected Caution, got %s", addOp.Safety())
+	}
+}
+
+// TestDiffIdentityRemoved guards the "clause removed, column kept" row —
+// DROP IDENTITY IF EXISTS, SAFE (no rewrite).
+func TestDiffIdentityRemoved(t *testing.T) {
+	d := New()
+	identity := "ALWAYS"
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.orders", &snapshot.SnapObject{
+		Kind: "table",
+		Table: &snapshot.SnapTable{
+			Schema:  "public",
+			Name:    "orders",
+			Columns: []snapshot.SnapColumn{{Name: "id", Type: "bigint", NotNull: true, Identity: &identity}},
+		},
+	})
+
+	desired := []pipeline.IRObject{
+		&ir.Table{
+			Schema: "public",
+			Name:   "orders",
+			Columns: []*ir.Column{
+				{Name: "id", Type: ir.TypeRef{Name: "bigint"}, NotNull: true}, // Identity dropped from source
+			},
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var dropOp pipeline.DiffOp
+	for _, o := range ops {
+		if strings.Contains(o.SQL(), "DROP IDENTITY") {
+			dropOp = o
+		}
+	}
+	if dropOp == nil {
+		t.Fatalf("expected a DROP IDENTITY op, got ops: %v", opsSQL(ops))
+	}
+	if !strings.Contains(dropOp.SQL(), `ALTER COLUMN "id" DROP IDENTITY IF EXISTS`) {
+		t.Errorf("unexpected SQL: %s", dropOp.SQL())
+	}
+	if dropOp.Safety() != pipeline.Safe {
+		t.Errorf("expected Safe, got %s", dropOp.Safety())
+	}
+}
+
+// TestDiffIdentityDirectionToggle guards the "ALWAYS<->BY DEFAULT changed,
+// options unchanged" row — SET GENERATED {ALWAYS|BY DEFAULT}, SAFE.
+func TestDiffIdentityDirectionToggle(t *testing.T) {
+	d := New()
+	identity := "ALWAYS"
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.orders", &snapshot.SnapObject{
+		Kind: "table",
+		Table: &snapshot.SnapTable{
+			Schema:  "public",
+			Name:    "orders",
+			Columns: []snapshot.SnapColumn{{Name: "id", Type: "bigint", NotNull: true, Identity: &identity}},
+		},
+	})
+
+	desired := []pipeline.IRObject{
+		&ir.Table{
+			Schema: "public",
+			Name:   "orders",
+			Columns: []*ir.Column{
+				{Name: "id", Type: ir.TypeRef{Name: "bigint"}, NotNull: true, Identity: &ir.Identity{Always: false}},
+			},
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var setOp pipeline.DiffOp
+	for _, o := range ops {
+		if strings.Contains(o.SQL(), "SET GENERATED") {
+			setOp = o
+		}
+		if strings.Contains(o.SQL(), "DROP COLUMN") || strings.Contains(o.SQL(), "ADD COLUMN") {
+			t.Errorf("direction toggle should not drop/re-add the column, got: %s", o.SQL())
+		}
+	}
+	if setOp == nil {
+		t.Fatalf("expected a SET GENERATED op, got ops: %v", opsSQL(ops))
+	}
+	if !strings.Contains(setOp.SQL(), `ALTER COLUMN "id" SET GENERATED BY DEFAULT`) {
+		t.Errorf("unexpected SQL: %s", setOp.SQL())
+	}
+	if setOp.Safety() != pipeline.Safe {
+		t.Errorf("expected Safe, got %s", setOp.Safety())
+	}
+}
+
+// TestDiffIdentityOptionsChanged guards the "identity-opts changed" row —
+// one targeted SET <option> per changed option, SAFE, distinct from
+// ALTER SEQUENCE (no sequence name involved). Changes only a subset
+// (IncrementBy, Cache) to confirm unchanged options (StartValue) don't
+// spuriously re-emit.
+func TestDiffIdentityOptionsChanged(t *testing.T) {
+	d := New()
+	identity := "ALWAYS"
+	snapInc, snapStart, snapCache := int64(1), int64(1000), int64(1)
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.orders", &snapshot.SnapObject{
+		Kind: "table",
+		Table: &snapshot.SnapTable{
+			Schema: "public",
+			Name:   "orders",
+			Columns: []snapshot.SnapColumn{{
+				Name: "id", Type: "bigint", NotNull: true, Identity: &identity,
+				IdentityIncrementBy: &snapInc, IdentityStartValue: &snapStart, IdentityCache: &snapCache,
+			}},
+		},
+	})
+
+	newInc, newCache := int64(5), int64(50)
+	start := int64(1000) // unchanged from snapshot
+	desired := []pipeline.IRObject{
+		&ir.Table{
+			Schema: "public",
+			Name:   "orders",
+			Columns: []*ir.Column{
+				{
+					Name: "id", Type: ir.TypeRef{Name: "bigint"}, NotNull: true,
+					Identity: &ir.Identity{Always: true, IncrementBy: &newInc, StartValue: &start, Cache: &newCache},
+				},
+			},
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var incOp, cacheOp pipeline.DiffOp
+	for _, o := range ops {
+		if strings.Contains(o.SQL(), "SET INCREMENT BY") {
+			incOp = o
+		}
+		if strings.Contains(o.SQL(), "SET CACHE") {
+			cacheOp = o
+		}
+		if strings.Contains(o.SQL(), "SET START WITH") {
+			t.Errorf("unchanged StartValue should not emit a SET START WITH op, got: %s", o.SQL())
+		}
+	}
+	if incOp == nil || !strings.Contains(incOp.SQL(), `ALTER COLUMN "id" SET INCREMENT BY 5`) {
+		t.Errorf("expected SET INCREMENT BY 5, got ops: %v", opsSQL(ops))
+	}
+	if incOp.Safety() != pipeline.Safe {
+		t.Errorf("expected Safe, got %s", incOp.Safety())
+	}
+	if cacheOp == nil || !strings.Contains(cacheOp.SQL(), `ALTER COLUMN "id" SET CACHE 50`) {
+		t.Errorf("expected SET CACHE 50, got ops: %v", opsSQL(ops))
+	}
+}
+
+// TestDiffIdentityUnchangedIsNoop guards against diffIdentityColumn firing
+// spuriously when the desired identity spec is byte-for-byte what the
+// snapshot already recorded.
+func TestDiffIdentityUnchangedIsNoop(t *testing.T) {
+	d := New()
+	identity := "ALWAYS"
+	inc, start, cache := int64(1), int64(1), int64(1)
+	cyc := true
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.orders", &snapshot.SnapObject{
+		Kind: "table",
+		Table: &snapshot.SnapTable{
+			Schema: "public",
+			Name:   "orders",
+			Columns: []snapshot.SnapColumn{{
+				Name: "id", Type: "bigint", NotNull: true, Identity: &identity,
+				IdentityIncrementBy: &inc, IdentityStartValue: &start, IdentityCache: &cache, IdentityCycle: &cyc,
+			}},
+		},
+	})
+
+	desired := []pipeline.IRObject{
+		&ir.Table{
+			Schema: "public",
+			Name:   "orders",
+			Columns: []*ir.Column{
+				{
+					Name: "id", Type: ir.TypeRef{Name: "bigint"}, NotNull: true,
+					Identity: &ir.Identity{Always: true, IncrementBy: &inc, StartValue: &start, Cache: &cache, Cycle: &cyc},
+				},
+			},
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, o := range ops {
+		if strings.Contains(o.SQL(), "IDENTITY") || strings.Contains(o.SQL(), "SET GENERATED") || strings.Contains(o.SQL(), "SET INCREMENT") || strings.Contains(o.SQL(), "SET START") || strings.Contains(o.SQL(), "SET CACHE") || strings.Contains(o.SQL(), "SET CYCLE") {
+			t.Errorf("unchanged identity spec should produce no ops, got: %s", o.SQL())
+		}
 	}
 }
 

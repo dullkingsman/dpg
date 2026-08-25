@@ -501,6 +501,45 @@ func objectSchema(obj pipeline.IRObject) string {
 // needs the OTHER role's own Inherit default, which a single object alone
 // can't provide. Every caller except dump's own runDump (which has the full
 // introspected role list available) uses this.
+// writeIdentityOptsDump appends id's identity-opts clause (RFC Section 7.2)
+// to b in dump-rendering form, mirroring internal/diff's writeIdentityOpts
+// but using kw for keyword casing like the rest of this file's renderers.
+func writeIdentityOptsDump(b *strings.Builder, id *ir.Identity, kw func(string) string) {
+	var opts strings.Builder
+	if id.StartValue != nil {
+		fmt.Fprintf(&opts, " %s %d", kw("START WITH"), *id.StartValue)
+	}
+	if id.IncrementBy != nil {
+		fmt.Fprintf(&opts, " %s %d", kw("INCREMENT BY"), *id.IncrementBy)
+	}
+	if id.NoMinValue {
+		fmt.Fprintf(&opts, " %s", kw("NO MINVALUE"))
+	} else if id.MinValue != nil {
+		fmt.Fprintf(&opts, " %s %d", kw("MINVALUE"), *id.MinValue)
+	}
+	if id.NoMaxValue {
+		fmt.Fprintf(&opts, " %s", kw("NO MAXVALUE"))
+	} else if id.MaxValue != nil {
+		fmt.Fprintf(&opts, " %s %d", kw("MAXVALUE"), *id.MaxValue)
+	}
+	if id.Cache != nil {
+		fmt.Fprintf(&opts, " %s %d", kw("CACHE"), *id.Cache)
+	}
+	if id.Cycle != nil {
+		if *id.Cycle {
+			fmt.Fprintf(&opts, " %s", kw("CYCLE"))
+		} else {
+			fmt.Fprintf(&opts, " %s", kw("NO CYCLE"))
+		}
+	}
+	if opts.Len() == 0 {
+		return
+	}
+	b.WriteString(" (")
+	b.WriteString(strings.TrimSpace(opts.String()))
+	b.WriteString(")")
+}
+
 func renderObjectDPG(b *strings.Builder, obj pipeline.IRObject, fmtOpts format.Options) {
 	renderObjectDPGWithRoleInheritDefaults(b, obj, fmtOpts, nil)
 }
@@ -595,6 +634,7 @@ func renderObjectDPGWithRoleInheritDefaults(b *strings.Builder, obj pipeline.IRO
 				} else {
 					fmt.Fprintf(&sb, " %s %s %s %s %s", kw("GENERATED"), kw("BY"), kw("DEFAULT"), kw("AS"), kw("IDENTITY"))
 				}
+				writeIdentityOptsDump(&sb, col.Identity, kw)
 			}
 			if col.Generated != nil {
 				genKw := kw("STORED")

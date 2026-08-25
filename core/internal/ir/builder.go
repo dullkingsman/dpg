@@ -478,7 +478,51 @@ func (b *Builder) buildColumn(cd *pg_query.ColumnDef, pos pipeline.SourcePos) (*
 			}
 
 		case pg_query.ConstrType_CONSTR_IDENTITY:
-			col.Identity = &Identity{Always: cst.GeneratedWhen == "a"}
+			id := &Identity{Always: cst.GeneratedWhen == "a"}
+			// cst.Options is the identical []*Node DefElem shape
+			// CreateSeqStmt.Options uses (real PostgreSQL's identity-opts
+			// grammar reuses SeqOptList verbatim) — same parsing as
+			// buildSequence's loop below, minus "as"/"owned_by" which
+			// PostgreSQL rejects for identity columns. Previously this whole
+			// list was discarded, silently downgrading any declared
+			// START WITH/INCREMENT BY/MINVALUE/MAXVALUE/CACHE/CYCLE option to
+			// PostgreSQL's bare defaults (RFC audit finding: real data loss,
+			// not a parse error).
+			for _, opt := range cst.Options {
+				de := opt.GetDefElem()
+				if de == nil {
+					continue
+				}
+				v := seqOptionInt(de)
+				switch de.Defname {
+				case "increment":
+					id.IncrementBy = v
+				case "start":
+					id.StartValue = v
+				case "minvalue":
+					if de.Arg == nil {
+						id.NoMinValue = true
+					} else {
+						id.MinValue = v
+					}
+				case "maxvalue":
+					if de.Arg == nil {
+						id.NoMaxValue = true
+					} else {
+						id.MaxValue = v
+					}
+				case "cache":
+					id.Cache = v
+				case "cycle":
+					if de.Arg != nil {
+						if bl := de.Arg.GetBoolean(); bl != nil {
+							cyc := bl.GetBoolval()
+							id.Cycle = &cyc
+						}
+					}
+				}
+			}
+			col.Identity = id
 			col.NotNull = true // identity columns are always implicitly NOT NULL in PG
 
 		case pg_query.ConstrType_CONSTR_PRIMARY:

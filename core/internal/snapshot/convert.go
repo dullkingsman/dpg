@@ -595,6 +595,14 @@ func toSnapColumn(col *ir.Column) SnapColumn {
 			s = "BY DEFAULT"
 		}
 		sc.Identity = &s
+		sc.IdentityIncrementBy = col.Identity.IncrementBy
+		sc.IdentityMinValue = col.Identity.MinValue
+		sc.IdentityMaxValue = col.Identity.MaxValue
+		sc.IdentityNoMinValue = col.Identity.NoMinValue
+		sc.IdentityNoMaxValue = col.Identity.NoMaxValue
+		sc.IdentityStartValue = col.Identity.StartValue
+		sc.IdentityCache = col.Identity.Cache
+		sc.IdentityCycle = col.Identity.Cycle
 	}
 	if col.Generated != nil {
 		sc.Generated = &col.Generated.Expr

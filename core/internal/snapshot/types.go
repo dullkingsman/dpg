@@ -375,13 +375,24 @@ type SnapPartition struct {
 }
 
 type SnapColumn struct {
-	Name      string  `json:"name"`
-	Type      string  `json:"type"`
-	NotNull   bool    `json:"not_null,omitempty"`
-	Default   *string `json:"default,omitempty"`
-	Identity  *string `json:"identity,omitempty"` // "ALWAYS" or "BY DEFAULT"
-	Serial    *string `json:"serial,omitempty"`   // "SMALLSERIAL"/"SERIAL"/"BIGSERIAL"
-	Generated *string `json:"generated,omitempty"`
+	Name     string  `json:"name"`
+	Type     string  `json:"type"`
+	NotNull  bool    `json:"not_null,omitempty"`
+	Default  *string `json:"default,omitempty"`
+	Identity *string `json:"identity,omitempty"` // "ALWAYS" or "BY DEFAULT"
+	// Identity sequence options — mirror ir.Identity's identical fields,
+	// nil/false meaning "not declared", same convention as SnapSequence's
+	// own IncrementBy/MinValue/etc. below. Meaningless when Identity is nil.
+	IdentityIncrementBy *int64  `json:"identity_increment_by,omitempty"`
+	IdentityMinValue    *int64  `json:"identity_min_value,omitempty"`
+	IdentityMaxValue    *int64  `json:"identity_max_value,omitempty"`
+	IdentityNoMinValue  bool    `json:"identity_no_min_value,omitempty"`
+	IdentityNoMaxValue  bool    `json:"identity_no_max_value,omitempty"`
+	IdentityStartValue  *int64  `json:"identity_start_value,omitempty"`
+	IdentityCache       *int64  `json:"identity_cache,omitempty"`
+	IdentityCycle       *bool   `json:"identity_cycle,omitempty"`
+	Serial              *string `json:"serial,omitempty"` // "SMALLSERIAL"/"SERIAL"/"BIGSERIAL"
+	Generated           *string `json:"generated,omitempty"`
 	// GeneratedVirtual is true when Generated is VIRTUAL (PG18+) rather
 	// than STORED — meaningless when Generated is nil. Kept as a sibling
 	// bool rather than folding into Generated's own shape, matching this
