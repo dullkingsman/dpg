@@ -6348,10 +6348,41 @@ func diffType(o *ir.Type, snap *snapshot.SnapType, fullSnap *pipeline.Snapshot, 
 			desiredVals[v] = true
 		}
 
-		// Values removed from the enum require the MIGRATE REMOVE procedure.
+		// RENAME VALUE (Section 5.1.1, audit item #19): validated against
+		// the same three-state resolution every other RENAMED-FROM-style
+		// directive in this codebase uses (genuine rename / post-apply
+		// no-op / stale-directive error). renamedFrom/renamedTo exclude
+		// both sides from the plain add/remove detection below — a rename
+		// is neither an addition nor (for MIGRATE REMOVE purposes) a
+		// removal.
+		renamedFrom := make(map[string]bool, len(o.EnumValueRenames))
+		renamedTo := make(map[string]bool, len(o.EnumValueRenames))
+		var renameOps []pipeline.DiffOp
+		for _, r := range o.EnumValueRenames {
+			if snapVals[r.To] {
+				// Post-apply / no-op state: the snapshot already has the
+				// new value.
+				continue
+			}
+			if !snapVals[r.From] {
+				return nil, pipeline.Errorf(r.Pos,
+					"RENAME VALUE %q on enum %s does not match the snapshot — neither the old nor the new value exists there. Remove RENAME VALUE if this is a genuinely new value.",
+					r.From, typeIdent)
+			}
+			renamedFrom[r.From] = true
+			renamedTo[r.To] = true
+			renameOps = append(renameOps, safeOp(
+				fmt.Sprintf("ALTER TYPE %s RENAME VALUE %s TO %s;", typeIdent, quoteLit(r.From), quoteLit(r.To)),
+				r.Pos,
+			))
+		}
+
+		// Values removed from the enum require the MIGRATE REMOVE
+		// procedure — a rename's old value doesn't count as "removed"
+		// (handled by RENAME VALUE above instead).
 		var removedCount int
 		for v := range snapVals {
-			if !desiredVals[v] {
+			if !desiredVals[v] && !renamedFrom[v] {
 				removedCount++
 			}
 		}
@@ -6359,23 +6390,63 @@ func diffType(o *ir.Type, snap *snapshot.SnapType, fullSnap *pipeline.Snapshot, 
 			// Merge into ops (not a bare return) — ops may already carry the
 			// shared OWNER TO/RENAME TO handling from the top of this
 			// function, which a plain return here would silently discard.
-			removeOps, err := diffEnumRemove(o, snap, fullSnap)
+			// Renames run first: real PostgreSQL's RENAME VALUE only
+			// retargets the catalog label (existing rows keep the same
+			// underlying enum OID, so col::text already reflects the new
+			// name by the time diffEnumRemove's own verification runs),
+			// and diffEnumRemove needs to know about them too so it
+			// doesn't independently (and wrongly) treat a just-renamed
+			// value as one that's actually being removed.
+			removeOps, err := diffEnumRemove(o, snap, fullSnap, renamedFrom)
 			if err != nil {
 				return nil, err
 			}
-			return append(ops, removeOps...), nil
+			return append(append(ops, renameOps...), removeOps...), nil
 		}
+
+		ops = append(ops, renameOps...)
 
 		// ALTER TYPE ADD VALUE couldn't run inside a transaction block
 		// before PG 12 (RFC §5.1.1) — moot given RFC §1.4's documented
 		// version floor of 14, so this always runs transactionally.
-		for _, v := range o.EnumValues {
-			if !snapVals[v] {
-				ops = append(ops, safeOp(
-					fmt.Sprintf("ALTER TYPE %s ADD VALUE %s;", typeIdent, quoteLit(v)),
-					pos,
-				))
+		// Positional control (BEFORE/AFTER, audit item #18) is inferred
+		// purely from where a new value sits in the desired list relative
+		// to values that already exist live (including one just renamed
+		// into place above), not a separate directive: walking left to
+		// right, each new value anchors AFTER the nearest earlier
+		// already-existing value (including one added earlier in this
+		// same loop — each ALTER TYPE ADD VALUE commits its own catalog
+		// change, so a later statement in the same migration can reference
+		// an earlier one), or BEFORE the nearest later already-existing
+		// one when there's no earlier anchor yet (e.g. inserting before
+		// the enum's current first value). Falls back to a plain
+		// (appended) ADD VALUE only when neither anchor exists.
+		alreadyLive := func(v string) bool { return snapVals[v] || renamedTo[v] }
+		lastKnown := ""
+		for i, v := range o.EnumValues {
+			if alreadyLive(v) {
+				lastKnown = v
+				continue
 			}
+			var stmt string
+			if lastKnown != "" {
+				stmt = fmt.Sprintf("ALTER TYPE %s ADD VALUE %s AFTER %s;", typeIdent, quoteLit(v), quoteLit(lastKnown))
+			} else {
+				anchor := ""
+				for _, w := range o.EnumValues[i+1:] {
+					if alreadyLive(w) {
+						anchor = w
+						break
+					}
+				}
+				if anchor != "" {
+					stmt = fmt.Sprintf("ALTER TYPE %s ADD VALUE %s BEFORE %s;", typeIdent, quoteLit(v), quoteLit(anchor))
+				} else {
+					stmt = fmt.Sprintf("ALTER TYPE %s ADD VALUE %s;", typeIdent, quoteLit(v))
+				}
+			}
+			ops = append(ops, safeOp(stmt, pos))
+			lastKnown = v
 		}
 	}
 	if !ptrEq(o.Comment, snap.Comment) {
@@ -6393,8 +6464,15 @@ func diffType(o *ir.Type, snap *snapshot.SnapType, fullSnap *pipeline.Snapshot, 
 // diffEnumRemove implements the 7-step MIGRATE REMOVE procedure for enums.
 // It creates a shadow type, runs the user-supplied DML, verifies no rows
 // carry removed values, alters affected columns, drops the old type, and
-// renames the shadow type back to the original name.
-func diffEnumRemove(o *ir.Type, snap *snapshot.SnapType, fullSnap *pipeline.Snapshot) ([]pipeline.DiffOp, error) {
+// renames the shadow type back to the original name. renamedFrom is the
+// caller's already-validated set of RENAME VALUE old-names (audit item
+// #19) — excluded from the removed-value computation here too, or a value
+// simultaneously renamed and left alone elsewhere would be wrongly treated
+// as an unguarded removal (real PostgreSQL's RENAME VALUE only retargets
+// the catalog label; by the time this function's own verification query
+// runs, an already-renamed row's col::text reflects the new name, not the
+// old one it's checking for).
+func diffEnumRemove(o *ir.Type, snap *snapshot.SnapType, fullSnap *pipeline.Snapshot, renamedFrom map[string]bool) ([]pipeline.DiffOp, error) {
 	pos := o.SrcPos
 	typeIdent := qualIdent(o.Schema, o.Name)
 	shadowIdent := qualIdent(o.Schema, o.Name+"__dpg_new")
@@ -6411,7 +6489,7 @@ func diffEnumRemove(o *ir.Type, snap *snapshot.SnapType, fullSnap *pipeline.Snap
 	}
 	var removed []string
 	for _, v := range snap.Values {
-		if !desiredSet[v] {
+		if !desiredSet[v] && !renamedFrom[v] {
 			removed = append(removed, v)
 		}
 	}

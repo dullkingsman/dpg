@@ -474,6 +474,12 @@ func (b *blockParser) parseBlock(pos pipeline.SourcePos) (pipeline.BlockAST, err
 			ast.ClusterOn, err = b.parseClusterOn(dirPos)
 		case "DETACHED":
 			ast.DetachedFrom, err = b.parseDetachedFrom(dirPos)
+		case "RENAME":
+			var r pipeline.EnumValueRenameDir
+			r, err = b.parseEnumValueRename(dirPos)
+			if err == nil {
+				ast.EnumValueRenames = append(ast.EnumValueRenames, r)
+			}
 		case "REFRESH":
 			// RFC audit item #84: Collation-only REFRESH VERSION, a bare
 			// presence keyword with no argument.
@@ -762,6 +768,31 @@ func (b *blockParser) parseIdentDirective(pos pipeline.SourcePos) (*pipeline.Ide
 		return nil, err
 	}
 	return &pipeline.Identifier{Name: name}, nil
+}
+
+// parseEnumValueRename reads: VALUE 'old' TO 'new'; (the "RENAME" directive
+// keyword itself is consumed by the caller's dispatch — Section 5.1.1).
+func (b *blockParser) parseEnumValueRename(pos pipeline.SourcePos) (pipeline.EnumValueRenameDir, error) {
+	if err := b.expect("VALUE"); err != nil {
+		return pipeline.EnumValueRenameDir{}, err
+	}
+	b.skipWS()
+	from, err := b.readSingleQuotedString()
+	if err != nil {
+		return pipeline.EnumValueRenameDir{}, err
+	}
+	if err := b.expect("TO"); err != nil {
+		return pipeline.EnumValueRenameDir{}, err
+	}
+	b.skipWS()
+	to, err := b.readSingleQuotedString()
+	if err != nil {
+		return pipeline.EnumValueRenameDir{}, err
+	}
+	if err := b.expectSemi(); err != nil {
+		return pipeline.EnumValueRenameDir{}, err
+	}
+	return pipeline.EnumValueRenameDir{From: from, To: to, Pos: pos}, nil
 }
 
 // parseSecurityLabel reads: LABEL [FOR provider] 'label'; (the "SECURITY"

@@ -1493,6 +1493,215 @@ func TestDiffEnumAddValue(t *testing.T) {
 	}
 }
 
+// TestDiffEnumAddValueBefore guards RFC audit item #18: positional ADD
+// VALUE control is inferred purely from where a new value sits in the
+// desired list relative to already-existing ones, not a separate
+// directive. Inserting at the front of the list (no earlier anchor) must
+// use BEFORE the nearest later already-existing value.
+func TestDiffEnumAddValueBefore(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.status", &snapshot.SnapObject{
+		Kind: "type",
+		Type: &snapshot.SnapType{
+			Schema: "public", Name: "status", Variant: "ENUM",
+			Values: []string{"active", "inactive"},
+		},
+	})
+	desired := []pipeline.IRObject{
+		&ir.Type{
+			Schema: "public", Name: "status", Variant: "ENUM",
+			EnumValues: []string{"new", "active", "inactive"},
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := `ALTER TYPE "public"."status" ADD VALUE 'new' BEFORE 'active';`
+	if !containsSQL(ops, want) {
+		t.Errorf("expected %q, got: %v", want, sqlList(ops))
+	}
+}
+
+// TestDiffEnumAddValueMiddleAndMultiple guards inserting in the middle of
+// the list and inserting more than one new value in the same migration —
+// each subsequent new value must chain AFTER the one added just before it.
+func TestDiffEnumAddValueMiddleAndMultiple(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.status", &snapshot.SnapObject{
+		Kind: "type",
+		Type: &snapshot.SnapType{
+			Schema: "public", Name: "status", Variant: "ENUM",
+			Values: []string{"active", "shipped"},
+		},
+	})
+	desired := []pipeline.IRObject{
+		&ir.Type{
+			Schema: "public", Name: "status", Variant: "ENUM",
+			EnumValues: []string{"active", "confirmed", "packed", "shipped"},
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsSQL(ops, `ALTER TYPE "public"."status" ADD VALUE 'confirmed' AFTER 'active';`) {
+		t.Errorf("expected confirmed AFTER active, got: %v", sqlList(ops))
+	}
+	if !containsSQL(ops, `ALTER TYPE "public"."status" ADD VALUE 'packed' AFTER 'confirmed';`) {
+		t.Errorf("expected packed AFTER confirmed (chained onto the value just added), got: %v", sqlList(ops))
+	}
+}
+
+// TestDiffEnumValueRenameEmitsAlterRenameValue guards RFC Section 5.1.1's
+// RENAME VALUE directive (audit item #19): before this, ir.Type had no such
+// field at all, so an enum value rename was unexpressable except as a
+// destructive MIGRATE REMOVE-and-add pair.
+func TestDiffEnumValueRenameEmitsAlterRenameValue(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.status", &snapshot.SnapObject{
+		Kind: "type",
+		Type: &snapshot.SnapType{
+			Schema: "public", Name: "status", Variant: "ENUM",
+			Values: []string{"active", "pending"},
+		},
+	})
+	desired := []pipeline.IRObject{
+		&ir.Type{
+			Schema: "public", Name: "status", Variant: "ENUM",
+			EnumValues:       []string{"active", "awaiting"},
+			EnumValueRenames: []pipeline.EnumValueRenameDir{{From: "pending", To: "awaiting"}},
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := `ALTER TYPE "public"."status" RENAME VALUE 'pending' TO 'awaiting';`
+	if !containsSQL(ops, want) {
+		t.Errorf("expected %q, got: %v", want, sqlList(ops))
+	}
+	if containsSQL(ops, "ADD VALUE") || containsSQL(ops, "CREATE TYPE") {
+		t.Errorf("a pure rename must not also be treated as an add or trigger MIGRATE REMOVE, got: %v", sqlList(ops))
+	}
+	for _, op := range ops {
+		if strings.Contains(op.SQL(), "RENAME VALUE") && op.Safety() != pipeline.Safe {
+			t.Errorf("RENAME VALUE safety = %v, want Safe: %s", op.Safety(), op.SQL())
+		}
+	}
+}
+
+// TestDiffEnumValueRenamePostApplyNoop proves a RENAME VALUE directive still
+// present in source after a successful rename is a no-op, mirroring the
+// same three-state resolution Index/Constraint/Policy's identical
+// RENAMED-FROM-style directives already use.
+func TestDiffEnumValueRenamePostApplyNoop(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.status", &snapshot.SnapObject{
+		Kind: "type",
+		Type: &snapshot.SnapType{
+			Schema: "public", Name: "status", Variant: "ENUM",
+			Values: []string{"active", "awaiting"},
+		},
+	})
+	desired := []pipeline.IRObject{
+		&ir.Type{
+			Schema: "public", Name: "status", Variant: "ENUM",
+			EnumValues:       []string{"active", "awaiting"},
+			EnumValueRenames: []pipeline.EnumValueRenameDir{{From: "pending", To: "awaiting"}},
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ops) != 0 {
+		t.Errorf("expected no ops for a post-apply stale RENAME VALUE, got: %v", sqlList(ops))
+	}
+}
+
+// TestDiffEnumValueRenameStaleErrors proves a RENAME VALUE directive whose
+// old value matches neither the current nor a prior snapshot value errors
+// clearly instead of silently doing nothing or misfiring.
+func TestDiffEnumValueRenameStaleErrors(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.status", &snapshot.SnapObject{
+		Kind: "type",
+		Type: &snapshot.SnapType{
+			Schema: "public", Name: "status", Variant: "ENUM",
+			Values: []string{"active"},
+		},
+	})
+	desired := []pipeline.IRObject{
+		&ir.Type{
+			Schema: "public", Name: "status", Variant: "ENUM",
+			EnumValues:       []string{"active", "new"},
+			EnumValueRenames: []pipeline.EnumValueRenameDir{{From: "nonexistent", To: "new"}},
+		},
+	}
+	_, err := d.Diff(desired, snap)
+	if err == nil {
+		t.Fatal("expected an error for a RENAME VALUE matching neither value in the snapshot")
+	}
+}
+
+// TestDiffEnumValueRenameWithSeparateRemoval guards the combined case: a
+// RENAME VALUE alongside a genuinely separate value removal (covered by
+// MIGRATE REMOVE) in the same migration. The renamed value must not be
+// treated as removed by diffEnumRemove's own independent computation, and
+// the rename must run before the shadow-type dance so the removal
+// verification's col::text check reflects the already-renamed label.
+func TestDiffEnumValueRenameWithSeparateRemoval(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.status", &snapshot.SnapObject{
+		Kind: "type",
+		Type: &snapshot.SnapType{
+			Schema: "public", Name: "status", Variant: "ENUM",
+			Values: []string{"active", "pending", "cancelled"},
+		},
+	})
+	desired := []pipeline.IRObject{
+		&ir.Type{
+			Schema: "public", Name: "status", Variant: "ENUM",
+			EnumValues:       []string{"active", "awaiting"},
+			EnumValueRenames: []pipeline.EnumValueRenameDir{{From: "pending", To: "awaiting"}},
+			MigrateRemove:    &pipeline.MigrateRemoveBlock{SQL: pipeline.RawExpr{Text: "UPDATE t SET s = 'active' WHERE s = 'cancelled';"}},
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	renameIdx, shadowIdx := -1, -1
+	for i, op := range ops {
+		sql := op.SQL()
+		if strings.Contains(sql, "RENAME VALUE 'pending' TO 'awaiting'") {
+			renameIdx = i
+		}
+		if strings.Contains(sql, "CREATE TYPE") && strings.Contains(sql, "__dpg_new") {
+			shadowIdx = i
+		}
+		if strings.Contains(sql, "'pending'") && strings.Contains(sql, "still carry a removed") {
+			t.Errorf("renamed value 'pending' must not be checked for as a removed value: %s", sql)
+		}
+	}
+	if renameIdx == -1 {
+		t.Fatalf("expected a RENAME VALUE op, got: %v", sqlList(ops))
+	}
+	if shadowIdx == -1 {
+		t.Fatalf("expected the MIGRATE REMOVE shadow-type CREATE TYPE op, got: %v", sqlList(ops))
+	}
+	if renameIdx > shadowIdx {
+		t.Errorf("RENAME VALUE must run before the shadow-type dance, got order: %v", sqlList(ops))
+	}
+}
+
 func TestDiffViewChanged(t *testing.T) {
 	d := New()
 	snap := &pipeline.Snapshot{}

@@ -1775,6 +1775,37 @@ func TestMigrateRemove(t *testing.T) {
 	}
 }
 
+// ── RENAME VALUE ─────────────────────────────────────────────────────────────
+
+// TestEnumRenameValue guards RFC Section 5.1.1's "RENAME VALUE 'old' TO
+// 'new'" enum-block directive (audit item #19) — parsed as a plain block
+// directive rather than the RFC's literal (but PG-invalid) inline per-value
+// placement inside the enum-values list.
+func TestEnumRenameValue(t *testing.T) {
+	ast := parse(t, `RENAME VALUE 'pending' TO 'awaiting';`)
+	if len(ast.EnumValueRenames) != 1 {
+		t.Fatalf("expected 1 rename, got %d", len(ast.EnumValueRenames))
+	}
+	r := ast.EnumValueRenames[0]
+	if r.From != "pending" || r.To != "awaiting" {
+		t.Errorf("rename: got From=%q To=%q, want From=%q To=%q", r.From, r.To, "pending", "awaiting")
+	}
+}
+
+// TestEnumRenameValueMultiple guards that more than one RENAME VALUE
+// directive in the same block accumulates rather than overwriting.
+func TestEnumRenameValueMultiple(t *testing.T) {
+	src := `RENAME VALUE 'pending' TO 'awaiting';
+	RENAME VALUE 'shipped' TO 'dispatched';`
+	ast := parse(t, src)
+	if len(ast.EnumValueRenames) != 2 {
+		t.Fatalf("expected 2 renames, got %d", len(ast.EnumValueRenames))
+	}
+	if ast.EnumValueRenames[0].From != "pending" || ast.EnumValueRenames[1].From != "shipped" {
+		t.Errorf("unexpected rename order/content: %+v", ast.EnumValueRenames)
+	}
+}
+
 // ── combined ──────────────────────────────────────────────────────────────────
 
 func TestFullTableBlock(t *testing.T) {

@@ -1756,6 +1756,7 @@ func (b *Builder) buildEnum(cs *pg_query.CreateEnumStmt, block pipeline.BlockAST
 	if block.MigrateRemove != nil {
 		t.MigrateRemove = block.MigrateRemove
 	}
+	t.EnumValueRenames = block.EnumValueRenames
 	for _, g := range block.Grants {
 		t.Grants = append(t.Grants, blockGrantToIR(g))
 	}

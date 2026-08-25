@@ -1247,6 +1247,26 @@ func TestBuildEnum(t *testing.T) {
 	}
 }
 
+// TestBuildEnumRenameValue guards RFC Section 5.1.1's RENAME VALUE
+// enum-block directive (audit item #19) reaching ir.Type.
+func TestBuildEnumRenameValue(t *testing.T) {
+	obj := buildObject(t, pipeline.KindEnum,
+		`status AS ENUM ('active', 'awaiting', 'inactive')`,
+		`RENAME VALUE 'pending' TO 'awaiting';`,
+	)
+	tp, ok := obj.(*ir.Type)
+	if !ok {
+		t.Fatalf("expected *ir.Type, got %T", obj)
+	}
+	if len(tp.EnumValueRenames) != 1 {
+		t.Fatalf("expected 1 rename, got %d", len(tp.EnumValueRenames))
+	}
+	r := tp.EnumValueRenames[0]
+	if r.From != "pending" || r.To != "awaiting" {
+		t.Errorf("rename: got From=%q To=%q", r.From, r.To)
+	}
+}
+
 // TestBuildEnumGrantsAndRevocations guards RFC audit item #3: ir.Type had
 // no Grants/Revocations field at all, for any of the 5 variants — a
 // declared GRANT/REVOCATION in a TYPE block was silently discarded.

@@ -797,6 +797,9 @@ type Type struct {
 	RenamedFromSchema *string
 	Deprecated        *string
 	MigrateRemove     *pipeline.MigrateRemoveBlock // ENUM only: MIGRATE REMOVE { } block
+	// EnumValueRenames is ENUM only: Section 5.1.1's RENAME VALUE { }
+	// directive(s) — see pipeline.EnumValueRenameDir's doc comment.
+	EnumValueRenames []pipeline.EnumValueRenameDir
 	// Grants/Revocations (RFC audit item #3) apply uniformly across all 5
 	// variants — real PostgreSQL's GRANT/REVOKE has no separate "ON DOMAIN"
 	// target; a domain is granted exactly like any other type, via

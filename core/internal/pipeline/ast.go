@@ -238,6 +238,21 @@ type MigrateRemoveBlock struct {
 	Pos    SourcePos
 }
 
+// EnumValueRenameDir is Section 5.1.1's "RENAME VALUE 'old' TO 'new'" enum-
+// block directive (RFC audit item #19) — repeatable, since a single
+// migration may rename more than one enum value. Modeled as a block
+// directive rather than the RFC's own literal (but PG-invalid) inline
+// per-value "'new_value' RENAMED FROM 'old_value'" placement inside the
+// enum-values list: confirmed live that real CREATE TYPE ... AS ENUM (...)
+// rejects any such extra token inside the parenthesized value list outright
+// ("syntax error"), the same RFC-documents-unparseable-PG-syntax gap domain
+// NOT VALID/EVENT TRIGGER trigger-enable-state had.
+type EnumValueRenameDir struct {
+	From string
+	To   string
+	Pos  SourcePos
+}
+
 // DefaultPrivilegeGrant is one GRANTS { } entry inside a DEFAULT PRIVILEGES
 // block. Unlike a regular GrantEntry, real PostgreSQL's ALTER DEFAULT
 // PRIVILEGES grammar requires an "ON <object-type>" clause per grant — the
@@ -486,6 +501,10 @@ type BlockAST struct {
 	// would otherwise prescribe for "declared table disappeared from its
 	// parent's PARTITIONS { } block."
 	DetachedFrom *DetachedFromDirective
+	// EnumValueRenames is Section 5.1.1's "RENAME VALUE 'old' TO 'new'"
+	// enum-block directive — see EnumValueRenameDir's doc comment for why
+	// it's block-level rather than the RFC's literal inline placement.
+	EnumValueRenames []EnumValueRenameDir
 	// TriggerEnableState is Section 14.1's DISABLED/ENABLE REPLICA/ENABLE
 	// ALWAYS block directive for an EVENT TRIGGER — "" (omitted) means
 	// ENABLED, PostgreSQL's own default. Same value set and vocabulary as
