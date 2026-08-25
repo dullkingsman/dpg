@@ -2100,6 +2100,116 @@ func TestRenderRoleMembershipsCompile(t *testing.T) {
 	}
 }
 
+// TestRenderRoleMembershipRoleDirectionInheritCompaction guards the
+// remaining half of RFC audit item #32's dump-compaction gap: an
+// IN_ROLE-direction entry's WITH INHERIT can already be compacted away
+// trivially (o.Inherit is this exact role's own attribute), but a
+// ROLE-direction entry names a DIFFERENT role — compacting it needs that
+// other role's own INHERIT default, only available via
+// renderObjectDPGWithRoleInheritDefaults' roleInheritDefaults map (built
+// from every introspected role in a real dump run). Exercises all three
+// cases: matching default (compacted), non-matching (rendered explicitly,
+// a real declared override), and the target role absent from the map
+// entirely (rendered explicitly — the same safe fallback renderObjectDPG's
+// nil-map behavior already has, e.g. for a system role dump never
+// introspects).
+func TestRenderRoleMembershipRoleDirectionInheritCompaction(t *testing.T) {
+	fmtOpts := format.Options{IndentSize: 4, KeywordCase: "upper"}
+	inheritTrue, inheritFalse := true, false
+	role := &ir.Role{
+		Name: "app_service",
+		Memberships: []ir.RoleMembership{
+			{Role: "child_default_true", Direction: "ROLE", Inherit: &inheritTrue},
+			{Role: "child_default_false", Direction: "ROLE", Inherit: &inheritFalse},
+			{Role: "child_override", Direction: "ROLE", Inherit: &inheritFalse},
+			{Role: "child_unknown", Direction: "ROLE", Inherit: &inheritFalse},
+		},
+	}
+	roleInheritDefaults := map[string]bool{
+		"child_default_true":  true,
+		"child_default_false": false,
+		"child_override":      true,
+		// "child_unknown" deliberately absent.
+	}
+
+	var b strings.Builder
+	renderObjectDPGWithRoleInheritDefaults(&b, role, fmtOpts, roleInheritDefaults)
+	rendered := b.String()
+
+	if strings.Contains(rendered, "child_default_true") && strings.Contains(rendered, "WITH INHERIT") {
+		for line := range strings.SplitSeq(rendered, "\n") {
+			if strings.Contains(line, "child_default_true") && strings.Contains(line, "WITH INHERIT") {
+				t.Errorf("child_default_true: WITH INHERIT should be compacted away (matches its own default), got line: %q", line)
+			}
+		}
+	}
+	if strings.Contains(rendered, "child_default_false") && strings.Contains(rendered, "WITH INHERIT") {
+		for line := range strings.SplitSeq(rendered, "\n") {
+			if strings.Contains(line, "child_default_false") && strings.Contains(line, "WITH INHERIT") {
+				t.Errorf("child_default_false: WITH INHERIT should be compacted away (matches its own default), got line: %q", line)
+			}
+		}
+	}
+	var sawOverride, sawUnknown bool
+	for line := range strings.SplitSeq(rendered, "\n") {
+		if strings.Contains(line, "child_override") && strings.Contains(line, "WITH INHERIT FALSE") {
+			sawOverride = true
+		}
+		if strings.Contains(line, "child_unknown") && strings.Contains(line, "WITH INHERIT FALSE") {
+			sawUnknown = true
+		}
+	}
+	if !sawOverride {
+		t.Errorf("child_override: expected an explicit WITH INHERIT FALSE (a real declared override), got: %s", rendered)
+	}
+	if !sawUnknown {
+		t.Errorf("child_unknown: expected an explicit WITH INHERIT FALSE (target role absent from roleInheritDefaults), got: %s", rendered)
+	}
+
+	dir := t.TempDir()
+	f := filepath.Join(dir, "roles.dpg")
+	if err := os.WriteFile(f, []byte(rendered), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	compiled, _, err := compiler.Compile([]string{f}, dir, pipeline.Default)
+	if err != nil {
+		t.Fatalf("dumped role failed to recompile: %v\n---\n%s", err, rendered)
+	}
+	got, ok := compiled[0].(*ir.Role)
+	if !ok {
+		t.Fatalf("expected *ir.Role, got %T", compiled[0])
+	}
+	byRole := map[string]ir.RoleMembership{}
+	for _, m := range got.Memberships {
+		byRole[m.Role] = m
+	}
+	// A compacted entry (child_default_true/child_default_false) is
+	// expected to recompile with Inherit == nil — compaction only ever
+	// drops the WITH INHERIT clause from rendered source, and it's
+	// introspectRoleMemberships' job (not dump's) to re-derive the real
+	// live value regardless of what source spells out explicitly. The
+	// still-explicit entries (child_override/child_unknown) must round-
+	// trip their real declared value unchanged.
+	for name, wantCompacted := range map[string]bool{
+		"child_default_true":  true,
+		"child_default_false": true,
+		"child_override":      false,
+		"child_unknown":       false,
+	} {
+		m, ok := byRole[name]
+		if !ok {
+			t.Errorf("%s: missing from recompiled memberships", name)
+			continue
+		}
+		if wantCompacted && m.Inherit != nil {
+			t.Errorf("%s: expected no WITH INHERIT clause in recompiled source (compacted), got Inherit=%v", name, *m.Inherit)
+		}
+		if !wantCompacted && (m.Inherit == nil || *m.Inherit != false) {
+			t.Errorf("%s: expected WITH INHERIT FALSE to round-trip, got Inherit=%v", name, m.Inherit)
+		}
+	}
+}
+
 // TestRenderRoleConfigsCompile guards RFC audit item #74's dump-and-
 // recompile round trip: a live-introspected Role with SET/RESET config
 // entries (as introspectRoleConfigs would populate — bare, unquoted

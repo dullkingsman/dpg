@@ -233,6 +233,18 @@ func runDump(
 		return fmt.Errorf("create output directory: %w", err)
 	}
 
+	// Built once, up front, from every introspected role — a ROLE-direction
+	// membership entry's WITH INHERIT compaction (see
+	// renderObjectDPGWithRoleInheritDefaults) needs the GRANTEE role's own
+	// default, which may not have been rendered (or even reached) yet at
+	// the point any single Role object is processed in the loop below.
+	roleInheritDefaults := map[string]bool{}
+	for _, obj := range objects {
+		if r, ok := obj.(*ir.Role); ok && r.Inherit != nil {
+			roleInheritDefaults[r.Name] = *r.Inherit
+		}
+	}
+
 	// Route objects into three buckets: cluster-scoped (roles, tablespaces —
 	// shared across databases), database-scoped but schemaless (FDWs, servers,
 	// user mappings, publications, event triggers, casts), and schema-scoped
@@ -246,20 +258,20 @@ func runDump(
 				ui.Yellow("warning", color), um.QualifiedName())
 		}
 		if isClusterScoped(obj) {
-			renderObjectDPG(&clusterFile, obj, fmtOpts)
+			renderObjectDPGWithRoleInheritDefaults(&clusterFile, obj, fmtOpts, roleInheritDefaults)
 			clusterObjects = append(clusterObjects, obj)
 			continue
 		}
 		schema := objectSchema(obj)
 		if schema == "" {
-			renderObjectDPG(&dbLevelFile, obj, fmtOpts)
+			renderObjectDPGWithRoleInheritDefaults(&dbLevelFile, obj, fmtOpts, roleInheritDefaults)
 			dbObjects = append(dbObjects, obj)
 			continue
 		}
 		if _, ok := schemaFiles[schema]; !ok {
 			schemaFiles[schema] = &strings.Builder{}
 		}
-		renderObjectDPG(schemaFiles[schema], obj, fmtOpts)
+		renderObjectDPGWithRoleInheritDefaults(schemaFiles[schema], obj, fmtOpts, roleInheritDefaults)
 		dbObjects = append(dbObjects, obj)
 	}
 
@@ -483,7 +495,26 @@ func objectSchema(obj pipeline.IRObject) string {
 
 // renderObjectDPG writes a minimal DPG declaration for obj into b using fmtOpts
 // for keyword case and indentation.
+// renderObjectDPG renders obj with no cross-role context available — the
+// ROLE case's WITH INHERIT compaction for a ROLE-direction membership entry
+// (see renderObjectDPGWithRoleInheritDefaults) never fires here, since that
+// needs the OTHER role's own Inherit default, which a single object alone
+// can't provide. Every caller except dump's own runDump (which has the full
+// introspected role list available) uses this.
 func renderObjectDPG(b *strings.Builder, obj pipeline.IRObject, fmtOpts format.Options) {
+	renderObjectDPGWithRoleInheritDefaults(b, obj, fmtOpts, nil)
+}
+
+// renderObjectDPGWithRoleInheritDefaults is renderObjectDPG plus
+// roleInheritDefaults: a role name -> rolinherit map built from every
+// introspected role in the current dump run, used only to compact a
+// ROLE-direction membership's WITH INHERIT clause when it matches the
+// target role's own default (RFC audit item #32's remaining dump-rendering
+// gap — the IN_ROLE-direction case below already does this trivially via
+// o.Inherit, since o IS the grantee there). nil (or a name absent from it)
+// simply means "unknown default," which renders explicitly rather than
+// guessing.
+func renderObjectDPGWithRoleInheritDefaults(b *strings.Builder, obj pipeline.IRObject, fmtOpts format.Options, roleInheritDefaults map[string]bool) {
 	ind := fmtOpts.Indent()
 	kw := fmtOpts.Keyword
 
@@ -1293,11 +1324,15 @@ func renderObjectDPG(b *strings.Builder, obj pipeline.IRObject, fmtOpts format.O
 		// rendering, on a copy — it never touches o.Memberships itself and
 		// has no effect on diffing. SET's default is a fixed constant
 		// (true, confirmed live) — safe to drop in both directions. INHERIT
-		// only has a safely-known default for an IN_ROLE-direction entry
+		// has a safely-known default for an IN_ROLE-direction entry
 		// (o.Inherit — this exact role's own attribute, always non-nil once
-		// introspected); a ROLE-direction entry points at a DIFFERENT role
-		// whose own INHERIT this function has no access to, so that case is
-		// left rendered explicitly rather than guessed.
+		// introspected) directly; a ROLE-direction entry points at a
+		// DIFFERENT role (m.Role), whose own INHERIT default is only
+		// knowable via roleInheritDefaults (built from every introspected
+		// role in the current dump run) — absent there (an unmanaged
+		// system role, or no cross-role context at all, e.g. a bare
+		// renderObjectDPG call), it's left rendered explicitly rather than
+		// guessed.
 		var inRole, roleMembers, adminRoles []string
 		var membershipDirs []ir.RoleMembership
 		for _, m := range o.Memberships {
@@ -1306,6 +1341,11 @@ func renderObjectDPG(b *strings.Builder, obj pipeline.IRObject, fmtOpts format.O
 			}
 			if m.Direction == "IN_ROLE" && m.Inherit != nil && o.Inherit != nil && *m.Inherit == *o.Inherit {
 				m.Inherit = nil
+			}
+			if m.Direction == "ROLE" && m.Inherit != nil {
+				if def, ok := roleInheritDefaults[m.Role]; ok && def == *m.Inherit {
+					m.Inherit = nil
+				}
 			}
 			if m.Inherit != nil || m.Set != nil {
 				membershipDirs = append(membershipDirs, m)
