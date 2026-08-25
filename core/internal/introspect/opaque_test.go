@@ -1,9 +1,44 @@
 package introspect
 
 import (
+	"slices"
 	"strings"
 	"testing"
+
+	"github.com/dullkingsman/dpg/internal/pipeline"
 )
+
+// ── parseDictInitOption ──────────────────────────────────────────────────────
+
+// TestParseDictInitOption guards RFC audit item #52: pg_ts_dict.
+// dictinitoption's packed format, confirmed live against a real snowball
+// dictionary, must parse into ordered key/value pairs with quoting/
+// escaping undone.
+func TestParseDictInitOption(t *testing.T) {
+	got := parseDictInitOption(`language = 'english', stopwords = 'english'`)
+	want := []pipeline.StorageParam{{Key: "language", Value: "english"}, {Key: "stopwords", Value: "english"}}
+	if !slices.Equal(got, want) {
+		t.Errorf("got %v, want %v", got, want)
+	}
+}
+
+// TestParseDictInitOptionEscapedQuote guards a doubled '' escaped single
+// quote inside a value unquoting correctly.
+func TestParseDictInitOptionEscapedQuote(t *testing.T) {
+	got := parseDictInitOption(`dictfile = 'it''s_a_file'`)
+	want := []pipeline.StorageParam{{Key: "dictfile", Value: "it's_a_file"}}
+	if !slices.Equal(got, want) {
+		t.Errorf("got %v, want %v", got, want)
+	}
+}
+
+// TestParseDictInitOptionEmpty guards the empty-string input (a dictionary
+// with no options at all) producing a nil/empty slice, not a spurious entry.
+func TestParseDictInitOptionEmpty(t *testing.T) {
+	if got := parseDictInitOption(""); len(got) != 0 {
+		t.Errorf("expected no entries for empty input, got %v", got)
+	}
+}
 
 // ── formatUserMappingOptions ────────────────────────────────────────────────
 

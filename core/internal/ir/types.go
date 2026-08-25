@@ -1615,6 +1615,10 @@ type TSConfig struct {
 	Body          string
 	Mappings      []pipeline.TSMappingDef
 	Comment       *string
+	// Owner is Section 12.1's ALTER TEXT SEARCH CONFIGURATION ... OWNER TO
+	// diffing input — same shape as TSDict.Owner (real PostgreSQL has an
+	// OWNER concept for a config too, unlike TSParser/TSTemplate).
+	Owner         *string
 	Reconstructed bool // Body rebuilt from the catalog; see Tablespace.Reconstructed
 	SrcPos        pipeline.SourcePos
 }
@@ -1635,8 +1639,15 @@ type TSDict struct {
 	TemplateSchema string
 	TemplateName   string
 	Body           string
-	Comment        *string
-	Owner          *string
+	// Options is Section 12.2's dictionary option list (LANGUAGE, STOPWORDS,
+	// ...), excluding TEMPLATE (tracked separately above) — audit item #52's
+	// structured diffing input. Real PostgreSQL supports inline options at
+	// CREATE time already (unlike Table's pre-#60 WITH (...) gap), so this
+	// field is diffing-only; createOpaque's raw Body passthrough already
+	// renders them correctly at creation.
+	Options       []pipeline.StorageParam
+	Comment       *string
+	Owner         *string
 	Reconstructed  bool // Body rebuilt from the catalog; see Tablespace.Reconstructed
 	// RenamedFrom/RenamedFromSchema — see Table's identical doc comments;
 	// real PostgreSQL supports ALTER TEXT SEARCH DICTIONARY ... RENAME TO/

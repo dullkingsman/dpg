@@ -90,6 +90,29 @@ type SnapOpaque struct {
 	// (confirmed via \h ALTER TEXT SEARCH PARSER/TEMPLATE), so neither gets
 	// an equivalent field.
 	TSDictOwner *string `json:"ts_dict_owner,omitempty"`
+	// TSConfigOwner is Section 12.1's ALTER TEXT SEARCH CONFIGURATION ...
+	// OWNER TO diffing input — same shape as TSDictOwner above.
+	TSConfigOwner *string `json:"ts_config_owner,omitempty"`
+	// TSDictOptionsStructured/TSDictOptions/TSDictTemplateName are Section
+	// 12.2's option-change diffing inputs (audit item #52) — see
+	// ir.TSDict.Options' doc comment. Structured sentinel follows the same
+	// "not every real dictionary declares options, so an empty list is a
+	// legitimate live state, not a stale-snapshot signal" reasoning as
+	// OptionsStructured/AggregateOptionsStructured above — per-kind-named
+	// rather than reusing the shared OptionsStructured field, matching
+	// AggregateOptionsStructured's own precedent. TSDictTemplateName is
+	// deliberately name-only, no schema counterpart: confirmed live that an
+	// unqualified TEMPLATE reference (the overwhelmingly common case — a
+	// built-in template) resolves via search_path to pg_catalog, not the
+	// dictionary's own schema, so falling back to the dictionary's schema
+	// (the convention every other RENAMED-FROM/family-style field in this
+	// file uses) would misdetect the ordinary case as changed on every
+	// plan — the same false-positive class this file's other Structured
+	// fallbacks exist specifically to avoid. A same-named template in two
+	// different schemas is accepted as an unrepresented edge case.
+	TSDictOptionsStructured bool           `json:"ts_dict_options_structured,omitempty"`
+	TSDictOptions           []SnapOptionKV `json:"ts_dict_options,omitempty"`
+	TSDictTemplateName      string         `json:"ts_dict_template_name,omitempty"`
 	// ProcedureDependsOnExtensions is Section 9.1's `[NO] DEPENDS ON
 	// EXTENSION` diffing input for Procedure specifically (Function uses
 	// its own dedicated SnapFunction.DependsOnExtensions field instead,

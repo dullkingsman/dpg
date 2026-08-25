@@ -1422,6 +1422,9 @@ func createObject(obj pipeline.IRObject, vtypes map[string]string) ([]pipeline.D
 		return appendCommentOp(ops, err, "statistics", o.Schema, o.Name, "", "", o.Comment, o.SrcPos)
 	case *ir.TSConfig:
 		ops, err := createOpaque(o.QualifiedName(), o.Body, "TEXT SEARCH CONFIGURATION", o.Schema, o.SrcPos)
+		if err == nil && o.Owner != nil && len(ops) > 0 {
+			ops = append(wrapCreateWithOwner(ops[0], o.Owner, o.SrcPos), ops[1:]...)
+		}
 		ops, err = appendCommentOp(ops, err, "ts_config", o.Schema, o.Name, "", "", o.Comment, o.SrcPos)
 		if err != nil {
 			return ops, err
@@ -5178,6 +5181,48 @@ func renameOpaqueIfUnchanged(ops []pipeline.DiffOp, alterKW string, snap *snapsh
 // renameOpaqueIfUnchanged's doc comment for why this lives in a per-kind
 // wrapper instead of the shared function.
 func diffTSDict(o *ir.TSDict, snap *snapshot.SnapOpaque) ([]pipeline.DiffOp, error) {
+	// Option-change diffing (Section 12.2, audit item #52): when the
+	// snapshot has structured Options/Template data, TEMPLATE (which real
+	// PostgreSQL has no ALTER for at all — confirmed live) decides
+	// DROP+CREATE on its own, and everything else (option add/change/
+	// remove) uses a targeted SAFE ALTER TEXT SEARCH DICTIONARY (...)
+	// instead of the raw opaque BodyHash comparison below, which would
+	// otherwise misdetect any option edit as a full body change (forcing
+	// an unnecessary destructive recreate) when comparing hand-written
+	// source, and — via Reconstructed always being true for a live-
+	// introspected object — detect nothing at all for a live-catalog-only
+	// option change (BodyHash is skipped entirely for Reconstructed
+	// bodies, the same root cause diffTablespace/diffCollation's identical
+	// doc comments already explain).
+	if snap.TSDictOptionsStructured {
+		// TEMPLATE comparison is deliberately name-only — see
+		// SnapOpaque.TSDictTemplateName's doc comment for why a schema
+		// fallback would misdetect the common unqualified-builtin-template
+		// case as changed on every plan.
+		if !strings.EqualFold(o.TemplateName, snap.TSDictTemplateName) {
+			ops, err := dropCreateOpaque(o.QualifiedName(), o.Body, o.Comment, snap, o.SrcPos)
+			if err != nil {
+				return nil, err
+			}
+			return ops, nil
+		}
+		var ops []pipeline.DiffOp
+		ident := qualIdent(snap.Schema, snap.Name)
+		ops = append(ops, diffTSDictOptions(ident, o.Options, snap.TSDictOptions, o.SrcPos)...)
+		if !ptrEq(o.Comment, snap.Comment) {
+			if sql := commentOnOpaqueSQL("ts_dict", snap.Schema, snap.Name, "", "", o.Comment); sql != "" {
+				ops = append(ops, safeOp(sql, o.SrcPos))
+			}
+		}
+		if !ptrEq(o.Owner, snap.TSDictOwner) && o.Owner != nil {
+			ops = append(ops, safeOp(fmt.Sprintf("ALTER TEXT SEARCH DICTIONARY %s OWNER TO %s;", ident, quoteIdent(*o.Owner)), o.SrcPos))
+		}
+		return renameOpaqueIfUnchanged(ops, "TEXT SEARCH DICTIONARY", snap, o.Schema, o.Name, o.SrcPos), nil
+	}
+
+	// Stale snapshot predating Options/Template's structured fields: fall
+	// back to the original opaque BodyHash comparison entirely, same
+	// self-healing spirit as every other Structured sentinel in this file.
 	hashBody := opaqueBodyForHash(o.Body, o.Schema, o.Name, snap.Schema, snap.Name)
 	ops, err := diffOpaqueIRHash(o.QualifiedName(), o.Body, hashBody, o.Reconstructed, o.Comment, snap, o.SrcPos)
 	if err != nil {
@@ -5201,6 +5246,43 @@ func diffTSDict(o *ir.TSDict, snap *snapshot.SnapOpaque) ([]pipeline.DiffOp, err
 		ops = append(ops, safeOp(fmt.Sprintf("ALTER TEXT SEARCH DICTIONARY %s OWNER TO %s;", qualIdent(snap.Schema, snap.Name), quoteIdent(*o.Owner)), o.SrcPos))
 	}
 	return renameOpaqueIfUnchanged(ops, "TEXT SEARCH DICTIONARY", snap, o.Schema, o.Name, o.SrcPos), nil
+}
+
+// diffTSDictOptions computes a single combined ALTER TEXT SEARCH DICTIONARY
+// name (key1 = val1, key2, ...) statement for a changed option set (Section
+// 12.2, audit item #52) — confirmed live via \h ALTER TEXT SEARCH
+// DICTIONARY that, unlike Table/Tablespace's separate SET/RESET clauses,
+// this is one parenthesized list where "key = value" adds/changes an option
+// and bare "key" (no "= value") removes it. snap is the snapshot's
+// structured option list; desired is the live IR's ordered option list.
+// SAFE: a text search dictionary has no stored data of its own to protect,
+// unlike a table's storage-affecting reloptions.
+func diffTSDictOptions(dictIdent string, desired []pipeline.StorageParam, snap []snapshot.SnapOptionKV, pos pipeline.SourcePos) []pipeline.DiffOp {
+	snapMap := make(map[string]string, len(snap))
+	for _, kv := range snap {
+		snapMap[kv.Key] = kv.Value
+	}
+	desiredKeys := make(map[string]bool, len(desired))
+	var entries []string
+	for _, p := range desired {
+		desiredKeys[p.Key] = true
+		old, existed := snapMap[p.Key]
+		if !existed || old != p.Value {
+			entries = append(entries, fmt.Sprintf("%s = %s", p.Key, quoteLit(p.Value)))
+		}
+	}
+	for _, kv := range snap {
+		if !desiredKeys[kv.Key] {
+			entries = append(entries, kv.Key)
+		}
+	}
+	if len(entries) == 0 {
+		return nil
+	}
+	return []pipeline.DiffOp{safeOp(
+		fmt.Sprintf("ALTER TEXT SEARCH DICTIONARY %s (%s);", dictIdent, strings.Join(entries, ", ")),
+		pos,
+	)}
 }
 
 // diffTSParser is diffTSDict's TSParser-specific counterpart (RFC Section
@@ -5242,13 +5324,25 @@ func diffTSConfig(o *ir.TSConfig, snap *snapshot.SnapOpaque) ([]pipeline.DiffOp,
 		return nil, err
 	}
 	configIdent := qualIdent(o.Schema, o.Name)
+	destructive := false
 	for _, op := range ops {
 		if op.Safety() == pipeline.Destructive {
-			for _, m := range o.Mappings {
-				ops = append(ops, safeOp(tsMappingAlterSQL(configIdent, m), o.SrcPos))
-			}
-			return ops, nil
+			destructive = true
+			break
 		}
+	}
+	if destructive {
+		for _, m := range o.Mappings {
+			ops = append(ops, safeOp(tsMappingAlterSQL(configIdent, m), o.SrcPos))
+		}
+		return ops, nil
+	}
+	// OWNER TO (Section 12.1) — skipped on the destructive (recreate) path
+	// above, same reasoning as diffTSDict's identical guard: createOpaque
+	// doesn't apply Owner at all, so this only fires on the no-recreate
+	// path in practice.
+	if !ptrEq(o.Owner, snap.TSConfigOwner) && o.Owner != nil {
+		ops = append(ops, safeOp(fmt.Sprintf("ALTER TEXT SEARCH CONFIGURATION %s OWNER TO %s;", configIdent, quoteIdent(*o.Owner)), o.SrcPos))
 	}
 	ops = append(ops, diffTSConfigMappings(configIdent, o.Mappings, snap.Mappings, o.SrcPos)...)
 	return ops, nil

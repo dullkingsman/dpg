@@ -3568,6 +3568,23 @@ func TestBuildTSDictTemplateQualified(t *testing.T) {
 	}
 }
 
+// TestBuildTSDictOptions guards RFC audit item #52: options declared
+// alongside TEMPLATE reach ir.TSDict.Options, excluding TEMPLATE itself.
+func TestBuildTSDictOptions(t *testing.T) {
+	obj := buildObject(t, pipeline.KindTSDict,
+		`my_dict (TEMPLATE = snowball, LANGUAGE = 'english', STOPWORDS = 'english')`,
+		``,
+	)
+	td, ok := obj.(*ir.TSDict)
+	if !ok {
+		t.Fatalf("expected *ir.TSDict, got %T", obj)
+	}
+	want := []pipeline.StorageParam{{Key: "language", Value: "english"}, {Key: "stopwords", Value: "english"}}
+	if !slices.Equal(td.Options, want) {
+		t.Errorf("Options: got %v, want %v", td.Options, want)
+	}
+}
+
 // ── Operator LEFTARG/RIGHTARG extraction ────────────────────────────────────────
 
 // TestBuildOperatorBinaryOperandTypes proves a binary operator's LEFTARG/
@@ -3768,6 +3785,22 @@ func TestBuildRoleComment(t *testing.T) {
 // wired, not just declared. Table-driven across a representative sample
 // covering both routing paths (buildDefineStmt for Collation/Operator/
 // TSDict, buildOpaque for Cast/EventTrigger/OperatorClass).
+// TestBuildTSConfigOwner guards RFC audit item #33: ir.TSConfig gains an
+// Owner field, wired from the generic block { OWNER "..."; } directive.
+func TestBuildTSConfigOwner(t *testing.T) {
+	obj := buildObject(t, pipeline.KindTSConfig,
+		`my_cfg (PARSER = pg_catalog."default")`,
+		`OWNER "search_admin";`,
+	)
+	tc, ok := obj.(*ir.TSConfig)
+	if !ok {
+		t.Fatalf("expected *ir.TSConfig, got %T", obj)
+	}
+	if tc.Owner == nil || *tc.Owner != "search_admin" {
+		t.Errorf("Owner: got %v, want search_admin", tc.Owner)
+	}
+}
+
 func TestBuildOpaqueCommentSupport(t *testing.T) {
 	const comment = "a comment"
 	cases := []struct {

@@ -13320,11 +13320,18 @@ func TestDiffOpaqueOfflineEditEmitsStructuredDropRecreate(t *testing.T) {
 			wantNewInBody:  "simple2",
 		},
 		{
-			name:           "ts_dict",
-			oldObj:         &ir.TSDict{Schema: "public", Name: "td", Body: "CREATE TEXT SEARCH DICTIONARY public.td (TEMPLATE = simple, stopwords = e1)"},
-			newObj:         &ir.TSDict{Schema: "public", Name: "td", Body: "CREATE TEXT SEARCH DICTIONARY public.td (TEMPLATE = simple, stopwords = e2)"},
+			// A TEMPLATE change specifically (not an option-only change,
+			// which RFC audit item #52 gives a real, targeted
+			// ALTER TEXT SEARCH DICTIONARY for — see
+			// TestDiffTSDictOptionsAddedChangedRemoved — real PostgreSQL
+			// has no ALTER for TEMPLATE at all, confirmed live).
+			name: "ts_dict",
+			oldObj: &ir.TSDict{Schema: "public", Name: "td", TemplateName: "simple",
+				Body: "CREATE TEXT SEARCH DICTIONARY public.td (TEMPLATE = simple)"},
+			newObj: &ir.TSDict{Schema: "public", Name: "td", TemplateName: "snowball",
+				Body: "CREATE TEXT SEARCH DICTIONARY public.td (TEMPLATE = snowball)"},
 			wantDropSubstr: `DROP TEXT SEARCH DICTIONARY IF EXISTS "public"."td";`,
-			wantNewInBody:  "e2",
+			wantNewInBody:  "snowball",
 		},
 		{
 			name:           "ts_parser",
@@ -13600,6 +13607,199 @@ func TestDiffTSDictRenamedFromEmitsAlterRename(t *testing.T) {
 
 // TestDiffTSDictOwnerChanged is the regression guard for Section 12.2's
 // OWNER TO capability: previously ir.TSDict had no Owner field at all.
+// TestDiffTSConfigOwnerChanged guards RFC audit item #33: ir.TSConfig had
+// no Owner field at all, despite real PostgreSQL supporting ALTER TEXT
+// SEARCH CONFIGURATION ... OWNER TO (confirmed live, same as TSDict).
+func TestDiffTSConfigOwnerChanged(t *testing.T) {
+	d := New()
+	body := `CREATE TEXT SEARCH CONFIGURATION "public"."my_cfg" (PARSER = "pg_catalog"."default")`
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.my_cfg", &snapshot.SnapObject{
+		Kind: "ts_config",
+		Opaque: &snapshot.SnapOpaque{
+			Kind: "ts_config", Schema: "public", Name: "my_cfg",
+			BodyHash: hashText(body),
+		},
+	})
+	owner := "search_admin"
+	desired := []pipeline.IRObject{
+		&ir.TSConfig{Schema: "public", Name: "my_cfg", Body: body, Owner: &owner},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := `ALTER TEXT SEARCH CONFIGURATION "public"."my_cfg" OWNER TO "search_admin";`
+	if !containsSQL(ops, want) {
+		t.Errorf("expected %q, got: %v", want, sqlList(ops))
+	}
+	if containsSQL(ops, "DROP TEXT SEARCH CONFIGURATION") {
+		t.Errorf("owner-only change should not DROP+CREATE, got: %v", sqlList(ops))
+	}
+}
+
+// TestCreateTSConfigWithOwner proves a brand-new text search configuration
+// with a declared owner applies it at creation time.
+func TestCreateTSConfigWithOwner(t *testing.T) {
+	d := New()
+	owner := "search_admin"
+	body := `CREATE TEXT SEARCH CONFIGURATION "public"."my_cfg" (PARSER = "pg_catalog"."default")`
+	desired := []pipeline.IRObject{
+		&ir.TSConfig{Schema: "public", Name: "my_cfg", Body: body, Owner: &owner},
+	}
+	ops, err := d.Diff(desired, &pipeline.Snapshot{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsSQL(ops, "CREATE TEXT SEARCH CONFIGURATION") {
+		t.Fatalf("expected a CREATE TEXT SEARCH CONFIGURATION op, got: %v", sqlList(ops))
+	}
+	if !containsSQL(ops, `SET ROLE "search_admin";`) {
+		t.Errorf("expected owner to be applied at creation via SET ROLE/RESET ROLE, got: %v", sqlList(ops))
+	}
+}
+
+// TestDiffTSDictOptionsAddedChangedRemoved guards RFC audit item #52:
+// diffTSDict previously relied entirely on the raw opaque BodyHash for
+// option changes, which either forced an unnecessary DESTRUCTIVE
+// drop+recreate for a hand-written-source-only option edit, or detected
+// nothing at all for a live-catalog-only one (BodyHash is skipped for a
+// Reconstructed body). A changed option set must now use a targeted SAFE
+// ALTER TEXT SEARCH DICTIONARY (...).
+func TestDiffTSDictOptionsAddedChangedRemoved(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.ispell", &snapshot.SnapObject{
+		Kind: "ts_dict",
+		Opaque: &snapshot.SnapOpaque{
+			Kind: "ts_dict", Schema: "public", Name: "ispell",
+			TSDictOptionsStructured: true,
+			TSDictTemplateName:      "ispell",
+			TSDictOptions:           []snapshot.SnapOptionKV{{Key: "language", Value: "english"}, {Key: "stopwords", Value: "english"}},
+		},
+	})
+	desired := []pipeline.IRObject{
+		&ir.TSDict{
+			Schema: "public", Name: "ispell", TemplateName: "ispell",
+			Body:    `CREATE TEXT SEARCH DICTIONARY public.ispell (TEMPLATE = ispell, LANGUAGE = 'french', DICTFILE = 'french')`,
+			Options: []pipeline.StorageParam{{Key: "language", Value: "french"}, {Key: "dictfile", Value: "french"}},
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := `ALTER TEXT SEARCH DICTIONARY "public"."ispell" (language = 'french', dictfile = 'french', stopwords);`
+	if !containsSQL(ops, want) {
+		t.Errorf("expected %q, got: %v", want, sqlList(ops))
+	}
+	if containsSQL(ops, "DROP TEXT SEARCH DICTIONARY") || containsSQL(ops, "CREATE TEXT SEARCH DICTIONARY") {
+		t.Errorf("an option-only change must not drop+recreate, got: %v", sqlList(ops))
+	}
+	for _, op := range ops {
+		if op.Safety() != pipeline.Safe {
+			t.Errorf("expected Safe safety for an option-only change, got [%s] %s", op.Safety(), op.SQL())
+		}
+	}
+}
+
+// TestDiffTSDictOptionsUnchangedIsNoop proves an unchanged option set
+// produces no ALTER op at all.
+func TestDiffTSDictOptionsUnchangedIsNoop(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.ispell", &snapshot.SnapObject{
+		Kind: "ts_dict",
+		Opaque: &snapshot.SnapOpaque{
+			Kind: "ts_dict", Schema: "public", Name: "ispell",
+			TSDictOptionsStructured: true,
+			TSDictTemplateName:      "ispell",
+			TSDictOptions:           []snapshot.SnapOptionKV{{Key: "language", Value: "english"}},
+		},
+	})
+	desired := []pipeline.IRObject{
+		&ir.TSDict{
+			Schema: "public", Name: "ispell", TemplateName: "ispell",
+			Body:    `CREATE TEXT SEARCH DICTIONARY public.ispell (TEMPLATE = ispell, LANGUAGE = 'english')`,
+			Options: []pipeline.StorageParam{{Key: "language", Value: "english"}},
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ops) != 0 {
+		t.Errorf("expected no ops for an unchanged option set, got: %v", sqlList(ops))
+	}
+}
+
+// TestDiffTSDictTemplateChangedStillDropsAndRecreates proves the boundary
+// of #52's fix: real PostgreSQL has no ALTER for TEMPLATE at all (confirmed
+// live), so a template change must still be a DESTRUCTIVE drop+recreate
+// even with structured option data available.
+func TestDiffTSDictTemplateChangedStillDropsAndRecreates(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.my_dict", &snapshot.SnapObject{
+		Kind: "ts_dict",
+		Opaque: &snapshot.SnapOpaque{
+			Kind: "ts_dict", Schema: "public", Name: "my_dict",
+			TSDictOptionsStructured: true,
+			TSDictTemplateName:      "simple",
+		},
+	})
+	desired := []pipeline.IRObject{
+		&ir.TSDict{
+			Schema: "public", Name: "my_dict", TemplateName: "snowball",
+			Body: `CREATE TEXT SEARCH DICTIONARY public.my_dict (TEMPLATE = snowball, LANGUAGE = 'english')`,
+			Options: []pipeline.StorageParam{{Key: "language", Value: "english"}},
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsSQL(ops, `DROP TEXT SEARCH DICTIONARY IF EXISTS "public"."my_dict";`) {
+		t.Errorf("expected a DROP for a TEMPLATE change, got: %v", sqlList(ops))
+	}
+	if !containsSQL(ops, "CREATE TEXT SEARCH DICTIONARY") {
+		t.Errorf("expected a CREATE for a TEMPLATE change, got: %v", sqlList(ops))
+	}
+}
+
+// TestDiffTSDictTemplateUnqualifiedMatchesQualifiedSnapshot guards the
+// deliberate name-only TEMPLATE comparison (SnapOpaque.TSDictTemplateName's
+// doc comment): an unqualified built-in TEMPLATE reference in source
+// (resolving via search_path to pg_catalog, confirmed live) must not
+// misdetect as changed against introspection's always-schema-qualified
+// name.
+func TestDiffTSDictTemplateUnqualifiedMatchesQualifiedSnapshot(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.my_dict", &snapshot.SnapObject{
+		Kind: "ts_dict",
+		Opaque: &snapshot.SnapOpaque{
+			Kind: "ts_dict", Schema: "public", Name: "my_dict",
+			TSDictOptionsStructured: true,
+			TSDictTemplateName:      "snowball",
+		},
+	})
+	desired := []pipeline.IRObject{
+		&ir.TSDict{
+			Schema: "public", Name: "my_dict", TemplateName: "snowball", // unqualified in source
+			Body:    `CREATE TEXT SEARCH DICTIONARY public.my_dict (TEMPLATE = snowball)`,
+			Options: nil,
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ops) != 0 {
+		t.Errorf("expected no ops (template unchanged), got: %v", sqlList(ops))
+	}
+}
+
 func TestDiffTSDictOwnerChanged(t *testing.T) {
 	d := New()
 	body := "CREATE TEXT SEARCH DICTIONARY public.ispell (TEMPLATE = ispell)"

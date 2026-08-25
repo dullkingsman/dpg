@@ -372,6 +372,7 @@ func toSnapObject(obj pipeline.IRObject) *SnapObject {
 	case *ir.TSConfig:
 		opaque := &SnapOpaque{
 			Kind: "ts_config", Schema: o.Schema, Name: o.Name, BodyHash: sourceBodyHash(o.Body, o.Reconstructed), Comment: o.Comment,
+			TSConfigOwner: o.Owner,
 		}
 		for _, m := range o.Mappings {
 			dicts := make([]string, len(m.Dictionaries))
@@ -387,7 +388,8 @@ func toSnapObject(obj pipeline.IRObject) *SnapObject {
 	case *ir.TSDict:
 		return &SnapObject{Kind: "ts_dict", Opaque: &SnapOpaque{
 			Kind: "ts_dict", Schema: o.Schema, Name: o.Name, BodyHash: sourceBodyHash(o.Body, o.Reconstructed), Comment: o.Comment,
-			TSDictOwner: o.Owner,
+			TSDictOwner:             o.Owner,
+			TSDictOptionsStructured: true, TSDictOptions: toSnapOptions(o.Options), TSDictTemplateName: o.TemplateName,
 		}}
 	case *ir.TSParser:
 		return &SnapObject{Kind: "ts_parser", Opaque: &SnapOpaque{

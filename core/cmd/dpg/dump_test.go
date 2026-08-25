@@ -1593,6 +1593,47 @@ func TestRenderTSConfigMappingCompiles(t *testing.T) {
 	}
 }
 
+// TestRenderTSConfigOwnerRoundtrip guards RFC audit item #33: renderTSConfigBody
+// previously had no rendering path for Owner at all, despite it now being
+// genuinely diffed (diffTSConfig).
+func TestRenderTSConfigOwnerRoundtrip(t *testing.T) {
+	fmtOpts := format.Options{IndentSize: 4, KeywordCase: "upper"}
+	owner := "search_admin"
+	tc := &ir.TSConfig{
+		Schema: "public", Name: "demo_search",
+		ParserSchema: "pg_catalog", ParserName: "default",
+		Body:  `CREATE TEXT SEARCH CONFIGURATION public.demo_search (PARSER = pg_catalog."default")`,
+		Owner: &owner,
+	}
+
+	var b strings.Builder
+	renderObjectDPG(&b, tc, fmtOpts)
+	rendered := b.String()
+
+	if !strings.Contains(rendered, "OWNER search_admin;") {
+		t.Fatalf("expected OWNER search_admin, got:\n%s", rendered)
+	}
+
+	dir := t.TempDir()
+	f := filepath.Join(dir, "objects.dpg")
+	if err := os.WriteFile(f, []byte(rendered), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	compiled, _, err := compiler.Compile([]string{f}, dir, pipeline.Default)
+	if err != nil {
+		t.Fatalf("dumped ts config failed to recompile: %v\n---\n%s", err, rendered)
+	}
+	var found *ir.TSConfig
+	for _, o := range compiled {
+		if c, ok := o.(*ir.TSConfig); ok && c.Name == "demo_search" {
+			found = c
+		}
+	}
+	if found == nil || found.Owner == nil || *found.Owner != "search_admin" {
+		t.Errorf("Owner did not round-trip: %+v", found)
+	}
+}
+
 // ── Operator family loose members (RFC §14.4) ─────────────────────────────────
 
 // TestRenderOpFamilyBareFormNoChurn guards zero output churn for the common

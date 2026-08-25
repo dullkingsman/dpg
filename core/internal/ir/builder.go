@@ -2784,11 +2784,26 @@ func (b *Builder) buildDefineStmt(ds *pg_query.DefineStmt, block pipeline.BlockA
 		if block.Comment != nil {
 			tc.Comment = &block.Comment.Value
 		}
+		if block.Owner != nil {
+			tc.Owner = &block.Owner.Name
+		}
 		return tc, nil
 
 	case pg_query.ObjectType_OBJECT_TSDICTIONARY:
 		td := &TSDict{Schema: schema, Name: name, Body: rawBody, SrcPos: pos}
 		td.TemplateSchema, td.TemplateName = defElemQualifiedName(ds.Definition, "template")
+		// Options (audit item #52) is every declared option except TEMPLATE
+		// (tracked separately above via defElemQualifiedName, whose Arg is a
+		// qualified-name-shaped node buildOrderedOptions' generic nodeToText
+		// doesn't handle — filtered out here rather than skipped during
+		// extraction, since buildOrderedOptions is the same shared helper
+		// Table/Tablespace/FOREIGN TABLE already use and gaining a
+		// kind-specific exclusion parameter isn't worth it for one caller).
+		for _, p := range buildOrderedOptions(ds.Definition) {
+			if !strings.EqualFold(p.Key, "template") {
+				td.Options = append(td.Options, p)
+			}
+		}
 		if block.Comment != nil {
 			// TSDict's Comment field already existed (unlike the 9 kinds
 			// gaining one alongside this fix) but was never actually

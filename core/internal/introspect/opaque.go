@@ -1451,6 +1451,33 @@ ORDER  BY n.nspname, t.tmplname`
 
 // ── text search: dictionaries ─────────────────────────────────────────────────
 
+// parseDictInitOption parses pg_ts_dict.dictinitoption's packed
+// "key = 'value', key2 = 'value2'" format into ordered key/value pairs
+// (audit item #52) — confirmed via a live psql probe against a real
+// snowball dictionary. Splits on top-level ", " (a comma immediately
+// followed by a space, which real PostgreSQL's own formatting always uses
+// here) and unquotes each value the same way a SQL string literal is
+// quoted (doubled '' as an escaped single quote) — values are stored raw/
+// unquoted, matching every other StorageParam producer in this codebase
+// (buildOrderedOptions' nodeToText included), so diffTSDictOptions can
+// re-quote uniformly via quoteLit at SQL-emission time regardless of which
+// side (source-declared or introspected) a value came from.
+func parseDictInitOption(s string) []pipeline.StorageParam {
+	var out []pipeline.StorageParam
+	for _, part := range strings.Split(s, ", ") {
+		key, val, ok := strings.Cut(part, " = ")
+		if !ok {
+			continue
+		}
+		val = strings.TrimSpace(val)
+		if len(val) >= 2 && val[0] == '\'' && val[len(val)-1] == '\'' {
+			val = strings.ReplaceAll(val[1:len(val)-1], "''", "'")
+		}
+		out = append(out, pipeline.StorageParam{Key: strings.TrimSpace(key), Value: val})
+	}
+	return out
+}
+
 func introspectTSDicts(ctx context.Context, conn pipeline.Querier) ([]pipeline.IRObject, error) {
 	// dictinitoption is stored as the already-rendered option list, e.g.
 	// "stopwords = 'english', language = 'english'"; it is appended verbatim.
@@ -1486,14 +1513,18 @@ ORDER  BY n.nspname, dict.dictname`
 			return nil, err
 		}
 		parts := []string{"TEMPLATE = " + qualIdentQ(tmplSchema, tmplName)}
+		var options []pipeline.StorageParam
 		if initOption != nil && strings.TrimSpace(*initOption) != "" {
-			parts = append(parts, strings.TrimSpace(*initOption))
+			trimmed := strings.TrimSpace(*initOption)
+			parts = append(parts, trimmed)
+			options = parseDictInitOption(trimmed)
 		}
 		body := fmt.Sprintf("CREATE TEXT SEARCH DICTIONARY %s (%s)", qualIdentQ(schema, name), strings.Join(parts, ", "))
 		out = append(out, &ir.TSDict{
 			Schema: schema, Name: name,
 			TemplateSchema: tmplSchema, TemplateName: tmplName,
-			Body: canonicalDDL(body), Comment: comment, Owner: &owner, Reconstructed: true,
+			Options: options,
+			Body:    canonicalDDL(body), Comment: comment, Owner: &owner, Reconstructed: true,
 		})
 	}
 	return out, rs.Err()
@@ -1508,11 +1539,13 @@ func introspectTSConfigs(ctx context.Context, conn pipeline.Querier) ([]pipeline
 	q := `
 SELECT n.nspname, c.cfgname,
        pn.nspname AS parser_schema, p.prsname AS parser_name,
-       obj_description(c.oid, 'pg_ts_config') AS comment
+       obj_description(c.oid, 'pg_ts_config') AS comment,
+       r.rolname AS owner
 FROM   pg_ts_config c
 JOIN   pg_namespace n  ON n.oid = c.cfgnamespace
 JOIN   pg_ts_parser p  ON p.oid = c.cfgparser
 JOIN   pg_namespace pn ON pn.oid = p.prsnamespace
+JOIN   pg_roles r      ON r.oid = c.cfgowner
 WHERE  c.oid >= $1
 AND    n.nspname NOT IN ('pg_catalog', 'information_schema', 'pg_toast')
 AND    ` + notExtensionOwned("pg_ts_config", "c.oid") + `
@@ -1527,9 +1560,9 @@ ORDER  BY n.nspname, c.cfgname`
 	var out []pipeline.IRObject
 	idx := make(map[string]*ir.TSConfig)
 	for rs.Next() {
-		var schema, name, parserSchema, parserName string
+		var schema, name, parserSchema, parserName, owner string
 		var comment *string
-		if err := rs.Scan(&schema, &name, &parserSchema, &parserName, &comment); err != nil {
+		if err := rs.Scan(&schema, &name, &parserSchema, &parserName, &comment, &owner); err != nil {
 			return nil, err
 		}
 		body := fmt.Sprintf("CREATE TEXT SEARCH CONFIGURATION %s (PARSER = %s)",
@@ -1537,7 +1570,7 @@ ORDER  BY n.nspname, c.cfgname`
 		tc := &ir.TSConfig{
 			Schema: schema, Name: name,
 			ParserSchema: parserSchema, ParserName: parserName,
-			Body: canonicalDDL(body), Comment: comment, Reconstructed: true,
+			Body: canonicalDDL(body), Comment: comment, Owner: &owner, Reconstructed: true,
 		}
 		idx[schema+"."+name] = tc
 		out = append(out, tc)

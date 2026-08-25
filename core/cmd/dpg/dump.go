@@ -2050,11 +2050,14 @@ func renderTSConfigBody(b *strings.Builder, ind string, fmtOpts format.Options, 
 		return
 	}
 	fmt.Fprintf(b, "\n%s", body)
-	if o.Comment == nil && len(o.Mappings) == 0 {
+	if o.Owner == nil && o.Comment == nil && len(o.Mappings) == 0 {
 		b.WriteString(";\n")
 		return
 	}
 	b.WriteString(" {\n")
+	if o.Owner != nil {
+		fmt.Fprintf(b, "%s%s %s;\n", ind, kw("OWNER"), quoteIdentIfNeeded(*o.Owner))
+	}
 	if o.Comment != nil {
 		fmt.Fprintf(b, "%s%s %s;\n", ind, kw("COMMENT"), sqlStringLit(*o.Comment))
 	}
