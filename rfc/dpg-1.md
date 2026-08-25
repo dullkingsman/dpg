@@ -6624,8 +6624,7 @@ Options:
 ### 18.8. dpg portability
 
    Reports all PostgreSQL-specific constructs in use with SQL standard
-   alternatives noted where available.  Output is text only; there is
-   no `--format` flag.
+   alternatives noted where available.
 
 ```
 dpg portability [options]
@@ -6633,7 +6632,14 @@ dpg portability [options]
 Options:
   --cluster <name>   cluster to analyze (default: all)
   --database <name>  database to analyze (default: all)
+  --format <fmt>     output format: text or json (default: text)
 ```
+
+   `--format json` emits one JSON object per cluster/database analyzed
+   (`{"cluster", "database", "issues": [...]}`, each issue carrying
+   `construct`/`alternative`/`file`/`line`/`col`) — suitable for CI or
+   other tooling, as an alternative to the default human-readable text
+   output.
 
    This command is OPTIONAL; it MUST NOT be a compilation gate.
 
@@ -7884,13 +7890,23 @@ SCHEMA public {
 {
   "schema": "public",
   "name": "order_number_seq",
+  "unlogged": false,
+  "owner": null,
   "comment": null,
+  "grants": [],
+  "revocations": [],
   "increment_by": 1,
   "min_value": 10000,
   "max_value": 99999999,
+  "no_min_value": false,
+  "no_max_value": false,
   "start_value": 10000,
   "cache": 50,
-  "cycle": false
+  "cycle": false,
+  "as_type": "bigint",
+  "owned_by": null,
+  "security_labels": [],
+  "name_maps": []
 }
 ```
 
@@ -7899,15 +7915,32 @@ SCHEMA public {
 ```json
 {
   "name": "app_service",
-  "comment": null
+  "can_login": true,
+  "superuser": false,
+  "create_db": false,
+  "create_role": false,
+  "inherit": true,
+  "is_replication": false,
+  "bypass_rls": false,
+  "connection_limit": null,
+  "password_hash": "sha256:...",
+  "valid_until": null,
+  "comment": null,
+  "memberships": [],
+  "configs": [],
+  "security_labels": [],
+  "name_maps": []
 }
 ```
 
-   Note: Role attributes (LOGIN, PASSWORD, CONNECTION LIMIT, etc.) are
-   NOT stored in the snapshot beyond the name and comment.  The differ
-   compares roles by name presence only.  Attribute changes are
-   re-applied via `ALTER ROLE` on each `dpg apply` run by comparing the
-   desired IR against a live catalog introspection.
+   Note: unlike Sequence's other object-level fields above, Role
+   attributes (`LOGIN`, `PASSWORD`, `CONNECTION LIMIT`, etc.) ARE stored
+   in the snapshot, not just the name and comment — `PasswordHash` in
+   particular persists a hash of the declared `PASSWORD` text (literal
+   or `{{secret-uri}}` reference) so that password drift is detectable
+   offline, without a live connection. The differ compares each
+   attribute against this stored state, the same targeted-diff treatment
+   every other object kind gets, not name-presence-only.
 
 #### D.1.9. Cluster-Level Snapshot File
 
@@ -8693,6 +8726,7 @@ ENUM user_status ('active', 'inactive', 'banned') {
    | E.20 | 2026-08-24 | `min_pg_version` promoted out of Section 23 ("Deferred Features") now that the reference implementation has it working: new Section 3.8 (resolution order — database overrides cluster overrides project root, most specific wins; validation against this specification's own floor of 14; enforcement via the new `min-pg-version` linter rule) and matching `[compiler]` config additions to Sections 3.2-3.4. Section 1.4's Tenet 3 paragraph's forward reference to the old Section 23 placeholder corrected to point at Section 3.8. Appendix D.3 gains the `min-pg-version` rule entry. Appendix F refreshed: new `Min PG Version` column added across the entire table (blank = available since the floor of PostgreSQL 14, this specification's own supported minimum), and 14 rows added for constructs documented by E.13-E.19 that had never been given their own Tenet-3 classification at all — `PARAMETER PRIVILEGES` (Section 11.6), Collation `REFRESH VERSION`/`RULES` (Section 14.2), Event Trigger's `login` event (Section 14.1), `GRANTED BY role` (Section 7.10), table-level named `NOT NULL` and temporal keys (Section 7.3), `NOT NULL ... NO INHERIT`/`ENFORCED`/`NOT ENFORCED`/FK column-scoped `SET NULL`/`SET DEFAULT` (Section 7.2), and Column `STATISTICS DEFAULT` (Section 7.4); the pre-existing generated-columns row split into `STORED` (floor-14) and `VIRTUAL` (PG18) since the two variants now carry different version gates. This documentation-only revision intentionally lands after the reference implementation (`core/`, commit `56ae62e`) rather than before it — the user's own explicit sequencing choice for this feature, so the RFC describes proven behavior rather than a plan. |
    | E.21 | 2026-08-25 | Section 7.4's generated-column diffing table implemented in the reference implementation (`core/`) for the first time — previously referenced from Section 7.2's `VIRTUAL` text but not actually wired into the differ at all, so any change to a generated column's expression, or a `STORED`/`VIRTUAL` switch, was silently undetected. Corrected two factual errors found live-testing that implementation against a real PostgreSQL 18 server: (1) Section 7.4's "removed, column kept" row split into separate `STORED` (`DROP EXPRESSION`, `SAFE`) and `VIRTUAL` (drop-and-recreate, `DESTRUCTIVE`) variants — PostgreSQL 18 flatly rejects `DROP EXPRESSION` for a `VIRTUAL` column, which this document previously didn't distinguish from `STORED`; Section 7.2's `VIRTUAL` paragraph updated to match. (2) Section 7.1's `period-clause` grammar production and Section 7.3's `PERIOD FOR name (start_col, end_col)` generated-period-column construct removed entirely — confirmed live that no such syntax exists in real PostgreSQL 18 (a syntax error against a real server, and absent from PostgreSQL's own official documentation); this document had described it in error. `WITHOUT OVERLAPS`/`PERIOD` temporal keys (Section 7.3) now correctly documented as referencing an *already-existing* range/multirange column directly, with no generated-range declaration form. Also corrected Section 7.3's claim that a temporal key is "implemented as an exclusion constraint under the hood" — confirmed live (`pg_constraint.contype`) that it stays catalogued as an ordinary `PRIMARY KEY`/`UNIQUE`/`FOREIGN KEY`, not reclassified to `EXCLUDE`; only the internal enforcement mechanism (`pg_constraint.conexclop`) is exclusion-based. Appendix F's temporal-keys row and Tenet-3 classification row updated to match. |
    | E.22 | 2026-08-26 | Section 8.2's `TABLESPACE`/`WITH (...)` clauses on a materialized view — grammar already documented, but never implemented: the reference implementation silently dropped both on parse, and never diffed them, so this specification's own worked example (`product_stats WITH (fillfactor = 90) TABLESPACE analytics_space`) did not round-trip. Now implemented and live-verified against a real PostgreSQL 17 server; Section 8.2's diffing-semantics paragraph gains the `TABLESPACE`/`WITH (...)` rows, both targeted `ALTER MATERIALIZED VIEW` forms, `SAFE`, matching a table's identical `TABLESPACE`/`WITH (...)` treatment (Section 7.11). |
+   | E.23 | 2026-08-26 | Two doc-accuracy corrections found during a fresh audit, no reference-implementation changes needed (the code was already correct): (1) Appendix D.1.8's `SnapRole`/`SnapSequence` wire-schema examples were stale and, for `SnapRole`, factually wrong — the accompanying note claimed role attributes are "NOT stored in the snapshot beyond the name and comment," but `PasswordHash` and 14 other attribute fields genuinely are (confirmed against `internal/snapshot/types.go`), directly contradicting Section 24's own correct description of password-hash storage; both examples rewritten to list every current field, and the note corrected. (2) Section 18.8 stated plainly "there is no `--format` flag" for `dpg portability` — false, `cmd/dpg/portability.go` has a real, working `--format json` flag (JSON per cluster/database analyzed); the false claim removed and the flag documented. |
 
 ---
 
