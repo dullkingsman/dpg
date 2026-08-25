@@ -119,6 +119,23 @@ func (d *Differ) Diff(desired []pipeline.IRObject, snap *pipeline.Snapshot) ([]p
 	// consumed tracks snapshot keys claimed by a rename, so they are not dropped.
 	consumed := make(map[string]bool)
 
+	// A table referenced by ATTACHED FROM (RFC Section 7.13) anywhere in
+	// desired is claimed the same way a rename target is: it genuinely
+	// disappears from desired as an independent top-level object (it's now
+	// only reachable nested inside its new parent's Partitions), so without
+	// this Pass 2 below would see it "absent from desired" and drop it —
+	// racing the ALTER TABLE ... ATTACH PARTITION diffPartitionList emits
+	// for it later in the same migration, which would then fail live
+	// ("relation does not exist") since the table it's trying to attach
+	// was just dropped out from under it.
+	for _, obj := range desired {
+		tbl, ok := obj.(*ir.Table)
+		if !ok {
+			continue
+		}
+		markAttachedFromTargets(tbl.Schema, tbl.Partitions, consumed)
+	}
+
 	// Build virtual type set up-front so all passes can resolve jsonb references.
 	vtypes := buildVTypeSet(desired)
 
@@ -199,8 +216,13 @@ func (d *Differ) Diff(desired []pipeline.IRObject, snap *pipeline.Snapshot) ([]p
 		}
 		consumed[oldKey] = true
 		// Route to diffObject; individual diff functions emit RENAME when
-		// the snap name differs from the desired name.
-		alterOps, err := diffObject(obj, &oldSnap, snap, vtypes)
+		// the snap name differs from the desired name. nil here (not
+		// Pass 2.5's skipDetachedByParent, computed later): a table being
+		// both renamed and a DETACHED FROM parent in the same migration is
+		// an unhandled combination, the same class of narrow edge case the
+		// RFC itself declines to support for RENAMED FROM combined with
+		// ATTACHED FROM/DETACHED FROM on one entry.
+		alterOps, err := diffObject(obj, &oldSnap, snap, vtypes, nil)
 		if err != nil {
 			return nil, err
 		}
@@ -245,6 +267,84 @@ func (d *Differ) Diff(desired []pipeline.IRObject, snap *pipeline.Snapshot) ([]p
 		ops = append(ops, dropObject(&so)...)
 	}
 
+	// Pass 2.5: DETACHED FROM (RFC Section 7.13) — a standalone Table
+	// declaring DetachedFrom is matched against a NESTED entry in its
+	// parent's own snapshot (SnapTable.Partitions), a different key space
+	// from every top-level-to-top-level mechanism above (Pass 1's rename
+	// handling included): a partition has no snap.Objects entry of its
+	// own. Without this pass, the child would independently look "new"
+	// to Pass 3 (CREATE TABLE) while the parent's own partition-list diff
+	// (diffPartitionList, inside Pass 3's per-object diffTable call) would
+	// independently see it "missing" (DROP TABLE) — emitting a destructive
+	// drop+recreate pair instead of the single metadata-only detach this
+	// directive exists to express. detachedChildren short-circuits the
+	// child's own Pass 3 handling entirely (there is no richer prior state
+	// to diff against beyond bounds/name — see the doc comment on
+	// ir.Table.DetachedFrom); skipDetachedByParent, keyed by the PARENT's
+	// qualified name, is threaded through diffObject → diffTable →
+	// diffPartitions → diffPartitionList so the parent's own removal-
+	// detection loop skips this specific child name.
+	detachedChildren := make(map[string]bool)
+	skipDetachedByParent := make(map[string]map[string]bool)
+	for _, obj := range desired {
+		tbl, ok := obj.(*ir.Table)
+		if !ok || tbl.DetachedFrom == nil {
+			continue
+		}
+		childKey := tbl.QualifiedName()
+		var childSnap snapshot.SnapObject
+		childFound, err := snap.GetObject(childKey, &childSnap)
+		if err != nil {
+			return nil, fmt.Errorf("diff: decoding snapshot for %q: %w", childKey, err)
+		}
+		parentKey := normalizeInheritRef(tbl.Schema, tbl.DetachedFrom.ParentTable)
+		var parentSnap snapshot.SnapObject
+		found, err := snap.GetObject(parentKey, &parentSnap)
+		if err != nil {
+			return nil, fmt.Errorf("diff: decoding snapshot for %q: %w", parentKey, err)
+		}
+		if !found || parentSnap.Table == nil {
+			return nil, pipeline.Errorf(tbl.SrcPos,
+				"DETACHED FROM %q on table %q does not match the snapshot — %q is not a known table",
+				tbl.DetachedFrom.ParentTable, tbl.QualifiedName(), parentKey)
+		}
+		matchedIdx := -1
+		for i := range parentSnap.Table.Partitions {
+			if parentSnap.Table.Partitions[i].Name == tbl.Name {
+				matchedIdx = i
+				break
+			}
+		}
+		if matchedIdx < 0 {
+			if childFound {
+				// Post-apply / no-op state: the detach already landed (the
+				// child now exists as its own top-level table, no longer
+				// listed among the parent's partitions) — same three-state
+				// resolution every other RENAMED-FROM-style directive in
+				// this codebase uses (Section 7.6): "new state already
+				// present" is not an error, just nothing left to do here.
+				// Falls through to Pass 3's normal handling, which diffs it
+				// like any other ordinary existing table.
+				continue
+			}
+			return nil, pipeline.Errorf(tbl.SrcPos,
+				"DETACHED FROM %q on table %q does not match the snapshot — %q is not currently a partition of %q, and no existing table %q was found either",
+				tbl.DetachedFrom.ParentTable, tbl.QualifiedName(), tbl.Name, parentKey, tbl.QualifiedName())
+		}
+		matched := parentSnap.Table.Partitions[matchedIdx]
+		stmt := fmt.Sprintf("ALTER TABLE %s DETACH PARTITION %s", quoteQualIdent(parentKey), qualIdent(matched.Schema, matched.Name))
+		if tbl.DetachedFrom.Concurrently {
+			ops = append(ops, manualOp(stmt+" CONCURRENTLY;", tbl.SrcPos))
+		} else {
+			ops = append(ops, cautionOp(stmt+";", tbl.SrcPos))
+		}
+		detachedChildren[tbl.QualifiedName()] = true
+		if skipDetachedByParent[parentKey] == nil {
+			skipDetachedByParent[parentKey] = make(map[string]bool)
+		}
+		skipDetachedByParent[parentKey][tbl.Name] = true
+	}
+
 	// Pass 3: create new or alter existing objects.
 	for _, obj := range desired {
 		// Skip objects already handled in pass 1.
@@ -256,6 +356,12 @@ func (d *Differ) Diff(desired []pipeline.IRObject, snap *pipeline.Snapshot) ([]p
 			continue
 		}
 		key := obj.QualifiedName()
+		// Skip tables just detached by Pass 2.5 — already fully handled
+		// there (see its own doc comment for why neither CREATE nor ALTER
+		// applies here).
+		if detachedChildren[key] {
+			continue
+		}
 		var so snapshot.SnapObject
 		found, err := snap.GetObject(key, &so)
 		if err != nil {
@@ -268,7 +374,7 @@ func (d *Differ) Diff(desired []pipeline.IRObject, snap *pipeline.Snapshot) ([]p
 			}
 			ops = append(ops, createOps...)
 		} else {
-			alterOps, err := diffObject(obj, &so, snap, vtypes)
+			alterOps, err := diffObject(obj, &so, snap, vtypes, skipDetachedByParent[key])
 			if err != nil {
 				return nil, err
 			}
@@ -481,6 +587,20 @@ func renamedFromKey(obj pipeline.IRObject) string {
 		}
 	}
 	return ""
+}
+
+// markAttachedFromTargets recurses through parts (a table's or partition's
+// own Partitions list, RFC Section 7.13) and marks every ATTACHED FROM
+// target's resolved qualified name in consumed — see Diff's own call site
+// for why an ATTACHED FROM target must never be dropped by Pass 2 despite
+// disappearing from desired as an independent top-level object.
+func markAttachedFromTargets(schema string, parts []*ir.Partition, consumed map[string]bool) {
+	for _, p := range parts {
+		if p.AttachedFrom != nil {
+			consumed[normalizeInheritRef(schema, *p.AttachedFrom)] = true
+		}
+		markAttachedFromTargets(schema, p.Partitions, consumed)
+	}
 }
 
 // oldSchema resolves the schema a RENAMED FROM name lived in: the explicit
@@ -4290,7 +4410,10 @@ func createRole(o *ir.Role) []pipeline.DiffOp {
 
 // ── DIFF / ALTER operations ───────────────────────────────────────────────────
 
-func diffObject(desired pipeline.IRObject, snap *snapshot.SnapObject, fullSnap *pipeline.Snapshot, vtypes map[string]string) ([]pipeline.DiffOp, error) {
+// skipDetachedChildren, only meaningful for the *ir.Table case, is Pass
+// 2.5's per-parent set of child partition names being detached this run
+// (see Diff's own doc comment) — nil everywhere else.
+func diffObject(desired pipeline.IRObject, snap *snapshot.SnapObject, fullSnap *pipeline.Snapshot, vtypes map[string]string, skipDetachedChildren map[string]bool) ([]pipeline.DiffOp, error) {
 	switch o := desired.(type) {
 	case *ir.Extension:
 		if snap.Extension == nil {
@@ -4316,7 +4439,7 @@ func diffObject(desired pipeline.IRObject, snap *snapshot.SnapObject, fullSnap *
 		if snap.Table == nil {
 			return nil, nil
 		}
-		return diffTable(o, snap.Table, fullSnap, vtypes)
+		return diffTable(o, snap.Table, fullSnap, vtypes, skipDetachedChildren)
 	case *ir.View:
 		if snap.View == nil {
 			return nil, nil
@@ -6353,7 +6476,7 @@ func replicaIdentityClause(ri ir.ReplicaIdentity) string {
 	return mode
 }
 
-func diffTable(o *ir.Table, snap *snapshot.SnapTable, fullSnap *pipeline.Snapshot, vtypes map[string]string) ([]pipeline.DiffOp, error) {
+func diffTable(o *ir.Table, snap *snapshot.SnapTable, fullSnap *pipeline.Snapshot, vtypes map[string]string, skipDetachedChildren map[string]bool) ([]pipeline.DiffOp, error) {
 	var ops []pipeline.DiffOp
 	pos := o.SrcPos
 	tbl := qualIdent(o.Schema, o.Name)
@@ -6506,7 +6629,7 @@ func diffTable(o *ir.Table, snap *snapshot.SnapTable, fullSnap *pipeline.Snapsho
 		tableObjType = "FOREIGN TABLE"
 	}
 	ops = append(ops, diffSecurityLabelSet(snap.SecurityLabels, o.SecurityLabels, tableObjType+" "+tbl, pos)...)
-	partitionOps, err := diffPartitions(tbl, o, snap, pos)
+	partitionOps, err := diffPartitions(tbl, o, snap, pos, skipDetachedChildren)
 	if err != nil {
 		return nil, err
 	}
@@ -6588,7 +6711,7 @@ func createPartitionOps(schema string, parent string, p *ir.Partition) []pipelin
 	return ops
 }
 
-func diffPartitions(tbl string, o *ir.Table, snap *snapshot.SnapTable, pos pipeline.SourcePos) ([]pipeline.DiffOp, error) {
+func diffPartitions(tbl string, o *ir.Table, snap *snapshot.SnapTable, pos pipeline.SourcePos, skipDetachedChildren map[string]bool) ([]pipeline.DiffOp, error) {
 	var ops []pipeline.DiffOp
 
 	// Partition strategy change cannot be done in-place.
@@ -6604,7 +6727,7 @@ func diffPartitions(tbl string, o *ir.Table, snap *snapshot.SnapTable, pos pipel
 		return ops, nil
 	}
 
-	partOps, err := diffPartitionList(o.Schema, tbl, o.Partitions, snap.Partitions, pos)
+	partOps, err := diffPartitionList(o.Schema, tbl, o.Partitions, snap.Partitions, pos, skipDetachedChildren)
 	if err != nil {
 		return nil, err
 	}
@@ -6621,7 +6744,13 @@ func diffPartitions(tbl string, o *ir.Table, snap *snapshot.SnapTable, pos pipel
 // keyed collection, matched by old name within the same parent, same stale-
 // directive validation) — a partition has no independent schema, so matching
 // is always within THIS parent's own list, never cross-schema.
-func diffPartitionList(schema, parent string, desired []*ir.Partition, snap []snapshot.SnapPartition, pos pipeline.SourcePos) ([]pipeline.DiffOp, error) {
+// skipDetached, only meaningful at the top level (nil for every recursive
+// sub-partition call — see Diff's Pass 2.5 doc comment: DETACHED FROM only
+// matches a direct child of the named parent), names child partitions
+// intentionally being detached this run — excluded from the "absent from
+// desired" removal detection below, which would otherwise treat them as
+// simply dropped.
+func diffPartitionList(schema, parent string, desired []*ir.Partition, snap []snapshot.SnapPartition, pos pipeline.SourcePos, skipDetached map[string]bool) ([]pipeline.DiffOp, error) {
 	var ops []pipeline.DiffOp
 
 	snapByName := make(map[string]snapshot.SnapPartition, len(snap))
@@ -6672,6 +6801,19 @@ func diffPartitionList(schema, parent string, desired []*ir.Partition, snap []sn
 			desiredPB = p.PartitionBy.Strategy + " (" + strings.Join(p.PartitionBy.Columns, ", ") + ")"
 		}
 		switch {
+		case !exists && p.AttachedFrom != nil:
+			// RFC Section 7.13's "ATTACHED FROM existing_table" form:
+			// attaches an already-existing standalone table instead of
+			// creating a new one — real PostgreSQL validates the existing
+			// table's structure and any CHECK constraints against the
+			// target bound at attach time; DPG performs no additional
+			// validation of its own (passthrough principle, as elsewhere
+			// in this document). ATTACH PARTITION has no CONCURRENTLY
+			// variant in real PostgreSQL, unlike DETACH.
+			ops = append(ops, cautionOp(
+				fmt.Sprintf("ALTER TABLE %s ATTACH PARTITION %s %s;", parent, quoteQualIdent(normalizeInheritRef(schema, *p.AttachedFrom)), p.Bounds),
+				p.SrcPos,
+			))
 		case !exists:
 			ops = append(ops, createPartitionOps(schema, parent, p)...)
 		case sp.Bound != p.Bounds:
@@ -6698,7 +6840,7 @@ func diffPartitionList(schema, parent string, desired []*ir.Partition, snap []sn
 					p.SrcPos,
 				))
 			}
-			subOps, err := diffPartitionList(schema, partTbl, p.Partitions, sp.Partitions, p.SrcPos)
+			subOps, err := diffPartitionList(schema, partTbl, p.Partitions, sp.Partitions, p.SrcPos, nil)
 			if err != nil {
 				return nil, err
 			}
@@ -6707,6 +6849,9 @@ func diffPartitionList(schema, parent string, desired []*ir.Partition, snap []sn
 	}
 	for _, sp := range snap {
 		if _, wasRenamed := renamedFrom[sp.Name]; wasRenamed {
+			continue
+		}
+		if skipDetached[sp.Name] {
 			continue
 		}
 		if !desiredHasName[sp.Name] {

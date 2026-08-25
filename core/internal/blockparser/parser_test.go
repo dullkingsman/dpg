@@ -1345,6 +1345,84 @@ func TestPartitionRenamedFrom(t *testing.T) {
 	}
 }
 
+// TestPartitionAttachedFrom guards RFC Section 7.13's "ATTACHED FROM
+// existing_table" form: attaches an already-existing standalone table
+// instead of creating a new one — Name is set to the existing table's own
+// bare name so every existing name-keyed lookup continues to work.
+func TestPartitionAttachedFrom(t *testing.T) {
+	src := `PARTITIONS {
+		ATTACHED FROM legacy_events FOR VALUES FROM ('2023-01-01') TO ('2024-01-01');
+	}`
+	ast := parse(t, src)
+	if ast.Partitions == nil || len(ast.Partitions.Partitions) != 1 {
+		t.Fatalf("expected 1 partition, got %v", ast.Partitions)
+	}
+	p := ast.Partitions.Partitions[0]
+	if p.AttachedFrom == nil || p.AttachedFrom.Name != "legacy_events" {
+		t.Fatalf("AttachedFrom: got %v", p.AttachedFrom)
+	}
+	if p.Name.Name != "legacy_events" {
+		t.Errorf("Name: got %q, want %q", p.Name.Name, "legacy_events")
+	}
+	wantBounds := "FOR VALUES FROM ('2023-01-01') TO ('2024-01-01')"
+	if p.Bounds.Text != wantBounds {
+		t.Errorf("Bounds.Text: got %q, want %q", p.Bounds.Text, wantBounds)
+	}
+}
+
+// TestPartitionAttachedFromDefault guards the DEFAULT-bound variant of
+// ATTACHED FROM.
+func TestPartitionAttachedFromDefault(t *testing.T) {
+	src := `PARTITIONS {
+		ATTACHED FROM legacy_default DEFAULT;
+	}`
+	ast := parse(t, src)
+	p := ast.Partitions.Partitions[0]
+	if p.AttachedFrom == nil || p.AttachedFrom.Name != "legacy_default" {
+		t.Fatalf("AttachedFrom: got %v", p.AttachedFrom)
+	}
+	if p.Bounds.Text != "DEFAULT" {
+		t.Errorf("Bounds.Text: got %q, want %q", p.Bounds.Text, "DEFAULT")
+	}
+}
+
+// TestPartitionAttachedFromSchemaQualified guards a schema-qualified
+// existing-table reference.
+func TestPartitionAttachedFromSchemaQualified(t *testing.T) {
+	src := `PARTITIONS {
+		ATTACHED FROM archive.legacy_events FOR VALUES FROM ('2023-01-01') TO ('2024-01-01');
+	}`
+	ast := parse(t, src)
+	p := ast.Partitions.Partitions[0]
+	if p.AttachedFrom == nil || p.AttachedFrom.Schema != "archive" || p.AttachedFrom.Name != "legacy_events" {
+		t.Fatalf("AttachedFrom: got %v", p.AttachedFrom)
+	}
+}
+
+// TestTableDetachedFrom guards RFC Section 7.13's DETACHED FROM block
+// directive — the symmetric counterpart to ATTACHED FROM, written on a
+// standalone TABLE declaration.
+func TestTableDetachedFrom(t *testing.T) {
+	ast := parse(t, `DETACHED FROM events;`)
+	if ast.DetachedFrom == nil {
+		t.Fatal("expected DetachedFrom to be set")
+	}
+	if ast.DetachedFrom.Table.Name != "events" {
+		t.Errorf("Table.Name: got %q, want %q", ast.DetachedFrom.Table.Name, "events")
+	}
+	if ast.DetachedFrom.Concurrently {
+		t.Error("expected Concurrently = false")
+	}
+}
+
+// TestTableDetachedFromConcurrently guards the CONCURRENTLY modifier.
+func TestTableDetachedFromConcurrently(t *testing.T) {
+	ast := parse(t, `DETACHED FROM events CONCURRENTLY;`)
+	if ast.DetachedFrom == nil || !ast.DetachedFrom.Concurrently {
+		t.Fatalf("DetachedFrom: got %v", ast.DetachedFrom)
+	}
+}
+
 // TestPartitionRenamedFromQuotedIdent confirms a double-quoted old name
 // (e.g. containing a reserved word or mixed case) is unquoted correctly.
 func TestPartitionRenamedFromQuotedIdent(t *testing.T) {

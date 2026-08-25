@@ -1190,6 +1190,12 @@ func mergeTableBlock(tbl *Table, block pipeline.BlockAST) error {
 		name := block.ClusterOn.Name
 		tbl.ClusterOn = &name
 	}
+	if block.DetachedFrom != nil {
+		tbl.DetachedFrom = &DetachedFrom{
+			ParentTable:  block.DetachedFrom.Table.String(),
+			Concurrently: block.DetachedFrom.Concurrently,
+		}
+	}
 	tbl.NameMaps = block.NameMaps
 
 	// Indexes
@@ -1314,6 +1320,10 @@ func buildPartitionBound(p pipeline.PartitionBound) *Partition {
 		Bounds:      p.Bounds.Text,
 		RenamedFrom: p.RenamedFrom,
 		SrcPos:      p.Pos,
+	}
+	if p.AttachedFrom != nil {
+		s := p.AttachedFrom.String()
+		part.AttachedFrom = &s
 	}
 	if p.SubStrategy != "" {
 		part.PartitionBy = &PartitionSpec{

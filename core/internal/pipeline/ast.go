@@ -209,7 +209,14 @@ type PartitionBound struct {
 	// RENAMED FROM addition) — matched within the same parent's partition
 	// list, never cross-schema (a partition's schema is always its parent
 	// table's, unlike Table/View/Function's cross-schema RENAMED FROM).
-	RenamedFrom   *string
+	RenamedFrom *string
+	// AttachedFrom is RFC Section 7.13's "ATTACHED FROM existing_table"
+	// form — attaches an already-existing standalone table (present in the
+	// snapshot) as this partition instead of creating a new one. Name is
+	// still set to AttachedFrom's own bare Name when this is set (the
+	// existing table's identity becomes the partition's), so every
+	// existing name-keyed lookup continues to work unchanged.
+	AttachedFrom  *Identifier
 	SubPartitions []PartitionBound
 	Pos           SourcePos
 }
@@ -466,6 +473,15 @@ type BlockAST struct {
 	// ALTER COLLATION ... REFRESH VERSION on every plan/apply for as long
 	// as it remains declared.
 	RefreshVersion bool
+	// DetachedFrom is Section 7.13's `DETACHED FROM parent_table
+	// [CONCURRENTLY]` block directive — the symmetric counterpart to a
+	// PARTITIONS { } entry's `ATTACHED FROM` — nil when not declared.
+	// Written on a standalone TABLE declaration that is currently a
+	// partition of parent_table per the snapshot; converts it back into an
+	// independent table instead of the plain DROP TABLE this document
+	// would otherwise prescribe for "declared table disappeared from its
+	// parent's PARTITIONS { } block."
+	DetachedFrom *DetachedFromDirective
 }
 
 // ReplicaIdentityDir is Section 7.11's REPLICA IDENTITY block directive.
@@ -473,4 +489,20 @@ type ReplicaIdentityDir struct {
 	Mode      string // "DEFAULT", "FULL", "NOTHING", or "INDEX"
 	IndexName string // only set when Mode == "INDEX"
 	Pos       SourcePos
+}
+
+// DetachedFromDirective is Section 7.13's DETACHED FROM block directive.
+// Table is the parent's reference (possibly schema-qualified — a
+// partition's own schema always matches its parent's, but the parent
+// reference itself follows the same table-ref shape RENAMED FROM/LIKE use).
+// Concurrently mirrors real PostgreSQL's ALTER TABLE ... DETACH PARTITION
+// ... CONCURRENTLY: runs the detach in two non-blocking steps instead of
+// holding a brief ACCESS EXCLUSIVE lock on the parent — Safety Manual
+// rather than Caution when set, since it changes the operation's shape,
+// the same reasoning Sequence's RESTART/Collation's REFRESH VERSION use for
+// their own imperative, non-persisted directives.
+type DetachedFromDirective struct {
+	Table        Identifier
+	Concurrently bool
+	Pos          SourcePos
 }

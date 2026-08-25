@@ -410,8 +410,15 @@ type Partition struct {
 	// a partition's schema is always its parent table's, so there is no
 	// cross-schema variant the way Table/View/Function have one.
 	RenamedFrom *string
-	Partitions  []*Partition
-	SrcPos      pipeline.SourcePos
+	// AttachedFrom is RFC Section 7.13's "ATTACHED FROM existing_table"
+	// form — nil for a normal partition. When set, this attaches an
+	// already-existing standalone table (matched against a top-level
+	// snapshot entry) instead of creating a new one — a possibly schema-
+	// qualified "schema.name" or bare "name" string (same convention as
+	// Table.Inherits), resolved against the parent's own schema when bare.
+	AttachedFrom *string
+	Partitions   []*Partition
+	SrcPos       pipeline.SourcePos
 }
 
 // ── concrete IR object types ──────────────────────────────────────────────────
@@ -529,7 +536,26 @@ type Table struct {
 	// always empty: per the RFC, "the snapshot records the resolved
 	// columns/constraints, not the LIKE clause itself."
 	LikeClauses []*LikeClause
-	SrcPos      pipeline.SourcePos
+	// DetachedFrom is RFC Section 7.13's DETACHED FROM block directive —
+	// nil when not declared. Converts a table that is currently a partition
+	// of DetachedFrom.ParentTable (matched against a nested entry in that
+	// parent's own snapshot, a different key space from every other
+	// RenamedFrom-style directive) back into an independent table.
+	DetachedFrom *DetachedFrom
+	SrcPos       pipeline.SourcePos
+}
+
+// DetachedFrom is Section 7.13's DETACHED FROM directive target — see
+// ir.Table.DetachedFrom's doc comment.
+type DetachedFrom struct {
+	// ParentTable is a possibly schema-qualified "schema.name" or bare
+	// "name" string (same convention as Table.Inherits/Partition.
+	// AttachedFrom), resolved against the child's own schema when bare —
+	// a partition's schema always matches its parent's.
+	ParentTable string
+	// Concurrently mirrors real PostgreSQL's ALTER TABLE ... DETACH
+	// PARTITION ... CONCURRENTLY — Safety Manual rather than Caution.
+	Concurrently bool
 }
 
 // LikeClause is one `LIKE source_table [{INCLUDING|EXCLUDING} attr ...]`

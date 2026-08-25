@@ -465,6 +465,8 @@ func (b *blockParser) parseBlock(pos pipeline.SourcePos) (pipeline.BlockAST, err
 			ast.ReplicaIdentity, err = b.parseReplicaIdentity(dirPos)
 		case "CLUSTER":
 			ast.ClusterOn, err = b.parseClusterOn(dirPos)
+		case "DETACHED":
+			ast.DetachedFrom, err = b.parseDetachedFrom(dirPos)
 		case "REFRESH":
 			// RFC audit item #84: Collation-only REFRESH VERSION, a bare
 			// presence keyword with no argument.
@@ -899,6 +901,30 @@ func (b *blockParser) parseClusterOn(pos pipeline.SourcePos) (*pipeline.Identifi
 		return nil, err
 	}
 	return &id, nil
+}
+
+// parseDetachedFrom reads: FROM parent_table [CONCURRENTLY];
+func (b *blockParser) parseDetachedFrom(pos pipeline.SourcePos) (*pipeline.DetachedFromDirective, error) {
+	if err := b.expect("FROM"); err != nil {
+		return nil, err
+	}
+	b.skipWS()
+	tbl, err := b.readIdentifier()
+	if err != nil {
+		return nil, err
+	}
+	d := &pipeline.DetachedFromDirective{Table: tbl, Pos: pos}
+	b.skipWS()
+	c := b.cur()
+	if strings.ToUpper(b.readWord()) == "CONCURRENTLY" {
+		d.Concurrently = true
+	} else {
+		b.restore(c)
+	}
+	if err := b.expectSemi(); err != nil {
+		return nil, err
+	}
+	return d, nil
 }
 
 // ── INDICES ───────────────────────────────────────────────────────────────────
@@ -2358,6 +2384,43 @@ func unquoteRawIdent(s string) string {
 // further partitioned, recursively.
 func (b *blockParser) parseOnePartitionBound() (pipeline.PartitionBound, error) {
 	pPos := b.srcPos()
+	b.skipWS()
+	c := b.cur()
+	firstWord := strings.ToUpper(b.readWord())
+	if firstWord == "ATTACHED" {
+		// RFC Section 7.13's "ATTACHED FROM existing_table" form — attaches
+		// an already-existing standalone table instead of creating a new
+		// one. No trailing sub-partitioning/RENAMED FROM suffix support
+		// here (the RFC doesn't specify combining ATTACHED FROM with
+		// either): the ref is read, then everything up to the terminator
+		// is taken verbatim as the bounds clause ("FOR VALUES ..." or
+		// "DEFAULT"), the same shape createPartitionOps already expects.
+		if err := b.expect("FROM"); err != nil {
+			return pipeline.PartitionBound{}, err
+		}
+		b.skipWS()
+		ref, err := b.readIdentifier()
+		if err != nil {
+			return pipeline.PartitionBound{}, err
+		}
+		raw, err := b.readRawUntil(";{}")
+		if err != nil {
+			return pipeline.PartitionBound{}, err
+		}
+		bound := pipeline.PartitionBound{
+			Name:         ref,
+			AttachedFrom: &ref,
+			Bounds:       pipeline.RawExpr{Text: strings.TrimSpace(raw), Pos: pPos},
+			Pos:          pPos,
+		}
+		b.skipWS()
+		if b.peek() == ';' {
+			b.advance()
+		}
+		return bound, nil
+	}
+	b.restore(c)
+
 	name, err := b.readIdentifier()
 	if err != nil {
 		return pipeline.PartitionBound{}, err

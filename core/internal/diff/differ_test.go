@@ -7882,6 +7882,284 @@ func TestDiffPartitionRemoved(t *testing.T) {
 	}
 }
 
+// TestDiffPartitionAttachedFrom is the regression guard for RFC Section
+// 7.13's "ATTACHED FROM existing_table" form: a not-yet-tracked partition
+// declaring AttachedFrom must emit ALTER TABLE ... ATTACH PARTITION, not
+// the CREATE TABLE ... PARTITION OF a normal new partition would get (which
+// would fail live — the table already exists).
+func TestDiffPartitionAttachedFrom(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.events", &snapshot.SnapObject{
+		Kind: "table",
+		Table: &snapshot.SnapTable{
+			Schema: "public", Name: "events", PartitionBy: "RANGE (created_at)",
+			Columns: []snapshot.SnapColumn{{Name: "id", Type: "bigint"}},
+		},
+	})
+	from := "legacy_events"
+	desired := []pipeline.IRObject{
+		&ir.Table{
+			Schema: "public", Name: "events",
+			PartitionBy: &ir.PartitionSpec{Strategy: "RANGE", Columns: []string{"created_at"}},
+			Columns:     []*ir.Column{{Name: "id", Type: ir.TypeRef{Name: "bigint"}}},
+			Partitions: []*ir.Partition{
+				{Name: "legacy_events", AttachedFrom: &from, Bounds: "FOR VALUES FROM ('2023-01-01') TO ('2024-01-01')"},
+			},
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := `ALTER TABLE "public"."events" ATTACH PARTITION "public"."legacy_events" FOR VALUES FROM ('2023-01-01') TO ('2024-01-01');`
+	if !containsSQL(ops, want) {
+		t.Errorf("expected %q, got: %v", want, sqlList(ops))
+	}
+	if containsSQL(ops, "CREATE TABLE") {
+		t.Errorf("must not CREATE TABLE for an attached-from partition, got: %v", sqlList(ops))
+	}
+	for _, op := range ops {
+		if strings.Contains(op.SQL(), "ATTACH PARTITION") && op.Safety() != pipeline.Caution {
+			t.Errorf("ATTACH PARTITION safety = %v, want Caution", op.Safety())
+		}
+	}
+}
+
+// TestDiffPartitionAttachedFromDoesNotDropTarget is the regression guard
+// for a real bug found live-testing this feature: the target table
+// genuinely disappears from desired as an independent top-level object
+// once rewritten as an ATTACHED FROM entry (it's now only reachable nested
+// inside its new parent's Partitions) — without marking it as consumed,
+// Pass 2's "absent from desired → drop" logic would drop it, racing the
+// ALTER TABLE ... ATTACH PARTITION emitted for it in the same migration
+// and making that statement fail live with "relation does not exist"
+// (confirmed live before this fix).
+func TestDiffPartitionAttachedFromDoesNotDropTarget(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.events", &snapshot.SnapObject{
+		Kind: "table",
+		Table: &snapshot.SnapTable{
+			Schema: "public", Name: "events", PartitionBy: "RANGE (created_at)",
+		},
+	})
+	_ = snap.SetObject("public.legacy_events", &snapshot.SnapObject{
+		Kind:  "table",
+		Table: &snapshot.SnapTable{Schema: "public", Name: "legacy_events"},
+	})
+	from := "legacy_events"
+	desired := []pipeline.IRObject{
+		&ir.Table{
+			Schema: "public", Name: "events",
+			PartitionBy: &ir.PartitionSpec{Strategy: "RANGE", Columns: []string{"created_at"}},
+			Partitions: []*ir.Partition{
+				{Name: "legacy_events", AttachedFrom: &from, Bounds: "FOR VALUES FROM ('2023-01-01') TO ('2024-01-01')"},
+			},
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if containsSQL(ops, `DROP TABLE IF EXISTS "public"."legacy_events"`) {
+		t.Errorf("must not drop the ATTACHED FROM target, got: %v", sqlList(ops))
+	}
+	if !containsSQL(ops, `ATTACH PARTITION "public"."legacy_events"`) {
+		t.Errorf("expected ATTACH PARTITION, got: %v", sqlList(ops))
+	}
+}
+
+// TestDiffPartitionAttachedFromAlreadyAttachedIsNoop proves that once an
+// ATTACHED FROM partition has actually been attached (now a normal entry in
+// the snapshot's partition list), it's compared exactly like any other
+// partition on subsequent plans — no re-attach attempted just because the
+// source declaration still says ATTACHED FROM.
+func TestDiffPartitionAttachedFromAlreadyAttachedIsNoop(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.events", &snapshot.SnapObject{
+		Kind: "table",
+		Table: &snapshot.SnapTable{
+			Schema: "public", Name: "events", PartitionBy: "RANGE (created_at)",
+			Columns: []snapshot.SnapColumn{{Name: "id", Type: "bigint"}},
+			Partitions: []snapshot.SnapPartition{
+				{Schema: "public", Name: "legacy_events", Bound: "FOR VALUES FROM ('2023-01-01') TO ('2024-01-01')"},
+			},
+		},
+	})
+	from := "legacy_events"
+	desired := []pipeline.IRObject{
+		&ir.Table{
+			Schema: "public", Name: "events",
+			PartitionBy: &ir.PartitionSpec{Strategy: "RANGE", Columns: []string{"created_at"}},
+			Columns:     []*ir.Column{{Name: "id", Type: ir.TypeRef{Name: "bigint"}}},
+			Partitions: []*ir.Partition{
+				{Name: "legacy_events", AttachedFrom: &from, Bounds: "FOR VALUES FROM ('2023-01-01') TO ('2024-01-01')"},
+			},
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ops) != 0 {
+		t.Errorf("expected zero ops for an already-attached partition, got: %v", sqlList(ops))
+	}
+}
+
+// TestDiffTableDetachedFrom is the regression guard for RFC Section 7.13's
+// DETACHED FROM directive: a standalone Table declaring it, matched against
+// a nested entry in its parent's snapshot, must emit exactly one ALTER
+// TABLE parent DETACH PARTITION child — never the DROP TABLE (parent's own
+// removal detection) + CREATE TABLE (the child's own not-found handling)
+// pair that would otherwise result from two independent, uncoordinated
+// diffs.
+func TestDiffTableDetachedFrom(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.events", &snapshot.SnapObject{
+		Kind: "table",
+		Table: &snapshot.SnapTable{
+			Schema: "public", Name: "events", PartitionBy: "RANGE (created_at)",
+			Columns: []snapshot.SnapColumn{{Name: "id", Type: "bigint"}},
+			Partitions: []snapshot.SnapPartition{
+				{Schema: "public", Name: "events_2023", Bound: "FOR VALUES FROM ('2023-01-01') TO ('2024-01-01')"},
+			},
+		},
+	})
+	desired := []pipeline.IRObject{
+		&ir.Table{
+			Schema: "public", Name: "events",
+			PartitionBy: &ir.PartitionSpec{Strategy: "RANGE", Columns: []string{"created_at"}},
+			Columns:     []*ir.Column{{Name: "id", Type: ir.TypeRef{Name: "bigint"}}},
+		},
+		&ir.Table{
+			Schema: "public", Name: "events_2023",
+			DetachedFrom: &ir.DetachedFrom{ParentTable: "events"},
+			Columns:      []*ir.Column{{Name: "id", Type: ir.TypeRef{Name: "bigint"}}},
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := `ALTER TABLE "public"."events" DETACH PARTITION "public"."events_2023";`
+	if !containsSQL(ops, want) {
+		t.Errorf("expected %q, got: %v", want, sqlList(ops))
+	}
+	if containsSQL(ops, "DROP TABLE") || containsSQL(ops, "CREATE TABLE") {
+		t.Errorf("must not DROP or CREATE the detached child, got: %v", sqlList(ops))
+	}
+	for _, op := range ops {
+		if strings.Contains(op.SQL(), "DETACH PARTITION") && op.Safety() != pipeline.Caution {
+			t.Errorf("DETACH PARTITION safety = %v, want Caution", op.Safety())
+		}
+	}
+}
+
+// TestDiffTableDetachedFromConcurrentlyIsManual guards the CONCURRENTLY
+// modifier's Safety classification (RFC's own diffing table: "MANUAL if
+// CONCURRENTLY written, else CAUTION").
+func TestDiffTableDetachedFromConcurrentlyIsManual(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.events", &snapshot.SnapObject{
+		Kind: "table",
+		Table: &snapshot.SnapTable{
+			Schema: "public", Name: "events", PartitionBy: "RANGE (created_at)",
+			Partitions: []snapshot.SnapPartition{
+				{Schema: "public", Name: "events_2023", Bound: "FOR VALUES FROM ('2023-01-01') TO ('2024-01-01')"},
+			},
+		},
+	})
+	desired := []pipeline.IRObject{
+		&ir.Table{
+			Schema: "public", Name: "events",
+			PartitionBy: &ir.PartitionSpec{Strategy: "RANGE", Columns: []string{"created_at"}},
+		},
+		&ir.Table{
+			Schema: "public", Name: "events_2023",
+			DetachedFrom: &ir.DetachedFrom{ParentTable: "events", Concurrently: true},
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := `ALTER TABLE "public"."events" DETACH PARTITION "public"."events_2023" CONCURRENTLY;`
+	if !containsSQL(ops, want) {
+		t.Errorf("expected %q, got: %v", want, sqlList(ops))
+	}
+	for _, op := range ops {
+		if strings.Contains(op.SQL(), "DETACH PARTITION") && op.Safety() != pipeline.Manual {
+			t.Errorf("DETACH PARTITION CONCURRENTLY safety = %v, want Manual", op.Safety())
+		}
+	}
+}
+
+// TestDiffTableDetachedFromAlreadyDetachedIsNoop proves that once a
+// DETACHED FROM has already landed (the child now exists as its own
+// top-level table, no longer listed among the parent's partitions), a
+// still-present DETACHED FROM directive in source is a no-op — not an
+// error — the same "new state already present" three-state resolution
+// every other RENAMED-FROM-style directive in this codebase uses.
+func TestDiffTableDetachedFromAlreadyDetachedIsNoop(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.events", &snapshot.SnapObject{
+		Kind:  "table",
+		Table: &snapshot.SnapTable{Schema: "public", Name: "events", PartitionBy: "RANGE (created_at)"},
+	})
+	_ = snap.SetObject("public.events_2023", &snapshot.SnapObject{
+		Kind:  "table",
+		Table: &snapshot.SnapTable{Schema: "public", Name: "events_2023"},
+	})
+	desired := []pipeline.IRObject{
+		&ir.Table{Schema: "public", Name: "events", PartitionBy: &ir.PartitionSpec{Strategy: "RANGE", Columns: []string{"created_at"}}},
+		&ir.Table{Schema: "public", Name: "events_2023", DetachedFrom: &ir.DetachedFrom{ParentTable: "events"}},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ops) != 0 {
+		t.Errorf("expected zero ops for an already-detached table, got: %v", sqlList(ops))
+	}
+}
+
+// TestDiffTableDetachedFromNotAPartitionErrors proves a DETACHED FROM
+// pointing at a real parent that doesn't currently have this child as a
+// partition is a compile error, not a silent no-op or an accidental
+// CREATE TABLE.
+func TestDiffTableDetachedFromNotAPartitionErrors(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.events", &snapshot.SnapObject{
+		Kind:  "table",
+		Table: &snapshot.SnapTable{Schema: "public", Name: "events", PartitionBy: "RANGE (created_at)"},
+	})
+	desired := []pipeline.IRObject{
+		&ir.Table{Schema: "public", Name: "events", PartitionBy: &ir.PartitionSpec{Strategy: "RANGE", Columns: []string{"created_at"}}},
+		&ir.Table{Schema: "public", Name: "events_2023", DetachedFrom: &ir.DetachedFrom{ParentTable: "events"}},
+	}
+	if _, err := d.Diff(desired, snap); err == nil {
+		t.Fatal("expected an error for DETACHED FROM a parent that doesn't have this child as a partition")
+	}
+}
+
+// TestDiffTableDetachedFromUnknownParentErrors proves a DETACHED FROM
+// pointing at a nonexistent parent table is a compile error.
+func TestDiffTableDetachedFromUnknownParentErrors(t *testing.T) {
+	d := New()
+	desired := []pipeline.IRObject{
+		&ir.Table{Schema: "public", Name: "events_2023", DetachedFrom: &ir.DetachedFrom{ParentTable: "nonexistent"}},
+	}
+	if _, err := d.Diff(desired, &pipeline.Snapshot{}); err == nil {
+		t.Fatal("expected an error for DETACHED FROM an unknown parent")
+	}
+}
+
 // TestDiffPartitionRenamedFromEmitsAlterRename is the regression guard for
 // the partition rename-detection gap: before this, a partition rename was
 // indistinguishable from "old partition removed, new partition added" —

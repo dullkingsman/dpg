@@ -750,6 +750,45 @@ func TestBuildTableSubPartitioned(t *testing.T) {
 	}
 }
 
+// TestBuildTableAttachedFromPartition guards RFC Section 7.13's "ATTACHED
+// FROM existing_table" form.
+func TestBuildTableAttachedFromPartition(t *testing.T) {
+	obj := buildObject(t, pipeline.KindTable,
+		`events (id BIGINT, created_at TIMESTAMPTZ NOT NULL) PARTITION BY RANGE (created_at)`,
+		`PARTITIONS { ATTACHED FROM legacy_events FOR VALUES FROM ('2023-01-01') TO ('2024-01-01'); }`,
+	)
+	tbl := obj.(*ir.Table)
+	if len(tbl.Partitions) != 1 {
+		t.Fatalf("expected 1 partition, got %d", len(tbl.Partitions))
+	}
+	p := tbl.Partitions[0]
+	if p.AttachedFrom == nil || *p.AttachedFrom != "legacy_events" {
+		t.Fatalf("AttachedFrom: got %v", p.AttachedFrom)
+	}
+	if p.Name != "legacy_events" {
+		t.Errorf("Name: got %q, want %q", p.Name, "legacy_events")
+	}
+}
+
+// TestBuildTableDetachedFrom guards RFC Section 7.13's DETACHED FROM block
+// directive on a standalone table declaration.
+func TestBuildTableDetachedFrom(t *testing.T) {
+	obj := buildObject(t, pipeline.KindTable,
+		`events_2023 (id BIGINT, created_at TIMESTAMPTZ NOT NULL)`,
+		`DETACHED FROM events CONCURRENTLY;`,
+	)
+	tbl := obj.(*ir.Table)
+	if tbl.DetachedFrom == nil {
+		t.Fatal("expected DetachedFrom to be set")
+	}
+	if tbl.DetachedFrom.ParentTable != "events" {
+		t.Errorf("ParentTable: got %q, want %q", tbl.DetachedFrom.ParentTable, "events")
+	}
+	if !tbl.DetachedFrom.Concurrently {
+		t.Error("expected Concurrently = true")
+	}
+}
+
 // TestBuildForeignTableOptions guards a real bug found live-testing a demo
 // project: buildForeignTable captured Foreign/ForeignServer but silently
 // dropped OPTIONS (...) entirely — no field existed to hold it, so a
