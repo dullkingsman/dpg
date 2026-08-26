@@ -185,7 +185,7 @@ func checkMinPGVersion(obj pipeline.IRObject, cfg pipeline.LinterConfig) []pipel
 		}
 	case *ir.Table:
 		if hasPrivilege(o.Grants, o.Revocations, "MAINTAIN") {
-			need(o.SrcPos, "MAINTAIN privilege", 17, "11.2")
+			need(o.SrcPos, "MAINTAIN privilege", 17, "7.10")
 		}
 	}
 	return diags
