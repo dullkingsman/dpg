@@ -1596,13 +1596,20 @@ base-type-block = *( ( comment-dir / owner-dir / renamed-from-dir ) ";" )
    dependency graph (Section 22) detects the resulting circular reference the
    same way it already detects circular `DEFERRABLE` foreign keys
    (Section 22.2) — a distinct cycle *kind*, broken by a distinct mechanism
-   specific to this case rather than Section 22.2's FK-specific algorithm: the
-   compiler emits the bare shell `CREATE TYPE mytype;` first, then the
-   `CREATE FUNCTION` statements that reference it, then the full
-   `CREATE TYPE mytype (INPUT = ..., OUTPUT = ..., ...)` — which real
-   PostgreSQL treats as replacing the shell entry rather than an error.
-   A user writing a self-referential base type declares only the single
-   full-option form in source; the two-step emission is internal.
+   specific to this case rather than Section 22.2's FK-specific algorithm:
+   the compiler simply omits the usual Function-depends-on-its-param/
+   return-type ordering edge for this specific case, so the `CREATE
+   FUNCTION` statements that reference `mytype` get emitted *before* the
+   full `CREATE TYPE mytype (INPUT = ..., OUTPUT = ..., ...)` — no
+   separate, explicit bare-shell statement is ever emitted. Real
+   PostgreSQL's own `LANGUAGE internal`/`LANGUAGE c` function creation
+   auto-creates the shell type implicitly the moment a not-yet-existing
+   return/argument type is referenced this way ("Creating a shell type
+   definition", confirmed live), and later treats the full `CREATE TYPE`
+   as replacing that auto-created shell rather than erroring. A user
+   writing a self-referential base type declares only the single
+   full-option form in source; the reordering (and PostgreSQL's own
+   implicit shell creation triggered by it) is internal.
 
 ```sql
 SCHEMA public {
@@ -2200,8 +2207,7 @@ TABLE order_items (
    pipeline. Both self-heal on an existing project's first `plan`/`apply`
    after upgrading (`legacyTypeNameBeforeFix` in `internal/diff/
    differ.go`), the same one-time upgrade-effect pattern already used for
-   the `SERIAL` IR-modeling and plpgsql `BodyHash` upgrades. See
-   `.dpg-notes/dpg-tracker.md` for the full closure writeup.
+   the `SERIAL` IR-modeling and plpgsql `BodyHash` upgrades.
 
 ### 7.3. Constraints
 
@@ -5257,9 +5263,11 @@ tablespace-block = *( ( comment-dir / renamed-from-dir ) ";" )
    `ALTER TABLESPACE old RENAME TO new` — Tablespace is cluster-level,
    not schema-scoped, so the generic extension's cross-schema `SET
    SCHEMA` half never applies (same as Publication/Server/Role above).
-   `WITH (...)` option changes remain the one still-open gap — this
-   document does not yet specify a non-destructive `SET`/`RESET` path
-   for them.
+   A `WITH (...)` option change emits a targeted
+   `ALTER TABLESPACE name SET (...)`/`RESET (...)` (real PostgreSQL's
+   identical two-clause grammar to `ALTER TABLE`'s own `SET`/`RESET`) —
+   `CAUTION`, since reloptions like `random_page_cost`/`seq_page_cost`
+   alter planning/maintenance behavior, not pure metadata.
 
 ```sql
 -- production/cluster/tablespaces.dpg
@@ -5275,7 +5283,7 @@ TABLESPACE archive  LOCATION '/mnt/hdd/pg_archive';
    |--------|-------------|--------|
    | Owner changed | `ALTER TABLESPACE name OWNER TO role` | `SAFE` |
    | Renamed (`RENAMED FROM`) | `ALTER TABLESPACE old RENAME TO new` | `CAUTION` |
-   | `WITH (...)` option changed | Not yet specified — grouped with the still-open gap above | — |
+   | `WITH (...)` option changed | `ALTER TABLESPACE name SET (...)`/`RESET (...)` | `CAUTION` |
    | `LOCATION` changed | `DROP TABLESPACE` + `CREATE TABLESPACE` | `DESTRUCTIVE` |
    | Tablespace removed | `DROP TABLESPACE name` | `DESTRUCTIVE` |
 
@@ -7302,7 +7310,7 @@ serial_sequence_declared      = "off"
    | Explicit revocations | Declared, Diffed | |
    | Default Privileges | Declared, Diffed | |
    | Security Labels (Section 14.11) | Declared, Diffed | Keyed by provider; every kind PostgreSQL's own `SECURITY LABEL` grammar supports and DPG models |
-   | Tablespaces | Declared, Passthrough | Cluster-level; reconstructed from catalog, hash-diffed. `CREATE`-time `WITH (...)` storage params, `OWNER TO`, `RENAME TO` all supported (Section 14.7); `SET`/`RESET` on `WITH (...)` options is still a separate, open gap |
+   | Tablespaces | Declared, Passthrough | Cluster-level; reconstructed from catalog, hash-diffed. `CREATE`-time `WITH (...)` storage params, `OWNER TO`, `RENAME TO`, and non-destructive `SET`/`RESET` on `WITH (...)` options are all supported (Section 14.7) |
    | Foreign Data Wrappers | Declared, Passthrough | Cluster-level; reconstructed from catalog, hash-diffed |
    | Foreign Servers | Declared, Passthrough | Reconstructed from catalog; hash-diffed. `OWNER`, `RENAMED FROM`, bare `VERSION`-only change also supported (Section 14.9) |
    | User Mappings | Declared, Passthrough | Reconstructed from catalog; hash-diffed. `OPTIONS` may hold a `{{secret-uri}}` reference (Section 14.10, Appendix D.5), resolved only immediately before `CREATE USER MAPPING` executes |
@@ -7337,7 +7345,6 @@ serial_sequence_declared      = "off"
    | `CREATE [PROCEDURAL] LANGUAGE` | Out of scope | Covered by extension install (`CREATE EXTENSION`); see Section 23 |
    | `CREATE TRANSFORM` | Out of scope | Always bundled with a specific extension pairing; see Section 23 |
    | `ALTER EXTENSION ADD`/`DROP member_object` | Out of scope | Extension-authoring concern, a tier below application-schema scope; see Section 23 |
-   | Minimum PG version targeting | Deferred | See Section 23; planned v1.1 |
 
 ---
 
@@ -7775,6 +7782,7 @@ SCHEMA public {
 
    | Code | Name | Description |
    |------|------|-------------|
+   | DPG-E000 | `unlabeled_compile_error` | Generic fallback label for a compile-time error not yet mapped to one of the specific codes below (`dpg validate --format json`'s catch-all `rule` value). |
    | DPG-E001 | `unknown_config_key` | Unknown key in `dpg.toml`. |
    | DPG-E002 | `ambiguous_connection` | Both `url` and `link` set in cluster config. |
    | DPG-E003 | `no_connection_configured` | Command requires a connection but neither `url` nor `link` is set. |

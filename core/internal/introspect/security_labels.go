@@ -17,13 +17,17 @@ import (
 //
 //   - pg_seclabel: every per-database object kind (table, column, view,
 //     function, procedure, aggregate, type/domain, schema, sequence,
-//     publication, subscription, event trigger). Keyed by (classoid,
-//     objoid, objsubid) — objsubid is the column's attnum for a table
-//     column, 0 for everything else.
-//   - pg_shseclabel: ROLE and TABLESPACE only, the two kinds among these
-//     that are cluster-wide rather than per-database (same boundary
-//     obj_description/shobj_description already splits on for comments).
-//     No objsubid column at all — shared objects never have sub-objects.
+//     publication, event trigger). Keyed by (classoid, objoid, objsubid) —
+//     objsubid is the column's attnum for a table column, 0 for everything
+//     else.
+//   - pg_shseclabel: ROLE, TABLESPACE, and SUBSCRIPTION — three kinds
+//     backed by a genuinely shared, cluster-wide catalog (relisshared,
+//     confirmed live) rather than a per-database one, despite Subscription
+//     having per-database CREATE SUBSCRIPTION syntax like every pg_seclabel
+//     kind above (same boundary obj_description/shobj_description already
+//     splits on for comments — see introspectSubscriptionSecurityLabels'
+//     own doc comment for why this one is easy to get wrong). No objsubid
+//     column at all — shared objects never have sub-objects.
 //
 // Every function below follows introspectXGrants' established shape
 // exactly: one query joining the catalog's name back from pg_seclabel/
