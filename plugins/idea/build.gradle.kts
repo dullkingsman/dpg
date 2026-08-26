@@ -3,7 +3,7 @@ plugins {
     id("org.jetbrains.intellij") version "1.17.2"
 }
 
-group   = "dev.thec1oud.plugins.ide.intellij"
+group   = "dev.thec1oud.plugins.ide"
 version = "0.2.0"
 
 repositories {

@@ -1,5 +1,5 @@
 <idea-plugin>
-  <id>dev.thec1oud.plugins.ide.intellij.dpg</id>
+  <id>dev.thec1oud.plugins.ide.dpg</id>
   <name>DPG</name>
   <version>0.2.0</version>
   <vendor url="https://github.com/thec1oud/dpg">thec1oud</vendor>
@@ -28,7 +28,7 @@
     <!-- ── File type ──────────────────────────────────────────────────────── -->
     <fileType
         name="DPG"
-        implementationClass="dev.thec1oud.plugins.ide.intellij.dpg.DpgFileType"
+        implementationClass="dev.thec1oud.plugins.ide.dpg.DpgFileType"
         language="DPG"
         extensions="dpg"
         fieldName="INSTANCE"/>
@@ -36,61 +36,61 @@
     <!-- ── Language foundation ───────────────────────────────────────────── -->
     <lang.parserDefinition
         language="DPG"
-        implementationClass="dev.thec1oud.plugins.ide.intellij.dpg.lang.DpgParserDefinition"/>
+        implementationClass="dev.thec1oud.plugins.ide.dpg.lang.DpgParserDefinition"/>
 
     <!-- ── Syntax highlighting ───────────────────────────────────────────── -->
     <lang.syntaxHighlighterFactory
         language="DPG"
-        implementationClass="dev.thec1oud.plugins.ide.intellij.dpg.highlight.DpgSyntaxHighlighterFactory"/>
+        implementationClass="dev.thec1oud.plugins.ide.dpg.highlight.DpgSyntaxHighlighterFactory"/>
 
     <colorSettingsPage
-        implementation="dev.thec1oud.plugins.ide.intellij.dpg.highlight.DpgColorSettingsPage"/>
+        implementation="dev.thec1oud.plugins.ide.dpg.highlight.DpgColorSettingsPage"/>
 
     <!-- ── Editor services ───────────────────────────────────────────────── -->
     <lang.commenter
         language="DPG"
-        implementationClass="dev.thec1oud.plugins.ide.intellij.dpg.editor.DpgCommenter"/>
+        implementationClass="dev.thec1oud.plugins.ide.dpg.editor.DpgCommenter"/>
 
     <lang.braceMatcher
         language="DPG"
-        implementationClass="dev.thec1oud.plugins.ide.intellij.dpg.editor.DpgBraceMatcher"/>
+        implementationClass="dev.thec1oud.plugins.ide.dpg.editor.DpgBraceMatcher"/>
 
     <lang.foldingBuilder
         language="DPG"
-        implementationClass="dev.thec1oud.plugins.ide.intellij.dpg.editor.DpgFoldingBuilder"/>
+        implementationClass="dev.thec1oud.plugins.ide.dpg.editor.DpgFoldingBuilder"/>
 
     <!-- ── Structure view ────────────────────────────────────────────────── -->
     <lang.psiStructureViewFactory
         language="DPG"
-        implementationClass="dev.thec1oud.plugins.ide.intellij.dpg.structure.DpgStructureViewFactory"/>
+        implementationClass="dev.thec1oud.plugins.ide.dpg.structure.DpgStructureViewFactory"/>
 
     <!-- ── Code completion ───────────────────────────────────────────────── -->
     <completion.contributor
         language="DPG"
-        implementationClass="dev.thec1oud.plugins.ide.intellij.dpg.completion.DpgCompletionContributor"/>
+        implementationClass="dev.thec1oud.plugins.ide.dpg.completion.DpgCompletionContributor"/>
 
     <!-- ── Semantic annotations ──────────────────────────────────────────── -->
     <annotator
         language="DPG"
-        implementationClass="dev.thec1oud.plugins.ide.intellij.dpg.annotator.DpgAnnotator"/>
+        implementationClass="dev.thec1oud.plugins.ide.dpg.annotator.DpgAnnotator"/>
 
     <!-- ── Find Usages ───────────────────────────────────────────────────── -->
     <lang.findUsagesProvider
         language="DPG"
-        implementationClass="dev.thec1oud.plugins.ide.intellij.dpg.findusages.DpgFindUsagesProvider"/>
+        implementationClass="dev.thec1oud.plugins.ide.dpg.findusages.DpgFindUsagesProvider"/>
 
     <!-- ── References (go-to-definition) ────────────────────────────────── -->
     <psi.referenceContributor
         language="DPG"
-        implementation="dev.thec1oud.plugins.ide.intellij.dpg.reference.DpgReferenceContributor"/>
+        implementation="dev.thec1oud.plugins.ide.dpg.reference.DpgReferenceContributor"/>
 
     <!-- ── Formatting ───────────────────────────────────────────────────── -->
     <lang.formatter
         language="DPG"
-        implementationClass="dev.thec1oud.plugins.ide.intellij.dpg.formatter.DpgFormattingModelBuilder"/>
+        implementationClass="dev.thec1oud.plugins.ide.dpg.formatter.DpgFormattingModelBuilder"/>
 
     <externalFormatProcessor
-        implementation="dev.thec1oud.plugins.ide.intellij.dpg.formatter.DpgExternalFormatter"/>
+        implementation="dev.thec1oud.plugins.ide.dpg.formatter.DpgExternalFormatter"/>
 
   </extensions>
 </idea-plugin>
