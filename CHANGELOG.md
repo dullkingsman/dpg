@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [idea-v0.5.2-alpha.15] — 2026-08-26
+
+- No changes.
+
 ## [vscode-v0.5.2-alpha.12] — 2026-08-26
 
 - No changes.
