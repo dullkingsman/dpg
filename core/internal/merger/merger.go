@@ -4,6 +4,7 @@ package merger
 
 import (
 	"fmt"
+	"reflect"
 	"sort"
 	"strconv"
 
@@ -368,12 +369,25 @@ func mergeTables(grp []pipeline.IRObject, base *ir.Table) (pipeline.IRObject, []
 		}
 
 		// Set-valued fields: union by name.
-		merged.Indexes = unionIndexes(merged.Indexes, next.Indexes)
-		merged.Policies = unionPolicies(merged.Policies, next.Policies)
-		merged.Triggers = unionTriggers(merged.Triggers, next.Triggers)
+		var err error
+		merged.Indexes, err = unionIndexes(merged.Indexes, next.Indexes)
+		if err != nil {
+			return nil, nil, err
+		}
+		merged.Policies, err = unionPolicies(merged.Policies, next.Policies)
+		if err != nil {
+			return nil, nil, err
+		}
+		merged.Triggers, err = unionTriggers(merged.Triggers, next.Triggers)
+		if err != nil {
+			return nil, nil, err
+		}
 		merged.Grants = append(merged.Grants, next.Grants...)
 		merged.Revocations = append(merged.Revocations, next.Revocations...)
-		merged.Constraints = unionConstraints(merged.Constraints, next.Constraints)
+		merged.Constraints, err = unionConstraints(merged.Constraints, next.Constraints)
+		if err != nil {
+			return nil, nil, err
+		}
 		merged.Columns = mergeColumns(merged.Columns, next.Columns)
 		merged.Partitions = append(merged.Partitions, next.Partitions...)
 	}
@@ -381,69 +395,106 @@ func mergeTables(grp []pipeline.IRObject, base *ir.Table) (pipeline.IRObject, []
 	return &merged, tracker.diags, nil
 }
 
-func unionIndexes(a, b []*ir.Index) []*ir.Index {
+// equalIgnoringPos reports whether two set-valued members are identical set
+// down to every field except Pos (source position necessarily differs
+// between the two files declaring "the same" member) — RFC Section 3.7:
+// "Identical duplicate entries (same name AND same definition) are silently
+// deduplicated. Entries with the same name but different definitions are a
+// compiler error (DPG-E005, conflicting set member)."
+func equalIgnoringPos[T any](a, b T, clearPos func(*T)) bool {
+	ac, bc := a, b
+	clearPos(&ac)
+	clearPos(&bc)
+	return reflect.DeepEqual(ac, bc)
+}
+
+func unionIndexes(a, b []*ir.Index) ([]*ir.Index, error) {
 	seen := make(map[string]*ir.Index, len(a))
 	for _, idx := range a {
 		seen[idx.Name] = idx
 	}
 	result := append([]*ir.Index(nil), a...)
 	for _, idx := range b {
-		if _, exists := seen[idx.Name]; !exists {
+		existing, exists := seen[idx.Name]
+		if !exists {
 			result = append(result, idx)
 			seen[idx.Name] = idx
+			continue
 		}
-		// Same name + same def → silently deduplicate (we skip for now).
+		if !equalIgnoringPos(*existing, *idx, func(x *ir.Index) { x.Pos = pipeline.SourcePos{} }) {
+			return nil, pipeline.ErrorfCode(idx.Pos, "DPG-E005",
+				"index %q declared with conflicting definitions across files", idx.Name)
+		}
+		// Same name + same def → silently deduplicate.
 	}
-	return result
+	return result, nil
 }
 
-func unionPolicies(a, b []*ir.Policy) []*ir.Policy {
-	seen := make(map[string]bool, len(a))
+func unionPolicies(a, b []*ir.Policy) ([]*ir.Policy, error) {
+	seen := make(map[string]*ir.Policy, len(a))
 	for _, p := range a {
-		seen[p.Name] = true
+		seen[p.Name] = p
 	}
 	result := append([]*ir.Policy(nil), a...)
 	for _, p := range b {
-		if !seen[p.Name] {
+		existing, exists := seen[p.Name]
+		if !exists {
 			result = append(result, p)
-			seen[p.Name] = true
+			seen[p.Name] = p
+			continue
+		}
+		if !equalIgnoringPos(*existing, *p, func(x *ir.Policy) { x.Pos = pipeline.SourcePos{} }) {
+			return nil, pipeline.ErrorfCode(p.Pos, "DPG-E005",
+				"policy %q declared with conflicting definitions across files", p.Name)
 		}
 	}
-	return result
+	return result, nil
 }
 
-func unionTriggers(a, b []*ir.Trigger) []*ir.Trigger {
-	seen := make(map[string]bool, len(a))
+func unionTriggers(a, b []*ir.Trigger) ([]*ir.Trigger, error) {
+	seen := make(map[string]*ir.Trigger, len(a))
 	for _, t := range a {
-		seen[t.Name] = true
+		seen[t.Name] = t
 	}
 	result := append([]*ir.Trigger(nil), a...)
 	for _, t := range b {
-		if !seen[t.Name] {
+		existing, exists := seen[t.Name]
+		if !exists {
 			result = append(result, t)
-			seen[t.Name] = true
+			seen[t.Name] = t
+			continue
+		}
+		if !equalIgnoringPos(*existing, *t, func(x *ir.Trigger) { x.Pos = pipeline.SourcePos{} }) {
+			return nil, pipeline.ErrorfCode(t.Pos, "DPG-E005",
+				"trigger %q declared with conflicting definitions across files", t.Name)
 		}
 	}
-	return result
+	return result, nil
 }
 
-func unionConstraints(a, b []*ir.Constraint) []*ir.Constraint {
-	seen := make(map[string]bool, len(a))
+func unionConstraints(a, b []*ir.Constraint) ([]*ir.Constraint, error) {
+	seen := make(map[string]*ir.Constraint, len(a))
 	for _, c := range a {
 		if c.Name != "" {
-			seen[c.Name] = true
+			seen[c.Name] = c
 		}
 	}
 	result := append([]*ir.Constraint(nil), a...)
 	for _, c := range b {
-		if c.Name == "" || !seen[c.Name] {
+		existing, exists := seen[c.Name]
+		if c.Name == "" || !exists {
 			result = append(result, c)
 			if c.Name != "" {
-				seen[c.Name] = true
+				seen[c.Name] = c
 			}
+			continue
+		}
+		if !equalIgnoringPos(*existing, *c, func(x *ir.Constraint) { x.Pos = pipeline.SourcePos{} }) {
+			return nil, pipeline.ErrorfCode(c.Pos, "DPG-E005",
+				"constraint %q declared with conflicting definitions across files", c.Name)
 		}
 	}
-	return result
+	return result, nil
 }
 
 func mergeColumns(a, b []*ir.Column) []*ir.Column {
@@ -672,7 +723,11 @@ func mergeTypes(grp []pipeline.IRObject, base *ir.Type) (pipeline.IRObject, []pi
 			if next.DomainNotNull {
 				merged.DomainNotNull = true
 			}
-			merged.DomainConstraints = unionConstraints(merged.DomainConstraints, next.DomainConstraints)
+			var err error
+			merged.DomainConstraints, err = unionConstraints(merged.DomainConstraints, next.DomainConstraints)
+			if err != nil {
+				return nil, nil, err
+			}
 		}
 	}
 	return &merged, tracker.diags, nil

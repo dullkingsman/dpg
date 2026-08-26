@@ -1,6 +1,7 @@
 package merger_test
 
 import (
+	"errors"
 	"strings"
 	"testing"
 
@@ -8,6 +9,33 @@ import (
 	"github.com/thec1oud/dpg/internal/merger"
 	"github.com/thec1oud/dpg/internal/pipeline"
 )
+
+// assertDPGE005 checks err carries a DPG-E005 CompilerError. ErrorfCode's
+// Code field is structured metadata, not interpolated into Error()'s text,
+// so this can't be a strings.Contains check. Merge() collects any
+// *pipeline.CompilerError from a group merge into a pipeline.Diagnostics
+// slice rather than returning it directly (see Merge's own loop), so the
+// code must be found there, not via errors.As on a bare CompilerError.
+func assertDPGE005(t *testing.T, err error, desc string) {
+	t.Helper()
+	if err == nil {
+		t.Fatalf("expected error for %s, got nil", desc)
+	}
+	diags, ok := err.(pipeline.Diagnostics)
+	if !ok {
+		var ce *pipeline.CompilerError
+		if !errors.As(err, &ce) {
+			t.Fatalf("expected pipeline.Diagnostics or *pipeline.CompilerError for %s, got: %v (%T)", desc, err, err)
+		}
+		diags = pipeline.Diagnostics{ce}
+	}
+	for _, d := range diags {
+		if d.Code == "DPG-E005" {
+			return
+		}
+	}
+	t.Errorf("expected a DPG-E005 diagnostic for %s, got: %v", desc, err)
+}
 
 var pos = pipeline.SourcePos{File: "a.dpg", Line: 1, Col: 1}
 var pos2 = pipeline.SourcePos{File: "b.dpg", Line: 1, Col: 1}
@@ -105,6 +133,50 @@ func TestMerge_Table_DuplicateIndexDeduped(t *testing.T) {
 	if len(tbl.Indexes) != 1 {
 		t.Errorf("Indexes: duplicate should be deduped; got %d", len(tbl.Indexes))
 	}
+}
+
+func TestMerge_Table_IndexConflictIsError(t *testing.T) {
+	a := &ir.Table{Schema: "app", Name: "t", SrcPos: pos, Indexes: []*ir.Index{
+		{Name: "idx_same", Columns: []pipeline.IndexColumn{{Name: "x"}}, Pos: pos},
+	}}
+	b := &ir.Table{Schema: "app", Name: "t", SrcPos: pos2, Indexes: []*ir.Index{
+		{Name: "idx_same", Columns: []pipeline.IndexColumn{{Name: "y"}}, Pos: pos2},
+	}}
+	_, _, err := merger.New().Merge([]pipeline.IRObject{a, b})
+	assertDPGE005(t, err, "conflicting index definitions")
+}
+
+func TestMerge_Table_PolicyConflictIsError(t *testing.T) {
+	a := &ir.Table{Schema: "app", Name: "t", SrcPos: pos, Policies: []*ir.Policy{
+		{Name: "p", Command: "SELECT", Pos: pos},
+	}}
+	b := &ir.Table{Schema: "app", Name: "t", SrcPos: pos2, Policies: []*ir.Policy{
+		{Name: "p", Command: "UPDATE", Pos: pos2},
+	}}
+	_, _, err := merger.New().Merge([]pipeline.IRObject{a, b})
+	assertDPGE005(t, err, "conflicting policy definitions")
+}
+
+func TestMerge_Table_TriggerConflictIsError(t *testing.T) {
+	a := &ir.Table{Schema: "app", Name: "t", SrcPos: pos, Triggers: []*ir.Trigger{
+		{Name: "trg", When: "BEFORE", Events: []string{"INSERT"}, ForEach: "ROW", Function: "f", Pos: pos},
+	}}
+	b := &ir.Table{Schema: "app", Name: "t", SrcPos: pos2, Triggers: []*ir.Trigger{
+		{Name: "trg", When: "AFTER", Events: []string{"INSERT"}, ForEach: "ROW", Function: "f", Pos: pos2},
+	}}
+	_, _, err := merger.New().Merge([]pipeline.IRObject{a, b})
+	assertDPGE005(t, err, "conflicting trigger definitions")
+}
+
+func TestMerge_Table_ConstraintConflictIsError(t *testing.T) {
+	a := &ir.Table{Schema: "app", Name: "t", SrcPos: pos, Constraints: []*ir.Constraint{
+		{Name: "ck_t", Type: "CHECK", Expr: "CHECK (amount > 0)", Pos: pos},
+	}}
+	b := &ir.Table{Schema: "app", Name: "t", SrcPos: pos2, Constraints: []*ir.Constraint{
+		{Name: "ck_t", Type: "CHECK", Expr: "CHECK (amount > 100)", Pos: pos2},
+	}}
+	_, _, err := merger.New().Merge([]pipeline.IRObject{a, b})
+	assertDPGE005(t, err, "conflicting constraint definitions")
 }
 
 func TestMerge_Table_ConstraintsUnioned(t *testing.T) {
