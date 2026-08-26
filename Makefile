@@ -236,7 +236,7 @@ docs-site: docs-cli
 	HUGO_PARAMS_DOCSVERSION="$(DOCS_VERSION)" \
 	HUGO_PARAMS_DPGVERSION="$(VERSION)" \
 	HUGO_PARAMS_LSPVERSION="$(LSP_VERSION)" \
-	$(HUGO) --minify
+	$(HUGO) --minify --cleanDestinationDir
 
 docs-serve: docs-cli
 	cd $(WEBSITE_DIR) && npm install && \

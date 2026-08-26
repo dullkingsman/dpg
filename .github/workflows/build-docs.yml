@@ -54,7 +54,7 @@ jobs:
 
       - name: Build Hugo site
         working-directory: site
-        run: hugo --minify
+        run: hugo --minify --cleanDestinationDir
         env:
           HUGO_BASEURL: "https://thec1oud.github.io/dpg/"
           HUGO_PARAMS_DOCSVERSION: ${{ inputs.docs_version }}
