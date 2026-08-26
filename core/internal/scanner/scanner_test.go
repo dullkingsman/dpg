@@ -996,6 +996,55 @@ TABLE events (id BIGINT, ...ts_cols);
 	}
 }
 
+func TestMacroInsideBlockIsError(t *testing.T) {
+	src := `
+TABLE orders (id BIGINT) {
+    MACRO evil (x INT);
+}
+`
+	err := scanErr(t, src)
+	if err == nil {
+		t.Fatal("expected error for MACRO declared inside a block, got nil")
+	}
+	if !strings.Contains(err.Error(), "DPG-E007") {
+		t.Errorf("error should carry DPG-E007, got: %v", err)
+	}
+}
+
+func TestParenMacroSpreadInsideBlockIsError(t *testing.T) {
+	src := `
+MACRO audit_cols (created_at TIMESTAMPTZ)
+
+TABLE orders (id BIGINT) {
+    ...audit_cols
+}
+`
+	err := scanErr(t, src)
+	if err == nil {
+		t.Fatal("expected error for paren-body macro spread inside a { } block, got nil")
+	}
+	if !strings.Contains(err.Error(), "DPG-E008") {
+		t.Errorf("error should carry DPG-E008, got: %v", err)
+	}
+}
+
+func TestBraceMacroSpreadInsideParenIsError(t *testing.T) {
+	src := `
+MACRO std_grants {
+    GRANTS { SELECT TO app_reader; }
+}
+
+TABLE orders (id BIGINT, ...std_grants);
+`
+	err := scanErr(t, src)
+	if err == nil {
+		t.Fatal("expected error for brace-body macro spread inside a ( ) list, got nil")
+	}
+	if !strings.Contains(err.Error(), "DPG-E009") {
+		t.Errorf("error should carry DPG-E009, got: %v", err)
+	}
+}
+
 func TestMacroMultipleSpreads(t *testing.T) {
 	src := `
 MACRO ts_cols (created_at TIMESTAMPTZ, updated_at TIMESTAMPTZ)

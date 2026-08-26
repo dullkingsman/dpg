@@ -104,7 +104,9 @@ func collectMacros(src []byte) (macroStore, error) {
 			// Skip to the next declaration-level boundary.
 			// We need to skip over the entire declaration so we don't
 			// accidentally pick up a MACRO keyword inside a function body.
-			p.skipDeclaration(pos, wordStart)
+			if err := p.skipDeclaration(pos, wordStart); err != nil {
+				return nil, err
+			}
 			continue
 		}
 
@@ -150,6 +152,14 @@ func collectMacros(src []byte) (macroStore, error) {
 func expandMacros(src []byte, store macroStore) ([]byte, error) {
 	var out strings.Builder
 	p := &macroParser{src: src}
+	// brackets tracks the stack of currently-open '(' / '{' delimiters in
+	// the real source text, so a spread site can be checked against its
+	// innermost enclosing bracket type (DPG-E008/E009, Section 4.7: "A
+	// paren-body macro MUST only be spread inside a ( ) list" / "A
+	// brace-body macro MUST only be spread inside a { } block"). A
+	// substituted macro body's own internal brackets are written as a bulk
+	// string, bypassing this loop entirely, so they never affect the stack.
+	var brackets []byte
 
 	for !p.eof() {
 		// Preserve string literals verbatim.
@@ -245,12 +255,28 @@ func expandMacros(src []byte, store macroStore) ([]byte, error) {
 			if !ok {
 				return nil, fmt.Errorf("spread ...%s: macro %q is not defined (DPG-E010)", name, name)
 			}
+			if len(brackets) > 0 {
+				switch innermost := brackets[len(brackets)-1]; {
+				case def.ParenStyle && innermost == '{':
+					return nil, fmt.Errorf("spread ...%s: paren-body macro %q spread inside a { } block, must be spread inside a ( ) list (DPG-E008)", name, name)
+				case !def.ParenStyle && innermost == '(':
+					return nil, fmt.Errorf("spread ...%s: brace-body macro %q spread inside a ( ) list, must be spread inside a { } block (DPG-E009)", name, name)
+				}
+			}
 			out.WriteString(def.Body)
 			// Consume optional trailing comma/semicolon that was the spread's separator.
 			// We leave it to the caller to provide correct separators around the spread.
 			continue
 		}
 
+		switch p.peek() {
+		case '(', '{':
+			brackets = append(brackets, p.peek())
+		case ')', '}':
+			if len(brackets) > 0 {
+				brackets = brackets[:len(brackets)-1]
+			}
+		}
 		out.WriteByte(src[p.pos])
 		p.advance()
 	}
@@ -528,27 +554,30 @@ func (p *macroParser) readBalanced(open, close byte) (string, error) {
 // skipDeclaration advances past a non-MACRO top-level declaration.
 // This is used during macro collection to skip over declarations that might
 // contain the word "MACRO" in a body (e.g. a function named macro_helper).
-// wordStart is the position where the first keyword started.
-func (p *macroParser) skipDeclaration(declStart, _ int) {
+// wordStart is the position where the first keyword started. Returns an
+// error (DPG-E007) if a genuine MACRO keyword is found nested inside the
+// declaration's { } block — MACRO is only valid as a top-level declaration
+// (Section 4.7).
+func (p *macroParser) skipDeclaration(declStart, _ int) error {
 	// Skip to ';' or end of a { } block at depth 0.
 	// This is a best-effort skip — we track strings and dollar-quotes.
 	for !p.eof() {
 		ch := p.peek()
 		if ch == ';' {
 			p.advance()
-			return
+			return nil
 		}
 		if ch == '{' {
 			p.advance()
-			if _, err := p.readBalanced('{', '}'); err != nil {
-				return
+			if err := p.scanBlockRejectingMacro(); err != nil {
+				return err
 			}
 			// After a { } block, optionally a trailing ';'.
 			p.skipWS()
 			if !p.eof() && p.peek() == ';' {
 				p.advance()
 			}
-			return
+			return nil
 		}
 		if ch == '\'' {
 			_ = p.skipSingleQuoted()
@@ -556,15 +585,74 @@ func (p *macroParser) skipDeclaration(declStart, _ int) {
 		}
 		if tag, ok := p.peekDollarTag(); ok {
 			if err := p.skipDollarQuoted(tag); err != nil {
-				return
+				return nil
 			}
 			p.skipWS()
 			if !p.eof() && p.peek() == ';' {
 				p.advance()
 			}
-			return
+			return nil
 		}
 		_ = declStart
 		p.advance()
 	}
+	return nil
+}
+
+// scanBlockRejectingMacro consumes a { } block (the opening '{' must already
+// be consumed) exactly like readBalanced('{', '}'), except it additionally
+// rejects a bare MACRO keyword found at any nesting depth inside the block —
+// MACRO declarations found inside a block (DPG-E007, Section 4.7's "It MUST
+// appear [at the top level]") rather than at the top level of a .dpg file.
+func (p *macroParser) scanBlockRejectingMacro() error {
+	depth := 1
+	for !p.eof() {
+		ch := p.peek()
+		switch {
+		case ch == '{':
+			depth++
+			p.advance()
+		case ch == '}':
+			depth--
+			p.advance()
+			if depth == 0 {
+				return nil
+			}
+		case ch == '\'':
+			if err := p.skipSingleQuoted(); err != nil {
+				return err
+			}
+		case ch == '-' && p.peekAt(1) == '-':
+			for !p.eof() && p.peek() != '\n' {
+				p.advance()
+			}
+		case ch == '/' && p.peekAt(1) == '*':
+			p.advance()
+			p.advance()
+			for !p.eof() {
+				if p.peek() == '*' && p.peekAt(1) == '/' {
+					p.advance()
+					p.advance()
+					break
+				}
+				p.advance()
+			}
+		default:
+			if tag, ok := p.peekDollarTag(); ok {
+				if err := p.skipDollarQuoted(tag); err != nil {
+					return err
+				}
+				continue
+			}
+			if isWordStart(ch) {
+				word := p.readWord()
+				if strings.ToUpper(word) == "MACRO" {
+					return fmt.Errorf("MACRO: declaration found inside a block — MACRO is only valid as a top-level declaration (DPG-E007)")
+				}
+				continue
+			}
+			p.advance()
+		}
+	}
+	return fmt.Errorf("unterminated {...} block")
 }
