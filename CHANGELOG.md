@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [grammar-v0.5.2-alpha.13] — 2026-08-26
+
+### Fixed
+
+- Drop 'intellij' from plugin ID per Marketplace validation
+- Pass --cleanDestinationDir to hugo builds
+- Add missing secret-uri shortcode template
+
+### Changed
+
+- Namespace plugin ID under dev.thec1oud reverse-DNS
+
 ## [0.5.5-alpha.4] — 2026-08-26
 
 ### Fixed
