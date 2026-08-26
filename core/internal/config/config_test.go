@@ -3,6 +3,7 @@ package config_test
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/dullkingsman/dpg/internal/config"
@@ -106,6 +107,71 @@ func TestLoadRoot_MissingFile(t *testing.T) {
 	}
 }
 
+// TestLoadRoot_UnknownTopLevelKey guards DPG-E001 (unknown_config_key, RFC
+// Appendix C) — previously had NO enforcement anywhere in this codebase (a
+// typo'd or stray key was silently ignored), unlike every other documented
+// DPG-E0xx code, which was merely unlabeled rather than unimplemented.
+func TestLoadRoot_UnknownTopLevelKey(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, dir, "dpg.toml", `
+[compiler]
+default_drop_behavior = "restrict"
+
+[bogus_section]
+foo = "bar"
+`)
+	_, err := config.LoadRoot(dir)
+	if err == nil {
+		t.Fatal("expected error for unknown top-level section")
+	}
+	if !strings.Contains(err.Error(), "DPG-E001") {
+		t.Errorf("expected DPG-E001 in error, got: %s", err)
+	}
+	if !strings.Contains(err.Error(), "bogus_section") {
+		t.Errorf("expected the unknown key name in error, got: %s", err)
+	}
+}
+
+// TestLoadRoot_UnknownNestedKey guards a typo'd key inside an otherwise
+// valid, known section (not just a wholly unknown top-level section).
+func TestLoadRoot_UnknownNestedKey(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, dir, "dpg.toml", `
+[compiler]
+default_drop_behavior = "restrict"
+typo_key = "oops"
+`)
+	_, err := config.LoadRoot(dir)
+	if err == nil {
+		t.Fatal("expected error for unknown key inside [compiler]")
+	}
+	if !strings.Contains(err.Error(), "DPG-E001") || !strings.Contains(err.Error(), "typo_key") {
+		t.Errorf("expected DPG-E001 mentioning typo_key, got: %s", err)
+	}
+}
+
+// TestLoadRoot_NameMapsKeysNeverFlagged guards against a false positive:
+// [namemaps]'s custom UnmarshalTOML must not make its own (validly-shaped)
+// keys look "unknown" to checkUnknownKeys.
+func TestLoadRoot_NameMapsKeysNeverFlagged(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, dir, "dpg.toml", `
+[compiler]
+default_drop_behavior = "restrict"
+
+[namemaps]
+default = "LOWER_SNAKE_CASE"
+prisma = "LOWER_CAMEL_CASE"
+
+[namemaps.column]
+prisma = "UPPER_CAMEL_CASE"
+`)
+	_, err := config.LoadRoot(dir)
+	if err != nil {
+		t.Fatalf("LoadRoot: unexpected error for valid [namemaps]: %v", err)
+	}
+}
+
 // ── LoadCluster ───────────────────────────────────────────────────────────────
 
 func TestLoadCluster_Basic(t *testing.T) {
@@ -154,6 +220,25 @@ url = "postgres://localhost/prod"
 	_, err := config.LoadCluster(path)
 	if err == nil {
 		t.Fatal("expected error: cluster name is required")
+	}
+}
+
+// TestLoadCluster_UnknownKey is LoadRoot's DPG-E001 guard at the cluster
+// config level.
+func TestLoadCluster_UnknownKey(t *testing.T) {
+	dir := t.TempDir()
+	path := writeFile(t, dir, "dpg.toml", `
+[cluster]
+name = "prod"
+url = "postgres://localhost/prod"
+bogus_key = true
+`)
+	_, err := config.LoadCluster(path)
+	if err == nil {
+		t.Fatal("expected error for unknown key")
+	}
+	if !strings.Contains(err.Error(), "DPG-E001") || !strings.Contains(err.Error(), "bogus_key") {
+		t.Errorf("expected DPG-E001 mentioning bogus_key, got: %s", err)
 	}
 }
 
@@ -213,6 +298,24 @@ default_schema = "app"
 	_, err := config.LoadDatabase(path)
 	if err == nil {
 		t.Fatal("expected error: database name is required")
+	}
+}
+
+// TestLoadDatabase_UnknownKey is LoadRoot's DPG-E001 guard at the database
+// config level.
+func TestLoadDatabase_UnknownKey(t *testing.T) {
+	dir := t.TempDir()
+	path := writeFile(t, dir, "dpg.toml", `
+[database]
+name = "app"
+bogus_key = 5
+`)
+	_, err := config.LoadDatabase(path)
+	if err == nil {
+		t.Fatal("expected error for unknown key")
+	}
+	if !strings.Contains(err.Error(), "DPG-E001") || !strings.Contains(err.Error(), "bogus_key") {
+		t.Errorf("expected DPG-E001 mentioning bogus_key, got: %s", err)
 	}
 }
 
@@ -286,6 +389,12 @@ default = "SNAKE_LOWER"
 	if err == nil {
 		t.Fatal("expected error for unknown rule SNAKE_LOWER, got nil")
 	}
+	// DPG-E030 (invalid_namemap_rule, RFC Appendix C) — embedded in the
+	// error message text (this codebase's precedent for non-CompilerError
+	// errors, e.g. DPG-E036/DPG-E012 elsewhere).
+	if !strings.Contains(err.Error(), "DPG-E030") {
+		t.Errorf("expected DPG-E030 in error, got: %s", err)
+	}
 }
 
 func TestNameMaps_InvalidRuleInByType(t *testing.T) {
@@ -297,6 +406,9 @@ prisma = "NOT_A_RULE"
 	_, err := config.LoadRoot(dir)
 	if err == nil {
 		t.Fatal("expected error for unknown rule in [namemaps.column], got nil")
+	}
+	if !strings.Contains(err.Error(), "DPG-E030") {
+		t.Errorf("expected DPG-E030 in error, got: %s", err)
 	}
 }
 

@@ -4326,6 +4326,14 @@ func TestDiffConstraintRenamedFromStaleErrors(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected an error for a stale RENAMED FROM matching no snapshot constraint")
 	}
+	// DPG-E021 (stale_renamed_from, RFC Appendix C).
+	cerr, ok := err.(*pipeline.CompilerError)
+	if !ok {
+		t.Fatalf("expected *pipeline.CompilerError, got %T: %v", err, err)
+	}
+	if cerr.Code != "DPG-E021" {
+		t.Errorf("Code: got %q, want DPG-E021", cerr.Code)
+	}
 }
 
 // TestDiffDomainConstraintRenamedFromEmitsAlterRename is
@@ -10386,6 +10394,14 @@ func TestDiffEnumRemoveRequiresMigrateRemoveBlock(t *testing.T) {
 	if !strings.Contains(err.Error(), "MIGRATE REMOVE") {
 		t.Errorf("expected MIGRATE REMOVE in error, got: %s", err)
 	}
+	// DPG-E014 (unguarded_enum_removal, RFC Appendix C).
+	cerr, ok := err.(*pipeline.CompilerError)
+	if !ok {
+		t.Fatalf("expected *pipeline.CompilerError, got %T: %v", err, err)
+	}
+	if cerr.Code != "DPG-E014" {
+		t.Errorf("Code: got %q, want DPG-E014", cerr.Code)
+	}
 }
 
 func TestDiffEnumRemoveEmitsShadowTypeAndDrop(t *testing.T) {
@@ -10469,6 +10485,13 @@ func TestDiffEnumRemoveAltersAffectedColumns(t *testing.T) {
 	}
 	if !containsSQL(ops, "RAISE EXCEPTION") {
 		t.Errorf("expected verification DO block, got: %v", sqls)
+	}
+	// DPG-E013 (enum_migration_data_remains, RFC Appendix C) — a runtime
+	// RAISE EXCEPTION, not a compile-time CompilerError, so the code is
+	// embedded directly in the raised message text (same precedent as
+	// DPG-E036/DPG-E012 elsewhere in this codebase).
+	if !containsSQL(ops, "DPG-E013") {
+		t.Errorf("expected DPG-E013 in the verification DO block's RAISE EXCEPTION message, got: %v", sqls)
 	}
 }
 

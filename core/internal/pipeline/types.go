@@ -371,6 +371,14 @@ type Querier interface {
 type CompilerError struct {
 	Pos     SourcePos
 	Message string
+	// Code is the RFC Appendix C `DPG-E0xx` code identifying this specific
+	// error condition ("" when unlabeled). Threaded through only at call
+	// sites that have been explicitly mapped to a documented code — the
+	// vast majority of Errorf call sites across this codebase predate this
+	// field and stay "" (compileErrsToDiagnostics' DPG-E000 catch-all
+	// covers those, same as before this field existed). Use ErrorfCode
+	// instead of Errorf to set it.
+	Code string
 }
 
 func (e *CompilerError) Error() string {
@@ -396,4 +404,12 @@ func (d Diagnostics) HasErrors() bool {
 // Errorf constructs a CompilerError at the given position.
 func Errorf(pos SourcePos, format string, args ...any) *CompilerError {
 	return &CompilerError{Pos: pos, Message: fmt.Sprintf(format, args...)}
+}
+
+// ErrorfCode is Errorf plus a documented DPG-E0xx code (RFC Appendix C) —
+// use at a call site whose error condition has been explicitly mapped to a
+// code, so callers like cmd/dpg/validate.go's --format json output can
+// surface the real code instead of the generic DPG-E000 fallback.
+func ErrorfCode(pos SourcePos, code, format string, args ...any) *CompilerError {
+	return &CompilerError{Pos: pos, Message: fmt.Sprintf(format, args...), Code: code}
 }

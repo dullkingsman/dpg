@@ -210,7 +210,7 @@ func (d *Differ) Diff(desired []pipeline.IRObject, snap *pipeline.Snapshot) ([]p
 			continue
 		}
 		if !oldFound {
-			return nil, pipeline.Errorf(obj.Pos(),
+			return nil, pipeline.ErrorfCode(obj.Pos(), "DPG-E021",
 				"RENAMED FROM %q on %s %q does not match the snapshot — neither the old nor the new name exists there. Remove RENAMED FROM if this is a genuinely new object.",
 				oldKey, describeKind(obj), newKey)
 		}
@@ -825,7 +825,7 @@ func diffCompositeAttrs(typeIdent string, attrs []*ir.Column, snap []snapshot.Sn
 			continue
 		}
 		if !oldInSnap {
-			return nil, pipeline.Errorf(a.SrcPos,
+			return nil, pipeline.ErrorfCode(a.SrcPos, "DPG-E021",
 				"RENAMED FROM %q on composite attribute %q in %s does not match the snapshot — neither the old nor the new name exists there. Remove RENAMED FROM if this is a genuinely new attribute.",
 				*a.RenamedFrom, a.Name, typeIdent)
 		}
@@ -6759,7 +6759,7 @@ func diffType(o *ir.Type, snap *snapshot.SnapType, fullSnap *pipeline.Snapshot, 
 				continue // post-apply / no-op state
 			}
 			if !oldInSnap {
-				return nil, pipeline.Errorf(c.Pos,
+				return nil, pipeline.ErrorfCode(c.Pos, "DPG-E021",
 					"RENAMED FROM %q on domain constraint %q does not match the snapshot — neither the old nor the new name exists there. Remove RENAMED FROM if this is a genuinely new constraint.",
 					*c.RenamedFrom, c.Name)
 			}
@@ -7072,7 +7072,7 @@ func diffEnumRemove(o *ir.Type, snap *snapshot.SnapType, fullSnap *pipeline.Snap
 	shadowIdent := qualIdent(o.Schema, o.Name+"__dpg_new")
 
 	if o.MigrateRemove == nil {
-		return nil, pipeline.Errorf(pos,
+		return nil, pipeline.ErrorfCode(pos, "DPG-E014",
 			"enum %s has removed values but no MIGRATE REMOVE block; add a MIGRATE REMOVE block with DML to migrate existing rows before removing",
 			typeIdent)
 	}
@@ -7131,7 +7131,7 @@ func diffEnumRemove(o *ir.Type, snap *snapshot.SnapType, fullSnap *pipeline.Snap
 		ops = append(ops, safeOp(fmt.Sprintf(
 			"DO $$ DECLARE _cnt bigint; BEGIN\n"+
 				"  SELECT count(*) INTO _cnt FROM %s WHERE %s::text = ANY(ARRAY[%s]);\n"+
-				"  IF _cnt > 0 THEN RAISE EXCEPTION 'MIGRATE REMOVE: %% row(s) in %s.%s still carry a removed %s value', _cnt; END IF;\n"+
+				"  IF _cnt > 0 THEN RAISE EXCEPTION 'DPG-E013: MIGRATE REMOVE: %% row(s) in %s.%s still carry a removed %s value', _cnt; END IF;\n"+
 				"END; $$;",
 			tblIdent, colIdent, strings.Join(removedLits, ", "),
 			tblIdent, colIdent, typeIdent,
@@ -7620,7 +7620,7 @@ func diffPartitionList(schema, parent string, desired []*ir.Partition, snap []sn
 			continue
 		}
 		if !oldInSnap {
-			return nil, pipeline.Errorf(p.SrcPos,
+			return nil, pipeline.ErrorfCode(p.SrcPos, "DPG-E021",
 				"RENAMED FROM %q on partition %q does not match the snapshot — neither the old nor the new name exists there. Remove RENAMED FROM if this is a genuinely new partition.",
 				*p.RenamedFrom, p.Name)
 		}
@@ -7846,7 +7846,7 @@ func diffColumns(tbl string, o *ir.Table, snap *snapshot.SnapTable, vtypes map[s
 			continue
 		}
 		if !oldInSnap {
-			return nil, nil, nil, pipeline.Errorf(col.SrcPos,
+			return nil, nil, nil, pipeline.ErrorfCode(col.SrcPos, "DPG-E021",
 				"RENAMED FROM %q on column %q in %s does not match the snapshot — neither the old nor the new name exists there. Remove RENAMED FROM if this is a genuinely new column.",
 				*col.RenamedFrom, col.Name, tbl)
 		}
@@ -8533,7 +8533,7 @@ func diffConstraints(tbl string, o *ir.Table, snap *snapshot.SnapTable, fullSnap
 			continue
 		}
 		if !oldInSnap {
-			return nil, pipeline.Errorf(c.Pos,
+			return nil, pipeline.ErrorfCode(c.Pos, "DPG-E021",
 				"RENAMED FROM %q on constraint %q does not match the snapshot — neither the old nor the new name exists there. Remove RENAMED FROM if this is a genuinely new constraint.",
 				*c.RenamedFrom, c.Name)
 		}
@@ -9206,7 +9206,7 @@ func validateIndexRenames(desired []*ir.Index, desiredByName map[string]*ir.Inde
 			continue
 		}
 		if !oldInSnap {
-			return nil, pipeline.Errorf(idx.Pos,
+			return nil, pipeline.ErrorfCode(idx.Pos, "DPG-E021",
 				"RENAMED FROM %q on index %q does not match the snapshot — neither the old nor the new name exists there. Remove RENAMED FROM if this is a genuinely new index.",
 				*idx.RenamedFrom, idx.Name)
 		}
@@ -9861,7 +9861,7 @@ func validatePolicyRenames(desired []*ir.Policy, desiredByName map[string]*ir.Po
 			continue
 		}
 		if !oldInSnap {
-			return nil, pipeline.Errorf(pol.Pos,
+			return nil, pipeline.ErrorfCode(pol.Pos, "DPG-E021",
 				"RENAMED FROM %q on policy %q does not match the snapshot — neither the old nor the new name exists there. Remove RENAMED FROM if this is a genuinely new policy.",
 				*pol.RenamedFrom, pol.Name)
 		}

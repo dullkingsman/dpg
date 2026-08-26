@@ -22,13 +22,13 @@ func resolveClusters(proj *project.Project, clusterFlag string) ([]*project.Clus
 				return []*project.Cluster{cl}, nil
 			}
 		}
-		return nil, fmt.Errorf("cluster %q not found; available: %s",
+		return nil, fmt.Errorf("DPG-E027: cluster %q not found; available: %s",
 			clusterFlag, strings.Join(clusterNames(proj.Clusters), ", "))
 	}
 	if len(proj.Clusters) == 1 {
 		return proj.Clusters, nil
 	}
-	return nil, fmt.Errorf("multiple clusters found (%s); use --cluster to select one",
+	return nil, fmt.Errorf("DPG-E026: multiple clusters found (%s); use --cluster to select one",
 		strings.Join(clusterNames(proj.Clusters), ", "))
 }
 
@@ -46,13 +46,13 @@ func resolveDatabases(cl *project.Cluster, dbFlag string) ([]*project.Database, 
 				return []*project.Database{db}, nil
 			}
 		}
-		return nil, fmt.Errorf("database %q not found in cluster %q; available: %s",
+		return nil, fmt.Errorf("DPG-E029: database %q not found in cluster %q; available: %s",
 			dbFlag, cl.Name(), strings.Join(dbNames(cl.Databases), ", "))
 	}
 	if len(cl.Databases) == 1 {
 		return cl.Databases, nil
 	}
-	return nil, fmt.Errorf("cluster %q has multiple databases (%s); use --database to select one",
+	return nil, fmt.Errorf("DPG-E028: cluster %q has multiple databases (%s); use --database to select one",
 		cl.Name(), strings.Join(dbNames(cl.Databases), ", "))
 }
 

@@ -218,8 +218,15 @@ func compileErrsToDiagnostics(err error) []diagnosticOut {
 	if diags, ok := err.(pipeline.Diagnostics); ok {
 		out := make([]diagnosticOut, 0, len(diags))
 		for _, d := range diags {
+			// DPG-E000 is the generic fallback rule label for an
+			// unlabeled CompilerError — most call sites still predate
+			// the Code field (see CompilerError.Code's doc comment).
+			rule := d.Code
+			if rule == "" {
+				rule = "DPG-E000"
+			}
 			out = append(out, diagnosticOut{
-				Rule:    "DPG-E000",
+				Rule:    rule,
 				Message: d.Message,
 				File:    d.Pos.File,
 				Line:    d.Pos.Line,

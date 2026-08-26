@@ -3764,7 +3764,7 @@ func (b *blockParser) parseNameMapValue(pos pipeline.SourcePos, tool string) (pi
 	}
 	rule := strings.ToUpper(b.readWord())
 	if !pipeline.ValidNameMapRules[rule] {
-		return pipeline.NameMapEntry{}, fmt.Errorf("%s: unknown name map rule %q; valid rules: LOWER_SNAKE_CASE, UPPER_SNAKE_CASE, LOWER_CAMEL_CASE, UPPER_CAMEL_CASE, LOWER_KEBAB_CASE, UPPER_KEBAB_CASE, TRAIN_CASE, LOWER_CASE, UPPER_CASE, PASCAL_SNAKE_CASE", pos, rule)
+		return pipeline.NameMapEntry{}, fmt.Errorf("%s: DPG-E030: unknown name map rule %q; valid rules: LOWER_SNAKE_CASE, UPPER_SNAKE_CASE, LOWER_CAMEL_CASE, UPPER_CAMEL_CASE, LOWER_KEBAB_CASE, UPPER_KEBAB_CASE, TRAIN_CASE, LOWER_CASE, UPPER_CASE, PASCAL_SNAKE_CASE", pos, rule)
 	}
 	if err := b.expectSemi(); err != nil {
 		return pipeline.NameMapEntry{}, err

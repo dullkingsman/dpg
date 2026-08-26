@@ -33,7 +33,7 @@ func (n *NameMapsConfig) UnmarshalTOML(data interface{}) error {
 		case string:
 			rule := strings.ToUpper(val)
 			if !pipeline.ValidNameMapRules[rule] {
-				return fmt.Errorf("[namemaps]: unknown rule %q for tool %q", val, k)
+				return fmt.Errorf("DPG-E030: [namemaps]: unknown rule %q for tool %q", val, k)
 			}
 			if n.Global == nil {
 				n.Global = make(map[string]string)
@@ -48,7 +48,7 @@ func (n *NameMapsConfig) UnmarshalTOML(data interface{}) error {
 				}
 				rule := strings.ToUpper(r)
 				if !pipeline.ValidNameMapRules[rule] {
-					return fmt.Errorf("[namemaps.%s]: unknown rule %q for tool %q", k, r, tool)
+					return fmt.Errorf("DPG-E030: [namemaps.%s]: unknown rule %q for tool %q", k, r, tool)
 				}
 				typeMap[tool] = rule
 			}
@@ -159,13 +159,45 @@ func DefaultRootConfig() RootConfig {
 	}
 }
 
+// checkUnknownKeys implements DPG-E001 (RFC Appendix C): meta.Undecoded()
+// lists every TOML key/table path present in the file that wasn't mapped to
+// any destination struct field — real BurntSushi/toml behavior, confirmed
+// via a direct decode probe, including both a bogus table itself
+// ("bogus_section") and its own keys ("bogus_section.foo") as separate
+// entries. A key inside [namemaps] is never reported here even if it looks
+// wrong: NameMapsConfig implements toml.Unmarshaler, so BurntSushi/toml
+// treats that whole subtree as consumed once the custom unmarshaler runs
+// (confirmed via the same probe) — NameMapsConfig's own UnmarshalTOML
+// already validates its own keys/values directly (DPG-E030), a different,
+// already-covered code path.
+//
+// Previously this codebase had NO unknown-key enforcement anywhere — a
+// typo'd or stray key in dpg.toml was silently ignored instead of erroring,
+// contrary to what Appendix C documents. This function is called right
+// after every toml.DecodeFile in this file.
+func checkUnknownKeys(meta toml.MetaData, path string) error {
+	undecoded := meta.Undecoded()
+	if len(undecoded) == 0 {
+		return nil
+	}
+	keys := make([]string, len(undecoded))
+	for i, k := range undecoded {
+		keys[i] = k.String()
+	}
+	return fmt.Errorf("DPG-E001: %s: unknown key(s): %s", path, strings.Join(keys, ", "))
+}
+
 // LoadRoot loads and parses dpg.toml from dir.
 // Missing optional fields default to DefaultRootConfig values.
 func LoadRoot(dir string) (RootConfig, error) {
 	cfg := DefaultRootConfig()
 	path := filepath.Join(dir, "dpg.toml")
-	if _, err := toml.DecodeFile(path, &cfg); err != nil {
+	meta, err := toml.DecodeFile(path, &cfg)
+	if err != nil {
 		return RootConfig{}, fmt.Errorf("loading %s: %w", path, err)
+	}
+	if err := checkUnknownKeys(meta, path); err != nil {
+		return RootConfig{}, err
 	}
 	if err := cfg.Compiler.validate(); err != nil {
 		return RootConfig{}, fmt.Errorf("%s: [compiler]: %w", path, err)
@@ -202,9 +234,10 @@ type ClusterConfig struct {
 	NameMaps NameMapsConfig `toml:"namemaps"`
 	// Compiler holds this cluster's compiler overrides — only MinPGVersion
 	// is meaningful here (see CompilerConfig's doc comment). A stray
-	// default_drop_behavior declared at this level is silently ignored
-	// rather than rejected — this codebase has no DPG-E001 unknown-key
-	// enforcement anywhere yet, a pre-existing gap, not introduced here.
+	// default_drop_behavior declared at this level is a genuine field on
+	// CompilerConfig (shared with root/database), so checkUnknownKeys
+	// (DPG-E001) does not flag it even though it has no effect at this
+	// level — narrower than unknown-key detection, out of scope here.
 	Compiler CompilerConfig `toml:"compiler"`
 }
 
@@ -251,8 +284,12 @@ func DefaultClusterConfig() ClusterConfig {
 // LoadCluster loads and parses the dpg.toml inside a cluster directory.
 func LoadCluster(path string) (ClusterConfig, error) {
 	cfg := DefaultClusterConfig()
-	if _, err := toml.DecodeFile(path, &cfg); err != nil {
+	meta, err := toml.DecodeFile(path, &cfg)
+	if err != nil {
 		return ClusterConfig{}, fmt.Errorf("loading %s: %w", path, err)
+	}
+	if err := checkUnknownKeys(meta, path); err != nil {
+		return ClusterConfig{}, err
 	}
 	if err := cfg.Cluster.validate(path); err != nil {
 		return ClusterConfig{}, err
@@ -300,8 +337,12 @@ func DefaultDatabaseConfig() DatabaseConfig {
 // LoadDatabase loads and parses the dpg.toml inside a database directory.
 func LoadDatabase(path string) (DatabaseConfig, error) {
 	cfg := DefaultDatabaseConfig()
-	if _, err := toml.DecodeFile(path, &cfg); err != nil {
+	meta, err := toml.DecodeFile(path, &cfg)
+	if err != nil {
 		return DatabaseConfig{}, fmt.Errorf("loading %s: %w", path, err)
+	}
+	if err := checkUnknownKeys(meta, path); err != nil {
+		return DatabaseConfig{}, err
 	}
 	if err := cfg.Database.validate(path); err != nil {
 		return DatabaseConfig{}, err
