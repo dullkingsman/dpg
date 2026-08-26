@@ -2254,10 +2254,22 @@ table-constraint-body
        The compiler identifies it by name and treats it as already
        existing (no new DDL emitted).
 
-   **`NOT VALID` placement:** A constraint with `NOT VALID` MUST be
-   declared in the `{ }` block.  Writing `NOT VALID` in the `( )` list
-   is a compiler error (DPG-E016) because PostgreSQL itself does not
-   support `NOT VALID` in `CREATE TABLE`.
+   **`NOT VALID` placement:** `NOT VALID` MAY be written either inline
+   in the `( )` list or via a `{ }` block `CONSTRAINT`/`CONSTRAINTS`
+   entry — confirmed live against PostgreSQL 14 through 18 that
+   `CREATE TABLE` genuinely accepts an inline `NOT VALID` on `CHECK`,
+   `FOREIGN KEY`, and (PostgreSQL 18+) table-level named `NOT NULL`
+   constraints; the two forms are not mutually exclusive alternatives
+   with one forbidden, they serve different situations. The inline
+   form is what a brand-new table being created for the first time
+   uses (there is no existing table yet for `NOT VALID`'s "check
+   later" semantics to defer against). The `{ }` block form exists for
+   the lifecycle above: adding a constraint to a table that already
+   exists requires `ALTER TABLE ... ADD CONSTRAINT`, not `CREATE
+   TABLE`, so it needs its own declarative surface independent of the
+   `( )` list — the same reason `RENAMED FROM` below needs one. There
+   is no DPG-E016 condition; this specification previously claimed one
+   incorrectly (see Appendix C).
 
    **DEFERRABLE FK cycles:** When two tables have a circular foreign
    key dependency and both FKs are `DEFERRABLE`, the compiler emits
@@ -2271,9 +2283,10 @@ table-constraint-body
    metadata-only — instead of the drop-and-recreate that a name-only
    difference would otherwise trigger under name-based constraint
    identity (Section 7.3's opening paragraph).  MUST appear in the `{ }`
-   block, the same placement restriction as `NOT VALID`, since it is
-   itself a lifecycle directive rather than a `CREATE TABLE`-native
-   clause.
+   block — unlike `NOT VALID` above, there is no `CREATE TABLE`-native
+   form of a rename at all (`RENAME CONSTRAINT` is inherently an
+   `ALTER TABLE`-only concept), so the `{ }` block is its only possible
+   placement, not a choice between two accepted forms.
 
    **Deferrability-only changes:** When an existing `FOREIGN KEY`
    constraint's `DEFERRABLE`/`INITIALLY DEFERRED`/`INITIALLY IMMEDIATE`
@@ -7902,7 +7915,7 @@ SCHEMA public {
    | DPG-E013 | `enum_migration_data_remains` | Rows still hold a removed ENUM value after the MIGRATE REMOVE DML ran. |
    | DPG-E014 | `unguarded_enum_removal` | ENUM value removed without a `MIGRATE REMOVE` block. |
    | DPG-E015 | `invalid_virtual_type_directive` | `VIRTUAL TYPE { }` block contains a directive other than `COMMENT`. |
-   | DPG-E016 | `not_valid_in_paren_list` | `NOT VALID` used in a column or constraint inside the `( )` list. |
+   | DPG-E016 | *(retracted)* | Was `not_valid_in_paren_list`, "`NOT VALID` used in a column or constraint inside the `( )` list" — retracted: confirmed live against PostgreSQL 14 through 18 that `CREATE TABLE` genuinely accepts inline `NOT VALID` (Section 7.3), so this condition can never actually occur. DPG intentionally does not check for it. This code is not reused for a different condition. |
    | DPG-E017 | `unresolvable_cycle` | Circular FK dependency with no `DEFERRABLE` FK. |
    | DPG-E018 | `unknown_column_reference` | `COLUMN name { }` block references a column not in the `( )` list. |
    | DPG-E019 | `stale_column_name_in_index` | Index or constraint references old column name after a rename. |
@@ -8841,6 +8854,7 @@ ENUM user_status ('active', 'inactive', 'banned') {
    | E.22 | 2026-08-26 | Section 8.2's `TABLESPACE`/`WITH (...)` clauses on a materialized view — grammar already documented, but never implemented: the reference implementation silently dropped both on parse, and never diffed them, so this specification's own worked example (`product_stats WITH (fillfactor = 90) TABLESPACE analytics_space`) did not round-trip. Now implemented and live-verified against a real PostgreSQL 17 server; Section 8.2's diffing-semantics paragraph gains the `TABLESPACE`/`WITH (...)` rows, both targeted `ALTER MATERIALIZED VIEW` forms, `SAFE`, matching a table's identical `TABLESPACE`/`WITH (...)` treatment (Section 7.11). |
    | E.23 | 2026-08-26 | Two doc-accuracy corrections found during a fresh audit, no reference-implementation changes needed (the code was already correct): (1) Appendix D.1.8's `SnapRole`/`SnapSequence` wire-schema examples were stale and, for `SnapRole`, factually wrong — the accompanying note claimed role attributes are "NOT stored in the snapshot beyond the name and comment," but `PasswordHash` and 14 other attribute fields genuinely are (confirmed against `internal/snapshot/types.go`), directly contradicting Section 24's own correct description of password-hash storage; both examples rewritten to list every current field, and the note corrected. (2) Section 18.8 stated plainly "there is no `--format` flag" for `dpg portability` — false, `cmd/dpg/portability.go` has a real, working `--format json` flag (JSON per cluster/database analyzed); the false claim removed and the flag documented. |
    | E.24 | 2026-08-26 | Closed the last open item from the 2026-08-26 fresh audit: `DROP CONSTRAINT ... ONLY` on partitioned tables (PostgreSQL 18+, Section 7.3), previously documented as a known, deliberately out-of-scope gap with no declarative representation at all. A partition's `PARTITIONS { }` entry may now carry its own trailing `{ }` body declaring one or more constraints independently of the parent (`CONSTRAINT`/`CONSTRAINTS`, the same Section 7.3 directive grammar a table's own block already accepts) — the sole exception to a partition otherwise never declaring structure independently of its parent. When a constraint disappears from the parent's own declaration while a direct partition declares it locally, the Differ emits `ALTER TABLE ONLY parent DROP CONSTRAINT` (`SAFE`) instead of the ordinary cascading drop; a constraint declared directly on a partition with no such parent-level history is simply an ordinary, version-independent `ALTER TABLE partition ADD/DROP CONSTRAINT`. Confirmed live against real PostgreSQL 17 and 18 servers: 17 rejects the `ONLY` statement outright ("cannot remove constraint from only the partitioned table when partitions exist"), 18 succeeds, flipping the constraint's row on every existing partition from inherited to local — the identical catalog signature (`conislocal = true`, `coninhcount = 0`) a from-scratch partition-local constraint produces, which is why this document's IR draws no distinction between the two histories either. Sections 7.13 and 21's constraint-diffing tables, and Appendix F, updated to match. |
+   | E.25 | 2026-08-26 | Retracted DPG-E016 (`not_valid_in_paren_list`) during the DPG-E0xx error-code triage: this specification claimed `NOT VALID` in the `( )` list is a compiler error "because PostgreSQL itself does not support `NOT VALID` in `CREATE TABLE`" — confirmed live against real PostgreSQL 14, 17, and 18 servers that this is false, `CREATE TABLE` genuinely accepts inline `NOT VALID` on `CHECK`, `FOREIGN KEY`, and (PostgreSQL 18+) table-level named `NOT NULL` constraints on every version this specification targets. The reference implementation was, and remains, correct — `buildConstraint` has always extracted `NotValid` directly from the parsed `( )` list via `pg_query`'s own `SkipValidation` field; no code ever enforced the false restriction, so there was nothing to fix there. Section 7.3's "`NOT VALID` placement" paragraph rewritten to state both the inline and `{ }` block forms are accepted, explaining the `{ }` block form's real justification (adding a constraint to an already-existing table needs `ALTER TABLE`, not `CREATE TABLE`) instead of the disproven "PostgreSQL can't express it" claim; `RENAMED FROM`'s adjacent placement rule no longer analogizes to `NOT VALID`'s (now nonexistent) restriction, since `RENAMED FROM` has its own, independently valid justification (no `CREATE TABLE`-native rename form exists at all). Appendix C's DPG-E016 row marked retracted rather than deleted, and the code is not reused. |
 
 ---
 
