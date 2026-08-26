@@ -117,7 +117,7 @@ Copyright Notice
     8.3.  Recursive Views .......................................... 50
 9.  Functions and Procedures ....................................... 51
     9.1.  Function Declaration Syntax .............................. 51
-    9.2.  Function Attributes ...................................... 52
+    9.2.  Function Attributes Reference ............................ 52
     9.3.  Procedures ............................................... 54
     9.4.  Aggregate Functions ...................................... 54
     9.5.  Function Body Diffing Semantics .......................... 55
@@ -127,6 +127,8 @@ Copyright Notice
     11.2. Grants — the Additive Model .............................. 58
     11.3. Revocations .............................................. 59
     11.4. Default Privileges ....................................... 60
+    11.5. Owner Impersonation at Object Creation ................... 60
+    11.6. Parameter Privileges ...................................... 60
 12. Full-Text Search Objects ....................................... 61
     12.1. Text Search Configurations ............................... 61
     12.2. Text Search Dictionaries ................................. 62
@@ -198,8 +200,8 @@ Appendix A.  ABNF Grammar Summary ................................ 120
 Appendix B.  Complete Example Project ............................ 126
 Appendix C.  Error Code Reference ................................ 132
 Appendix D.  Corrections and Additions to Earlier Sections ....... 138
-    D.1.  Snapshot Format Corrections ............................. 138
-    D.2.  CLI Command Corrections ................................. 142
+    D.1.  Snapshot Format — Actual Wire Schema .................... 138
+    D.2.  dpg plan Corrections Integrated; Target Auto-Selection Rules 142
     D.3.  Linter Rule ID Corrections .............................. 145
     D.4.  Pipeline Registry Key Constants ......................... 145
     D.5.  SecretResolver Protocol Specification ................... 146
@@ -2011,7 +2013,9 @@ TABLE shipping_address OF address (
 ### 7.2. Column Definitions
 
    Column definitions appear inside the `( )` list and follow
-   PostgreSQL's `CREATE TABLE` column syntax exactly.
+   PostgreSQL's `CREATE TABLE` column syntax exactly. `type-ref` also
+   accepts the `SERIAL`/`BIGSERIAL`/`SMALLSERIAL` pseudo-type spellings;
+   see Appendix D.11 for their normalization and diffing behavior.
 
 ```abnf
 column-def  = col-name WSP type-ref
@@ -5827,7 +5831,7 @@ Phase 10: Emission (Emitter)
    with DELETE ops appended after all CREATE/ALTER ops in reverse
    topological order (dependents dropped before their dependencies).
 
-### 15.11. Phase 10 — Emission
+### 15.12. Phase 10 — Emission
 
    The Emitter (interface `pipeline.Emitter`) splits the `[]DiffOp`
    into two groups:
@@ -5879,7 +5883,7 @@ Phase 10: Emission (Emitter)
    | `cluster` | string | The cluster name from the cluster `dpg.toml`. |
    | `database` | string | The database name from the database `dpg.toml`. Absent for cluster-level snapshots. |
    | `applied_at` | RFC 3339 string | UTC timestamp of the last successful `dpg apply`. |
-   | `source_revision` | string | The git commit hash at apply time, if available. Empty if git is unavailable. |
+   | `source_revision` | string | The git commit hash at apply time, if available. Empty if git is unavailable; see Appendix D.6 for the exact detection algorithm. |
    | `objects` | object | Map from `QualifiedName()` to per-object snapshot record. |
 
 ### 16.3. Per-Object Snapshot Schema
@@ -8897,8 +8901,8 @@ ENUM user_status ('active', 'inactive', 'banned') {
    | Section 11.1 | `CREATE ROLE`/`CREATE USER` core (`LOGIN`, `PASSWORD`) | Standard | — | SQL standardizes authorization identifiers, though PostgreSQL's unified role model (merging users and groups) is its own design. |
    | Section 11.1 | `SUPERUSER`/`CREATEDB`/`CREATEROLE`/`REPLICATION`/`BYPASSRLS`/`CONNECTION LIMIT` | PGSpecific | — | PostgreSQL-specific role attributes. |
    | Section 11.2 | `GRANT`/`REVOKE` core | Standard | — | Core SQL privilege model. |
-   | Section 11.2 | `MAINTAIN` privilege | PGSpecific | 17 | PostgreSQL-specific privilege covering VACUUM/ANALYZE/CLUSTER/REINDEX. |
-   | Section 11.3 | Role membership (`GRANT role TO role`, `WITH ADMIN OPTION`/`WITH INHERIT`/`WITH SET`) | Mixed | 16 (`WITH INHERIT`/`WITH SET` only) | Standard SQL has roles and role grants; `WITH ADMIN OPTION` is standard and floor-14, `WITH INHERIT`/`WITH SET` are PostgreSQL-specific refinements of role-attribute inheritance. |
+   | Section 7.10 | `MAINTAIN` privilege | PGSpecific | 17 | PostgreSQL-specific privilege covering VACUUM/ANALYZE/CLUSTER/REINDEX. |
+   | Section 11.1 | Role membership (`GRANT role TO role`, `WITH ADMIN OPTION`/`WITH INHERIT`/`WITH SET`) | Mixed | 16 (`WITH INHERIT`/`WITH SET` only) | Standard SQL has roles and role grants; `WITH ADMIN OPTION` is standard and floor-14, `WITH INHERIT`/`WITH SET` are PostgreSQL-specific refinements of role-attribute inheritance. |
    | Section 11.4 | `ALTER DEFAULT PRIVILEGES` | PGSpecific | — | No standard mechanism for privilege templates applied to not-yet-created objects. |
    | Section 11.5 | Owner impersonation (`SET ROLE`/`RESET ROLE`) | Standard | — | SQL standardizes `SET ROLE`; PostgreSQL's specific creator-attribution semantics this section documents are PostgreSQL's own catalog behavior. |
    | Section 11.6 | `PARAMETER PRIVILEGES` (`GRANT {SET\|ALTER SYSTEM} ON PARAMETER`) | PGSpecific | 15 | PostgreSQL's grantable parameter-ACL object type; no standard equivalent. |
