@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.5-alpha.5] — 2026-08-26
+
+### Fixed
+
+- Pass explicit --tag to npm publish for grammar package
+- Switch grammar npm/crates.io publish to OIDC trusted publishing
+- Drop 'intellij' from plugin ID per Marketplace validation
+- Pass --cleanDestinationDir to hugo builds
+
+### Changed
+
+- Namespace plugin ID under dev.thec1oud reverse-DNS
+
 ## [grammar-v0.5.2-alpha.15] — 2026-08-26
 
 ### Fixed
