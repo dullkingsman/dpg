@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.5-alpha.4] — 2026-08-26
+
+### Fixed
+
+- Add missing secret-uri shortcode template
+
 ## [idea-v0.5.2-alpha.15] — 2026-08-26
 
 - No changes.
