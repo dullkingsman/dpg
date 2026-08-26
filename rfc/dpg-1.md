@@ -1180,12 +1180,16 @@ INDEX idx_status (status) WHERE (status = 'active');
 
    When the same object is declared across multiple `.dpg` files (the
    same schema-qualified name and kind), the compiler MUST merge all
-   declarations into a single logical object before IR construction.
-   Merge semantics follow Section 3.7.
+   declarations into a single logical object. Merge semantics follow
+   Section 3.7.
 
-   Block merging occurs after macro expansion and before tokenization.
-   The merged result is treated as if all declarations had appeared in
-   a single file.
+   Block merging occurs after IR construction, not on raw source text:
+   each declaration is independently tokenized, parsed, and built into
+   its own `IRObject` first (Phases 3-5, Section 15.4-15.7), and the
+   Merger (Phase 6, Section 15.8) then combines same-name-and-kind
+   `IRObject`s into one. The merged result is treated as if all
+   declarations had contributed to a single logical object, regardless
+   of which file each one came from.
 
 ### 4.10. Identifiers
 
@@ -4331,8 +4335,16 @@ ROLE app_admin
    `IN ROLE`/`ROLE`/`ADMIN` are create-time-only PostgreSQL grammar — a
    later membership change has no `ALTER ROLE` equivalent, so it's diffed
    as `GRANT`/`REVOKE` (PostgreSQL's own mechanism for changing membership
-   after creation), matching how DPG already diffs object-level privilege
-   grants (Section 11.2) rather than inventing new DDL shape for this.
+   after creation), reusing the same DDL vocabulary as Section 11.2's
+   object-level privilege grants rather than inventing new DDL shape
+   for this. The *semantics* differ deliberately, though: unlike Section
+   11.2's additive model (removing a grant declaration emits nothing),
+   removing a role-membership declaration emits an actual `REVOKE` (the
+   table above, "membership removed" row) — membership is treated as
+   an ordinary, fully-synced property of the role's own declaration,
+   the same as `LOGIN`/`SUPERUSER`/`INHERIT`/etc. in the row above it,
+   not as a grant on some other object a role might also be
+   independently given access to outside DPG's management.
 
 ### 11.2. Grants — The Additive Model
 
@@ -5662,7 +5674,7 @@ Phase 10: Emission (Emitter)
    The PGSQLParser (interface `pipeline.PGSQLParser`) takes a
    `RawObject.Part1` text and the `ObjectKind`, prepends the
    appropriate `CREATE [OR REPLACE]` verb, and invokes the PostgreSQL
-   parser (via `github.com/pganalyze/pg_query_go/v5`, which wraps
+   parser (via `github.com/pganalyze/pg_query_go/v6`, which wraps
    libpg_query — the same parser used by PostgreSQL itself).
 
    The result is a `pipeline.PGParseResult` holding the pg_query parse
@@ -5751,32 +5763,14 @@ Phase 10: Emission (Emitter)
 ### 15.9. Phase 7 — Dependency Resolution
 
    The DependencyResolver (interface `pipeline.DependencyResolver`)
-   performs a topological sort of the merged IR object list.
+   performs a topological sort of the merged IR object list, producing
+   an ordered `[]IRObject` slice such that every object appears after
+   all objects it depends on.
 
-   **Edge creation rules** (object A depends on object B if):
-
-   -   A column of A has a type defined by B (a user-defined type or
-       domain in B's schema).
-   -   A column of A has a `REFERENCES` constraint to table B.
-   -   A view's query text references table or view B.
-   -   A function's body references table or view B (if extractable).
-   -   An index on A uses an operator class defined in B.
-   -   A partition of A specifies B as its parent.
-
-   **Circular dependency resolution:**
-
-   When a cycle is detected:
-
-   1.  If every FK in the cycle is `DEFERRABLE`, the resolver emits the
-       tables in any order (all tables first, then circular FKs as
-       `ALTER TABLE ADD CONSTRAINT ... DEFERRABLE INITIALLY DEFERRED`
-       statements).
-
-   2.  If any FK in the cycle is NOT `DEFERRABLE`, the resolver emits
-       error DPG-E017 with the complete cycle path listed.
-
-   The output is an ordered `[]IRObject` slice such that every object
-   appears after all objects it depends on.
+   Section 22 is the single normative source for the complete edge-creation
+   rule set and circular-dependency resolution algorithm — this phase
+   is that section's DependencyResolver invocation, not a separate or
+   simplified variant of it.
 
 ### 15.10. Phase 8 — Linting
 
@@ -7143,12 +7137,33 @@ serial_sequence_declared      = "off"
    the schema-management scope this specification defines, and is not
    planned for any future version.
 
+   **Large Objects (`lo_create`/`lo_import`/`lo_export` etc.):**
+   Permanently out of scope, not merely deferred. A large object has no
+   `CREATE`/`ALTER`/`DROP` DDL statement at all — it's created,
+   imported, and exported entirely through server-side functions
+   (`lo_create`, `lo_import`, `lo_export`, `lo_unlink`), the same
+   runtime/DML tier as the row data those functions typically move.
+   There is no declarative surface for DPG's no-verb object model
+   (Section 4) to attach to. Not planned for any future version.
+
    **`REASSIGN OWNED BY` / `DROP OWNED BY`:**
    Out of scope. Both are one-shot cluster-maintenance commands, closer
    in spirit to `VACUUM` than to a declared object — there is no
    steady-state "desired" form of either to diff against, which is
    exactly the same reason `ALTER` is structurally excluded from DPG's
    no-verb object model (Section 4). Not planned for any future version.
+
+   **`CLUSTER` (the maintenance command, not `CLUSTER ON`):**
+   Out of scope. Like `REASSIGN OWNED BY`/`DROP OWNED BY` above, `CLUSTER`
+   is a one-shot table-rewrite maintenance command with no steady-state
+   "desired" form to diff against — running it twice in a row is not
+   idempotent in the way a declared object's DDL must be (Section
+   17.4). DPG's `CLUSTER ON name` directive (Section 7.11) declares
+   which index a *future, manually-run* `CLUSTER` would use; it does
+   not itself invoke the command. PostgreSQL 17's `CLUSTER (VERBOSE,
+   ...)` parenthesized-options syntax is a variant of the same command
+   and is out of scope for the same reason. Not planned for any future
+   version.
 
    **`ALTER SYSTEM`:**
    Out of scope. It writes a GUC override to `postgresql.auto.conf`, a
