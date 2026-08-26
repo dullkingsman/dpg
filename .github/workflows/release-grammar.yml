@@ -129,7 +129,11 @@ jobs:
       - name: Publish
         working-directory: lang/grammar
         run: |
-          output=$(npm publish --access public --provenance 2>&1) && echo "$output" || {
+          NPM_TAG="latest"
+          if [[ "${{ needs.resolve-meta.outputs.prerelease }}" == "true" ]]; then
+            NPM_TAG="alpha"
+          fi
+          output=$(npm publish --access public --provenance --tag "$NPM_TAG" 2>&1) && echo "$output" || {
             echo "$output"
             echo "$output" | grep -qE 'already exists|cannot publish over'
           }
