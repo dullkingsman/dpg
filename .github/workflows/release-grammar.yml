@@ -104,7 +104,7 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: "20"
+          node-version: "24"
           registry-url: "https://registry.npmjs.org"
           cache: npm
           cache-dependency-path: lang/grammar/package.json
@@ -123,10 +123,11 @@ jobs:
         working-directory: lang/grammar
         run: npm install
 
+      - name: Ensure npm supports OIDC trusted publishing (>=11.5.1)
+        run: npm install -g npm@latest
+
       - name: Publish
         working-directory: lang/grammar
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
           output=$(npm publish --access public --provenance 2>&1) && echo "$output" || {
             echo "$output"
@@ -137,6 +138,8 @@ jobs:
     name: Publish to crates.io
     needs: resolve-meta
     runs-on: ubuntu-latest
+    permissions:
+      id-token: write
 
     steps:
       - uses: actions/checkout@v4
@@ -145,10 +148,13 @@ jobs:
         working-directory: lang/grammar
         run: sed -i "s/^version = .*/version = \"${{ needs.resolve-meta.outputs.version }}\"/" Cargo.toml
 
+      - uses: rust-lang/crates-io-auth-action@v1
+        id: auth
+
       - name: Publish
         working-directory: lang/grammar
         env:
-          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
         run: |
           output=$(cargo publish --allow-dirty 2>&1) && echo "$output" || {
             echo "$output"
