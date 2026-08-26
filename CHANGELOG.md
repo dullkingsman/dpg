@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [grammar-v0.5.2-alpha.14] — 2026-08-26
+
+### Fixed
+
+- Switch grammar npm/crates.io publish to OIDC trusted publishing
+
 ## [grammar-v0.5.2-alpha.13] — 2026-08-26
 
 ### Fixed
