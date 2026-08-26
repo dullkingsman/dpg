@@ -171,7 +171,12 @@ type ColumnBlock struct {
 	Revocations    []RevocationEntry
 	SecurityLabels []SecurityLabel
 	NameMaps       []NameMapEntry
-	Pos            SourcePos
+	// NameMapWarnings holds DPG-E031 findings (same tool key specified more
+	// than once at this column's block level) — warning-only, never fails
+	// compilation. NameMaps above has already been deduped to the winning
+	// (last) entry per tool by the time this is populated.
+	NameMapWarnings []LintDiagnostic
+	Pos             SourcePos
 }
 
 // SecurityLabel is one "SECURITY LABEL [FOR provider] '...'" directive
@@ -319,6 +324,7 @@ type ParameterGrant struct {
 	Parameters []Identifier
 	Roles      []Identifier
 	WithGrant  bool
+	GrantedBy  *string
 	Pos        SourcePos
 }
 
@@ -328,6 +334,7 @@ type ParameterRevocation struct {
 	Parameters []Identifier
 	Roles      []Identifier
 	Cascade    bool
+	GrantedBy  *string
 	Pos        SourcePos
 }
 
@@ -473,6 +480,11 @@ type BlockAST struct {
 	OpFamilyMembers     []OpFamilyMember
 	PreferredJsonFormat string // "json" or "jsonb"; empty = not set (default jsonb)
 	NameMaps            []NameMapEntry
+	// NameMapWarnings holds DPG-E031 findings (same tool key specified more
+	// than once at this object's top block level) — warning-only, never
+	// fails compilation. NameMaps above has already been deduped to the
+	// winning (last) entry per tool by the time this is populated.
+	NameMapWarnings []LintDiagnostic
 	// DomainDefault/DomainNotNull are RFC §5.4's DOMAIN-only "DEFAULT expr;"
 	// and "NOT NULL;" block directives, MERGED with any DEFAULT/NOT NULL/
 	// CHECK already present in the domain's Part 1 (real PG's own inline

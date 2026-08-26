@@ -2,6 +2,7 @@ package blockparser_test
 
 import (
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/dullkingsman/dpg/internal/blockparser"
@@ -1099,6 +1100,28 @@ func TestParameterPrivilegesRevocation(t *testing.T) {
 	}
 	if len(r.Roles) != 1 || r.Roles[0].Name != "app_readonly" {
 		t.Errorf("Roles: got %v", r.Roles)
+	}
+}
+
+func TestParameterPrivilegesGrantedBy(t *testing.T) {
+	pp, err := blockparser.ParseParameterPrivileges("", `
+		GRANTS { SET ON PARAMETER work_mem TO app_admin WITH GRANT OPTION GRANTED BY admin_role; }
+		REVOCATIONS { SET ON PARAMETER work_mem FROM app_readonly GRANTED BY admin_role CASCADE; }
+	`, zeroPos)
+	if err != nil {
+		t.Fatalf("ParseParameterPrivileges: %v", err)
+	}
+	if pp.Grants[0].GrantedBy == nil || *pp.Grants[0].GrantedBy != "admin_role" {
+		t.Errorf("GRANTED BY did not parse on grant, got %v", pp.Grants[0].GrantedBy)
+	}
+	if !pp.Grants[0].WithGrant {
+		t.Error("WITH GRANT OPTION should still parse alongside GRANTED BY")
+	}
+	if pp.Revocations[0].GrantedBy == nil || *pp.Revocations[0].GrantedBy != "admin_role" {
+		t.Errorf("GRANTED BY did not parse on revocation, got %v", pp.Revocations[0].GrantedBy)
+	}
+	if !pp.Revocations[0].Cascade {
+		t.Error("CASCADE should still parse after GRANTED BY on revocation")
 	}
 }
 
@@ -2363,6 +2386,55 @@ func TestNameMapMultipleSingular(t *testing.T) {
 	ast := parse(t, src)
 	if len(ast.NameMaps) != 2 {
 		t.Fatalf("expected 2 NameMap entries, got %d", len(ast.NameMaps))
+	}
+}
+
+func TestNameMapDuplicateToolLastWins(t *testing.T) {
+	src := `NAME MAP prisma TO "First";
+		NAME MAP prisma TO "Second";`
+	ast := parse(t, src)
+	if len(ast.NameMaps) != 1 {
+		t.Fatalf("expected duplicate tool entries collapsed to 1, got %d: %+v", len(ast.NameMaps), ast.NameMaps)
+	}
+	if ast.NameMaps[0].Value != "Second" {
+		t.Errorf("expected last entry to win (Value=Second), got %+v", ast.NameMaps[0])
+	}
+	if len(ast.NameMapWarnings) != 1 {
+		t.Fatalf("expected 1 DPG-E031 warning, got %d: %+v", len(ast.NameMapWarnings), ast.NameMapWarnings)
+	}
+	w := ast.NameMapWarnings[0]
+	if w.Rule != "duplicate-namemap-tool" || !strings.Contains(w.Message, "DPG-E031") || !strings.Contains(w.Message, "prisma") {
+		t.Errorf("unexpected warning: %+v", w)
+	}
+}
+
+func TestNameMapNoDuplicateNoWarning(t *testing.T) {
+	src := `NAME MAP prisma TO "First";
+		NAME MAP drizzle TO "Second";`
+	ast := parse(t, src)
+	if len(ast.NameMaps) != 2 {
+		t.Fatalf("expected 2 distinct entries, got %d", len(ast.NameMaps))
+	}
+	if len(ast.NameMapWarnings) != 0 {
+		t.Errorf("expected no warnings for distinct tools, got %+v", ast.NameMapWarnings)
+	}
+}
+
+func TestNameMapColumnBlockDuplicateToolLastWins(t *testing.T) {
+	src := `COLUMN created_at {
+		NAME MAP prisma TO "First";
+		NAME MAP prisma TO "Second";
+	}`
+	ast := parse(t, src)
+	if len(ast.Columns) != 1 {
+		t.Fatalf("expected 1 column, got %d", len(ast.Columns))
+	}
+	col := ast.Columns[0]
+	if len(col.NameMaps) != 1 || col.NameMaps[0].Value != "Second" {
+		t.Fatalf("expected last entry to win, got %+v", col.NameMaps)
+	}
+	if len(col.NameMapWarnings) != 1 || !strings.Contains(col.NameMapWarnings[0].Message, "DPG-E031") {
+		t.Fatalf("expected 1 DPG-E031 warning on column block, got %+v", col.NameMapWarnings)
 	}
 }
 

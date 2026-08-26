@@ -737,6 +737,7 @@ func (b *blockParser) parseBlock(pos pipeline.SourcePos) (pipeline.BlockAST, err
 			return ast, err
 		}
 	}
+	ast.NameMaps, ast.NameMapWarnings = dedupeNameMapsLastWins(ast.NameMaps)
 	return ast, nil
 }
 
@@ -1699,6 +1700,7 @@ func (b *blockParser) parseColumnBlock(pos pipeline.SourcePos) (pipeline.ColumnB
 	if err := b.fillColumnBlock(&col); err != nil {
 		return col, err
 	}
+	col.NameMaps, col.NameMapWarnings = dedupeNameMapsLastWins(col.NameMaps)
 	b.skipWS()
 	if b.peek() != '}' {
 		return col, b.errorf("expected '}' to close COLUMN %s block", name)
@@ -3590,6 +3592,26 @@ func (b *blockParser) parseOneParameterGrant(pos pipeline.SourcePos) (pipeline.P
 			b.restore(c)
 		}
 	}
+
+	// Optional GRANTED BY role-spec — see parseOneGrant's identical clause;
+	// real PostgreSQL's GRANT ... ON PARAMETER accepts it the same as every
+	// other GRANT form (confirmed live, PG17).
+	b.skipWS()
+	c = b.cur()
+	if strings.ToUpper(b.peekWord()) == "GRANTED" {
+		b.readWord()
+		if err := b.expect("BY"); err != nil {
+			return g, err
+		}
+		spec, err := b.parseRoleSpec()
+		if err != nil {
+			return g, err
+		}
+		g.GrantedBy = &spec
+	} else {
+		b.restore(c)
+	}
+
 	b.skipWS()
 	if b.peek() == ';' {
 		b.advance()
@@ -3670,8 +3692,27 @@ func (b *blockParser) parseOneParameterRevocation(pos pipeline.SourcePos) (pipel
 			break
 		}
 	}
+
+	// Optional GRANTED BY role-spec — see parseOneRevocation's identical
+	// clause; grammar order here is GRANTED BY before CASCADE.
 	b.skipWS()
 	c := b.cur()
+	if strings.ToUpper(b.peekWord()) == "GRANTED" {
+		b.readWord()
+		if err := b.expect("BY"); err != nil {
+			return r, err
+		}
+		spec, err := b.parseRoleSpec()
+		if err != nil {
+			return r, err
+		}
+		r.GrantedBy = &spec
+	} else {
+		b.restore(c)
+	}
+
+	b.skipWS()
+	c = b.cur()
 	if strings.ToUpper(b.peekWord()) == "CASCADE" {
 		b.readWord()
 		r.Cascade = true
@@ -3770,6 +3811,48 @@ func (b *blockParser) parseNameMapValue(pos pipeline.SourcePos, tool string) (pi
 		return pipeline.NameMapEntry{}, err
 	}
 	return pipeline.NameMapEntry{Tool: tool, Value: rule, IsLiteral: false, Pos: pos}, nil
+}
+
+// dedupeNameMapsLastWins collapses entries to the last occurrence per tool
+// key (RFC Appendix C, DPG-E031: "same tool key specified more than once at
+// the same block level ... warning only; last entry wins") and returns a
+// DPG-E031 LintDiagnostic for each tool that had more than one entry. Order
+// of the surviving entries follows their last occurrence's position in the
+// input.
+func dedupeNameMapsLastWins(entries []pipeline.NameMapEntry) ([]pipeline.NameMapEntry, []pipeline.LintDiagnostic) {
+	if len(entries) < 2 {
+		return entries, nil
+	}
+	lastIdx := make(map[string]int, len(entries))
+	for i, e := range entries {
+		lastIdx[e.Tool] = i
+	}
+	deduped := make([]pipeline.NameMapEntry, 0, len(lastIdx))
+	for i, e := range entries {
+		if i != lastIdx[e.Tool] {
+			continue // shadowed by a later entry for the same tool
+		}
+		deduped = append(deduped, e)
+	}
+	dupCount := make(map[string]int, len(lastIdx))
+	var tools []string
+	var warnings []pipeline.LintDiagnostic
+	for _, e := range entries {
+		if dupCount[e.Tool] == 0 {
+			tools = append(tools, e.Tool)
+		}
+		dupCount[e.Tool]++
+	}
+	for _, tool := range tools {
+		if dupCount[tool] > 1 {
+			warnings = append(warnings, pipeline.LintDiagnostic{
+				Pos:     entries[lastIdx[tool]].Pos,
+				Rule:    "duplicate-namemap-tool",
+				Message: fmt.Sprintf("DPG-E031: tool key %q specified more than once at this block level; last entry wins", tool),
+			})
+		}
+	}
+	return deduped, warnings
 }
 
 // ── TEXT SEARCH MAPPING ───────────────────────────────────────────────────────

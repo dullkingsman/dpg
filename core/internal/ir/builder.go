@@ -2429,6 +2429,9 @@ func (b *Builder) buildFDW(cs *pg_query.CreateFdwStmt, block pipeline.BlockAST, 
 	if block.RenamedFrom != nil {
 		f.RenamedFrom = &block.RenamedFrom.Name
 	}
+	if block.Owner != nil {
+		f.Owner = &block.Owner.Name
+	}
 	for _, g := range block.Grants {
 		f.Grants = append(f.Grants, blockGrantToIR(g))
 	}
@@ -3122,6 +3125,7 @@ func (b *Builder) BuildParameterPrivileges(block pipeline.ParameterPrivilegesBlo
 			Parameters: identifierStrings(g.Parameters),
 			Roles:      identifierStrings(g.Roles),
 			WithGrant:  g.WithGrant,
+			GrantedBy:  g.GrantedBy,
 			Pos:        g.Pos,
 		})
 	}
@@ -3131,6 +3135,7 @@ func (b *Builder) BuildParameterPrivileges(block pipeline.ParameterPrivilegesBlo
 			Parameters: identifierStrings(r.Parameters),
 			Roles:      identifierStrings(r.Roles),
 			Cascade:    r.Cascade,
+			GrantedBy:  r.GrantedBy,
 			Pos:        r.Pos,
 		})
 	}
@@ -3224,6 +3229,9 @@ func (b *Builder) buildSubscription(stmt *pg_query.CreateSubscriptionStmt, block
 	}
 	if block.RenamedFrom != nil {
 		sub.RenamedFrom = &block.RenamedFrom.Name
+	}
+	if block.Owner != nil {
+		sub.Owner = &block.Owner.Name
 	}
 	sub.SecurityLabels = block.SecurityLabels
 	return sub, nil

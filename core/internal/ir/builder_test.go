@@ -4755,6 +4755,21 @@ func TestBuildParameterPrivileges(t *testing.T) {
 	}
 }
 
+// TestBuildParameterPrivilegesGrantedBy guards GrantedBy conversion for both
+// Grants and Revocations.
+func TestBuildParameterPrivilegesGrantedBy(t *testing.T) {
+	pp := buildParameterPrivileges(t, "", `
+		GRANTS { SET ON PARAMETER work_mem TO app_admin GRANTED BY admin_role; }
+		REVOCATIONS { SET ON PARAMETER work_mem FROM app_readonly GRANTED BY admin_role; }
+	`)
+	if pp.Grants[0].GrantedBy == nil || *pp.Grants[0].GrantedBy != "admin_role" {
+		t.Errorf("Grant.GrantedBy: got %v", pp.Grants[0].GrantedBy)
+	}
+	if pp.Revocations[0].GrantedBy == nil || *pp.Revocations[0].GrantedBy != "admin_role" {
+		t.Errorf("Revocation.GrantedBy: got %v", pp.Revocations[0].GrantedBy)
+	}
+}
+
 // TestBuildParameterPrivilegesQualifiedNameIsConstant guards that
 // ParameterPrivileges.QualifiedName is a fixed singleton key — unlike
 // DefaultPrivileges, which splits per (role, schema, object type), a DPG

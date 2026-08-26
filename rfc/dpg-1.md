@@ -5370,8 +5370,9 @@ USER MAPPING FOR app_service
    exist (Appendix D.5), matching the same correction already made to Role
    `PASSWORD`'s hardcoded-password rule.
 
-   Hardcoded passwords (an `OPTIONS` `password` value with no `{{...}}`
-   placeholder at all) are rejected by the linter when
+   Hardcoded passwords (a literal value with no `{{...}}` placeholder
+   under any password-like `OPTIONS` key — `password`/`passwd`/`pwd`/
+   `secret`/`passphrase`) are rejected by the linter when
    `forbid_hardcoded_passwords` is enabled (default `true`) — implemented
    as `hardcoded-fdw-password` in the reference linter (Section 19.1's own table
    still names several rules with this document's snake_case rather than
@@ -6689,7 +6690,7 @@ dpg completion <shell>
    | Rule ID | Description | Default Level |
    |---------|-------------|---------------|
    | `hardcoded_password` | `ROLE PASSWORD 'literal'` detected. Use `env:VAR_NAME`. | Error |
-   | `hardcoded_fdw_password` | `USER MAPPING OPTIONS (password 'literal')` detected. | Error |
+   | `hardcoded_fdw_password` | `USER MAPPING OPTIONS` has a literal value under a password-like key (`password`/`passwd`/`pwd`/`secret`/`passphrase`, matched as a substring). | Error |
    | `deprecated_reference` | A non-deprecated object references a deprecated object or column. | Warning |
    | `missing_column_comment` | A column has no `COMMENT` and `require_column_comments = true`. | Warning (configurable to Error) |
    | `column_count_exceeded` | A table has more columns than `max_columns_per_table`. | Warning |
@@ -7194,8 +7195,8 @@ serial_sequence_declared      = "off"
    placeholder deliberately contains no `{{...}}` marker, so if the
    dumped file is planned or applied unmodified, the existing
    `hardcoded-fdw-password` rule (see Appendix D.3 for the corrected
-   rule ID table) still hard-errors on the literal
-   `password` key and forces the operator to replace it with a real
+   rule ID table) still hard-errors on any of the 5 password-like keys
+   and forces the operator to replace it with a real
    `{{secret-uri}}` reference. What remains a genuine, inherent
    limitation — not fixable by redaction — is narrower than the above:
    PostgreSQL itself only ever stores the resolved credential, never the
@@ -8016,7 +8017,7 @@ SCHEMA public {
    |---|---|---|
    | `hardcoded-password` | A table column's `DEFAULT` contains a hardcoded string, for a column whose name contains `password`, `passwd`, `pwd`, `secret`, or `passphrase` (case-insensitive). | Error |
    | `hardcoded-role-password` | A `ROLE`'s `PASSWORD` is a literal value with no `{{secret-uri}}` placeholder. A separate rule from `hardcoded-password` above — different check, different object kind — despite Section 19.1's table conflating both under one `hardcoded_password` entry. | Error |
-   | `hardcoded-fdw-password` | A `USER MAPPING`'s `OPTIONS (password '...')` is a literal value with no `{{secret-uri}}` placeholder. | Error |
+   | `hardcoded-fdw-password` | A `USER MAPPING`'s `OPTIONS` has a literal value with no `{{secret-uri}}` placeholder under a password-like key (`password`/`passwd`/`pwd`/`secret`/`passphrase`, matched case-insensitively as a substring — the same 5-key list as `hardcoded-password` above and `dump`'s own OPTIONS redaction, Section 14.10). | Error |
    | `deprecated` | Object or column is marked `DEPRECATED`. Applied to tables, columns, views, functions. A different check from `deprecated-reference` below (that object/column being deprecated, vs. something else referencing it) — see the note below. | Warning |
    | `missing-column-comment` | Column lacks a `COMMENT` when `require_column_comments = true`. Renamed from `require-column-comments` (Section 19.1 named this `missing_column_comment`; the actual code now matches that wording, kebab-cased). | Warning |
    | `column-count-exceeded` | Table exceeds `max_columns_per_table` columns. Renamed from `max-columns` (Section 19.1 named this `column_count_exceeded`; the actual code now matches that wording, kebab-cased). | Error |

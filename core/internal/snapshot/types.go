@@ -151,7 +151,10 @@ type SnapOpaque struct {
 	FDWHandler        string         `json:"fdw_handler,omitempty"`
 	FDWValidator      string         `json:"fdw_validator,omitempty"`
 	FDWOptions        []SnapOptionKV `json:"fdw_options,omitempty"`
-	ServerFDWName     string         `json:"server_fdw_name,omitempty"`
+	// FDWOwner is Section 14.8's ALTER FOREIGN DATA WRAPPER ... OWNER TO
+	// diffing input — same shape as ServerOwner below.
+	FDWOwner      *string `json:"fdw_owner,omitempty"`
+	ServerFDWName string  `json:"server_fdw_name,omitempty"`
 	ServerType        *string        `json:"server_type,omitempty"`
 	ServerVersion     *string        `json:"server_version,omitempty"`
 	ServerOptions     []SnapOptionKV `json:"server_options,omitempty"`
@@ -197,6 +200,9 @@ type SnapOpaque struct {
 	// CollationRules is RFC audit item #111's PG16+ ICU RULES diffing
 	// input — see ir.Collation.Rules' doc comment.
 	CollationRules *string `json:"collation_rules,omitempty"`
+	// SubscriptionOwner is Section 13.2's ALTER SUBSCRIPTION ... OWNER TO
+	// diffing input — same shape as CollationOwner above.
+	SubscriptionOwner *string `json:"subscription_owner,omitempty"`
 	// OperatorStructured/OperatorRestrict/OperatorJoin/OperatorCommutator/
 	// OperatorNegator/OperatorHashes/OperatorMerges are RFC Section 14.3's
 	// optimizer-hint structured diffing inputs — see ir.Operator.Restrict's
@@ -806,4 +812,8 @@ type SnapParamGrant struct {
 	Parameters []string `json:"parameters"`
 	Roles      []string `json:"roles"`
 	WithGrant  bool     `json:"with_grant,omitempty"`
+	// GrantedBy — see SnapGrant.GrantedBy's identical doc comment. Excluded
+	// from paramGrantKey (identity), same "declared, so managed" comparison
+	// rule via grantedByMatches.
+	GrantedBy *string `json:"granted_by,omitempty"`
 }

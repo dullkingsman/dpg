@@ -3,6 +3,7 @@ package compiler_test
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	_ "github.com/dullkingsman/dpg/internal/blockparser"
@@ -369,6 +370,47 @@ func TestCompile_MultiFileScalarMergeConflict(t *testing.T) {
 	// value is used regardless").
 	if tbl.Owner == nil || *tbl.Owner != "bob" {
 		t.Errorf("Owner (last-wins, regardless of conflict): got %v", tbl.Owner)
+	}
+}
+
+func TestCompile_DuplicateNameMapToolWarns(t *testing.T) {
+	dbDir := t.TempDir()
+	f := filepath.Join(dbDir, "schemas", "app", "tables.dpg")
+	writeDPG(t, f, `TABLE users (id BIGINT NOT NULL) {
+		NAME MAP prisma TO "First";
+		NAME MAP prisma TO "Second";
+	}`)
+
+	objects, mergeDiags, err := compiler.Compile([]string{f}, dbDir, pipeline.Default)
+	if err != nil {
+		t.Fatalf("Compile: %v", err)
+	}
+
+	var dups []pipeline.LintDiagnostic
+	for _, d := range mergeDiags {
+		if d.Rule == "duplicate-namemap-tool" {
+			dups = append(dups, d)
+		}
+	}
+	if len(dups) != 1 {
+		t.Fatalf("expected 1 duplicate-namemap-tool diagnostic, got %d: %v", len(dups), mergeDiags)
+	}
+	if !strings.Contains(dups[0].Message, "DPG-E031") {
+		t.Errorf("expected DPG-E031 in message, got %q", dups[0].Message)
+	}
+
+	var tbl *ir.Table
+	for _, o := range objects {
+		if t2, ok := o.(*ir.Table); ok && t2.Name == "users" {
+			tbl = t2
+			break
+		}
+	}
+	if tbl == nil {
+		t.Fatal("'users' table not found")
+	}
+	if len(tbl.NameMaps) != 1 || tbl.NameMaps[0].Value != "Second" {
+		t.Errorf("expected last-entry-wins collapsed to 1 NameMap entry with Value=Second, got %+v", tbl.NameMaps)
 	}
 }
 

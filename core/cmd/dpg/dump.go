@@ -1551,7 +1551,7 @@ func renderObjectDPGWithRoleInheritDefaults(b *strings.Builder, obj pipeline.IRO
 	case *ir.EventTrigger:
 		renderEventTriggerBody(b, ind, fmtOpts, o)
 	case *ir.ForeignDataWrapper:
-		renderOpaqueBodyWithGrants(b, ind, fmtOpts, o.Body, o.Comment, o.Grants, o.Revocations)
+		renderForeignDataWrapperBody(b, ind, fmtOpts, o)
 	case *ir.ForeignServer:
 		renderForeignServerBody(b, ind, fmtOpts, o)
 	case *ir.UserMapping:
@@ -1559,7 +1559,7 @@ func renderObjectDPGWithRoleInheritDefaults(b *strings.Builder, obj pipeline.IRO
 	case *ir.Publication:
 		renderPublicationBody(b, ind, fmtOpts, o)
 	case *ir.Subscription:
-		renderOpaqueBodyWithLabels(b, ind, fmtOpts, o.Body, o.Comment, o.SecurityLabels)
+		renderSubscriptionBody(b, ind, fmtOpts, o)
 	case *ir.Tablespace:
 		renderOpaqueBodyWithGrantsAndLabels(b, ind, fmtOpts, o.Body, o.Comment, o.Grants, o.Revocations, o.SecurityLabels)
 	case *ir.Operator:
@@ -2000,6 +2000,9 @@ func renderParameterPrivileges(b *strings.Builder, ind string, fmtOpts format.Op
 			if g.WithGrant {
 				fmt.Fprintf(b, " %s %s %s", kw("WITH"), kw("GRANT"), kw("OPTION"))
 			}
+			if g.GrantedBy != nil {
+				fmt.Fprintf(b, " %s %s %s", kw("GRANTED"), kw("BY"), *g.GrantedBy)
+			}
 			b.WriteString(";\n")
 		}
 		fmt.Fprintf(b, "%s}\n", ind)
@@ -2013,6 +2016,9 @@ func renderParameterPrivileges(b *strings.Builder, ind string, fmtOpts format.Op
 			}
 			fmt.Fprintf(b, "%s%s %s %s %s %s %s", entryInd, priv, kw("ON"), kw("PARAMETER"),
 				strings.Join(r.Parameters, ", "), kw("FROM"), strings.Join(r.Roles, ", "))
+			if r.GrantedBy != nil {
+				fmt.Fprintf(b, " %s %s %s", kw("GRANTED"), kw("BY"), *r.GrantedBy)
+			}
 			if r.Cascade {
 				fmt.Fprintf(b, " %s", kw("CASCADE"))
 			}
@@ -2023,13 +2029,13 @@ func renderParameterPrivileges(b *strings.Builder, ind string, fmtOpts format.Op
 	b.WriteString("}\n")
 }
 
-// renderOpaqueBodyWithGrants is renderOpaqueBody plus Grants/Revocations
-// (RFC audit items #4/#5/#6) — Tablespace/ForeignDataWrapper/ForeignServer
-// only, the 3 opaque kinds that gained a Grants/Revocations field without
-// also having SecurityLabels (Tablespace has both, via
-// renderOpaqueBodyWithGrantsAndLabels below).
-func renderOpaqueBodyWithGrants(b *strings.Builder, ind string, fmtOpts format.Options, body string, comment *string, grants []ir.Grant, revocations []ir.Revocation) {
-	body = strings.TrimSpace(body)
+// renderForeignDataWrapperBody is like the old renderOpaqueBodyWithGrants
+// (Section 14.8) — kept as its own function like renderForeignServerBody,
+// rather than adding an Owner parameter to writeFuncBlock and touching
+// every other call site.
+func renderForeignDataWrapperBody(b *strings.Builder, ind string, fmtOpts format.Options, o *ir.ForeignDataWrapper) {
+	kw := fmtOpts.Keyword
+	body := strings.TrimSpace(o.Body)
 	const createPrefix = "CREATE "
 	if len(body) >= len(createPrefix) && strings.EqualFold(body[:len(createPrefix)], createPrefix) {
 		body = strings.TrimSpace(body[len(createPrefix):])
@@ -2038,7 +2044,40 @@ func renderOpaqueBodyWithGrants(b *strings.Builder, ind string, fmtOpts format.O
 		return
 	}
 	fmt.Fprintf(b, "\n%s", body)
-	writeFuncBlock(b, ind, fmtOpts, comment, grants, revocations)
+	if o.Owner == nil && o.Comment == nil && len(o.Grants) == 0 && len(o.Revocations) == 0 {
+		b.WriteString(";\n")
+		return
+	}
+	b.WriteString(" {\n")
+	if o.Owner != nil {
+		fmt.Fprintf(b, "%s%s %s;\n", ind, kw("OWNER"), quoteIdentIfNeeded(*o.Owner))
+	}
+	if o.Comment != nil {
+		fmt.Fprintf(b, "%s%s %s;\n", ind, kw("COMMENT"), sqlStringLit(*o.Comment))
+	}
+	for _, g := range o.Grants {
+		priv := "ALL"
+		if len(g.Privileges) > 0 {
+			priv = strings.Join(g.Privileges, ", ")
+		}
+		fmt.Fprintf(b, "%s%s %s %s %s", ind, kw("GRANT"), priv, kw("TO"), strings.Join(g.Roles, ", "))
+		if g.WithGrant {
+			fmt.Fprintf(b, " %s %s %s", kw("WITH"), kw("GRANT"), kw("OPTION"))
+		}
+		b.WriteString(";\n")
+	}
+	for _, r := range o.Revocations {
+		priv := "ALL"
+		if len(r.Privileges) > 0 {
+			priv = strings.Join(r.Privileges, ", ")
+		}
+		fmt.Fprintf(b, "%s%s %s %s %s", ind, kw("REVOCATION"), priv, kw("FROM"), strings.Join(r.Roles, ", "))
+		if r.Cascade {
+			fmt.Fprintf(b, " %s", kw("CASCADE"))
+		}
+		b.WriteString(";\n")
+	}
+	b.WriteString("}\n")
 }
 
 // renderForeignServerBody is renderOpaqueBodyWithGrants plus Owner (RFC
@@ -2120,16 +2159,12 @@ func renderOpaqueBody(b *strings.Builder, ind string, fmtOpts format.Options, bo
 	writeFuncBlock(b, ind, fmtOpts, comment, nil, nil)
 }
 
-// renderOpaqueBodyWithLabels is renderOpaqueBody plus SecurityLabels (RFC
-// §14.11) — a separate entry point (not a renderOpaqueBody parameter)
-// because most of renderOpaqueBody's callers (Collation, Cast, FDW,
-// ForeignServer, UserMapping, Operator, OperatorClass/Family, Statistics,
-// TSParser/Template/Dict) are kinds real PostgreSQL's SECURITY LABEL simply
-// doesn't support at all — their ir types have no SecurityLabels field to
-// pass. Only the 4 opaque kinds that do (Tablespace, Publication,
-// Subscription, EventTrigger) call this instead.
-func renderOpaqueBodyWithLabels(b *strings.Builder, ind string, fmtOpts format.Options, body string, comment *string, securityLabels []pipeline.SecurityLabel) {
-	body = strings.TrimSpace(body)
+// renderSubscriptionBody is Subscription's dedicated render function (same
+// reasoning as renderPublicationBody): OWNER (Section 13.2) plus Comment/
+// SecurityLabels.
+func renderSubscriptionBody(b *strings.Builder, ind string, fmtOpts format.Options, o *ir.Subscription) {
+	kw := fmtOpts.Keyword
+	body := strings.TrimSpace(o.Body)
 	const createPrefix = "CREATE "
 	if len(body) >= len(createPrefix) && strings.EqualFold(body[:len(createPrefix)], createPrefix) {
 		body = strings.TrimSpace(body[len(createPrefix):])
@@ -2138,14 +2173,25 @@ func renderOpaqueBodyWithLabels(b *strings.Builder, ind string, fmtOpts format.O
 		return
 	}
 	fmt.Fprintf(b, "\n%s", body)
-	writeFuncBlockWithLabels(b, ind, fmtOpts, comment, nil, nil, securityLabels)
+	if o.Owner == nil && o.Comment == nil && len(o.SecurityLabels) == 0 {
+		b.WriteString(";\n")
+		return
+	}
+	b.WriteString(" {\n")
+	if o.Owner != nil {
+		fmt.Fprintf(b, "%s%s %s;\n", ind, kw("OWNER"), quoteIdentIfNeeded(*o.Owner))
+	}
+	if o.Comment != nil {
+		fmt.Fprintf(b, "%s%s %s;\n", ind, kw("COMMENT"), sqlStringLit(*o.Comment))
+	}
+	writeSecurityLabels(b, ind, fmtOpts, o.SecurityLabels)
+	b.WriteString("}\n")
 }
 
-// renderPublicationBody is renderOpaqueBodyWithLabels's Publication-specific
-// variant: Publication's OWNER (RFC audit item #7) has no counterpart in
-// any other opaque kind's IR, so it can't go through the shared
-// writeFuncBlockWithLabels helper without adding a parameter every other
-// caller would pass nil for.
+// renderPublicationBody is Publication's dedicated render function, like
+// renderSubscriptionBody/renderEventTriggerBody below: OWNER can't go
+// through the shared writeFuncBlockWithLabels helper without adding a
+// parameter every other caller would pass nil for.
 func renderPublicationBody(b *strings.Builder, ind string, fmtOpts format.Options, o *ir.Publication) {
 	kw := fmtOpts.Keyword
 	body := strings.TrimSpace(o.Body)
@@ -2172,11 +2218,8 @@ func renderPublicationBody(b *strings.Builder, ind string, fmtOpts format.Option
 	b.WriteString("}\n")
 }
 
-// renderEventTriggerBody is renderOpaqueBodyWithLabels's EventTrigger-
-// specific variant: EventTrigger's OWNER (Section 14.1) has no counterpart
-// in renderOpaqueBodyWithLabels's other callers (Subscription), so it can't
-// go through that shared helper without adding a parameter every other
-// caller would pass nil for — same reasoning as renderPublicationBody.
+// renderEventTriggerBody is EventTrigger's dedicated render function
+// (Section 14.1) — same reasoning as renderPublicationBody.
 func renderEventTriggerBody(b *strings.Builder, ind string, fmtOpts format.Options, o *ir.EventTrigger) {
 	kw := fmtOpts.Keyword
 	body := strings.TrimSpace(o.Body)

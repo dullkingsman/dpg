@@ -4,7 +4,6 @@ package linter
 
 import (
 	"fmt"
-	"regexp"
 	"strings"
 
 	"github.com/dullkingsman/dpg/internal/ir"
@@ -35,17 +34,27 @@ func (l *BuiltinLinter) Lint(objects []pipeline.IRObject, cfg pipeline.LinterCon
 
 // FilterMergeDiagnostics applies scalar-merge-conflict's own gating to the
 // diagnostics returned by pipeline.Merger.Merge (via compiler.Compile's
-// second return value): dropped entirely when
-// cfg.WarnOnScalarMergeConflict is false, otherwise passed through
-// ApplyRuleSeverityOverrides so [linter.rules] can still independently
-// promote/demote/silence the rule by ID, same as every other rule. The
-// merger itself is deliberately config-unaware (no algorithmic reason to
-// couple it to LinterConfig) — this is the one place that gating logic
-// lives, mirroring how ApplyRuleSeverityOverrides is itself the one place
-// [linter.rules] gating lives for Lint's own diagnostics.
+// second return value): scalar-merge-conflict entries are dropped when
+// cfg.WarnOnScalarMergeConflict is false; every other entry in this slice
+// (e.g. compiler.Compile's own DPG-E031 "duplicate-namemap-tool" findings,
+// merged into the same slice since both are populated ahead of/independent
+// from linting) is unaffected by that flag — it only ever governed the
+// scalar-merge-conflict rule specifically. Everything that survives is
+// passed through ApplyRuleSeverityOverrides so [linter.rules] can still
+// independently promote/demote/silence any rule by ID, same as every other
+// rule. The merger itself is deliberately config-unaware (no algorithmic
+// reason to couple it to LinterConfig) — this is the one place that gating
+// logic lives, mirroring how ApplyRuleSeverityOverrides is itself the one
+// place [linter.rules] gating lives for Lint's own diagnostics.
 func FilterMergeDiagnostics(mergeDiags []pipeline.LintDiagnostic, cfg pipeline.LinterConfig) []pipeline.LintDiagnostic {
 	if !cfg.WarnOnScalarMergeConflict {
-		return nil
+		filtered := mergeDiags[:0]
+		for _, d := range mergeDiags {
+			if d.Rule != "scalar-merge-conflict" {
+				filtered = append(filtered, d)
+			}
+		}
+		mergeDiags = filtered
 	}
 	return ApplyRuleSeverityOverrides(mergeDiags, cfg.Rules)
 }
@@ -352,27 +361,31 @@ func checkRole(r *ir.Role, cfg pipeline.LinterConfig) []pipeline.LintDiagnostic 
 // case-insensitive keyword, ” escaping supported like any SQL string
 // literal). UserMapping stays fully opaque (no structured OPTIONS field
 // exists to check directly, unlike Role.Password) — see
-// internal/diff.userMappingCreateOp's doc comment for why OPTIONS keys
-// aren't parsed out structurally at all (they're FDW-provider-specific,
-// not fixed by DPG).
-var fdwPasswordLit = regexp.MustCompile(`(?i)\bpassword\s+'((?:[^']|'')*)'`)
-
-// checkUserMapping implements RFC §19.1's hardcoded_fdw_password rule: a
-// literal `password 'value'` in a USER MAPPING's OPTIONS, with no
-// {{secret-uri}} placeholder anywhere in it, when forbid_hardcoded_passwords
-// is enabled — same severity and intent as checkRole, applied via a text
-// match instead of a structured field since UserMapping has none.
+// checkUserMapping implements RFC Section 19.1's hardcoded_fdw_password
+// rule: a literal (non-{{secret-uri}}) value under any password-like
+// OPTIONS key in a USER MAPPING, when forbid_hardcoded_passwords is
+// enabled — same severity and intent as checkRole. Matches against the
+// structured Options field (populated by buildUserMapping from the real
+// parsed OPTIONS clause) using the same 5-key substring list
+// (passwordColNames) as checkColumn's hardcoded-password rule and
+// introspect.userMappingPasswordKeys' redaction — previously this only
+// matched the literal key "password" via a regex against raw Body text, so
+// a literal value under passwd/pwd/secret/passphrase went uncaught even
+// though dump's redaction already treated all 5 as sensitive.
 func checkUserMapping(u *ir.UserMapping, cfg pipeline.LinterConfig) []pipeline.LintDiagnostic {
 	var diags []pipeline.LintDiagnostic
 
 	if !cfg.ForbidHardcodedPasswords {
 		return diags
 	}
-	if m := fdwPasswordLit.FindStringSubmatch(u.Body); m != nil && !strings.Contains(m[1], "{{") {
+	for _, opt := range u.Options {
+		if !looksLikePasswordKey(opt.Key) || strings.Contains(opt.Value, "{{") {
+			continue
+		}
 		diags = append(diags, pipeline.LintDiagnostic{
 			Pos:     u.SrcPos,
 			Rule:    "hardcoded-fdw-password",
-			Message: fmt.Sprintf("user mapping %s: OPTIONS password is a literal value; use a {{secret-uri}} reference instead (e.g. {{vault:secret/fdw/%s#password}})", u.QualifiedName(), u.Server),
+			Message: fmt.Sprintf("user mapping %s: OPTIONS %s is a literal value; use a {{secret-uri}} reference instead (e.g. {{vault:secret/fdw/%s#%s}})", u.QualifiedName(), opt.Key, u.Server, opt.Key),
 			IsError: true,
 		})
 	}
@@ -513,6 +526,20 @@ func looksLikePassword(colName, defaultExpr string) bool {
 			if strings.HasPrefix(trimmed, "'") {
 				return true
 			}
+		}
+	}
+	return false
+}
+
+// looksLikePasswordKey is checkUserMapping's key-only counterpart to
+// looksLikePassword — a USER MAPPING OPTIONS key has no separate "is this a
+// string literal" question the way a column DEFAULT expression does, since
+// FDW options are always plain string values.
+func looksLikePasswordKey(key string) bool {
+	lower := strings.ToLower(key)
+	for _, kw := range passwordColNames {
+		if strings.Contains(lower, kw) {
+			return true
 		}
 	}
 	return false

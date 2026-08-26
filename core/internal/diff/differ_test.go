@@ -8119,6 +8119,11 @@ func TestDiffTableInheritsRemoved(t *testing.T) {
 	if !containsSQL(ops, "NO INHERIT") {
 		t.Errorf("expected NO INHERIT, got: %v", sqlList(ops))
 	}
+	for _, o := range ops {
+		if strings.Contains(o.SQL(), "NO INHERIT") && o.Safety() != pipeline.Safe {
+			t.Errorf("expected NO INHERIT op to be SAFE (catalog-only, no rewrite), got %v: %v", o.Safety(), o.SQL())
+		}
+	}
 }
 
 // ── Column attribute diffing ──────────────────────────────────────────────────
@@ -12452,6 +12457,67 @@ func TestDiffParameterPrivilegesGrantAdded(t *testing.T) {
 	}
 }
 
+// TestDiffParameterPrivilegesGrantedByDrift guards the "declared, so
+// managed" GrantedBy re-check (RFC audit item #90, generalized here) — a
+// matched grant whose desired side newly declares GRANTED BY that the
+// snapshot doesn't already satisfy re-issues the GRANT with GRANTED BY.
+func TestDiffParameterPrivilegesGrantedByDrift(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	pp := &snapshot.SnapParameterPrivileges{
+		Grants: []snapshot.SnapParamGrant{{Privileges: []string{"SET"}, Parameters: []string{"work_mem"}, Roles: []string{"app_admin"}}},
+	}
+	_ = snap.SetObject("PARAMETER PRIVILEGES", &snapshot.SnapObject{
+		Kind:                "parameter_privileges",
+		ParameterPrivileges: pp,
+	})
+	adminRole := "admin_role"
+	desired := []pipeline.IRObject{
+		&ir.ParameterPrivileges{
+			Grants: []ir.ParameterGrant{
+				{Privileges: []string{"SET"}, Parameters: []string{"work_mem"}, Roles: []string{"app_admin"}, GrantedBy: &adminRole},
+			},
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsSQL(ops, "GRANTED BY \"admin_role\"") {
+		t.Errorf("expected re-GRANT with GRANTED BY, got: %v", sqlList(ops))
+	}
+}
+
+// TestDiffParameterPrivilegesGrantedByAlreadySatisfiedIsNoop guards the
+// inverse: when the snapshot already records the matching GrantedBy, no
+// re-GRANT is emitted.
+func TestDiffParameterPrivilegesGrantedByAlreadySatisfiedIsNoop(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	adminRole := "admin_role"
+	pp := &snapshot.SnapParameterPrivileges{
+		Grants: []snapshot.SnapParamGrant{{Privileges: []string{"SET"}, Parameters: []string{"work_mem"}, Roles: []string{"app_admin"}, GrantedBy: &adminRole}},
+	}
+	_ = snap.SetObject("PARAMETER PRIVILEGES", &snapshot.SnapObject{
+		Kind:                "parameter_privileges",
+		ParameterPrivileges: pp,
+	})
+	desired := []pipeline.IRObject{
+		&ir.ParameterPrivileges{
+			Grants: []ir.ParameterGrant{
+				{Privileges: []string{"SET"}, Parameters: []string{"work_mem"}, Roles: []string{"app_admin"}, GrantedBy: &adminRole},
+			},
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ops) != 0 {
+		t.Errorf("expected noop when GrantedBy already satisfied, got: %v", sqlList(ops))
+	}
+}
+
 // TestDiffParameterPrivilegesGrantRemovedEmitsNothing guards RFC Section
 // 11.6's literal additive-model text: removing a GRANTS { } entry from
 // source (while the PARAMETER PRIVILEGES block itself remains) must not
@@ -13834,6 +13900,46 @@ func TestDiffSubscriptionUnchangedIsNoop(t *testing.T) {
 	}
 	if len(ops) != 0 {
 		t.Errorf("expected no ops for an unchanged subscription, got %d: %v", len(ops), ops)
+	}
+}
+
+// TestDiffSubscriptionOwnerChanged guards the lower-priority fresh-audit
+// finding that ir.Subscription had no Owner support at all.
+func TestDiffSubscriptionOwnerChanged(t *testing.T) {
+	d := New()
+	body := "CREATE SUBSCRIPTION sub CONNECTION 'host=x user=y' PUBLICATION pub"
+	snap := &pipeline.Snapshot{}
+	if err := snapshot.Populate(snap, []pipeline.IRObject{
+		&ir.Subscription{Name: "sub", ConnInfo: "host=x user=y", Body: body, Owner: strPtr("alice")},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	desired := []pipeline.IRObject{
+		&ir.Subscription{Name: "sub", ConnInfo: "host=x user=y", Body: body, Owner: strPtr("bob")},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsSQL(ops, `ALTER SUBSCRIPTION "sub" OWNER TO "bob"`) {
+		t.Errorf("expected ALTER SUBSCRIPTION OWNER TO, got: %v", sqlList(ops))
+	}
+}
+
+func TestDiffSubscriptionOwnerUnchangedIsNoop(t *testing.T) {
+	d := New()
+	body := "CREATE SUBSCRIPTION sub CONNECTION 'host=x user=y' PUBLICATION pub"
+	sub := &ir.Subscription{Name: "sub", ConnInfo: "host=x user=y", Body: body, Owner: strPtr("alice")}
+	snap := &pipeline.Snapshot{}
+	if err := snapshot.Populate(snap, []pipeline.IRObject{sub}); err != nil {
+		t.Fatal(err)
+	}
+	ops, err := d.Diff([]pipeline.IRObject{sub}, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ops) != 0 {
+		t.Errorf("expected zero ops for an unchanged Owner, got: %v", sqlList(ops))
 	}
 }
 
@@ -18876,6 +18982,59 @@ func TestDiffFDWUnchangedIsNoop(t *testing.T) {
 	}
 	if len(ops) != 0 {
 		t.Errorf("expected zero ops for an unchanged FDW, got: %v", sqlList(ops))
+	}
+}
+
+// TestDiffFDWOwnerChanged guards the lower-priority fresh-audit finding
+// that ir.ForeignDataWrapper had no Owner support at all — mirrors
+// ForeignServer's identical ALTER ... OWNER TO diffing.
+func TestDiffFDWOwnerChanged(t *testing.T) {
+	d := New()
+	oldOwner := "alice"
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("myfdw", &snapshot.SnapObject{
+		Kind: "fdw",
+		Opaque: &snapshot.SnapOpaque{
+			Kind: "fdw", Name: "myfdw", OptionsStructured: true, FDWOwner: &oldOwner,
+		},
+	})
+	desired := []pipeline.IRObject{
+		&ir.ForeignDataWrapper{
+			Name: "myfdw", Body: "CREATE FOREIGN DATA WRAPPER myfdw",
+			Owner: strPtr("bob"),
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsSQL(ops, `ALTER FOREIGN DATA WRAPPER "myfdw" OWNER TO "bob"`) {
+		t.Errorf("expected ALTER FOREIGN DATA WRAPPER OWNER TO, got: %v", sqlList(ops))
+	}
+}
+
+func TestDiffFDWOwnerUnchangedIsNoop(t *testing.T) {
+	d := New()
+	owner := "alice"
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("myfdw", &snapshot.SnapObject{
+		Kind: "fdw",
+		Opaque: &snapshot.SnapOpaque{
+			Kind: "fdw", Name: "myfdw", OptionsStructured: true, FDWOwner: &owner,
+		},
+	})
+	desired := []pipeline.IRObject{
+		&ir.ForeignDataWrapper{
+			Name: "myfdw", Body: "CREATE FOREIGN DATA WRAPPER myfdw",
+			Owner: &owner,
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ops) != 0 {
+		t.Errorf("expected zero ops for an unchanged Owner, got: %v", sqlList(ops))
 	}
 }
 

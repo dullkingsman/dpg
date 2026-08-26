@@ -178,7 +178,8 @@ func TestLintHardcodedFDWPassword(t *testing.T) {
 	l := New()
 	objects := []pipeline.IRObject{&ir.UserMapping{
 		User: "app", Server: "srv",
-		Body: "CREATE USER MAPPING FOR app SERVER srv OPTIONS (user 'app', password 'hunter2')",
+		Options: []pipeline.StorageParam{{Key: "user", Value: "app"}, {Key: "password", Value: "hunter2"}},
+		Body:    "CREATE USER MAPPING FOR app SERVER srv OPTIONS (user 'app', password 'hunter2')",
 	}}
 	diags, err := l.Lint(objects, pipeline.LinterConfig{ForbidHardcodedPasswords: true})
 	if err != nil {
@@ -202,7 +203,8 @@ func TestLintFDWPasswordWithSecretReferenceOK(t *testing.T) {
 	l := New()
 	objects := []pipeline.IRObject{&ir.UserMapping{
 		User: "app", Server: "srv",
-		Body: "CREATE USER MAPPING FOR app SERVER srv OPTIONS (user 'app', password '{{vault:secret/fdw/srv#pw}}')",
+		Options: []pipeline.StorageParam{{Key: "user", Value: "app"}, {Key: "password", Value: "{{vault:secret/fdw/srv#pw}}"}},
+		Body:    "CREATE USER MAPPING FOR app SERVER srv OPTIONS (user 'app', password '{{vault:secret/fdw/srv#pw}}')",
 	}}
 	diags, err := l.Lint(objects, pipeline.LinterConfig{ForbidHardcodedPasswords: true})
 	if err != nil {
@@ -219,7 +221,8 @@ func TestLintFDWPasswordRuleDisabled(t *testing.T) {
 	l := New()
 	objects := []pipeline.IRObject{&ir.UserMapping{
 		User: "app", Server: "srv",
-		Body: "CREATE USER MAPPING FOR app SERVER srv OPTIONS (password 'hunter2')",
+		Options: []pipeline.StorageParam{{Key: "password", Value: "hunter2"}},
+		Body:    "CREATE USER MAPPING FOR app SERVER srv OPTIONS (password 'hunter2')",
 	}}
 	diags, err := l.Lint(objects, pipeline.LinterConfig{ForbidHardcodedPasswords: false})
 	if err != nil {
@@ -242,6 +245,7 @@ func TestLintFDWPasswordCatchesDumpedRedactionPlaceholder(t *testing.T) {
 	l := New()
 	objects := []pipeline.IRObject{&ir.UserMapping{
 		User: "app", Server: "srv",
+		Options: []pipeline.StorageParam{{Key: "user", Value: "app"}, {Key: "password", Value: introspect.UserMappingRedactedPlaceholder}},
 		Body: fmt.Sprintf("CREATE USER MAPPING FOR app SERVER srv OPTIONS (user 'app', password %s)",
 			"'"+introspect.UserMappingRedactedPlaceholder+"'"),
 	}}
@@ -260,11 +264,45 @@ func TestLintFDWPasswordCatchesDumpedRedactionPlaceholder(t *testing.T) {
 	}
 }
 
+// TestLintFDWHardcodedPasswordFullKeyListParity guards the fresh-audit
+// finding that hardcoded-fdw-password previously matched only the literal
+// key "password", while dump's UserMapping-OPTIONS redaction (and the
+// column-level hardcoded-password rule) use the broader 5-key list
+// (password/passwd/pwd/secret/passphrase) — the RFC's Section 24 prose
+// claims parity between them, so a literal value under any of the other 4
+// keys must now be caught too, not just "password".
+func TestLintFDWHardcodedPasswordFullKeyListParity(t *testing.T) {
+	l := New()
+	for _, key := range []string{"passwd", "pwd", "secret", "passphrase"} {
+		t.Run(key, func(t *testing.T) {
+			objects := []pipeline.IRObject{&ir.UserMapping{
+				User: "app", Server: "srv",
+				Options: []pipeline.StorageParam{{Key: key, Value: "hunter2"}},
+				Body:    fmt.Sprintf("CREATE USER MAPPING FOR app SERVER srv OPTIONS (%s 'hunter2')", key),
+			}}
+			diags, err := l.Lint(objects, pipeline.LinterConfig{ForbidHardcodedPasswords: true})
+			if err != nil {
+				t.Fatal(err)
+			}
+			found := false
+			for _, d := range diags {
+				if d.Rule == "hardcoded-fdw-password" {
+					found = true
+				}
+			}
+			if !found {
+				t.Errorf("expected hardcoded-fdw-password for a literal value under key %q, got: %v", key, diags)
+			}
+		})
+	}
+}
+
 func TestLintUserMappingNoPasswordOptionOK(t *testing.T) {
 	l := New()
 	objects := []pipeline.IRObject{&ir.UserMapping{
 		User: "app", Server: "srv",
-		Body: "CREATE USER MAPPING FOR app SERVER srv OPTIONS (user 'app')",
+		Options: []pipeline.StorageParam{{Key: "user", Value: "app"}},
+		Body:    "CREATE USER MAPPING FOR app SERVER srv OPTIONS (user 'app')",
 	}}
 	diags, err := l.Lint(objects, pipeline.LinterConfig{ForbidHardcodedPasswords: true})
 	if err != nil {
@@ -545,6 +583,17 @@ func TestFilterMergeDiagnosticsRuleSeverityOverrideError(t *testing.T) {
 	})
 	if len(got) != 1 || !got[0].IsError {
 		t.Errorf("[linter.rules] \"error\" should promote scalar-merge-conflict, got %v", got)
+	}
+}
+
+func TestFilterMergeDiagnosticsGatingDisabledDoesNotDropOtherRules(t *testing.T) {
+	mergeDiags := []pipeline.LintDiagnostic{
+		{Rule: "scalar-merge-conflict", Message: "table public.t: owner conflicts"},
+		{Rule: "duplicate-namemap-tool", Message: "DPG-E031: tool key \"prisma\" specified more than once"},
+	}
+	got := FilterMergeDiagnostics(mergeDiags, pipeline.LinterConfig{WarnOnScalarMergeConflict: false})
+	if len(got) != 1 || got[0].Rule != "duplicate-namemap-tool" {
+		t.Errorf("WarnOnScalarMergeConflict=false should only drop scalar-merge-conflict, got %v", got)
 	}
 }
 

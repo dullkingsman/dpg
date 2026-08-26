@@ -2735,6 +2735,133 @@ func TestRenderDefaultPrivilegesCompiles(t *testing.T) {
 	}
 }
 
+// TestRenderParameterPrivilegesGrantedByRoundtrip guards Parameter
+// Privileges' GRANTED BY (RFC Section 11.6) round-tripping through dump —
+// real PostgreSQL's GRANT/REVOKE ... ON PARAMETER accepts the same optional
+// GRANTED BY role-spec as every other GRANT form (confirmed live, PG17).
+func TestRenderParameterPrivilegesGrantedByRoundtrip(t *testing.T) {
+	fmtOpts := format.Options{IndentSize: 4, KeywordCase: "upper"}
+	adminRole := "admin_role"
+	pp := &ir.ParameterPrivileges{
+		Grants: []ir.ParameterGrant{
+			{Privileges: []string{"SET"}, Parameters: []string{"work_mem"}, Roles: []string{"app_admin"}, WithGrant: true, GrantedBy: &adminRole},
+		},
+		Revocations: []ir.ParameterRevocation{
+			{Privileges: []string{"SET"}, Parameters: []string{"work_mem"}, Roles: []string{"app_readonly"}, Cascade: true, GrantedBy: &adminRole},
+		},
+	}
+
+	var b strings.Builder
+	renderObjectDPG(&b, pp, fmtOpts)
+	rendered := b.String()
+
+	if !strings.Contains(rendered, "GRANTED BY admin_role") {
+		t.Errorf("expected GRANTED BY in rendered output, got:\n%s", rendered)
+	}
+
+	dir := t.TempDir()
+	f := filepath.Join(dir, "objects.dpg")
+	if err := os.WriteFile(f, []byte(rendered), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	compiled, _, err := compiler.Compile([]string{f}, dir, pipeline.Default)
+	if err != nil {
+		t.Fatalf("dumped parameter privileges failed to recompile: %v\n---\n%s", err, rendered)
+	}
+	var found *ir.ParameterPrivileges
+	for _, o := range compiled {
+		if p, ok := o.(*ir.ParameterPrivileges); ok {
+			found = p
+		}
+	}
+	if found == nil {
+		t.Fatalf("parameter privileges object missing after recompile\n---\n%s", rendered)
+	}
+	if len(found.Grants) != 1 || found.Grants[0].GrantedBy == nil || *found.Grants[0].GrantedBy != "admin_role" {
+		t.Errorf("Grant GrantedBy did not round-trip: %+v", found.Grants)
+	}
+	if len(found.Revocations) != 1 || found.Revocations[0].GrantedBy == nil || *found.Revocations[0].GrantedBy != "admin_role" {
+		t.Errorf("Revocation GrantedBy did not round-trip: %+v", found.Revocations)
+	}
+}
+
+// TestRenderForeignDataWrapperOwnerRoundtrip guards the lower-priority
+// fresh-audit finding that ir.ForeignDataWrapper had no Owner support at
+// all, unlike ForeignServer (its closest sibling opaque kind).
+func TestRenderForeignDataWrapperOwnerRoundtrip(t *testing.T) {
+	fmtOpts := format.Options{IndentSize: 4, KeywordCase: "upper"}
+	owner := "alice"
+	fdw := &ir.ForeignDataWrapper{Name: "myfdw", Body: "CREATE FOREIGN DATA WRAPPER myfdw", Owner: &owner}
+
+	var b strings.Builder
+	renderObjectDPG(&b, fdw, fmtOpts)
+	rendered := b.String()
+
+	if !strings.Contains(rendered, "OWNER alice") {
+		t.Errorf("expected OWNER in rendered output, got:\n%s", rendered)
+	}
+
+	dir := t.TempDir()
+	f := filepath.Join(dir, "objects.dpg")
+	if err := os.WriteFile(f, []byte(rendered), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	compiled, _, err := compiler.Compile([]string{f}, dir, pipeline.Default)
+	if err != nil {
+		t.Fatalf("dumped fdw failed to recompile: %v\n---\n%s", err, rendered)
+	}
+	var found *ir.ForeignDataWrapper
+	for _, o := range compiled {
+		if f2, ok := o.(*ir.ForeignDataWrapper); ok {
+			found = f2
+		}
+	}
+	if found == nil {
+		t.Fatalf("fdw object missing after recompile\n---\n%s", rendered)
+	}
+	if found.Owner == nil || *found.Owner != "alice" {
+		t.Errorf("Owner did not round-trip: %v", found.Owner)
+	}
+}
+
+// TestRenderSubscriptionOwnerRoundtrip is TestRenderForeignDataWrapperOwnerRoundtrip's
+// Subscription counterpart.
+func TestRenderSubscriptionOwnerRoundtrip(t *testing.T) {
+	fmtOpts := format.Options{IndentSize: 4, KeywordCase: "upper"}
+	owner := "alice"
+	sub := &ir.Subscription{Name: "my_sub", Body: "CREATE SUBSCRIPTION my_sub CONNECTION 'host=x' PUBLICATION my_pub", Owner: &owner}
+
+	var b strings.Builder
+	renderObjectDPG(&b, sub, fmtOpts)
+	rendered := b.String()
+
+	if !strings.Contains(rendered, "OWNER alice") {
+		t.Errorf("expected OWNER in rendered output, got:\n%s", rendered)
+	}
+
+	dir := t.TempDir()
+	f := filepath.Join(dir, "objects.dpg")
+	if err := os.WriteFile(f, []byte(rendered), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	compiled, _, err := compiler.Compile([]string{f}, dir, pipeline.Default)
+	if err != nil {
+		t.Fatalf("dumped subscription failed to recompile: %v\n---\n%s", err, rendered)
+	}
+	var found *ir.Subscription
+	for _, o := range compiled {
+		if s2, ok := o.(*ir.Subscription); ok {
+			found = s2
+		}
+	}
+	if found == nil {
+		t.Fatalf("subscription object missing after recompile\n---\n%s", rendered)
+	}
+	if found.Owner == nil || *found.Owner != "alice" {
+		t.Errorf("Owner did not round-trip: %v", found.Owner)
+	}
+}
+
 // TestRenderExtensionCommentRoundtrip guards a real gap: ir.Extension had no
 // Comment field at all, so a declared COMMENT was silently dropped by dump
 // (and by build/snapshot/diff before this fix) even though COMMENT ON

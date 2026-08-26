@@ -1876,6 +1876,9 @@ func createSubscription(o *ir.Subscription) ([]pipeline.DiffOp, error) {
 		op:       manualOp(o.Body+";", o.SrcPos),
 		connInfo: o.ConnInfo,
 	}}
+	if o.Owner != nil {
+		ops = wrapCreateWithOwner(ops[0], o.Owner, o.SrcPos)
+	}
 	if o.Comment != nil {
 		// manualOp (non-transactional), not safeOp: emit buckets ops purely
 		// by Transactional() into two separate lists, and the executor runs
@@ -2570,6 +2573,9 @@ func diffFDW(o *ir.ForeignDataWrapper, snap *snapshot.SnapOpaque) ([]pipeline.Di
 	// is valid), so OptionsStructured is an explicit sentinel instead.
 	if !snap.OptionsStructured {
 		ops := renameOps
+		if !ptrEq(o.Owner, snap.FDWOwner) && o.Owner != nil {
+			ops = append(ops, safeOp(fmt.Sprintf("ALTER FOREIGN DATA WRAPPER %s OWNER TO %s;", quoteIdent(o.Name), quoteIdent(*o.Owner)), pos))
+		}
 		if !ptrEq(o.Comment, snap.Comment) {
 			if sql := commentOnOpaqueSQL("fdw", "", o.Name, "", "", o.Comment); sql != "" {
 				ops = append(ops, safeOp(sql, pos))
@@ -2590,11 +2596,17 @@ func diffFDW(o *ir.ForeignDataWrapper, snap *snapshot.SnapOpaque) ([]pipeline.Di
 		if err != nil {
 			return nil, err
 		}
+		if o.Owner != nil && len(createOps) > 0 {
+			createOps = append(wrapCreateWithOwner(createOps[0], o.Owner, pos), createOps[1:]...)
+		}
 		ops = append(ops, createOps...)
 		ops = append(ops, createSimpleGrantOps("FOREIGN DATA WRAPPER", quoteIdent(o.Name), o.Grants, o.Revocations, pos, false)...)
 		return appendCommentOp(ops, nil, "fdw", "", o.Name, "", "", o.Comment, pos)
 	}
 	ops := renameOps
+	if !ptrEq(o.Owner, snap.FDWOwner) && o.Owner != nil {
+		ops = append(ops, safeOp(fmt.Sprintf("ALTER FOREIGN DATA WRAPPER %s OWNER TO %s;", quoteIdent(o.Name), quoteIdent(*o.Owner)), pos))
+	}
 	if !ptrEq(o.Comment, snap.Comment) {
 		if sql := commentOnOpaqueSQL("fdw", "", o.Name, "", "", o.Comment); sql != "" {
 			ops = append(ops, safeOp(sql, pos))
@@ -2905,6 +2917,9 @@ func diffSubscription(o *ir.Subscription, snap *snapshot.SnapOpaque) ([]pipeline
 		}
 	}
 	ops := renameOps
+	if !ptrEq(o.Owner, snap.SubscriptionOwner) && o.Owner != nil {
+		ops = append(ops, safeOp(fmt.Sprintf("ALTER SUBSCRIPTION %s OWNER TO %s;", quoteIdent(o.Name), quoteIdent(*o.Owner)), pos))
+	}
 	if !ptrEq(o.Comment, snap.Comment) {
 		if o.Comment != nil {
 			ops = append(ops, safeOp(fmt.Sprintf("COMMENT ON SUBSCRIPTION %s IS %s;", quoteIdent(o.Name), quoteLit(*o.Comment)), pos))
@@ -3177,21 +3192,41 @@ func createParameterPrivileges(o *ir.ParameterPrivileges) []pipeline.DiffOp {
 	for _, g := range o.Grants {
 		sql := fmt.Sprintf("GRANT %s ON PARAMETER %s TO %s",
 			privStr(g.Privileges), paramList(g.Parameters), roleList(g.Roles))
-		if g.WithGrant {
-			sql += " WITH GRANT OPTION"
-		}
+		sql += paramGrantOptSuffix(g)
 		ops = append(ops, safeOp(sql+";", pos))
 	}
 	for _, r := range o.Revocations {
-		cascade := ""
-		if r.Cascade {
-			cascade = " CASCADE"
-		}
-		sql := fmt.Sprintf("REVOKE %s ON PARAMETER %s FROM %s%s",
-			privStr(r.Privileges), paramList(r.Parameters), roleList(r.Roles), cascade)
+		sql := fmt.Sprintf("REVOKE %s ON PARAMETER %s FROM %s",
+			privStr(r.Privileges), paramList(r.Parameters), roleList(r.Roles))
+		sql += paramRevokeOptSuffix(r)
 		ops = append(ops, safeOp(sql+";", pos))
 	}
 	return ops
+}
+
+// paramGrantOptSuffix is grantOptSuffix's ParameterGrant counterpart (that
+// helper takes ir.Grant specifically; ParameterGrant is a distinct type).
+func paramGrantOptSuffix(g ir.ParameterGrant) string {
+	s := ""
+	if g.WithGrant {
+		s += " WITH GRANT OPTION"
+	}
+	if g.GrantedBy != nil {
+		s += " GRANTED BY " + roleSpecSQL(*g.GrantedBy)
+	}
+	return s
+}
+
+// paramRevokeOptSuffix is revokeOptSuffix's ParameterRevocation counterpart.
+func paramRevokeOptSuffix(r ir.ParameterRevocation) string {
+	s := ""
+	if r.GrantedBy != nil {
+		s += " GRANTED BY " + roleSpecSQL(*r.GrantedBy)
+	}
+	if r.Cascade {
+		s += " CASCADE"
+	}
+	return s
 }
 
 // diffParameterPrivileges diffs a PARAMETER PRIVILEGES declaration against
@@ -3224,12 +3259,21 @@ func diffParameterPrivileges(o *ir.ParameterPrivileges, snap *snapshot.SnapParam
 	// ensures declared grants are present, it never revokes one just because
 	// its declaration was deleted.
 	for k, g := range desiredGrantsByKey {
-		if _, ok := snapGrantsByKey[k]; !ok {
+		sg, matched := snapGrantsByKey[k]
+		if !matched {
 			sql := fmt.Sprintf("GRANT %s ON PARAMETER %s TO %s",
 				privStr(g.Privileges), paramList(g.Parameters), roleList(g.Roles))
-			if g.WithGrant {
-				sql += " WITH GRANT OPTION"
-			}
+			sql += paramGrantOptSuffix(g)
+			ops = append(ops, safeOp(sql+";", pos))
+			continue
+		}
+		// Matched: GrantedBy isn't part of paramGrantKey — same "declared, so
+		// managed" comparison rule as diffGrantSet (RFC audit item #90,
+		// generalized to Parameter Privileges).
+		if !grantedByMatches(g.GrantedBy, sg.GrantedBy) {
+			sql := fmt.Sprintf("GRANT %s ON PARAMETER %s TO %s",
+				privStr(g.Privileges), paramList(g.Parameters), roleList(g.Roles))
+			sql += paramGrantOptSuffix(g)
 			ops = append(ops, safeOp(sql+";", pos))
 		}
 	}
@@ -3255,16 +3299,21 @@ func diffParameterPrivileges(o *ir.ParameterPrivileges, snap *snapshot.SnapParam
 		}
 	}
 	for k, r := range desiredRevsByKey {
-		if _, ok := snapRevsByKey[k]; !ok {
-			cascade := ""
-			if r.Cascade {
-				cascade = " CASCADE"
-			}
-			ops = append(ops, cautionOp(
-				fmt.Sprintf("REVOKE %s ON PARAMETER %s FROM %s%s;",
-					privStr(r.Privileges), paramList(r.Parameters), roleList(r.Roles), cascade),
-				pos,
-			))
+		sr, matched := snapRevsByKey[k]
+		if !matched {
+			sql := fmt.Sprintf("REVOKE %s ON PARAMETER %s FROM %s",
+				privStr(r.Privileges), paramList(r.Parameters), roleList(r.Roles))
+			sql += paramRevokeOptSuffix(r)
+			ops = append(ops, cautionOp(sql+";", pos))
+			continue
+		}
+		// Matched: same "declared, so managed" GrantedBy re-check as
+		// diffRevocationSet's identical branch (RFC audit item #90).
+		if !grantedByMatches(r.GrantedBy, sr.GrantedBy) {
+			sql := fmt.Sprintf("REVOKE %s ON PARAMETER %s FROM %s",
+				privStr(r.Privileges), paramList(r.Parameters), roleList(r.Roles))
+			sql += paramRevokeOptSuffix(r)
+			ops = append(ops, cautionOp(sql+";", pos))
 		}
 	}
 
@@ -7741,7 +7790,13 @@ func diffTableInherits(tbl string, o *ir.Table, snap *snapshot.SnapTable, pos pi
 	}
 	for _, p := range snap.Inherits {
 		if !desiredSet[normalizeInheritRef(o.Schema, p)] {
-			ops = append(ops, cautionOp(fmt.Sprintf("ALTER TABLE %s NO INHERIT %s;", tbl, quoteQualIdent(normalizeInheritRef(o.Schema, p))), pos))
+			// SAFE, not CAUTION: confirmed live (PG17) that NO INHERIT only
+			// drops the catalog-level inheritance link — it takes the same
+			// AccessExclusiveLock as any other structural ALTER TABLE, does
+			// not rewrite or scan the child's rows, and any inherited CHECK
+			// constraint is retained on the child as a local constraint
+			// rather than being dropped.
+			ops = append(ops, safeOp(fmt.Sprintf("ALTER TABLE %s NO INHERIT %s;", tbl, quoteQualIdent(normalizeInheritRef(o.Schema, p))), pos))
 		}
 	}
 	return ops

@@ -344,8 +344,9 @@ SELECT f.fdwname,
        hn.nspname, h.proname,
        vn.nspname, v.proname,
        f.fdwoptions,
-       obj_description(f.oid, 'pg_foreign_data_wrapper') AS comment
+       obj_description(f.oid, 'pg_foreign_data_wrapper') AS comment, r.rolname AS owner
 FROM   pg_foreign_data_wrapper f
+JOIN   pg_roles r ON r.oid = f.fdwowner
 LEFT   JOIN pg_proc h      ON h.oid = f.fdwhandler
 LEFT   JOIN pg_namespace hn ON hn.oid = h.pronamespace
 LEFT   JOIN pg_proc v      ON v.oid = f.fdwvalidator
@@ -362,11 +363,11 @@ ORDER  BY f.fdwname`
 
 	var out []pipeline.IRObject
 	for rs.Next() {
-		var name string
+		var name, owner string
 		var hSchema, hName, vSchema, vName *string
 		var options []string
 		var comment *string
-		if err := rs.Scan(&name, &hSchema, &hName, &vSchema, &vName, &options, &comment); err != nil {
+		if err := rs.Scan(&name, &hSchema, &hName, &vSchema, &vName, &options, &comment, &owner); err != nil {
 			return nil, err
 		}
 		var sb strings.Builder
@@ -386,7 +387,8 @@ ORDER  BY f.fdwname`
 		sb.WriteString(formatOptions(options))
 		out = append(out, &ir.ForeignDataWrapper{
 			Name: name, Handler: handler, Validator: validator, Options: optionsToStorageParams(options),
-			Body: canonicalDDL(sb.String()), Comment: comment, Reconstructed: true,
+			Owner: &owner,
+			Body:  canonicalDDL(sb.String()), Comment: comment, Reconstructed: true,
 		})
 	}
 	if err := rs.Err(); err != nil {
@@ -830,8 +832,9 @@ func introspectSubscriptions(ctx context.Context, conn pipeline.Querier) ([]pipe
 	q := fmt.Sprintf(`
 SELECT s.subname, s.subbinary, s.substream, %s, %s,
        %s, %s, %s, s.subslotname, s.subsynccommit, s.subpublications, %s,
-       obj_description(s.oid, 'pg_subscription') AS comment
+       obj_description(s.oid, 'pg_subscription') AS comment, r.rolname AS owner
 FROM   pg_subscription s
+JOIN   pg_roles r ON r.oid = s.subowner
 WHERE  s.subdbid = (SELECT oid FROM pg_database WHERE datname = current_database())
 ORDER  BY s.subname`, twoPhaseCol, disableOnErrCol, pwReqCol, runAsOwnerCol, failoverCol, originCol)
 
@@ -843,7 +846,7 @@ ORDER  BY s.subname`, twoPhaseCol, disableOnErrCol, pwReqCol, runAsOwnerCol, fai
 
 	var out []pipeline.IRObject
 	for rs.Next() {
-		var name string
+		var name, owner string
 		var binary, disableOnErr, pwReq, runAsOwner, failover bool
 		var stream, twoPhase byte
 		var slotName *string
@@ -852,7 +855,7 @@ ORDER  BY s.subname`, twoPhaseCol, disableOnErrCol, pwReqCol, runAsOwnerCol, fai
 		var comment *string
 		if err := rs.Scan(&name, &binary, &stream, &twoPhase,
 			&disableOnErr, &pwReq, &runAsOwner, &failover, &slotName, &syncCommit,
-			&publications, &origin, &comment); err != nil {
+			&publications, &origin, &comment, &owner); err != nil {
 			return nil, err
 		}
 
@@ -916,7 +919,8 @@ ORDER  BY s.subname`, twoPhaseCol, disableOnErrCol, pwReqCol, runAsOwnerCol, fai
 
 		out = append(out, &ir.Subscription{
 			Name: name, ConnInfo: subscriptionConnInfoPlaceholder,
-			Body: canonicalDDL(sb.String()), Comment: comment, Reconstructed: true,
+			Owner: &owner,
+			Body:  canonicalDDL(sb.String()), Comment: comment, Reconstructed: true,
 		})
 	}
 	if err := rs.Err(); err != nil {

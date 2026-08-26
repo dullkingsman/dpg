@@ -610,6 +610,7 @@ func introspectParameterPrivileges(ctx context.Context, conn pipeline.Querier) (
 			Parameters: []string{name},
 			Roles:      g.Roles,
 			WithGrant:  g.WithGrant,
+			GrantedBy:  g.GrantedBy,
 		})
 	}); err != nil {
 		return nil, err

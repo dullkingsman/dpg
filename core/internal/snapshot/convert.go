@@ -267,6 +267,7 @@ func toSnapObject(obj pipeline.IRObject) *SnapObject {
 		so := &SnapOpaque{
 			Kind: "fdw", Name: o.Name,
 			OptionsStructured: true, FDWHandler: o.Handler, FDWValidator: o.Validator, FDWOptions: toSnapOptions(o.Options),
+			FDWOwner: o.Owner,
 			BodyHash: sourceBodyHash(o.Body, o.Reconstructed), Comment: o.Comment,
 		}
 		for _, g := range o.Grants {
@@ -317,7 +318,8 @@ func toSnapObject(obj pipeline.IRObject) *SnapObject {
 	case *ir.Subscription:
 		return &SnapObject{Kind: "subscription", Opaque: &SnapOpaque{
 			Kind: "subscription", Name: o.Name, BodyHash: sourceBodyHash(o.Body, o.Reconstructed), Comment: o.Comment,
-			SecurityLabels: toSnapSecurityLabels(o.SecurityLabels),
+			SubscriptionOwner: o.Owner,
+			SecurityLabels:    toSnapSecurityLabels(o.SecurityLabels),
 		}}
 	case *ir.EventTrigger:
 		return &SnapObject{Kind: "event_trigger", Opaque: &SnapOpaque{
@@ -829,6 +831,7 @@ func toSnapParamGrant(g ir.ParameterGrant) SnapParamGrant {
 		Parameters: g.Parameters,
 		Roles:      g.Roles,
 		WithGrant:  g.WithGrant,
+		GrantedBy:  g.GrantedBy,
 	}
 }
 
@@ -839,6 +842,7 @@ func toSnapParamRevocation(r ir.ParameterRevocation) SnapParamGrant {
 		Privileges: r.Privileges,
 		Parameters: r.Parameters,
 		Roles:      r.Roles,
+		GrantedBy:  r.GrantedBy,
 	}
 }
 

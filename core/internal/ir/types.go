@@ -1173,11 +1173,13 @@ type ForeignDataWrapper struct {
 	// RenamedFrom names the FDW's prior identity (RENAMED FROM) — bare, like
 	// Role/EventTrigger's identical field: foreign data wrappers are
 	// database-level, not schema-scoped, so there is no RenamedFromSchema
-	// counterpart here. Owner is a separate, still-open gap (real
-	// PostgreSQL supports ALTER FOREIGN DATA WRAPPER ... OWNER TO,
-	// superuser-only), out of scope here.
+	// counterpart here.
 	RenamedFrom *string
-	SrcPos      pipeline.SourcePos
+	// Owner is RFC Section 14.8's ALTER FOREIGN DATA WRAPPER ... OWNER TO
+	// diffing input — same shape as ForeignServer.Owner (superuser-only in
+	// real PostgreSQL, same as CREATE FOREIGN DATA WRAPPER itself).
+	Owner  *string
+	SrcPos pipeline.SourcePos
 }
 
 func (f *ForeignDataWrapper) QualifiedName() string   { return f.Name }
@@ -1347,10 +1349,11 @@ type Subscription struct {
 	Reconstructed bool // Body rebuilt from the catalog; see Tablespace.Reconstructed
 	// RenamedFrom names the subscription's prior identity (RENAMED FROM) —
 	// bare, like ForeignDataWrapper's identical field: subscriptions are
-	// database-level, not schema-scoped. Owner is a separate, still-open
-	// gap (real PostgreSQL supports ALTER SUBSCRIPTION ... OWNER TO), out
-	// of scope here.
-	RenamedFrom    *string
+	// database-level, not schema-scoped.
+	RenamedFrom *string
+	// Owner is Section 13.2's ALTER SUBSCRIPTION ... OWNER TO diffing
+	// input — same shape as ForeignServer.Owner.
+	Owner          *string
 	SecurityLabels []pipeline.SecurityLabel
 	SrcPos         pipeline.SourcePos
 }
@@ -1983,7 +1986,11 @@ type ParameterGrant struct {
 	Parameters []string
 	Roles      []string
 	WithGrant  bool
-	Pos        pipeline.SourcePos
+	// GrantedBy — see Grant.GrantedBy's identical doc comment; real
+	// PostgreSQL's GRANT ... ON PARAMETER accepts the same optional
+	// GRANTED BY role-spec as every other GRANT form (confirmed live, PG17).
+	GrantedBy *string
+	Pos       pipeline.SourcePos
 }
 
 // ParameterRevocation is a PARAMETER PRIVILEGES REVOCATIONS { } entry.
@@ -1992,7 +1999,9 @@ type ParameterRevocation struct {
 	Parameters []string
 	Roles      []string
 	Cascade    bool
-	Pos        pipeline.SourcePos
+	// GrantedBy — see Grant.GrantedBy's identical doc comment.
+	GrantedBy *string
+	Pos       pipeline.SourcePos
 }
 
 // ParameterPrivileges is a PARAMETER PRIVILEGES declaration (RFC Section

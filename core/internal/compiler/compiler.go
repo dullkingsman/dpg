@@ -53,6 +53,10 @@ func Compile(files []string, dbDir string, reg *pipeline.Registry) ([]pipeline.I
 
 	var rawObjects []pipeline.RawObject
 	var diags pipeline.Diagnostics
+	// nameMapWarnings collects DPG-E031 findings (blockAST.NameMapWarnings)
+	// from every parsed block, merged into the returned LintDiagnostic slice
+	// alongside the merger's scalar-merge-conflict warnings below.
+	var nameMapWarnings []pipeline.LintDiagnostic
 	// Track unique directory-inferred schemas so we can inject synthetic declarations.
 	dirSchemas := map[string]pipeline.SourcePos{}
 
@@ -222,6 +226,10 @@ func Compile(files []string, dbDir string, reg *pipeline.Registry) ([]pipeline.I
 			}
 			return nil, nil, blockErr
 		}
+		nameMapWarnings = append(nameMapWarnings, blockAST.NameMapWarnings...)
+		for _, col := range blockAST.Columns {
+			nameMapWarnings = append(nameMapWarnings, col.NameMapWarnings...)
+		}
 
 		obj, buildErr := irBuilder.Build(pgResult, blockAST)
 		if buildErr != nil {
@@ -239,6 +247,7 @@ func Compile(files []string, dbDir string, reg *pipeline.Registry) ([]pipeline.I
 
 	// Stage 4: Merge same-name declarations across files.
 	merged, mergeDiags, mergeErr := merger.Merge(irObjects)
+	mergeDiags = append(mergeDiags, nameMapWarnings...)
 	if mergeErr != nil {
 		return nil, mergeDiags, mergeErr
 	}
