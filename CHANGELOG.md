@@ -7,6 +7,187 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [nvim-v0.5.2-alpha.11] — 2026-08-26
+
+### Added
+
+- Implement DROP CONSTRAINT ... ONLY on partitioned tables (PG18+)
+- Thread DPG-E0xx codes through documented sites, implement DPG-E001
+- Materialized-view TABLESPACE/WITH storage-params support
+- Structured optimizer-hint fields, safe ALTER OPERATOR SET diffing
+- Parse and diff identity-column sequence options (Section 7.4)
+- Implement foreign table as partition (RFC Section 7.13)
+- Unify membership lists and implement WITH ADMIN/INHERIT/SET
+- Implement GRANTED BY role and Role SET/RESET IN DATABASE
+- Implement LEAKPROOF, TRANSFORM FOR TYPE, C obj_file/link_symbol, and BEGIN ATOMIC bodies
+- Implement TSConfig owner and TSDict option-change diffing
+- Implement ENUM positional ADD VALUE and RENAME VALUE
+- Implement DISABLED/ENABLE REPLICA/ENABLE ALWAYS
+- Diff and emit WITH (...) storage-params SET/RESET
+- Implement ATTACHED FROM / DETACHED FROM partition directives
+- Implement UNLOGGED prefix
+- Implement ON ONLY prefix and opclass parameters
+- Implement typed tables (OF type_name) and access method
+- Implement composite attribute and domain COLLATE
+- Implement WITHOUT OVERLAPS/PERIOD temporal keys (PG18)
+- Implement ENFORCED/NOT ENFORCED on CHECK/FOREIGN KEY (PG18)
+- Implement table-level named NOT NULL constraint (PG18)
+- Implement generated-column VIRTUAL and its diffing
+- Implement min_pg_version project-gating (Section 23)
+- Implement PARAMETER PRIVILEGES (Section 11.6, PG15+)
+- Implement OWNER TO
+- Implement OWNER TO
+- Implement Owner and RENAMED FROM
+- Implement RENAMED FROM
+- Implement RESTART and REFRESH VERSION
+- Implement trigger enable-state (DISABLED / ENABLE REPLICA / ENABLE ALWAYS)
+- Implement [NO] DEPENDS ON EXTENSION (RFC audit items #71, #75)
+- Implement OWNER TO (RFC audit item #34, half)
+- Implement OWNER TO (RFC audit item #76, half)
+- Accept STATISTICS DEFAULT; fix missing SET STATISTICS on new tables
+- Structured diffing for BASE type's 7 in-place-alterable properties
+- Implement REPLICA IDENTITY and CLUSTER ON block directives
+- Implement column alignment for dpg fmt (RFC §18.7)
+- Add SECURITY LABEL support (RFC §14.11)
+- Give OperatorClass structured member capture
+- Add Aggregate Revocations and Extension Comment
+- Support COMMENT ON Constraint/Index/Policy/Trigger
+- Wire schema GRANT/REVOKE through all layers
+- Require confirmation before dpg dump overwrites files
+- Implement scalar-merge-conflict lint rule (full scope)
+- Implement deprecated-reference lint rule
+- Model SERIAL/BIGSERIAL/SMALLSERIAL as a first-class IR concept
+- Implement 2 more RFC-documented rules and per-rule severity overrides
+- Implement operator family loose members (RFC §14.4)
+- Implement remaining unimplemented RFC object kinds and fix real bugs found exhaustively live-testing every DPG feature
+- Reconstruct Subscriptions from the live catalog
+- Support secret references in USER MAPPING OPTIONS
+- Implement full Role attribute system with PASSWORD secret refs
+- Support secret references in SUBSCRIPTION CONNECTION
+- Implement Vault, AWS/GCP/Azure secret manager backends
+- Support CONSTRAINTS plural block (RFC §4.8)
+- Support WITH/NULLS NOT DISTINCT and Mode-B index syntax
+- Introspect deferred-tier opaque objects (operators, TS, opclass/family)
+- Introspect reliable-tier opaque objects; fix operator-class DROP
+- Add support for macro spread references, resolution logic, and related tests across LSP and IDEA plugin
+- Enforce blank line between schema attributes and first nested object in formatter and add related test
+- Add support for DPG code formatting in IDEA plugin, including indentation, blank lines, and spacing adjustments
+- Add support for macro declarations, rendering, and schema-level nesting in formatter
+- Add support for macro references, completions, and spread expressions in IDEA plugin
+
+### Fixed
+
+- Close 5 lower-priority fresh-audit-2026-08-26 gaps
+- Exclude default-privileges self-grant from ACL introspection
+- Compact ROLE-direction WITH INHERIT when it matches the grantee's default
+- Suppress extension comments matching the control-file default
+- Capture GRANTED BY grantor from live ACL entries
+- Exclude owner self-grants from ACL introspection
+- Diff Strict/SecurityDef on existing functions
+- Tablespace WITH params, policy rename, RLSForced dump, operator class SET SCHEMA
+- Implement FROM existing_collation copy-from
+- Diff and emit the LOGGED/UNLOGGED toggle
+- Capture and diff every agg-option, not just six
+- Diff PG16+ ICU RULES
+- Use ALTER POLICY for TO/USING/WITH CHECK-only changes
+- Use ALTER EXTENSION SET SCHEMA instead of DROP+CREATE
+- Wire domain constraint NOT VALID and VALIDATE CONSTRAINT
+- Emit ALTER ... SET SCHEMA for the remaining cross-schema rename kinds
+- Implement CREATE TABLE (LIKE source_table [...]) instead of discarding it
+- Emit ALTER ... SET SCHEMA for cross-schema RENAMED FROM moves
+- Detect and rename Subscription, FDW, OperatorClass, OperatorFamily, StatisticsObject
+- Detect and rename TSDict, TSParser, TSTemplate, Role, EventTrigger
+- Detect and rename Type (all variants) and Collation
+- Detect and rename Constraint and Index instead of drop+recreate
+- Detect and rename renamed partitions instead of drop+recreate
+- Support cross-schema RENAMED FROM and fix Function rename
+- Emit ALTER TYPE ADD VALUE as transactional, not MANUAL
+- Prevent spurious cycles from plpgsql table references
+- Fix Phase 4 state-audit bugs #28/#30/#2
+- Fix Phase 3 state-audit bugs #15+16/#14/#1/#17
+- Fix Phase 2 state-audit bugs #3-6/#7/#8-11/#20/#24/#25/#26/#27
+- Fix Phase 1 state-audit bugs #23/#21/#19/#12+13/#29
+- Error on a case-mismatched VIRTUAL TYPE reference
+- Make plan --live detect real OperatorClass AS-list changes
+- Make the public schema visible to introspection, guard it from DROP
+- Stop RANGE types from crashing dpg via an infinite Sort recursion
+- Synthesize PUBLIC EXECUTE revocation for explicitly-revoked functions/procedures/aggregates
+- Compare Aggregate options structurally instead of raw BodyHash
+- Enforce DPG-E004 reserved-name conflict, deduplicate error wording
+- Validate cluster/database name uniqueness and non-emptiness
+- Connect per-database commands to the selected database, not whatever the cluster URL happens to point at
+- Diff and introspect trigger WHEN conditions
+- Apply NOT VALID on CREATE TABLE, ignore paren-only expression drift
+- Stop double-rendering NOT VALID on dump
+- Make BASE types actually round-trip
+- Wire Type.Owner and fix dump comment loss
+- Stop treating inherited columns/constraints as drift
+- Render and correctly apply Table.Inherits
+- Classify same-base-type typmod widening as CAUTION
+- Classify implicit-cast column type changes as CAUTION
+- Sandbox dpg dump -o's cluster-scoped output and snapshot
+- Canonicalize embedded plpgsql expression fragments, closing the last hashing gap
+- Stop keyword-casing from mangling identifiers, reconcile rule-ID naming
+- Stop dpg fmt from doubling ';' and collapsing empty '{ }' blocks
+- Canonicalize plpgsql body hashing, closing the last "Inherent" item
+- Predict PostgreSQL's real fallback name for unpredictable EXCLUDE elements
+- Close G-live gap for StatisticsObject, completing Workstream 2
+- Close G-live gap for Collation
+- Close G-live gap for Publication, closing Tier 2
+- Close G-live gap for FDW/ForeignServer/UserMapping
+- Close G-live gap for Tablespace/Cast/EventTrigger
+- Canonicalize LANGUAGE SQL bodies before hashing to stop spurious CREATE OR REPLACE
+- Redact password-like OPTIONS on USER MAPPING introspection
+- Quote synthetic CREATE SCHEMA for directory-inferred schemas
+- Add 3 missing dependency-graph edges (publication→table, sql-function→function, function-type→type)
+- Implement RFC §5.4 DOMAIN structured diffing, fix introspectCasts internal-dependency bug
+- Fix 9 real bugs found live-testing every DPG object kind against a real demo project
+- Implement ChainResolver, fix silent scheme-passthrough bug
+- Adopt pg_dump's model for operator families
+- Infer implied return type for functions with omitted RETURNS clause
+- Capture OUT/INOUT/VARIADIC argument modes on introspection
+- Reconstruct RETURNS TABLE(...) functions correctly
+- Add SETOF representation for function return types
+- Capture and diff FUNCTION PARALLEL/COST/ROWS attributes
+- Reconcile unnamed EXCLUDE constraint names against PostgreSQL's real auto-naming algorithm
+- Parse EXCLUDE constraint bodies and fix two SQL-text rename bugs
+- Capture operator operand types so DROP OPERATOR is valid and overloads don't collide
+- Recognize PostgreSQL's auto-generated constraint names for unnamed CHECK constraints
+- Render FUNCTION/PROCEDURE bodies instead of dropping them from dump output
+- Recognize PostgreSQL's auto-generated constraint names for unnamed PRIMARY KEY/UNIQUE/FOREIGN KEY
+- Render table/schema/sequence OWNER and column attributes; fix inert sequence ownership
+- Fix sequence CYCLE parsing and add PROCEDURE test coverage
+- Support reserved-word/quoted SCHEMA names
+- Normalize trigger function references to avoid spurious drift
+- Accept POLICY/TRIGGER/PARTITION singular keyword
+- Emit REVOKE for explicit table/column/view REVOCATION
+- Accept GRANT/REVOCATION singular keyword outside plural blocks
+- Compare index definitions instead of matching by name only
+- Emit structured DROP+CREATE for opaque object updates
+- Make dumped projects recompile and re-apply faithfully
+
+### Changed
+
+- Document dpg fmt's undocumented --stdin flag
+- Fix 6 stale doc-only items from fresh-audit-2026-08-26
+- Fix stale SnapRole/SnapSequence examples and portability --format claim
+- Promote min_pg_version out of Deferred Features, refresh Appendix F
+- Add RENAMED FROM grammar for Policy, Trigger, Partition, TS Config
+- Spell out RFC section reference instead of section-sign
+- Replace section-sign character with spelled-out Section/Appendix
+- Close final mop-up items and fix appendix physical section order
+- Add newer-PostgreSQL-version grammar (PG15-18); fix ALTER TYPE ADD VALUE transaction-cutoff error
+- Add namespace/storage/FDW/replication grammar; close remaining Phase 5 destructive-to-safe swaps
+- Add full-text search grammar for silent PG feature gaps
+- Add access-control grammar for silent PG feature gaps
+- Add type/domain/function/aggregate grammar for silent PG feature gaps
+- Add table/view/index/sequence grammar for silent PG feature gaps
+- Fix CLI reference drift, undefined grammar, and Domain syntax; add PG version/portability classification
+- Drop redundant { CONNECTION } block form, add COMMENT
+- Update coverage matrix and clarify introspection behaviors
+- Simplify schema node comment collection logic in parser
+- Migrated idea plugin from LSP-based implementation to plugin-native parsing, highlighting, and tooling
+
 ## [idea-v0.5.2-alpha.14] — 2026-08-26
 
 ### Added
