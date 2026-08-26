@@ -3632,6 +3632,38 @@ func TestBuildVirtualTypeCommentAndFormat(t *testing.T) {
 	}
 }
 
+// TestBuildVirtualTypeRejectsOtherDirectives is the regression guard for
+// DPG-E015 (RFC Section 5.6): the { } block accepts only COMMENT and
+// PREFERRED JSON FORMAT — buildVirtualType previously read only those two
+// fields off the parsed block and silently ignored anything else a user
+// wrote there (e.g. a GRANTS block, which has no meaning for a construct
+// that emits no DDL and has no catalog object to grant on) instead of
+// rejecting it.
+func TestBuildVirtualTypeRejectsOtherDirectives(t *testing.T) {
+	p := pgparser.New()
+	pgResult, err := p.Parse(pipeline.KindVirtualType, `payload AS text`, zeroPos)
+	if err != nil {
+		t.Fatalf("pg parse error: %v", err)
+	}
+	bp := blockparser.New()
+	blockAST, err := bp.Parse(pipeline.KindVirtualType, `GRANTS { SELECT TO reader; }`, zeroPos)
+	if err != nil {
+		t.Fatalf("block parse error: %v", err)
+	}
+	builder := ir.NewBuilder()
+	_, err = builder.Build(pgResult, blockAST)
+	if err == nil {
+		t.Fatal("expected a build error for a GRANTS directive inside a VIRTUAL TYPE block")
+	}
+	cerr, ok := err.(*pipeline.CompilerError)
+	if !ok {
+		t.Fatalf("expected *pipeline.CompilerError, got %T: %v", err, err)
+	}
+	if cerr.Code != "DPG-E015" {
+		t.Errorf("Code: got %q, want DPG-E015", cerr.Code)
+	}
+}
+
 func TestBuildVirtualTypeSchemaQualifiedName(t *testing.T) {
 	p := pgparser.New()
 	pgResult, err := p.Parse(pipeline.KindVirtualType, `billing.status AS text`, zeroPos)

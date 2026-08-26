@@ -227,7 +227,7 @@ Use --watch to re-run automatically whenever source files change.`,
 func introspectSnapshot(ctx context.Context, cl *project.Cluster, db *project.Database, secretResolver pipeline.SecretResolver, introspector pipeline.Introspector) (*pipeline.Snapshot, error) {
 	connStr := cl.ConnectionString()
 	if connStr == "" {
-		return nil, fmt.Errorf("cluster %q has no connection configured (set url or link in cluster dpg.toml)", cl.Name())
+		return nil, fmt.Errorf("DPG-E003: cluster %q has no connection configured (set url or link in cluster dpg.toml)", cl.Name())
 	}
 	if cl.IsLink() {
 		var err error
@@ -379,7 +379,7 @@ func buildClusterPlan(
 func introspectClusterSnapshot(ctx context.Context, cl *project.Cluster, secretResolver pipeline.SecretResolver, introspector pipeline.Introspector) (*pipeline.Snapshot, error) {
 	connStr := cl.ConnectionString()
 	if connStr == "" {
-		return nil, fmt.Errorf("cluster %q has no connection configured", cl.Name())
+		return nil, fmt.Errorf("DPG-E003: cluster %q has no connection configured", cl.Name())
 	}
 	if cl.IsLink() {
 		var err error

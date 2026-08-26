@@ -1265,7 +1265,7 @@ func mergeTableBlock(tbl *Table, block pipeline.BlockAST) error {
 	for _, cb := range block.Columns {
 		col, ok := colMap[cb.Name.Name]
 		if !ok {
-			return pipeline.Errorf(cb.Pos,
+			return pipeline.ErrorfCode(cb.Pos, "DPG-E018",
 				"COLUMN %q is not declared in TABLE %s; the COLUMN block must reference a column listed in the table's ( ) section%s",
 				cb.Name.Name, qualName(tbl.Schema, tbl.Name), suggestColumns(cb.Name.Name, tbl.Columns))
 		}
@@ -1980,7 +1980,7 @@ func (b *Builder) buildCompositeType(cs *pg_query.CompositeTypeStmt, block pipel
 	for _, cb := range block.Columns {
 		attr, ok := attrMap[cb.Name.Name]
 		if !ok {
-			return nil, pipeline.Errorf(cb.Pos,
+			return nil, pipeline.ErrorfCode(cb.Pos, "DPG-E018",
 				"COLUMN %q is not declared in TYPE %s; the COLUMN block must reference an attribute listed in the type's ( ) section%s",
 				cb.Name.Name, qualName(t.Schema, t.Name), suggestColumns(cb.Name.Name, t.CompositeAttrs))
 		}
@@ -3856,6 +3856,24 @@ func (b *Builder) buildVirtualType(part1 string, block pipeline.BlockAST, pos pi
 	body, err := parseVtypeBody(bodyText, pos)
 	if err != nil {
 		return nil, err
+	}
+
+	// Section 5.6: the { } block accepts only COMMENT and
+	// PREFERRED JSON FORMAT (plus Name Maps, Appendix D.10's
+	// cross-cutting directive available on every object block). Any
+	// other directive is DPG-E015.
+	if block.Owner != nil || block.RenamedFrom != nil || block.Protected ||
+		block.Deprecated != nil || block.DropCascade ||
+		len(block.Indices) > 0 || len(block.Policies) > 0 || len(block.Triggers) > 0 ||
+		len(block.Grants) > 0 || len(block.Revocations) > 0 || len(block.SecurityLabels) > 0 ||
+		len(block.Columns) > 0 || len(block.Constraints) > 0 ||
+		block.EnableRLS || block.ForceRLS || block.Partitions != nil ||
+		block.MigrateRemove != nil || len(block.DefaultPrivileges) > 0 ||
+		len(block.Mappings) > 0 || len(block.OpFamilyMembers) > 0 ||
+		block.DomainDefault != nil || block.DomainNotNull ||
+		len(block.DependsOnExtensions) > 0 {
+		return nil, pipeline.ErrorfCode(pos, "DPG-E015",
+			"VIRTUAL TYPE %s: the { } block only accepts COMMENT and PREFERRED JSON FORMAT", namePart)
 	}
 
 	vt := &VirtualType{

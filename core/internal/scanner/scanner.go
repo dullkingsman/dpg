@@ -538,13 +538,13 @@ func (s *state) detectKind(pos pipeline.SourcePos) (pipeline.ObjectKind, error) 
 
 	switch strings.ToUpper(word) {
 	case "CREATE", "ALTER", "DROP":
-		return pipeline.KindUnknown, pipeline.Errorf(pos,
+		return pipeline.KindUnknown, pipeline.ErrorfCode(pos, "DPG-E006",
 			"%s is not allowed at declaration level — DPG source describes desired state, not commands",
 			strings.ToUpper(word))
 	case "TEMPORARY":
 		s.skipWS()
 		s.readWord() // consume TABLE (or whatever follows)
-		return pipeline.KindUnknown, pipeline.Errorf(pos, "TEMPORARY TABLE is not supported by DPG")
+		return pipeline.KindUnknown, pipeline.ErrorfCode(pos, "DPG-E023", "TEMPORARY TABLE is not supported by DPG")
 
 	case "TABLE":
 		return pipeline.KindTable, nil

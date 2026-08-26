@@ -207,7 +207,7 @@ func runDump(
 
 	connStr := cl.ConnectionString()
 	if connStr == "" {
-		return fmt.Errorf("cluster %q has no connection configured (set url or link in cluster dpg.toml)", cl.Name())
+		return fmt.Errorf("DPG-E003: cluster %q has no connection configured (set url or link in cluster dpg.toml)", cl.Name())
 	}
 	if cl.IsLink() {
 		var err error

@@ -975,6 +975,25 @@ func TestMacroUndefinedErrors(t *testing.T) {
 	if !strings.Contains(err.Error(), "missing_macro") {
 		t.Errorf("error should mention 'missing_macro', got: %v", err)
 	}
+	if !strings.Contains(err.Error(), "DPG-E010") {
+		t.Errorf("error should carry DPG-E010, got: %v", err)
+	}
+}
+
+func TestMacroDuplicateNameIsError(t *testing.T) {
+	src := `
+MACRO ts_cols (created_at TIMESTAMPTZ)
+MACRO ts_cols (updated_at TIMESTAMPTZ)
+
+TABLE events (id BIGINT, ...ts_cols);
+`
+	err := scanErr(t, src)
+	if err == nil {
+		t.Fatal("expected error for duplicate macro name, got nil")
+	}
+	if !strings.Contains(err.Error(), "DPG-E011") {
+		t.Errorf("error should carry DPG-E011, got: %v", err)
+	}
 }
 
 func TestMacroMultipleSpreads(t *testing.T) {

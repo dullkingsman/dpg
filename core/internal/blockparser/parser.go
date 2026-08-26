@@ -731,7 +731,7 @@ func (b *blockParser) parseBlock(pos pipeline.SourcePos) (pipeline.BlockAST, err
 				err = fmt.Errorf("%s: expected MAP or MAPS after NAME, got %q", dirPos, w2)
 			}
 		default:
-			return ast, fmt.Errorf("%s: unknown block directive %q", dirPos, word)
+			return ast, fmt.Errorf("%s: DPG-E024: unknown block directive %q", dirPos, word)
 		}
 		if err != nil {
 			return ast, err
@@ -1834,7 +1834,7 @@ func (b *blockParser) fillColumnBlock(col *pipeline.ColumnBlock) error {
 				err = fmt.Errorf("%s: expected MAP or MAPS after NAME, got %q", dirPos, w2)
 			}
 		default:
-			return fmt.Errorf("%s: unknown column directive %q", dirPos, word)
+			return fmt.Errorf("%s: DPG-E024: unknown column directive %q", dirPos, word)
 		}
 		if err != nil {
 			return err
@@ -1861,15 +1861,24 @@ func (b *blockParser) parseStatisticsValue(pos pipeline.SourcePos) (*int, error)
 		return nil, nil
 	}
 	var buf []byte
+	if b.peek() == '-' {
+		buf = append(buf, b.advance())
+	}
 	for !b.eof() && isDigit(b.peek()) {
 		buf = append(buf, b.advance())
 	}
-	if len(buf) == 0 {
+	if len(buf) == 0 || (len(buf) == 1 && buf[0] == '-') {
 		return nil, fmt.Errorf("%s: expected an integer or DEFAULT after STATISTICS", pos)
 	}
 	n, err := strconv.Atoi(string(buf))
 	if err != nil {
 		return nil, fmt.Errorf("%s: invalid STATISTICS value: %w", pos, err)
+	}
+	// Section 7.4: STATISTICS n MUST be in [-1, 10000] — real PostgreSQL's
+	// own valid range for a column's statistics target (-1 restores the
+	// system default; there is no equivalent lower sentinel above 10000).
+	if n < -1 || n > 10000 {
+		return nil, fmt.Errorf("%s: DPG-E020: STATISTICS value %d is outside the valid range [-1, 10000]", pos, n)
 	}
 	if err := b.expectSemi(); err != nil {
 		return nil, err
@@ -3244,7 +3253,7 @@ func (b *blockParser) parseDefaultPrivilegesEntries(dp *pipeline.DefaultPrivileg
 			}
 			dp.Revocations = append(dp.Revocations, r)
 		default:
-			return fmt.Errorf("%s: unexpected directive %q in DEFAULT PRIVILEGES block", dirPos, word)
+			return fmt.Errorf("%s: DPG-E024: unexpected directive %q in DEFAULT PRIVILEGES block", dirPos, word)
 		}
 	}
 }
@@ -3514,7 +3523,7 @@ func (b *blockParser) parseParameterPrivilegesEntries(pp *pipeline.ParameterPriv
 			}
 			pp.Revocations = append(pp.Revocations, revs...)
 		default:
-			return fmt.Errorf("%s: unexpected directive %q in PARAMETER PRIVILEGES block", dirPos, word)
+			return fmt.Errorf("%s: DPG-E024: unexpected directive %q in PARAMETER PRIVILEGES block", dirPos, word)
 		}
 	}
 }

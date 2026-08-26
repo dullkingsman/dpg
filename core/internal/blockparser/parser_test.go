@@ -486,6 +486,38 @@ func TestColumnStatisticsInvalidErrors(t *testing.T) {
 	}
 }
 
+// TestColumnStatisticsNegativeOne is the regression guard for DPG-E020's
+// documented valid range, [-1, 10000]: -1 (restore PostgreSQL's system
+// default) is itself a legal value, but parseStatisticsValue's digit-only
+// scan couldn't even parse a leading '-', so the one negative value real
+// PostgreSQL accepts was a hard parse error.
+func TestColumnStatisticsNegativeOne(t *testing.T) {
+	src := `COLUMN status { STATISTICS -1; }`
+	ast := parse(t, src)
+	col := ast.Columns[0]
+	if col.Statistics == nil || *col.Statistics != -1 {
+		t.Errorf("Statistics: got %v, want -1", col.Statistics)
+	}
+}
+
+// TestColumnStatisticsOutOfRange is the regression guard for RFC Section
+// 7.4's DPG-E020: a STATISTICS value outside [-1, 10000] was previously
+// accepted with no range check at all.
+func TestColumnStatisticsOutOfRange(t *testing.T) {
+	for _, src := range []string{
+		`COLUMN status { STATISTICS -2; }`,
+		`COLUMN status { STATISTICS 10001; }`,
+	} {
+		err := parseErr(t, src)
+		if err == nil {
+			t.Fatalf("%s: expected DPG-E020 range error, got none", src)
+		}
+		if !strings.Contains(err.Error(), "DPG-E020") {
+			t.Errorf("%s: expected error to mention DPG-E020, got: %v", src, err)
+		}
+	}
+}
+
 // TestDependsOnExtension is the regression guard for RFC audit item #71:
 // Section 9.1's func-block-only "DEPENDS ON EXTENSION ext;" directive
 // (Function/Procedure), repeatable.

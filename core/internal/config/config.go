@@ -302,10 +302,10 @@ func LoadCluster(path string) (ClusterConfig, error) {
 
 func (c ClusterDef) validate(path string) error {
 	if c.Name == "" {
-		return fmt.Errorf("%s: cluster name is required (set name in [cluster])", path)
+		return fmt.Errorf("DPG-E032: %s: cluster name is required (set name in [cluster])", path)
 	}
 	if c.URL != "" && c.Link != "" {
-		return fmt.Errorf("%s: url and link are mutually exclusive", path)
+		return fmt.Errorf("DPG-E002: %s: url and link are mutually exclusive", path)
 	}
 	return nil
 }
@@ -355,7 +355,7 @@ func LoadDatabase(path string) (DatabaseConfig, error) {
 
 func (d DatabaseDef) validate(path string) error {
 	if d.Name == "" {
-		return fmt.Errorf("%s: database name is required (set name in [database])", path)
+		return fmt.Errorf("DPG-E033: %s: database name is required (set name in [database])", path)
 	}
 	return nil
 }

@@ -780,7 +780,7 @@ func (r *Resolver) Sort(objects []pipeline.IRObject) ([]pipeline.IRObject, error
 				for _, i := range cycle {
 					members = append(members, objects[i].QualifiedName())
 				}
-				return nil, pipeline.Errorf(pipeline.SourcePos{}, "circular dependency cycle with no DEFERRABLE FK: %s",
+				return nil, pipeline.ErrorfCode(pipeline.SourcePos{}, "DPG-E017", "circular dependency cycle with no DEFERRABLE FK: %s",
 					strings.Join(members, " → "))
 			}
 
@@ -803,7 +803,7 @@ func (r *Resolver) Sort(objects []pipeline.IRObject) ([]pipeline.IRObject, error
 		for _, i := range cycle {
 			members = append(members, objects[i].QualifiedName())
 		}
-		return nil, pipeline.Errorf(pipeline.SourcePos{}, "circular dependency cycle with no DEFERRABLE FK: %s",
+		return nil, pipeline.ErrorfCode(pipeline.SourcePos{}, "DPG-E017", "circular dependency cycle with no DEFERRABLE FK: %s",
 			strings.Join(members, " → "))
 	}
 

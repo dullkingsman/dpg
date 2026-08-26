@@ -117,6 +117,9 @@ func collectMacros(src []byte) (macroStore, error) {
 		if name == "" {
 			return nil, fmt.Errorf("MACRO: expected identifier after MACRO, got %q", p.peek())
 		}
+		if _, dup := store[name]; dup {
+			return nil, fmt.Errorf("MACRO %s: macro name redeclared in the same file (DPG-E011)", name)
+		}
 
 		// Read body: either (...) or {...}.
 		p.skipWS()
@@ -240,7 +243,7 @@ func expandMacros(src []byte, store macroStore) ([]byte, error) {
 			}
 			def, ok := store[name]
 			if !ok {
-				return nil, fmt.Errorf("spread ...%s: macro %q is not defined", name, name)
+				return nil, fmt.Errorf("spread ...%s: macro %q is not defined (DPG-E010)", name, name)
 			}
 			out.WriteString(def.Body)
 			// Consume optional trailing comma/semicolon that was the spread's separator.
@@ -347,7 +350,7 @@ func expandBodyText(body string, store macroStore, resolve func(string) error) (
 				continue
 			}
 			if _, ok := store[name]; !ok {
-				return "", fmt.Errorf("spread ...%s: macro %q is not defined", name, name)
+				return "", fmt.Errorf("spread ...%s: macro %q is not defined (DPG-E010)", name, name)
 			}
 			if err := resolve(name); err != nil {
 				return "", err

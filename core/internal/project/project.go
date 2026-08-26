@@ -211,7 +211,7 @@ func checkDuplicateClusterNames(clusters []*Cluster) error {
 	for _, cl := range clusters {
 		name := cl.Name()
 		if existing, ok := seen[name]; ok {
-			return fmt.Errorf("duplicate cluster name %q declared in both %s and %s", name, existing.Dir, cl.Dir)
+			return fmt.Errorf("DPG-E034: duplicate cluster name %q declared in both %s and %s", name, existing.Dir, cl.Dir)
 		}
 		seen[name] = cl
 	}
@@ -327,7 +327,7 @@ func checkDuplicateDatabaseNames(databases []*Database) error {
 	for _, db := range databases {
 		name := db.Name()
 		if existing, ok := seen[name]; ok {
-			return fmt.Errorf("duplicate database name %q declared in both %s and %s", name, existing.Dir, db.Dir)
+			return fmt.Errorf("DPG-E035: duplicate database name %q declared in both %s and %s", name, existing.Dir, db.Dir)
 		}
 		seen[name] = db
 	}

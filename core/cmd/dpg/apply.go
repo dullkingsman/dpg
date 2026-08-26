@@ -205,7 +205,7 @@ func runApply(
 	if !opts.allowDestructive {
 		for _, op := range ops {
 			if op.Safety() == pipeline.Destructive {
-				return fmt.Errorf("migration contains destructive operations; re-run with --allow-destructive to proceed\n  first: %s", op.SQL())
+				return fmt.Errorf("DPG-E025: migration contains destructive operations; re-run with --allow-destructive to proceed\n  first: %s", op.SQL())
 			}
 		}
 	}
@@ -271,7 +271,7 @@ func runApply(
 
 	connStr := cl.ConnectionString()
 	if connStr == "" {
-		return fmt.Errorf("cluster %q has no connection configured (set url or link in cluster dpg.toml)", cl.Name())
+		return fmt.Errorf("DPG-E003: cluster %q has no connection configured (set url or link in cluster dpg.toml)", cl.Name())
 	}
 	if cl.IsLink() {
 		connStr, err = secretResolver.Resolve(connStr)
@@ -391,7 +391,7 @@ func runClusterApply(
 	if !opts.allowDestructive {
 		for _, op := range ops {
 			if op.Safety() == pipeline.Destructive {
-				return fmt.Errorf("cluster migration contains destructive operations; re-run with --allow-destructive\n  first: %s", op.SQL())
+				return fmt.Errorf("DPG-E025: cluster migration contains destructive operations; re-run with --allow-destructive\n  first: %s", op.SQL())
 			}
 		}
 	}
@@ -449,7 +449,7 @@ func runClusterApply(
 
 	connStr := cl.ConnectionString()
 	if connStr == "" {
-		return fmt.Errorf("cluster %q has no connection configured", cl.Name())
+		return fmt.Errorf("DPG-E003: cluster %q has no connection configured", cl.Name())
 	}
 	if cl.IsLink() {
 		connStr, err = secretResolver.Resolve(connStr)

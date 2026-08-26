@@ -121,7 +121,7 @@ func runVerify(
 
 	connStr := cl.ConnectionString()
 	if connStr == "" {
-		return false, fmt.Errorf("cluster %q has no connection configured (set url or link in cluster dpg.toml)", cl.Name())
+		return false, fmt.Errorf("DPG-E003: cluster %q has no connection configured (set url or link in cluster dpg.toml)", cl.Name())
 	}
 	if cl.IsLink() {
 		connStr, err = secretResolver.Resolve(connStr)
@@ -195,7 +195,7 @@ func runVerifyCluster(
 
 	connStr := cl.ConnectionString()
 	if connStr == "" {
-		return false, fmt.Errorf("cluster %q has no connection configured (set url or link in cluster dpg.toml)", cl.Name())
+		return false, fmt.Errorf("DPG-E003: cluster %q has no connection configured (set url or link in cluster dpg.toml)", cl.Name())
 	}
 	if cl.IsLink() {
 		connStr, err = secretResolver.Resolve(connStr)
