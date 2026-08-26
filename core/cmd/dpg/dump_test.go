@@ -7,14 +7,14 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/dullkingsman/dpg/internal/compiler"
-	"github.com/dullkingsman/dpg/internal/config"
-	"github.com/dullkingsman/dpg/internal/diff"
-	"github.com/dullkingsman/dpg/internal/format"
-	"github.com/dullkingsman/dpg/internal/ir"
-	"github.com/dullkingsman/dpg/internal/pipeline"
-	"github.com/dullkingsman/dpg/internal/project"
-	"github.com/dullkingsman/dpg/internal/snapshot"
+	"github.com/thec1oud/dpg/internal/compiler"
+	"github.com/thec1oud/dpg/internal/config"
+	"github.com/thec1oud/dpg/internal/diff"
+	"github.com/thec1oud/dpg/internal/format"
+	"github.com/thec1oud/dpg/internal/ir"
+	"github.com/thec1oud/dpg/internal/pipeline"
+	"github.com/thec1oud/dpg/internal/project"
+	"github.com/thec1oud/dpg/internal/snapshot"
 )
 
 // TestRenderColumnSerialCompiles proves a column with Serial set renders the

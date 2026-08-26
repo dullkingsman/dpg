@@ -40,7 +40,7 @@ Status of This Memo
 
    This document is the authoritative specification for DPG version
    0.8.1 and supersedes all prior informal design documents including
-   rfc/v0.8.0.md.  The Go implementation at github.com/dullkingsman/dpg
+   rfc/v0.8.0.md.  The Go implementation at github.com/thec1oud/dpg
    MUST conform to every normative statement in this document.
 
 Copyright Notice

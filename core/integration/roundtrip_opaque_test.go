@@ -10,15 +10,15 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/dullkingsman/dpg/internal/compiler"
-	"github.com/dullkingsman/dpg/internal/diff"
-	"github.com/dullkingsman/dpg/internal/emit"
-	"github.com/dullkingsman/dpg/internal/executor"
-	"github.com/dullkingsman/dpg/internal/introspect"
-	"github.com/dullkingsman/dpg/internal/ir"
-	"github.com/dullkingsman/dpg/internal/pipeline"
-	"github.com/dullkingsman/dpg/internal/snapshot"
-	"github.com/dullkingsman/dpg/internal/testpg"
+	"github.com/thec1oud/dpg/internal/compiler"
+	"github.com/thec1oud/dpg/internal/diff"
+	"github.com/thec1oud/dpg/internal/emit"
+	"github.com/thec1oud/dpg/internal/executor"
+	"github.com/thec1oud/dpg/internal/introspect"
+	"github.com/thec1oud/dpg/internal/ir"
+	"github.com/thec1oud/dpg/internal/pipeline"
+	"github.com/thec1oud/dpg/internal/snapshot"
+	"github.com/thec1oud/dpg/internal/testpg"
 )
 
 // assertOpaqueRoundtrip compiles an inline .dpg fixture, applies it, introspects
@@ -3683,7 +3683,7 @@ $$ {}`
 // (removing whitespace around concatenation operators) — the exact
 // scenario the original plpgsql body-hash fix didn't cover, closed by
 // canonicalizePlpgsqlExprFragments re-parsing/re-deparsing each
-// PLpgSQL_expr fragment via github.com/dullkingsman/dpg_query_go's
+// PLpgSQL_expr fragment via github.com/thec1oud/dpg_query_go's
 // raw-parse-mode entry points.
 func TestRoundtripFunctionPlpgsqlEmbeddedExpressionReformattingLiveNoSpuriousDrift(t *testing.T) {
 	connStr := testpg.Start(t)

@@ -9,14 +9,14 @@ indent            = { tab-width = 4, unit = "    " }
 
 formatter = { command = "dpg", args = ["fmt", "--stdin"] }
 
-# Requires dpg-lsp on $PATH — download from https://github.com/dullkingsman/dpg/releases
+# Requires dpg-lsp on $PATH — download from https://github.com/thec1oud/dpg/releases
 language-servers = ["dpg-lsp"]
 
 # Tree-sitter grammar — add to your languages.toml or wait for upstream inclusion.
 # Requires Helix 24.03+ for subdir support.
-# Update rev to the latest grammar-v* tag: https://github.com/dullkingsman/dpg/releases
+# Update rev to the latest grammar-v* tag: https://github.com/thec1oud/dpg/releases
 [language.grammar]
-source = { git = "https://github.com/dullkingsman/dpg", rev = "grammar-v0.1.0", subdir = "lang/grammar" }
+source = { git = "https://github.com/thec1oud/dpg", rev = "grammar-v0.1.0", subdir = "lang/grammar" }
 
 [language-server.dpg-lsp]
 command = "dpg-lsp"

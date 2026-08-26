@@ -1,4 +1,4 @@
-baseURL = "https://dullkingsman.github.io/dpg/"
+baseURL = "https://thec1oud.github.io/dpg/"
 title = "DPG — Declarative PG"
 enableRobotsTXT = true
 publishDir = "../core/internal/docssite/public"

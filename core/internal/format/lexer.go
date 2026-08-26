@@ -3,7 +3,7 @@ package format
 import (
 	"strings"
 
-	"github.com/dullkingsman/dpg/internal/scanutil"
+	"github.com/thec1oud/dpg/internal/scanutil"
 )
 
 // TokType identifies the type of a format token.

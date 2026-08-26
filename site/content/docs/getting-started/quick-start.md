@@ -23,7 +23,7 @@ weight: 2
 ### 1. Install
 
 ```bash
-git clone https://github.com/dullkingsman/dpg
+git clone https://github.com/thec1oud/dpg
 cd dpg
 make install
 ```

@@ -21,7 +21,7 @@ import (
 	"github.com/Azure/azure-sdk-for-go/sdk/azidentity"
 	"github.com/Azure/azure-sdk-for-go/sdk/security/keyvault/azsecrets"
 
-	"github.com/dullkingsman/dpg/internal/secrets"
+	"github.com/thec1oud/dpg/internal/secrets"
 )
 
 // resolveTimeout bounds a single secret lookup — see vault's identical

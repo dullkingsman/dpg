@@ -67,7 +67,7 @@ func buildRoot() *cobra.Command {
 to idiomatic PG DDL. Describe what your database should be; DPG figures
 out what needs to change.
 
-Source: https://github.com/dullkingsman/dpg`,
+Source: https://github.com/thec1oud/dpg`,
 	}
 	root.PersistentFlags().StringP("dir", "C", "", "project root directory (default: current working directory)")
 	root.PersistentFlags().String("env", "", "path to .env file (default: .env in project root, if present)")

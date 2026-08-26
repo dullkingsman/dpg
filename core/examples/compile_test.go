@@ -8,7 +8,7 @@ package examples_test
 import (
 	"testing"
 
-	"github.com/dullkingsman/dpg/internal/pipeline"
+	"github.com/thec1oud/dpg/internal/pipeline"
 )
 
 func TestCompileInitialDDL(t *testing.T) {

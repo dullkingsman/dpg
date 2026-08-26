@@ -3,7 +3,7 @@ package ir_test
 import (
 	"testing"
 
-	"github.com/dullkingsman/dpg/internal/ir"
+	"github.com/thec1oud/dpg/internal/ir"
 )
 
 // ── HashFunctionBody ─────────────────────────────────────────────────────────

@@ -6,7 +6,7 @@ import (
 
 	pg_query "github.com/pganalyze/pg_query_go/v6"
 
-	"github.com/dullkingsman/dpg/internal/ir"
+	"github.com/thec1oud/dpg/internal/ir"
 )
 
 func TestRenderCreateFunctionSQLDollarQuoteCollision(t *testing.T) {

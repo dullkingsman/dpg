@@ -11,8 +11,8 @@ import (
 	pg_query "github.com/pganalyze/pg_query_go/v6"
 	"google.golang.org/protobuf/reflect/protoreflect"
 
-	"github.com/dullkingsman/dpg/internal/ast"
-	"github.com/dullkingsman/dpg/internal/pipeline"
+	"github.com/thec1oud/dpg/internal/ast"
+	"github.com/thec1oud/dpg/internal/pipeline"
 )
 
 func init() {

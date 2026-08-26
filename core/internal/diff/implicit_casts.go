@@ -3,7 +3,7 @@ package diff
 import (
 	"strings"
 
-	"github.com/dullkingsman/dpg/internal/ir"
+	"github.com/thec1oud/dpg/internal/ir"
 )
 
 // implicitCastPairs is the raw pg_catalog.pg_type.typname pairs (source,

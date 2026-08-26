@@ -1,5 +1,5 @@
 BINARY  := dpg
-MODULE  := github.com/dullkingsman/dpg
+MODULE  := github.com/thec1oud/dpg
 CMD     := ./cmd/dpg
 BUILD   := build
 DIST    := dist

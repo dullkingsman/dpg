@@ -1,6 +1,6 @@
 package ir
 
-import "github.com/dullkingsman/dpg/internal/pipeline"
+import "github.com/thec1oud/dpg/internal/pipeline"
 
 // ResolveLikeClauses implements pipeline.IRBuilder.
 func (b *Builder) ResolveLikeClauses(objects []pipeline.IRObject) error {

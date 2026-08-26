@@ -8,31 +8,31 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/dullkingsman/dpg/internal/pipeline"
-	"github.com/dullkingsman/dpg/internal/project"
-	snapshotpkg "github.com/dullkingsman/dpg/internal/snapshot"
-	"github.com/dullkingsman/dpg/internal/ui"
-	"github.com/dullkingsman/dpg/internal/version"
+	"github.com/thec1oud/dpg/internal/pipeline"
+	"github.com/thec1oud/dpg/internal/project"
+	snapshotpkg "github.com/thec1oud/dpg/internal/snapshot"
+	"github.com/thec1oud/dpg/internal/ui"
+	"github.com/thec1oud/dpg/internal/version"
 
 	// Import default pipeline implementations to trigger their init() registration.
-	_ "github.com/dullkingsman/dpg/internal/blockparser"
-	_ "github.com/dullkingsman/dpg/internal/diff"
-	_ "github.com/dullkingsman/dpg/internal/emit"
-	_ "github.com/dullkingsman/dpg/internal/executor"
-	_ "github.com/dullkingsman/dpg/internal/graph"
-	_ "github.com/dullkingsman/dpg/internal/introspect"
-	_ "github.com/dullkingsman/dpg/internal/ir"
-	_ "github.com/dullkingsman/dpg/internal/linter"
-	_ "github.com/dullkingsman/dpg/internal/merger"
-	_ "github.com/dullkingsman/dpg/internal/pgparser"
-	_ "github.com/dullkingsman/dpg/internal/portability"
-	_ "github.com/dullkingsman/dpg/internal/scanner"
-	_ "github.com/dullkingsman/dpg/internal/secrets"
-	_ "github.com/dullkingsman/dpg/internal/secrets/awssm"
-	_ "github.com/dullkingsman/dpg/internal/secrets/azurekv"
-	_ "github.com/dullkingsman/dpg/internal/secrets/gcpsm"
-	_ "github.com/dullkingsman/dpg/internal/secrets/vault"
-	_ "github.com/dullkingsman/dpg/internal/snapshot"
+	_ "github.com/thec1oud/dpg/internal/blockparser"
+	_ "github.com/thec1oud/dpg/internal/diff"
+	_ "github.com/thec1oud/dpg/internal/emit"
+	_ "github.com/thec1oud/dpg/internal/executor"
+	_ "github.com/thec1oud/dpg/internal/graph"
+	_ "github.com/thec1oud/dpg/internal/introspect"
+	_ "github.com/thec1oud/dpg/internal/ir"
+	_ "github.com/thec1oud/dpg/internal/linter"
+	_ "github.com/thec1oud/dpg/internal/merger"
+	_ "github.com/thec1oud/dpg/internal/pgparser"
+	_ "github.com/thec1oud/dpg/internal/portability"
+	_ "github.com/thec1oud/dpg/internal/scanner"
+	_ "github.com/thec1oud/dpg/internal/secrets"
+	_ "github.com/thec1oud/dpg/internal/secrets/awssm"
+	_ "github.com/thec1oud/dpg/internal/secrets/azurekv"
+	_ "github.com/thec1oud/dpg/internal/secrets/gcpsm"
+	_ "github.com/thec1oud/dpg/internal/secrets/vault"
+	_ "github.com/thec1oud/dpg/internal/snapshot"
 )
 
 var (
@@ -59,7 +59,7 @@ func newRootCmd() *cobra.Command {
 to idiomatic PG DDL. Describe what your database should be; DPG figures
 out what needs to change.
 
-Source: https://github.com/dullkingsman/dpg`,
+Source: https://github.com/thec1oud/dpg`,
 		SilenceUsage:  true,
 		SilenceErrors: true,
 	}

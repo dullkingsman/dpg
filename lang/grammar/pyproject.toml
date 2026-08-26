@@ -19,8 +19,8 @@ license.text = "MIT"
 readme = "README.md"
 
 [project.urls]
-Homepage = "https://github.com/dullkingsman/dpg"
-Repository = "https://github.com/dullkingsman/dpg"
+Homepage = "https://github.com/thec1oud/dpg"
+Repository = "https://github.com/thec1oud/dpg"
 
 [project.optional-dependencies]
 core = ["tree-sitter~=0.21"]

@@ -19,21 +19,21 @@ import (
 	// Side-effect imports: each package registers its implementation in
 	// pipeline.Default via init(), making it available to compiler.Compile
 	// and pipeline.MustResolve calls below.
-	_ "github.com/dullkingsman/dpg/internal/blockparser"
-	_ "github.com/dullkingsman/dpg/internal/diff"
-	_ "github.com/dullkingsman/dpg/internal/graph"
-	_ "github.com/dullkingsman/dpg/internal/ir"
-	_ "github.com/dullkingsman/dpg/internal/linter"
-	_ "github.com/dullkingsman/dpg/internal/merger"
-	_ "github.com/dullkingsman/dpg/internal/pgparser"
-	_ "github.com/dullkingsman/dpg/internal/portability"
-	_ "github.com/dullkingsman/dpg/internal/scanner"
+	_ "github.com/thec1oud/dpg/internal/blockparser"
+	_ "github.com/thec1oud/dpg/internal/diff"
+	_ "github.com/thec1oud/dpg/internal/graph"
+	_ "github.com/thec1oud/dpg/internal/ir"
+	_ "github.com/thec1oud/dpg/internal/linter"
+	_ "github.com/thec1oud/dpg/internal/merger"
+	_ "github.com/thec1oud/dpg/internal/pgparser"
+	_ "github.com/thec1oud/dpg/internal/portability"
+	_ "github.com/thec1oud/dpg/internal/scanner"
 
-	"github.com/dullkingsman/dpg/internal/compiler"
-	"github.com/dullkingsman/dpg/internal/emit"
-	"github.com/dullkingsman/dpg/internal/pipeline"
+	"github.com/thec1oud/dpg/internal/compiler"
+	"github.com/thec1oud/dpg/internal/emit"
+	"github.com/thec1oud/dpg/internal/pipeline"
 	// Named import gives us snapshot.Populate; init() also registers the FileStore.
-	"github.com/dullkingsman/dpg/internal/snapshot"
+	"github.com/thec1oud/dpg/internal/snapshot"
 )
 
 // compileDPG compiles one or more .dpg fixture files into a sorted IR slice.

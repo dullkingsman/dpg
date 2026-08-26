@@ -3,7 +3,7 @@
 package analysis
 
 import (
-	"github.com/dullkingsman/dpg-lsp/internal/workspace"
+	"github.com/thec1oud/dpg-lsp/internal/workspace"
 	protocol "github.com/tliron/glsp/protocol_3_16"
 )
 

@@ -6,10 +6,10 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/dullkingsman/dpg/internal/config"
-	"github.com/dullkingsman/dpg/internal/pipeline"
-	"github.com/dullkingsman/dpg/internal/project"
-	"github.com/dullkingsman/dpg/internal/ui"
+	"github.com/thec1oud/dpg/internal/config"
+	"github.com/thec1oud/dpg/internal/pipeline"
+	"github.com/thec1oud/dpg/internal/project"
+	"github.com/thec1oud/dpg/internal/ui"
 )
 
 // ── mock implementations ─────────────────────────────────────────────────────

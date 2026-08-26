@@ -54,12 +54,12 @@ DPG flips the model:
 **Requirements:** Go 1.25+, a C compiler (GCC or Clang) — `pg_query_go` links against the real PostgreSQL parser via CGo.
 
 ```bash
-git clone https://github.com/dullkingsman/dpg
+git clone https://github.com/thec1oud/dpg
 cd dpg
 make install       # installs dpg to $GOPATH/bin
 ```
 
-See the [installation guide](https://dullkingsman.github.io/dpg/docs/getting-started/installation/) for cross-compilation, pre-built binaries, and all `make` targets.
+See the [installation guide](https://thec1oud.github.io/dpg/docs/getting-started/installation/) for cross-compilation, pre-built binaries, and all `make` targets.
 
 ## Quick Start
 
@@ -84,7 +84,7 @@ dpg verify         # detect live drift against the committed snapshot
 | `dpg diff` | Diff two `.dpg` source directories and print the SQL between them. |
 | `dpg portability` | Report PostgreSQL-specific constructs that reduce portability. |
 
-All commands accept `--cluster` and `--database` flags when a project has multiple targets. See the [CLI reference](https://dullkingsman.github.io/dpg/docs/cli/) for the full flag reference.
+All commands accept `--cluster` and `--database` flags when a project has multiple targets. See the [CLI reference](https://thec1oud.github.io/dpg/docs/cli/) for the full flag reference.
 
 ## Project Layout
 
@@ -105,20 +105,20 @@ myproject/
     └── snapshots/                   # Committed snapshot (source of truth)
 ```
 
-See the [project structure guide](https://dullkingsman.github.io/dpg/docs/fundamentals/project-structure/) for the full directory layout.
+See the [project structure guide](https://thec1oud.github.io/dpg/docs/fundamentals/project-structure/) for the full directory layout.
 
 ## Documentation
 
 | Document | Contents |
 |---|---|
-| [Installation](https://dullkingsman.github.io/dpg/docs/getting-started/installation/) | Build requirements, make targets, cross-compilation |
-| [Project Structure](https://dullkingsman.github.io/dpg/docs/fundamentals/project-structure/) | Directory layout, dpg.toml, cluster and database config |
-| [Two-Part Syntax](https://dullkingsman.github.io/dpg/docs/fundamentals/two-part-syntax/) | The `{ }` block model, merge rules, structural scoping |
-| [Schema Objects](https://dullkingsman.github.io/dpg/docs/schema-objects/) | Tables, views, functions, types, sequences, roles, indexes, RLS, grants |
-| [CLI Reference](https://dullkingsman.github.io/dpg/docs/cli/) | All commands and flags |
-| [Linting](https://dullkingsman.github.io/dpg/docs/migrations/linting/) | Lint rules and configuration |
-| [Lifecycle Directives](https://dullkingsman.github.io/dpg/docs/migrations/lifecycle/) | RENAMED FROM, DEPRECATED, PROTECTED, DROP CASCADE |
-| [Snapshots & Diffing](https://dullkingsman.github.io/dpg/docs/fundamentals/snapshots/) | JSON snapshot format, dry-run, watch mode |
+| [Installation](https://thec1oud.github.io/dpg/docs/getting-started/installation/) | Build requirements, make targets, cross-compilation |
+| [Project Structure](https://thec1oud.github.io/dpg/docs/fundamentals/project-structure/) | Directory layout, dpg.toml, cluster and database config |
+| [Two-Part Syntax](https://thec1oud.github.io/dpg/docs/fundamentals/two-part-syntax/) | The `{ }` block model, merge rules, structural scoping |
+| [Schema Objects](https://thec1oud.github.io/dpg/docs/schema-objects/) | Tables, views, functions, types, sequences, roles, indexes, RLS, grants |
+| [CLI Reference](https://thec1oud.github.io/dpg/docs/cli/) | All commands and flags |
+| [Linting](https://thec1oud.github.io/dpg/docs/migrations/linting/) | Lint rules and configuration |
+| [Lifecycle Directives](https://thec1oud.github.io/dpg/docs/migrations/lifecycle/) | RENAMED FROM, DEPRECATED, PROTECTED, DROP CASCADE |
+| [Snapshots & Diffing](https://thec1oud.github.io/dpg/docs/fundamentals/snapshots/) | JSON snapshot format, dry-run, watch mode |
 | [RFC DPG-1](rfc/dpg-1.md) | Full language specification |
 
 ## Development

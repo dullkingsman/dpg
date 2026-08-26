@@ -31,7 +31,7 @@ Everything needed to build, test, and contribute to DPG.
 The setup script installs every mandatory tool and verifies the build. Safe to re-run.
 
 ```bash
-git clone https://github.com/dullkingsman/dpg
+git clone https://github.com/thec1oud/dpg
 cd dpg
 bash scripts/setup.sh
 ```

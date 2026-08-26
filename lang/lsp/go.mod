@@ -1,4 +1,4 @@
-module github.com/dullkingsman/dpg-lsp
+module github.com/thec1oud/dpg-lsp
 
 go 1.25.1
 

@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/dullkingsman/dpg/internal/project"
+	"github.com/thec1oud/dpg/internal/project"
 )
 
 // resolveClusters returns which clusters to operate on.

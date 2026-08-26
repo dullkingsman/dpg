@@ -4,9 +4,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/dullkingsman/dpg/internal/graph"
-	"github.com/dullkingsman/dpg/internal/ir"
-	"github.com/dullkingsman/dpg/internal/pipeline"
+	"github.com/thec1oud/dpg/internal/graph"
+	"github.com/thec1oud/dpg/internal/ir"
+	"github.com/thec1oud/dpg/internal/pipeline"
 )
 
 var pos = pipeline.SourcePos{File: "test.dpg", Line: 1, Col: 1}

@@ -6,8 +6,8 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/dullkingsman/dpg/internal/ir"
-	"github.com/dullkingsman/dpg/internal/pipeline"
+	"github.com/thec1oud/dpg/internal/ir"
+	"github.com/thec1oud/dpg/internal/pipeline"
 )
 
 func init() {

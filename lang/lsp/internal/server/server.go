@@ -4,9 +4,9 @@ import (
 	"os"
 	"os/exec"
 
-	"github.com/dullkingsman/dpg-lsp/internal/analysis"
-	"github.com/dullkingsman/dpg-lsp/internal/version"
-	"github.com/dullkingsman/dpg-lsp/internal/workspace"
+	"github.com/thec1oud/dpg-lsp/internal/analysis"
+	"github.com/thec1oud/dpg-lsp/internal/version"
+	"github.com/thec1oud/dpg-lsp/internal/workspace"
 	"github.com/tliron/commonlog"
 	"github.com/tliron/glsp"
 	protocol "github.com/tliron/glsp/protocol_3_16"

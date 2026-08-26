@@ -2,7 +2,7 @@
 # install-lsp.sh — download and install dpg-lsp from GitHub Releases.
 #
 # One-liner:
-#   curl -fsSL https://raw.githubusercontent.com/dullkingsman/dpg/master/scripts/install-lsp.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/thec1oud/dpg/master/scripts/install-lsp.sh | bash
 #
 # Options:
 #   --version <tag>    Install a specific release tag (default: latest)
@@ -14,12 +14,12 @@
 #   macOS  — amd64 (Intel), arm64 (Apple Silicon)
 #
 # The binary is downloaded from:
-#   https://github.com/dullkingsman/dpg/releases
+#   https://github.com/thec1oud/dpg/releases
 
 set -euo pipefail
 IFS=$'\n\t'
 
-REPO="dullkingsman/dpg"
+REPO="thec1oud/dpg"
 BINARY="dpg-lsp"
 
 # ── Flags ────────────────────────────────────────────────────────────────────

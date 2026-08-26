@@ -3,9 +3,9 @@ package pgparser_test
 import (
 	"testing"
 
-	"github.com/dullkingsman/dpg/internal/ast"
-	"github.com/dullkingsman/dpg/internal/pgparser"
-	"github.com/dullkingsman/dpg/internal/pipeline"
+	"github.com/thec1oud/dpg/internal/ast"
+	"github.com/thec1oud/dpg/internal/pgparser"
+	"github.com/thec1oud/dpg/internal/pipeline"
 )
 
 var zeroPos = pipeline.SourcePos{File: "test.dpg", Line: 1, Col: 1}

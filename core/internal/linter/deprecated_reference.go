@@ -3,8 +3,8 @@ package linter
 import (
 	"fmt"
 
-	"github.com/dullkingsman/dpg/internal/ir"
-	"github.com/dullkingsman/dpg/internal/pipeline"
+	"github.com/thec1oud/dpg/internal/ir"
+	"github.com/thec1oud/dpg/internal/pipeline"
 )
 
 // checkDeprecatedReference implements RFC Section 19.1's deprecated-reference rule:

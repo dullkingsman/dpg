@@ -5,7 +5,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/dullkingsman/dpg/internal/pipeline"
+	"github.com/thec1oud/dpg/internal/pipeline"
 )
 
 // ChainResolver dispatches a secret URI to whichever resolver is registered

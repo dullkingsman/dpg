@@ -15,7 +15,7 @@ No live PostgreSQL instance is required for most development. The test suite is 
 ## Getting Started
 
 ```bash
-git clone https://github.com/dullkingsman/dpg
+git clone https://github.com/thec1oud/dpg
 cd dpg
 make build     # builds core/build/dpg
 make test      # runs all tests
@@ -24,7 +24,7 @@ make test      # runs all tests
 ## Repository Layout
 
 ```
-core/                  Go module (github.com/dullkingsman/dpg)
+core/                  Go module (github.com/thec1oud/dpg)
   cmd/dpg/             CLI commands (plan, apply, verify, dump, diff, portability)
   internal/
     ast/               Abstract syntax tree types

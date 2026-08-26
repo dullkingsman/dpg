@@ -1,8 +1,8 @@
 <idea-plugin>
-  <id>com.dullkingsman.dpg</id>
+  <id>com.thec1oud.dpg</id>
   <name>DPG</name>
   <version>0.2.0</version>
-  <vendor url="https://github.com/dullkingsman/dpg">dullkingsman</vendor>
+  <vendor url="https://github.com/thec1oud/dpg">thec1oud</vendor>
 
   <description><![CDATA[
     <p>Native language support for <b>.dpg</b> (DPG / Declarative PostgreSQL) source files.</p>
@@ -28,7 +28,7 @@
     <!-- ── File type ──────────────────────────────────────────────────────── -->
     <fileType
         name="DPG"
-        implementationClass="com.dullkingsman.dpg.DpgFileType"
+        implementationClass="com.thec1oud.dpg.DpgFileType"
         language="DPG"
         extensions="dpg"
         fieldName="INSTANCE"/>
@@ -36,61 +36,61 @@
     <!-- ── Language foundation ───────────────────────────────────────────── -->
     <lang.parserDefinition
         language="DPG"
-        implementationClass="com.dullkingsman.dpg.lang.DpgParserDefinition"/>
+        implementationClass="com.thec1oud.dpg.lang.DpgParserDefinition"/>
 
     <!-- ── Syntax highlighting ───────────────────────────────────────────── -->
     <lang.syntaxHighlighterFactory
         language="DPG"
-        implementationClass="com.dullkingsman.dpg.highlight.DpgSyntaxHighlighterFactory"/>
+        implementationClass="com.thec1oud.dpg.highlight.DpgSyntaxHighlighterFactory"/>
 
     <colorSettingsPage
-        implementation="com.dullkingsman.dpg.highlight.DpgColorSettingsPage"/>
+        implementation="com.thec1oud.dpg.highlight.DpgColorSettingsPage"/>
 
     <!-- ── Editor services ───────────────────────────────────────────────── -->
     <lang.commenter
         language="DPG"
-        implementationClass="com.dullkingsman.dpg.editor.DpgCommenter"/>
+        implementationClass="com.thec1oud.dpg.editor.DpgCommenter"/>
 
     <lang.braceMatcher
         language="DPG"
-        implementationClass="com.dullkingsman.dpg.editor.DpgBraceMatcher"/>
+        implementationClass="com.thec1oud.dpg.editor.DpgBraceMatcher"/>
 
     <lang.foldingBuilder
         language="DPG"
-        implementationClass="com.dullkingsman.dpg.editor.DpgFoldingBuilder"/>
+        implementationClass="com.thec1oud.dpg.editor.DpgFoldingBuilder"/>
 
     <!-- ── Structure view ────────────────────────────────────────────────── -->
     <lang.psiStructureViewFactory
         language="DPG"
-        implementationClass="com.dullkingsman.dpg.structure.DpgStructureViewFactory"/>
+        implementationClass="com.thec1oud.dpg.structure.DpgStructureViewFactory"/>
 
     <!-- ── Code completion ───────────────────────────────────────────────── -->
     <completion.contributor
         language="DPG"
-        implementationClass="com.dullkingsman.dpg.completion.DpgCompletionContributor"/>
+        implementationClass="com.thec1oud.dpg.completion.DpgCompletionContributor"/>
 
     <!-- ── Semantic annotations ──────────────────────────────────────────── -->
     <annotator
         language="DPG"
-        implementationClass="com.dullkingsman.dpg.annotator.DpgAnnotator"/>
+        implementationClass="com.thec1oud.dpg.annotator.DpgAnnotator"/>
 
     <!-- ── Find Usages ───────────────────────────────────────────────────── -->
     <lang.findUsagesProvider
         language="DPG"
-        implementationClass="com.dullkingsman.dpg.findusages.DpgFindUsagesProvider"/>
+        implementationClass="com.thec1oud.dpg.findusages.DpgFindUsagesProvider"/>
 
     <!-- ── References (go-to-definition) ────────────────────────────────── -->
     <psi.referenceContributor
         language="DPG"
-        implementation="com.dullkingsman.dpg.reference.DpgReferenceContributor"/>
+        implementation="com.thec1oud.dpg.reference.DpgReferenceContributor"/>
 
     <!-- ── Formatting ───────────────────────────────────────────────────── -->
     <lang.formatter
         language="DPG"
-        implementationClass="com.dullkingsman.dpg.formatter.DpgFormattingModelBuilder"/>
+        implementationClass="com.thec1oud.dpg.formatter.DpgFormattingModelBuilder"/>
 
     <externalFormatProcessor
-        implementation="com.dullkingsman.dpg.formatter.DpgExternalFormatter"/>
+        implementation="com.thec1oud.dpg.formatter.DpgExternalFormatter"/>
 
   </extensions>
 </idea-plugin>

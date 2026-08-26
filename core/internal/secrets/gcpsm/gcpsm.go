@@ -22,7 +22,7 @@ import (
 	"cloud.google.com/go/secretmanager/apiv1/secretmanagerpb"
 	gax "github.com/googleapis/gax-go/v2"
 
-	"github.com/dullkingsman/dpg/internal/secrets"
+	"github.com/thec1oud/dpg/internal/secrets"
 )
 
 // resolveTimeout bounds a single secret lookup — see vault's identical

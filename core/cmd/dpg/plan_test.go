@@ -5,12 +5,12 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/dullkingsman/dpg/internal/config"
-	"github.com/dullkingsman/dpg/internal/ir"
-	"github.com/dullkingsman/dpg/internal/linter"
-	"github.com/dullkingsman/dpg/internal/pipeline"
-	"github.com/dullkingsman/dpg/internal/project"
-	"github.com/dullkingsman/dpg/internal/ui"
+	"github.com/thec1oud/dpg/internal/config"
+	"github.com/thec1oud/dpg/internal/ir"
+	"github.com/thec1oud/dpg/internal/linter"
+	"github.com/thec1oud/dpg/internal/pipeline"
+	"github.com/thec1oud/dpg/internal/project"
+	"github.com/thec1oud/dpg/internal/ui"
 )
 
 // TestNormalizeLinterRuleKeysSnakeToKebab guards RFC audit item #17: the

@@ -20,7 +20,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/secretsmanager"
 
-	"github.com/dullkingsman/dpg/internal/secrets"
+	"github.com/thec1oud/dpg/internal/secrets"
 )
 
 // resolveTimeout bounds a single secret lookup — see vault's identical

@@ -83,7 +83,7 @@ suite("DPG Formatting", () => {
 
     assert.strictEqual(doc.languageId, "dpg");
 
-    const ext = vscode.extensions.getExtension("dullkingsman.vscode-dpg");
+    const ext = vscode.extensions.getExtension("thec1oud.vscode-dpg");
     if (ext) {
       assert.ok(ext.isActive, "extension should be active after opening dpg file");
     }

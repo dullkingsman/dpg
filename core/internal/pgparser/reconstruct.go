@@ -1,7 +1,7 @@
 package pgparser
 
 import (
-	"github.com/dullkingsman/dpg/internal/pipeline"
+	"github.com/thec1oud/dpg/internal/pipeline"
 )
 
 // Reconstruct prepends the correct CREATE verb to a stripped Part1 string,

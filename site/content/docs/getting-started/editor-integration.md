@@ -23,7 +23,7 @@ DPG ships native plugins for VS Code, Neovim, Helix, and JetBrains IDEs. Each pl
 `dpg-lsp` is the language server that powers diagnostics, hover, and completions. Install it once and all editors share it:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/dullkingsman/dpg/master/scripts/install-lsp.sh | bash
+curl -fsSL https://raw.githubusercontent.com/thec1oud/dpg/master/scripts/install-lsp.sh | bash
 ```
 
 Verify both binaries are reachable:
@@ -37,7 +37,7 @@ dpg-lsp --version
 
 ## VS Code
 
-The official VS Code extension provides syntax highlighting, LSP integration, and format-on-save. It is published on the VS Code Marketplace as **`dullkingsman.vscode-dpg`**.
+The official VS Code extension provides syntax highlighting, LSP integration, and format-on-save. It is published on the VS Code Marketplace as **`thec1oud.vscode-dpg`**.
 
 ### Install
 
@@ -48,7 +48,7 @@ Open the Extensions panel (`Ctrl+Shift+X`), search for **"DPG Declarative PG"**,
 Or from the command line:
 
 ```bash
-code --install-extension dullkingsman.vscode-dpg
+code --install-extension thec1oud.vscode-dpg
 ```
 
 **From source (VSIX):**
@@ -98,7 +98,7 @@ The Neovim plugin lives in `plugins/nvim/` of the DPG repository. It requires **
 Clone the DPG repo, then point lazy.nvim at the `plugins/nvim` subdirectory:
 
 ```bash
-git clone https://github.com/dullkingsman/dpg \
+git clone https://github.com/thec1oud/dpg \
   ~/.local/share/dpg
 ```
 
@@ -188,7 +188,7 @@ formatter = { command = "dpg", args = ["fmt", "--stdin"] }
 language-servers = ["dpg-lsp"]
 
 [language.grammar]
-source = { git = "https://github.com/dullkingsman/tree-sitter-dpg", rev = "main" }
+source = { git = "https://github.com/thec1oud/tree-sitter-dpg", rev = "main" }
 
 [language-server.dpg-lsp]
 command = "dpg-lsp"

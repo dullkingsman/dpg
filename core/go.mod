@@ -1,4 +1,4 @@
-module github.com/dullkingsman/dpg
+module github.com/thec1oud/dpg
 
 go 1.25.6
 

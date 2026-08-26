@@ -7,7 +7,7 @@ weight: 2
 The `pkg/dpg` package is the stable public surface for extending DPG. Import it from your plugin:
 
 ```go
-import "github.com/dullkingsman/dpg/core/pkg/dpg"
+import "github.com/thec1oud/dpg/core/pkg/dpg"
 ```
 
 No internal packages are required. Every interface, type, and helper function needed to build and register a custom pipeline stage is available through `pkg/dpg`.
@@ -249,4 +249,4 @@ The full set of public functions and helpers in `pkg/dpg`:
 | `dpg.NewRegistry()` | Create an isolated registry (for testing or embedding) |
 | `dpg.Default` | The process-wide registry |
 
-For godoc on all exported types, see the [pkg.go.dev documentation](https://pkg.go.dev/github.com/dullkingsman/dpg/core/pkg/dpg).
+For godoc on all exported types, see the [pkg.go.dev documentation](https://pkg.go.dev/github.com/thec1oud/dpg/core/pkg/dpg).

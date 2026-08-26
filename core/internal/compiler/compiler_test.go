@@ -6,14 +6,14 @@ import (
 	"strings"
 	"testing"
 
-	_ "github.com/dullkingsman/dpg/internal/blockparser"
-	"github.com/dullkingsman/dpg/internal/compiler"
-	_ "github.com/dullkingsman/dpg/internal/graph"
-	"github.com/dullkingsman/dpg/internal/ir"
-	_ "github.com/dullkingsman/dpg/internal/merger"
-	_ "github.com/dullkingsman/dpg/internal/pgparser"
-	"github.com/dullkingsman/dpg/internal/pipeline"
-	_ "github.com/dullkingsman/dpg/internal/scanner"
+	_ "github.com/thec1oud/dpg/internal/blockparser"
+	"github.com/thec1oud/dpg/internal/compiler"
+	_ "github.com/thec1oud/dpg/internal/graph"
+	"github.com/thec1oud/dpg/internal/ir"
+	_ "github.com/thec1oud/dpg/internal/merger"
+	_ "github.com/thec1oud/dpg/internal/pgparser"
+	"github.com/thec1oud/dpg/internal/pipeline"
+	_ "github.com/thec1oud/dpg/internal/scanner"
 )
 
 // ── inferSchemaFromPath ───────────────────────────────────────────────────────

@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/dullkingsman/dpg/internal/format"
+	"github.com/thec1oud/dpg/internal/format"
 )
 
 // ── Lexer ─────────────────────────────────────────────────────────────────────

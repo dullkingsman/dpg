@@ -1,20 +1,20 @@
 package dpg
 
 import (
-	"github.com/dullkingsman/dpg/internal/compiler"
-	"github.com/dullkingsman/dpg/internal/ir"
-	"github.com/dullkingsman/dpg/internal/linter"
-	"github.com/dullkingsman/dpg/internal/pipeline"
-	"github.com/dullkingsman/dpg/internal/project"
+	"github.com/thec1oud/dpg/internal/compiler"
+	"github.com/thec1oud/dpg/internal/ir"
+	"github.com/thec1oud/dpg/internal/linter"
+	"github.com/thec1oud/dpg/internal/pipeline"
+	"github.com/thec1oud/dpg/internal/project"
 
 	// Concrete implementations register into pipeline.Default via init().
-	_ "github.com/dullkingsman/dpg/internal/blockparser"
-	_ "github.com/dullkingsman/dpg/internal/diff"
-	_ "github.com/dullkingsman/dpg/internal/emit"
-	_ "github.com/dullkingsman/dpg/internal/graph"
-	_ "github.com/dullkingsman/dpg/internal/merger"
-	_ "github.com/dullkingsman/dpg/internal/pgparser"
-	_ "github.com/dullkingsman/dpg/internal/scanner"
+	_ "github.com/thec1oud/dpg/internal/blockparser"
+	_ "github.com/thec1oud/dpg/internal/diff"
+	_ "github.com/thec1oud/dpg/internal/emit"
+	_ "github.com/thec1oud/dpg/internal/graph"
+	_ "github.com/thec1oud/dpg/internal/merger"
+	_ "github.com/thec1oud/dpg/internal/pgparser"
+	_ "github.com/thec1oud/dpg/internal/scanner"
 )
 
 // ── Source positions ──────────────────────────────────────────────────────────

@@ -48,7 +48,7 @@ jobs:
             **lazy.nvim**
             ```lua
             {
-              "dullkingsman/dpg",
+              "thec1oud/dpg",
               tag = "${{ steps.meta.outputs.tag }}",
               subdir = "plugins/nvim",
               config = function() require("dpg").setup() end,
@@ -57,5 +57,5 @@ jobs:
 
             **packer.nvim**
             ```lua
-            use { "dullkingsman/dpg", tag = "${{ steps.meta.outputs.tag }}", rtp = "plugins/nvim" }
+            use { "thec1oud/dpg", tag = "${{ steps.meta.outputs.tag }}", rtp = "plugins/nvim" }
             ```

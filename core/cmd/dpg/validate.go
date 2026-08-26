@@ -8,10 +8,10 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/dullkingsman/dpg/internal/compiler"
-	dpglinter "github.com/dullkingsman/dpg/internal/linter"
-	"github.com/dullkingsman/dpg/internal/pipeline"
-	"github.com/dullkingsman/dpg/internal/ui"
+	"github.com/thec1oud/dpg/internal/compiler"
+	dpglinter "github.com/thec1oud/dpg/internal/linter"
+	"github.com/thec1oud/dpg/internal/pipeline"
+	"github.com/thec1oud/dpg/internal/ui"
 )
 
 func newValidateCmd() *cobra.Command {

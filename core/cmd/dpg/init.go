@@ -113,7 +113,7 @@ func runInit(root, cluster, database, schema, connURL string) error {
 
 func rootTOML() string {
 	return `# DPG project root configuration.
-# See: https://github.com/dullkingsman/dpg
+# See: https://github.com/thec1oud/dpg
 
 [compiler]
 default_drop_behavior = "restrict"

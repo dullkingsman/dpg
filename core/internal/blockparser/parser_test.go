@@ -5,8 +5,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/dullkingsman/dpg/internal/blockparser"
-	"github.com/dullkingsman/dpg/internal/pipeline"
+	"github.com/thec1oud/dpg/internal/blockparser"
+	"github.com/thec1oud/dpg/internal/pipeline"
 )
 
 var zeroPos = pipeline.SourcePos{File: "test.dpg", Line: 1, Col: 1}

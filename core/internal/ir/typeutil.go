@@ -356,7 +356,7 @@ func HashFunctionBody(language, body, fullStatement string) string {
 // RETURN expressions, RAISE params, cursor queries, embedded SQL) — this
 // emitter does not re-parse or normalize it on its own. This is closed by
 // separately re-parsing and re-deparsing each fragment according to its own
-// "parseMode", using github.com/dullkingsman/dpg_query_go's raw-parse-mode
+// "parseMode", using github.com/thec1oud/dpg_query_go's raw-parse-mode
 // entry points (RAW_PARSE_PLPGSQL_EXPR/ASSIGN1/2/3 — the exact modes
 // PostgreSQL's own PL/pgSQL compiler uses for these fragments, confirmed by
 // reading libpg_query's parser.h and pl_gram.c directly, not guessed) —

@@ -6,8 +6,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/dullkingsman/dpg/internal/pipeline"
-	"github.com/dullkingsman/dpg/internal/ui"
+	"github.com/thec1oud/dpg/internal/pipeline"
+	"github.com/thec1oud/dpg/internal/ui"
 )
 
 // RenderOptions controls what the renderer writes.

@@ -7,7 +7,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/dullkingsman/dpg/internal/pipeline"
+	"github.com/thec1oud/dpg/internal/pipeline"
 )
 
 // ownerRoleRefRe matches the quoted role identifier in "SET ROLE "x";" (the

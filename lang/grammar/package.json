@@ -6,7 +6,7 @@
   "types": "bindings/node",
   "repository": {
     "type": "git",
-    "url": "https://github.com/dullkingsman/dpg",
+    "url": "https://github.com/thec1oud/dpg",
     "directory": "lang/grammar"
   },
   "keywords": [

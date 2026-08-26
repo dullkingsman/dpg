@@ -4,7 +4,7 @@ import (
 	"os"
 	"testing"
 
-	"github.com/dullkingsman/dpg/internal/pipeline"
+	"github.com/thec1oud/dpg/internal/pipeline"
 )
 
 // TestResolveNonEnvURIErrors guards EnvResolver's strict contract: it only

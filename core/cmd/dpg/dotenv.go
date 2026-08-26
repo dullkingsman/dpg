@@ -6,7 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/dullkingsman/dpg/internal/project"
+	"github.com/thec1oud/dpg/internal/project"
 )
 
 // loadEnv loads environment variables from an .env file for commands that

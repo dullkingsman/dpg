@@ -3,7 +3,7 @@ package main
 import (
 	"github.com/spf13/cobra"
 
-	"github.com/dullkingsman/dpg/internal/docssite"
+	"github.com/thec1oud/dpg/internal/docssite"
 )
 
 func newDocsCmd() *cobra.Command {

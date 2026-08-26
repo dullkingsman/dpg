@@ -15,14 +15,14 @@ import (
 	"github.com/testcontainers/testcontainers-go"
 	"github.com/testcontainers/testcontainers-go/wait"
 
-	"github.com/dullkingsman/dpg/internal/compiler"
-	"github.com/dullkingsman/dpg/internal/diff"
-	"github.com/dullkingsman/dpg/internal/emit"
-	"github.com/dullkingsman/dpg/internal/executor"
-	"github.com/dullkingsman/dpg/internal/pipeline"
-	_ "github.com/dullkingsman/dpg/internal/secrets"       // registers the default ChainResolver
-	_ "github.com/dullkingsman/dpg/internal/secrets/vault" // registers the "vault" scheme
-	"github.com/dullkingsman/dpg/internal/testpg"
+	"github.com/thec1oud/dpg/internal/compiler"
+	"github.com/thec1oud/dpg/internal/diff"
+	"github.com/thec1oud/dpg/internal/emit"
+	"github.com/thec1oud/dpg/internal/executor"
+	"github.com/thec1oud/dpg/internal/pipeline"
+	_ "github.com/thec1oud/dpg/internal/secrets"       // registers the default ChainResolver
+	_ "github.com/thec1oud/dpg/internal/secrets/vault" // registers the "vault" scheme
+	"github.com/thec1oud/dpg/internal/testpg"
 )
 
 // startVaultDev launches a HashiCorp Vault dev-mode container and returns

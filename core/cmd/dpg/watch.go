@@ -9,7 +9,7 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/dullkingsman/dpg/internal/ui"
+	"github.com/thec1oud/dpg/internal/ui"
 )
 
 const watchInterval = 500 * time.Millisecond

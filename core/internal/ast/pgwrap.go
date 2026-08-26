@@ -6,7 +6,7 @@ package ast
 import (
 	pg_query "github.com/pganalyze/pg_query_go/v6"
 
-	"github.com/dullkingsman/dpg/internal/pipeline"
+	"github.com/thec1oud/dpg/internal/pipeline"
 )
 
 // Unwrap extracts the *pg_query.ParseResult stored in a pipeline.PGParseResult.

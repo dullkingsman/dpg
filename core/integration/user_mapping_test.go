@@ -12,15 +12,15 @@ import (
 
 	vaultapi "github.com/hashicorp/vault/api"
 
-	"github.com/dullkingsman/dpg/internal/compiler"
-	"github.com/dullkingsman/dpg/internal/diff"
-	"github.com/dullkingsman/dpg/internal/emit"
-	"github.com/dullkingsman/dpg/internal/executor"
-	"github.com/dullkingsman/dpg/internal/introspect"
-	"github.com/dullkingsman/dpg/internal/ir"
-	"github.com/dullkingsman/dpg/internal/pipeline"
-	"github.com/dullkingsman/dpg/internal/snapshot"
-	"github.com/dullkingsman/dpg/internal/testpg"
+	"github.com/thec1oud/dpg/internal/compiler"
+	"github.com/thec1oud/dpg/internal/diff"
+	"github.com/thec1oud/dpg/internal/emit"
+	"github.com/thec1oud/dpg/internal/executor"
+	"github.com/thec1oud/dpg/internal/introspect"
+	"github.com/thec1oud/dpg/internal/ir"
+	"github.com/thec1oud/dpg/internal/pipeline"
+	"github.com/thec1oud/dpg/internal/snapshot"
+	"github.com/thec1oud/dpg/internal/testpg"
 )
 
 // TestUserMappingPasswordSecretRoundtrip proves USER MAPPING's OPTIONS may

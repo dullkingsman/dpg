@@ -7,12 +7,12 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/dullkingsman/dpg/internal/emit"
-	"github.com/dullkingsman/dpg/internal/executor"
-	"github.com/dullkingsman/dpg/internal/pipeline"
-	"github.com/dullkingsman/dpg/internal/project"
-	"github.com/dullkingsman/dpg/internal/snapshot"
-	"github.com/dullkingsman/dpg/internal/ui"
+	"github.com/thec1oud/dpg/internal/emit"
+	"github.com/thec1oud/dpg/internal/executor"
+	"github.com/thec1oud/dpg/internal/pipeline"
+	"github.com/thec1oud/dpg/internal/project"
+	"github.com/thec1oud/dpg/internal/snapshot"
+	"github.com/thec1oud/dpg/internal/ui"
 )
 
 func newVerifyCmd() *cobra.Command {

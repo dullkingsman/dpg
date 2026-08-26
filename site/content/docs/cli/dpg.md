@@ -13,7 +13,7 @@ DPG is a declarative, state-based superset of PostgreSQL SQL that compiles
 to idiomatic PG DDL. Describe what your database should be; DPG figures
 out what needs to change.
 
-Source: https://github.com/dullkingsman/dpg
+Source: https://github.com/thec1oud/dpg
 
 ### Options
 

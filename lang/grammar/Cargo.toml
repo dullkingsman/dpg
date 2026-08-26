@@ -5,7 +5,7 @@ version = "0.0.1"
 license = "MIT"
 keywords = ["incremental", "parsing", "tree-sitter", "dpg"]
 categories = ["parsing", "text-editors"]
-repository = "https://github.com/dullkingsman/dpg"
+repository = "https://github.com/thec1oud/dpg"
 edition = "2021"
 autoexamples = false
 

@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/dullkingsman/dpg/internal/pipeline"
+	"github.com/thec1oud/dpg/internal/pipeline"
 )
 
 func TestDistinctOwnerRoles(t *testing.T) {

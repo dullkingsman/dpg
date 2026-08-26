@@ -1887,5 +1887,5 @@ Initial release.
 - Secret resolution via `env:` and `link:` URI schemes
 - Migration archiving to a configurable directory
 
-[Unreleased]: https://github.com/dullkingsman/dpg/compare/v0.1.0...HEAD
-[0.1.0]: https://github.com/dullkingsman/dpg/releases/tag/v0.1.0
+[Unreleased]: https://github.com/thec1oud/dpg/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/thec1oud/dpg/releases/tag/v0.1.0

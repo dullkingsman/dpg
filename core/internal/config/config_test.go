@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/dullkingsman/dpg/internal/config"
+	"github.com/thec1oud/dpg/internal/config"
 )
 
 func writeFile(t *testing.T, dir, name, content string) string {

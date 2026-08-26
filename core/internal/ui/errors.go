@@ -6,7 +6,7 @@ import (
 	"io"
 	"strings"
 
-	"github.com/dullkingsman/dpg/internal/pipeline"
+	"github.com/thec1oud/dpg/internal/pipeline"
 )
 
 // ErrSilent is returned when an error has already been printed to the terminal

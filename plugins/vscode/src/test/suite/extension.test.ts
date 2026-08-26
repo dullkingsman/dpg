@@ -4,7 +4,7 @@ import * as vscode from "vscode";
 suite("DPG Extension", () => {
   suiteSetup(async () => {
     // Ensure the extension is activated before any test runs.
-    const ext = vscode.extensions.getExtension("dullkingsman.vscode-dpg");
+    const ext = vscode.extensions.getExtension("thec1oud.vscode-dpg");
     if (ext && !ext.isActive) {
       await ext.activate();
     }

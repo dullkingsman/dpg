@@ -6,11 +6,11 @@ import (
 	"context"
 	"testing"
 
-	"github.com/dullkingsman/dpg/internal/executor"
-	"github.com/dullkingsman/dpg/internal/introspect"
-	"github.com/dullkingsman/dpg/internal/ir"
-	"github.com/dullkingsman/dpg/internal/pipeline"
-	"github.com/dullkingsman/dpg/internal/testpg"
+	"github.com/thec1oud/dpg/internal/executor"
+	"github.com/thec1oud/dpg/internal/introspect"
+	"github.com/thec1oud/dpg/internal/ir"
+	"github.com/thec1oud/dpg/internal/pipeline"
+	"github.com/thec1oud/dpg/internal/testpg"
 )
 
 // TestIntrospectSecurityLabels is the live-catalog guard for RFC Section 14.11

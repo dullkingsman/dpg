@@ -20,7 +20,7 @@ To build from source, a C compiler (GCC or Clang) and Go 1.25+ are also required
 ### One-line install (Linux / macOS)
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/dullkingsman/dpg/master/scripts/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/thec1oud/dpg/master/scripts/install.sh | bash
 ```
 
 This downloads the correct pre-built binary for your platform and installs it to `/usr/local/bin` (if `sudo` is available) or `~/.local/bin` (otherwise).
@@ -28,7 +28,7 @@ This downloads the correct pre-built binary for your platform and installs it to
 To also install the language server for editor support in one step:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/dullkingsman/dpg/master/scripts/install.sh | bash -s -- --with-lsp
+curl -fsSL https://raw.githubusercontent.com/thec1oud/dpg/master/scripts/install.sh | bash -s -- --with-lsp
 ```
 
 ### Install script options
@@ -37,7 +37,7 @@ curl -fsSL https://raw.githubusercontent.com/dullkingsman/dpg/master/scripts/ins
 
 ### Manual download
 
-Download the binary directly from the [Releases page](https://github.com/dullkingsman/dpg/releases):
+Download the binary directly from the [Releases page](https://github.com/thec1oud/dpg/releases):
 
 | Platform | Archive |
 |---|---|
@@ -54,7 +54,7 @@ Each archive contains a single binary. Extract it, rename it to `dpg` (or `dpg.e
 If you have Go 1.25+ and a C compiler installed:
 
 ```bash
-go install github.com/dullkingsman/dpg/core/cmd/dpg@latest
+go install github.com/thec1oud/dpg/core/cmd/dpg@latest
 ```
 
 ---
@@ -66,13 +66,13 @@ go install github.com/dullkingsman/dpg/core/cmd/dpg@latest
 ### One-line install (Linux / macOS)
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/dullkingsman/dpg/master/scripts/install-lsp.sh | bash
+curl -fsSL https://raw.githubusercontent.com/thec1oud/dpg/master/scripts/install-lsp.sh | bash
 ```
 
 Or install both `dpg` and `dpg-lsp` together:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/dullkingsman/dpg/master/scripts/install.sh | bash -s -- --with-lsp
+curl -fsSL https://raw.githubusercontent.com/thec1oud/dpg/master/scripts/install.sh | bash -s -- --with-lsp
 ```
 
 ### Install script options
@@ -81,7 +81,7 @@ curl -fsSL https://raw.githubusercontent.com/dullkingsman/dpg/master/scripts/ins
 
 ### Manual download
 
-Download the binary directly from the [Releases page](https://github.com/dullkingsman/dpg/releases):
+Download the binary directly from the [Releases page](https://github.com/thec1oud/dpg/releases):
 
 | Platform | Archive |
 |---|---|
@@ -110,7 +110,7 @@ Editor setup is covered in [Editor Integration](./editor-integration).
 Because `pg_query_go` links against the real PostgreSQL C parser, a C compiler must be present. Pure-Go cross-compilation is **not** possible; each target platform must be built on that platform or with a compatible CGo cross-compilation toolchain.
 
 ```bash
-git clone https://github.com/dullkingsman/dpg
+git clone https://github.com/thec1oud/dpg
 cd dpg
 ```
 

@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"log"
 
-	"github.com/dullkingsman/dpg-lsp/internal/server"
-	"github.com/dullkingsman/dpg-lsp/internal/version"
+	"github.com/thec1oud/dpg-lsp/internal/server"
+	"github.com/thec1oud/dpg-lsp/internal/version"
 )
 
 func main() {

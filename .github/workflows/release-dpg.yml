@@ -102,9 +102,9 @@ jobs:
           CGO_ENABLED: '1'
         run: |
           LDFLAGS="-s -w \
-            -X 'github.com/dullkingsman/dpg/internal/version.Version=${{ github.ref_name }}' \
-            -X 'github.com/dullkingsman/dpg/internal/version.Commit=${GITHUB_SHA:0:7}' \
-            -X 'github.com/dullkingsman/dpg/internal/version.Date=$(date -u +%Y-%m-%dT%H:%M:%SZ)'"
+            -X 'github.com/thec1oud/dpg/internal/version.Version=${{ github.ref_name }}' \
+            -X 'github.com/thec1oud/dpg/internal/version.Commit=${GITHUB_SHA:0:7}' \
+            -X 'github.com/thec1oud/dpg/internal/version.Date=$(date -u +%Y-%m-%dT%H:%M:%SZ)'"
           go build -tags embeddata -trimpath -ldflags "$LDFLAGS" -o dist/dpg ./cmd/dpg
           cd dist && tar czf ${{ matrix.archive }} dpg
 
@@ -119,9 +119,9 @@ jobs:
           CC: gcc
         run: |
           LDFLAGS="-s -w \
-            -X 'github.com/dullkingsman/dpg/internal/version.Version=${{ github.ref_name }}' \
-            -X 'github.com/dullkingsman/dpg/internal/version.Commit=${GITHUB_SHA:0:7}' \
-            -X 'github.com/dullkingsman/dpg/internal/version.Date=$(date -u +%Y-%m-%dT%H:%M:%SZ)'"
+            -X 'github.com/thec1oud/dpg/internal/version.Version=${{ github.ref_name }}' \
+            -X 'github.com/thec1oud/dpg/internal/version.Commit=${GITHUB_SHA:0:7}' \
+            -X 'github.com/thec1oud/dpg/internal/version.Date=$(date -u +%Y-%m-%dT%H:%M:%SZ)'"
           go build -tags embeddata -trimpath -ldflags "$LDFLAGS" -o dist/dpg.exe ./cmd/dpg
           cd dist && 7z a ${{ matrix.archive }} dpg.exe
 

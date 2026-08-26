@@ -25,7 +25,7 @@ import (
 
 	vaultapi "github.com/hashicorp/vault/api"
 
-	"github.com/dullkingsman/dpg/internal/secrets"
+	"github.com/thec1oud/dpg/internal/secrets"
 )
 
 // resolveTimeout bounds a single secret lookup. pipeline.SecretResolver's

@@ -10,8 +10,8 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/dullkingsman/dpg/internal/format"
-	"github.com/dullkingsman/dpg/internal/project"
+	"github.com/thec1oud/dpg/internal/format"
+	"github.com/thec1oud/dpg/internal/project"
 )
 
 func newFmtCmd() *cobra.Command {

@@ -4,8 +4,8 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/dullkingsman/dpg/internal/pipeline"
-	"github.com/dullkingsman/dpg/internal/scanner"
+	"github.com/thec1oud/dpg/internal/pipeline"
+	"github.com/thec1oud/dpg/internal/scanner"
 )
 
 // kindKeyword returns the leading keyword(s) for a given ObjectKind, matching

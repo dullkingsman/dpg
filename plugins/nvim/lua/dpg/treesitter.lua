@@ -9,7 +9,7 @@ function M.setup()
 
   parsers.get_parser_configs().dpg = {
     install_info = {
-      url                            = "https://github.com/dullkingsman/dpg",
+      url                            = "https://github.com/thec1oud/dpg",
       files                          = { "src/parser.c", "src/scanner.c" },
       branch                         = "master",
       subdir                         = "lang/grammar",

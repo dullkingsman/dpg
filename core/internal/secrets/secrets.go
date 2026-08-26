@@ -22,7 +22,7 @@ import (
 	"os"
 	"strings"
 
-	"github.com/dullkingsman/dpg/internal/pipeline"
+	"github.com/thec1oud/dpg/internal/pipeline"
 )
 
 // defaultChain is the single ChainResolver registered under

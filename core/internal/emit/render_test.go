@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/dullkingsman/dpg/internal/pipeline"
+	"github.com/thec1oud/dpg/internal/pipeline"
 )
 
 type testOp struct {

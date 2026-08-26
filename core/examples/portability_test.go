@@ -17,7 +17,7 @@ package examples_test
 import (
 	"testing"
 
-	"github.com/dullkingsman/dpg/internal/pipeline"
+	"github.com/thec1oud/dpg/internal/pipeline"
 )
 
 func TestPortabilityAnalysis(t *testing.T) {

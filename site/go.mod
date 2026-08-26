@@ -1,4 +1,4 @@
-module github.com/dullkingsman/dpg/website
+module github.com/thec1oud/dpg/website
 
 go 1.21
 

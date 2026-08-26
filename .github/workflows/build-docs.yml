@@ -56,7 +56,7 @@ jobs:
         working-directory: site
         run: hugo --minify
         env:
-          HUGO_BASEURL: "https://dullkingsman.github.io/dpg/"
+          HUGO_BASEURL: "https://thec1oud.github.io/dpg/"
           HUGO_PARAMS_DOCSVERSION: ${{ inputs.docs_version }}
           HUGO_PARAMS_DPGVERSION: ${{ inputs.dpg_version }}
           HUGO_PARAMS_LSPVERSION: ${{ inputs.lsp_version }}

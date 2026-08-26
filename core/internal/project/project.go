@@ -6,7 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/dullkingsman/dpg/internal/config"
+	"github.com/thec1oud/dpg/internal/config"
 )
 
 // Project is the fully-resolved DPG project, rooted at a directory containing dpg.toml.

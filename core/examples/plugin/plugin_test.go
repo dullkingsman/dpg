@@ -1,5 +1,5 @@
 // Package plugin_test demonstrates how to register a custom linter extension
-// using only the public github.com/dullkingsman/dpg/pkg/dpg API.
+// using only the public github.com/thec1oud/dpg/pkg/dpg API.
 //
 // No internal packages are imported — everything required to build and register
 // a custom pipeline stage is available through pkg/dpg.
@@ -13,7 +13,7 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/dullkingsman/dpg/pkg/dpg"
+	"github.com/thec1oud/dpg/pkg/dpg"
 )
 
 // tableCommentLinter warns whenever a table has no COMMENT directive.

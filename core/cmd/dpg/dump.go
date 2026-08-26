@@ -12,15 +12,15 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/dullkingsman/dpg/internal/compiler"
-	"github.com/dullkingsman/dpg/internal/executor"
-	"github.com/dullkingsman/dpg/internal/format"
-	"github.com/dullkingsman/dpg/internal/introspect"
-	"github.com/dullkingsman/dpg/internal/ir"
-	"github.com/dullkingsman/dpg/internal/pipeline"
-	"github.com/dullkingsman/dpg/internal/project"
-	"github.com/dullkingsman/dpg/internal/snapshot"
-	"github.com/dullkingsman/dpg/internal/ui"
+	"github.com/thec1oud/dpg/internal/compiler"
+	"github.com/thec1oud/dpg/internal/executor"
+	"github.com/thec1oud/dpg/internal/format"
+	"github.com/thec1oud/dpg/internal/introspect"
+	"github.com/thec1oud/dpg/internal/ir"
+	"github.com/thec1oud/dpg/internal/pipeline"
+	"github.com/thec1oud/dpg/internal/project"
+	"github.com/thec1oud/dpg/internal/snapshot"
+	"github.com/thec1oud/dpg/internal/ui"
 )
 
 func newDumpCmd() *cobra.Command {

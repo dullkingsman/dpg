@@ -6,7 +6,7 @@ import (
 	"strings"
 
 	"github.com/BurntSushi/toml"
-	"github.com/dullkingsman/dpg/internal/pipeline"
+	"github.com/thec1oud/dpg/internal/pipeline"
 )
 
 // NameMapsConfig holds the parsed [namemaps] configuration at any config level.

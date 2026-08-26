@@ -68,7 +68,7 @@ linter, ok := pipeline.Resolve[pipeline.Linter](Default, pipeline.KeyLinter)
 `pkg/dpg` re-exports the registry API so plugin authors never need to import internal packages:
 
 ```go
-import "github.com/dullkingsman/dpg/core/pkg/dpg"
+import "github.com/thec1oud/dpg/core/pkg/dpg"
 
 dpg.Default.Register(dpg.KeyLinter, myLinter)
 ```

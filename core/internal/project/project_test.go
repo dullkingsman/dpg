@@ -6,8 +6,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/dullkingsman/dpg/internal/config"
-	"github.com/dullkingsman/dpg/internal/project"
+	"github.com/thec1oud/dpg/internal/config"
+	"github.com/thec1oud/dpg/internal/project"
 )
 
 // buildTree creates a minimal project layout under a temp dir.

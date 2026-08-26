@@ -8,10 +8,10 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/dullkingsman/dpg/internal/diff"
-	"github.com/dullkingsman/dpg/internal/emit"
-	"github.com/dullkingsman/dpg/internal/executor"
-	"github.com/dullkingsman/dpg/internal/testpg"
+	"github.com/thec1oud/dpg/internal/diff"
+	"github.com/thec1oud/dpg/internal/emit"
+	"github.com/thec1oud/dpg/internal/executor"
+	"github.com/thec1oud/dpg/internal/testpg"
 )
 
 // TestRoundtripFunctionDependsOnExtension is the live regression guard for

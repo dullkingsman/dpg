@@ -4,8 +4,8 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/dullkingsman/dpg/internal/ir"
-	"github.com/dullkingsman/dpg/internal/pipeline"
+	"github.com/thec1oud/dpg/internal/ir"
+	"github.com/thec1oud/dpg/internal/pipeline"
 )
 
 // introspectXSecurityLabels below populate SecurityLabels (RFC Section 14.11) for

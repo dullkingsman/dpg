@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/dullkingsman/dpg/internal/pipeline"
+	"github.com/thec1oud/dpg/internal/pipeline"
 )
 
 // stubLinter is a Linter that always returns a fixed set of diagnostics.

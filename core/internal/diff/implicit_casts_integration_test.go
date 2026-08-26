@@ -7,8 +7,8 @@ import (
 	"sort"
 	"testing"
 
-	"github.com/dullkingsman/dpg/internal/executor"
-	"github.com/dullkingsman/dpg/internal/testpg"
+	"github.com/thec1oud/dpg/internal/executor"
+	"github.com/thec1oud/dpg/internal/testpg"
 )
 
 // TestImplicitCastsMatchesLiveCatalog re-runs the exact query
