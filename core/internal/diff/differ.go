@@ -7392,6 +7392,9 @@ func diffTable(o *ir.Table, snap *snapshot.SnapTable, fullSnap *pipeline.Snapsho
 		return nil, err
 	}
 	ops = append(ops, colOps...)
+	if err := checkNoStaleColumnRefs(o, renamedCols); err != nil {
+		return nil, err
+	}
 	constraintOps, droppedViaOnly, err := diffConstraints(tbl, o, snap, fullSnap, pos, renamedCols, droppedCols)
 	if err != nil {
 		return nil, err
@@ -7901,6 +7904,63 @@ func diffTableInherits(tbl string, o *ir.Table, snap *snapshot.SnapTable, pos pi
 // for the NEW name would make every directive a one-shot. The collision check
 // (RENAMED FROM names a column ALSO present in the desired DDL) stays
 // snapshot-independent because it's incoherent intent regardless of state.
+// checkNoStaleColumnRefs validates that no constraint or index in o still
+// references a column's pre-rename name (RFC Section 7.6, DPG-E019): once a
+// fresh column rename is recognized, "all constraint and index
+// declarations MUST use [the new name]." renamedCols maps old name -> new
+// name for renames happening in this diff pass only (built by diffColumns,
+// which excludes already-applied renames — nothing to check there since
+// the old name is gone from live use).
+//
+// Checks structural column-list fields only: Constraint.Columns,
+// Constraint.CheckColumn (populated only for a single-column CHECK
+// expression), Index.Columns' plain-name entries, and Index.Include. A
+// stale reference buried inside a multi-column CHECK expression or an
+// expression index would need a full AST walk to detect and isn't covered
+// — the same documented limitation Constraint.CheckColumn's own
+// single-column restriction already carries elsewhere in this codebase.
+func checkNoStaleColumnRefs(o *ir.Table, renamedCols map[string]string) error {
+	if len(renamedCols) == 0 {
+		return nil
+	}
+	for _, c := range o.Constraints {
+		for _, col := range c.Columns {
+			if newName, stale := renamedCols[col]; stale {
+				return pipeline.ErrorfCode(c.Pos, "DPG-E019",
+					"constraint %q references column %q, which was just renamed to %q — update the constraint to use the new name",
+					c.Name, col, newName)
+			}
+		}
+		if c.CheckColumn != nil {
+			if newName, stale := renamedCols[*c.CheckColumn]; stale {
+				return pipeline.ErrorfCode(c.Pos, "DPG-E019",
+					"constraint %q references column %q, which was just renamed to %q — update the constraint to use the new name",
+					c.Name, *c.CheckColumn, newName)
+			}
+		}
+	}
+	for _, idx := range o.Indexes {
+		for _, col := range idx.Columns {
+			if col.Name == "" {
+				continue // expression index column, not a simple reference
+			}
+			if newName, stale := renamedCols[col.Name]; stale {
+				return pipeline.ErrorfCode(idx.Pos, "DPG-E019",
+					"index %q references column %q, which was just renamed to %q — update the index to use the new name",
+					idx.Name, col.Name, newName)
+			}
+		}
+		for _, col := range idx.Include {
+			if newName, stale := renamedCols[col]; stale {
+				return pipeline.ErrorfCode(idx.Pos, "DPG-E019",
+					"index %q INCLUDEs column %q, which was just renamed to %q — update the index to use the new name",
+					idx.Name, col, newName)
+			}
+		}
+	}
+	return nil
+}
+
 func diffColumns(tbl string, o *ir.Table, snap *snapshot.SnapTable, vtypes map[string]string) ([]pipeline.DiffOp, map[string]string, map[string]bool, error) {
 	// A typed table (Section 7.1's OF type_name) never has its own
 	// independently-diffed Columns in this codebase — the desired side is

@@ -4477,6 +4477,98 @@ func TestDiffColumnRenameKeepsConstraints(t *testing.T) {
 	}
 }
 
+// TestDiffColumnRenameStaleConstraintRefIsError is the regression guard for
+// RFC Section 7.6's DPG-E019: "After emitting the rename, all constraint
+// and index declarations MUST use [the new name]." A constraint whose
+// structured Columns list still names the pre-rename column is a genuine
+// authoring mistake (the user renamed the column but forgot to update the
+// constraint declaration to match) and must error, not silently pass
+// through unchecked.
+func TestDiffColumnRenameStaleConstraintRefIsError(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("app.users", &snapshot.SnapObject{
+		Kind: "table",
+		Table: &snapshot.SnapTable{
+			Schema: "app", Name: "users",
+			Columns: []snapshot.SnapColumn{
+				{Name: "id", Type: "bigint"},
+				{Name: "email", Type: "text"},
+			},
+		},
+	})
+
+	old := "email"
+	desired := []pipeline.IRObject{
+		&ir.Table{
+			Schema: "app", Name: "users",
+			Columns: []*ir.Column{
+				{Name: "id", Type: ir.TypeRef{Name: "bigint"}},
+				{Name: "email_address", Type: ir.TypeRef{Name: "text"}, RenamedFrom: &old},
+			},
+			Constraints: []*ir.Constraint{
+				// Stale: still lists "email", the pre-rename name.
+				{Name: "uq_users_email", Type: "UNIQUE", Columns: []string{"email"},
+					Expr: `UNIQUE ("email")`},
+			},
+		},
+	}
+	_, err := d.Diff(desired, snap)
+	if err == nil {
+		t.Fatal("expected error for constraint still referencing the pre-rename column name, got nil")
+	}
+	ce, ok := err.(*pipeline.CompilerError)
+	if !ok {
+		t.Fatalf("expected *pipeline.CompilerError, got %T: %v", err, err)
+	}
+	if ce.Code != "DPG-E019" {
+		t.Errorf("expected DPG-E019, got code %q: %v", ce.Code, err)
+	}
+}
+
+// TestDiffColumnRenameStaleIndexRefIsError is DPG-E019's index-side
+// counterpart to TestDiffColumnRenameStaleConstraintRefIsError.
+func TestDiffColumnRenameStaleIndexRefIsError(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("app.users", &snapshot.SnapObject{
+		Kind: "table",
+		Table: &snapshot.SnapTable{
+			Schema: "app", Name: "users",
+			Columns: []snapshot.SnapColumn{
+				{Name: "id", Type: "bigint"},
+				{Name: "email", Type: "text"},
+			},
+		},
+	})
+
+	old := "email"
+	desired := []pipeline.IRObject{
+		&ir.Table{
+			Schema: "app", Name: "users",
+			Columns: []*ir.Column{
+				{Name: "id", Type: ir.TypeRef{Name: "bigint"}},
+				{Name: "email_address", Type: ir.TypeRef{Name: "text"}, RenamedFrom: &old},
+			},
+			Indexes: []*ir.Index{
+				// Stale: still lists "email", the pre-rename name.
+				{Name: "idx_users_email", Columns: []pipeline.IndexColumn{{Name: "email"}}},
+			},
+		},
+	}
+	_, err := d.Diff(desired, snap)
+	if err == nil {
+		t.Fatal("expected error for index still referencing the pre-rename column name, got nil")
+	}
+	ce, ok := err.(*pipeline.CompilerError)
+	if !ok {
+		t.Fatalf("expected *pipeline.CompilerError, got %T: %v", err, err)
+	}
+	if ce.Code != "DPG-E019" {
+		t.Errorf("expected DPG-E019, got code %q: %v", ce.Code, err)
+	}
+}
+
 // TestDiffColumnRenameKeepsIndex guards a real bug found live-testing a
 // demo project: diffIndexes compared the desired index against the
 // snapshot's SnapIndex verbatim, with no rename translation at all (unlike
