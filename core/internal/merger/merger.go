@@ -1,5 +1,5 @@
 // Package merger implements pipeline.Merger. It merges same-object IRObject
-// declarations across multiple .dpg files per RFC §3.7 set/scalar merge rules.
+// declarations across multiple .dpg files per RFC Section 3.7 set/scalar merge rules.
 package merger
 
 import (
@@ -25,7 +25,7 @@ func New() *Merger { return &Merger{} }
 // Set-valued fields are unioned; scalar fields use last-file-wins (alphabetical
 // path order). Conflicting same-named set members with different definitions
 // return a CompilerError. The second return value holds "scalar-merge-conflict"
-// diagnostics (RFC §19.1) surfaced along the way — see pipeline.Merger's doc
+// diagnostics (RFC Section 19.1) surfaced along the way — see pipeline.Merger's doc
 // comment for why gating is the caller's job, not this function's.
 func (m *Merger) Merge(objects []pipeline.IRObject) ([]pipeline.IRObject, []pipeline.LintDiagnostic, error) {
 	// Group by (type-tag, qualified-name).
@@ -194,13 +194,13 @@ func mergeGroup(grp []pipeline.IRObject) (pipeline.IRObject, []pipeline.LintDiag
 
 // ── scalar-merge-conflict tracking ──────────────────────────────────────────
 
-// conflictTracker implements RFC §3.7's scalar-merge-conflict detection: for
+// conflictTracker implements RFC Section 3.7's scalar-merge-conflict detection: for
 // every "last file wins" scalar property this package merges, it records
 // which file most recently supplied the property's current value, and emits
 // a LintDiagnostic whenever a later file supplies a genuinely different
 // value for the same property. Winning-value semantics are unaffected — the
 // merge functions always keep applying last-file-wins regardless of what the
-// tracker reports; this only adds visibility, matching RFC §3.7's own
+// tracker reports; this only adds visibility, matching RFC Section 3.7's own
 // wording ("the compiler SHOULD emit a LintDiagnostic... The winning value
 // is used regardless").
 //
@@ -654,7 +654,7 @@ func mergeTypes(grp []pipeline.IRObject, base *ir.Type) (pipeline.IRObject, []pi
 		if merged.Variant == "ENUM" && next.Variant == "ENUM" {
 			merged.EnumValues = unionStrings(merged.EnumValues, next.EnumValues)
 		}
-		// For DOMAINs: RFC §5.4's structured diffing inputs are themselves
+		// For DOMAINs: RFC Section 5.4's structured diffing inputs are themselves
 		// scalar properties (a domain's base type / default / not-null are
 		// each set once, same as Owner/Comment), so they get the same
 		// conflict-tracked last-wins treatment — bundled into this
@@ -823,7 +823,7 @@ func mergeRoles(grp []pipeline.IRObject, base *ir.Role) (pipeline.IRObject, []pi
 			merged.Comment = next.Comment
 		}
 
-		// Role-membership entries are additive across files (RFC §3.7's
+		// Role-membership entries are additive across files (RFC Section 3.7's
 		// set-valued treatment — the point of splitting a role's memberships
 		// across files is usually to combine them, not to have one file's
 		// list silently discarded), matching Grants' identical simple-append

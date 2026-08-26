@@ -21,7 +21,7 @@ type TableRef struct {
 // a subquery — and returns the distinct references found. Order is
 // unspecified (a plpgsql body's fragments are collected via a JSON object
 // walk, whose key order Go's encoding/json makes no guarantee about) — never
-// rely on it; callers only ever need the set. RFC §22.1 item 9 (audit item
+// rely on it; callers only ever need the set. RFC Section 22.1 item 9 (audit item
 // #30): used to build real function/
 // procedure-body-to-table and view-to-table dependency edges, replacing a
 // blunt "depends on every table" heuristic.

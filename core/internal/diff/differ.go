@@ -64,8 +64,8 @@ func manualTransactionalOp(sql string, pos pipeline.SourcePos) *op {
 }
 
 // wrapCreateWithOwner wraps createOp in SET ROLE/RESET ROLE when owner is
-// declared (RFC §11.5, audit item #28). PostgreSQL attributes default-
-// privilege eligibility (§11.4) to whichever role actually executed CREATE,
+// declared (RFC Section 11.5, audit item #28). PostgreSQL attributes default-
+// privilege eligibility (Section 11.4) to whichever role actually executed CREATE,
 // not to final ownership — creating directly as the declared owner (rather
 // than creating as the connecting role and reassigning afterward via a
 // trailing ALTER ... OWNER TO) matches real PostgreSQL creator semantics and
@@ -177,7 +177,7 @@ func (d *Differ) Diff(desired []pipeline.IRObject, snap *pipeline.Snapshot) ([]p
 	// A rename is detected when desired has RenamedFrom, the snapshot has the
 	// OLD key, and the snapshot does NOT yet have the NEW key. After a rename
 	// is applied, the snapshot is rewritten to use the new key — so on every
-	// subsequent run the new key IS present and the old key is gone. RFC §7.4
+	// subsequent run the new key IS present and the old key is gone. RFC Section 7.4
 	// step 5 says a stale RENAMED FROM is a compiler error; the trick is to
 	// distinguish "stale because user typo'd" from "stale because the rename
 	// already happened." We use the new key's presence as the discriminator:
@@ -241,7 +241,7 @@ func (d *Differ) Diff(desired []pipeline.IRObject, snap *pipeline.Snapshot) ([]p
 		if err := json.Unmarshal(raw, &so); err != nil {
 			return nil, fmt.Errorf("diff: corrupted snapshot entry %q: %w", key, err)
 		}
-		// RFC §7.11/§15.10 Phase 9 Pass 3: a table marked PROTECTED in the
+		// RFC Section 7.11/Section 15.10 Phase 9 Pass 3: a table marked PROTECTED in the
 		// snapshot must never be silently dropped just because it's absent
 		// from desired — that's error DPG-E022, not a DROP TABLE. Found via
 		// this session's live-testing sweep: Protected was parsed all the way
@@ -743,7 +743,7 @@ func stringSetEqual(a, b []string) bool {
 	if len(a) != len(b) {
 		// A dedup-aware length check would be more correct for duplicate
 		// entries, but WHEN TAG IN (...) listing the same tag twice is not
-		// a real, meaningful shape (RFC §14.1's tag-list is just an
+		// a real, meaningful shape (RFC Section 14.1's tag-list is just an
 		// enumeration of distinct DDL command tags) — a plain length
 		// mismatch is sufficient signal here without building a multiset.
 		return false
@@ -762,7 +762,7 @@ func stringSetEqual(a, b []string) bool {
 
 // effectiveComment resolves an object's live COMMENT text — used for
 // columns, tables, views, and functions (the RFC's own stated scope for
-// DEPRECATED, §19.1: "Applied to tables, columns, views, functions").
+// DEPRECATED, Section 19.1: "Applied to tables, columns, views, functions").
 // DEPRECATED (when set) always wins, rendered with the RFC's own
 // "[DEPRECATED] msg" prefix — real PostgreSQL only ever stores one comment
 // per object, so an explicit Comment is shadowed whenever Deprecated is
@@ -782,7 +782,7 @@ func effectiveComment(comment, deprecated *string) *string {
 }
 
 // diffCompositeAttrs diffs a composite type's attribute list against the
-// snapshot, emitting the RFC §5.2-documented granular ops (ADD ATTRIBUTE =
+// snapshot, emitting the RFC Section 5.2-documented granular ops (ADD ATTRIBUTE =
 // SAFE, DROP ATTRIBUTE = DESTRUCTIVE, ALTER ATTRIBUTE TYPE = DESTRUCTIVE,
 // RENAME ATTRIBUTE via a COLUMN-equivalent RENAMED FROM sub-block) instead
 // of the previous behavior, which treated ANY attribute change — including
@@ -870,7 +870,7 @@ func diffCompositeAttrs(typeIdent string, attrs []*ir.Column, snap []snapshot.Sn
 			))
 			continue
 		}
-		// RFC §5.2: a type or COLLATE change are both DESTRUCTIVE, via the
+		// RFC Section 5.2: a type or COLLATE change are both DESTRUCTIVE, via the
 		// same ALTER ATTRIBUTE TYPE statement (COLLATE is an optional
 		// trailing clause on it, not a separate ALTER).
 		if resolvedType != sc.Type || a.Collation != sc.Collation {
@@ -1071,7 +1071,7 @@ func diffGrantSet(
 	return ops
 }
 
-// diffRevocationSet diffs an explicit REVOCATIONS list (RFC §11.3) against its
+// diffRevocationSet diffs an explicit REVOCATIONS list (RFC Section 11.3) against its
 // snapshot. Unlike grants (the additive model in diffGrantSet — removing a
 // GRANT declaration emits nothing), a revocation is itself tracked as a
 // persistent declaration: once applied it's remembered in the snapshot so a
@@ -1130,7 +1130,7 @@ func diffRevocationSet(
 }
 
 // securityLabelSQL renders a single "SECURITY LABEL [FOR provider] ON
-// <onClause> IS ..." statement (RFC §14.11). label == nil renders IS NULL
+// <onClause> IS ..." statement (RFC Section 14.11). label == nil renders IS NULL
 // (removes the label for that provider); provider == "" omits the FOR
 // clause, letting PostgreSQL resolve it to the sole loaded provider.
 func securityLabelSQL(provider, onClause string, label *string) string {
@@ -1153,7 +1153,7 @@ func securityLabelSQL(provider, onClause string, label *string) string {
 	return b.String()
 }
 
-// diffSecurityLabelSet diffs a SECURITY LABEL list (RFC §14.11) against its
+// diffSecurityLabelSet diffs a SECURITY LABEL list (RFC Section 14.11) against its
 // snapshot, keyed by provider — PostgreSQL lets several independent label
 // providers label the same object simultaneously, and each provider's own
 // label is an independent catalog row (pg_seclabel's primary key includes
@@ -1327,7 +1327,7 @@ func dropObject(so *snapshot.SnapObject) []pipeline.DiffOp {
 		if so.Opaque != nil {
 			// Unlike its opaque-tier siblings (Collation, Cast, Operator, ...),
 			// an event trigger holds no data and nothing else in the catalog
-			// depends on it — RFC §14.1 explicitly classifies its DROP+CREATE
+			// depends on it — RFC Section 14.1 explicitly classifies its DROP+CREATE
 			// cycle as SAFE ("no data involved"), not DESTRUCTIVE like the
 			// rest of dropObject's cases.
 			return []pipeline.DiffOp{safeOp(fmt.Sprintf("DROP EVENT TRIGGER IF EXISTS %s;", quoteIdent(so.Opaque.Name)), zero)}
@@ -1691,7 +1691,7 @@ func appendCommentOp(ops []pipeline.DiffOp, err error, kind, schema, name, args,
 
 // appendSecurityLabelOps is appendCommentOp's SecurityLabels counterpart —
 // one createSecurityLabelOps op per declared provider, appended at
-// creation time (RFC §14.11). Skipped entirely for an opaque kind
+// creation time (RFC Section 14.11). Skipped entirely for an opaque kind
 // opaqueOnClause doesn't recognize.
 func appendSecurityLabelOps(ops []pipeline.DiffOp, err error, kind, schema, name, args, using string, labels []pipeline.SecurityLabel, pos pipeline.SourcePos) ([]pipeline.DiffOp, error) {
 	if err != nil || len(labels) == 0 {
@@ -1706,7 +1706,7 @@ func appendSecurityLabelOps(ops []pipeline.DiffOp, err error, kind, schema, name
 // userMappingCreateOp is the DiffOp for a CREATE USER MAPPING statement
 // whose OPTIONS clause may embed a secret reference (Secret resolution,
 // Phase 5) — e.g. OPTIONS (user 'app', password '{{vault:secret/fdw/db#pw}}').
-// Unlike SUBSCRIPTION CONNECTION (§13.2/§6bb-§6dd) there's no single known
+// Unlike SUBSCRIPTION CONNECTION (Section 13.2/items 6bb-6dd) there's no single known
 // clause to isolate: FDW OPTIONS keys are provider-specific, not fixed by
 // DPG, so ExecSQL runs pipeline.ResolveTemplate over the ENTIRE deparsed
 // body — a no-op everywhere there's no {{...}}, and it substitutes each
@@ -1741,7 +1741,7 @@ func createUserMapping(o *ir.UserMapping) ([]pipeline.DiffOp, error) {
 // CREATE side must produce a userMappingCreateOp, not a generic createOpaque
 // op, so any {{...}} reference in OPTIONS is resolved only immediately
 // before execution, never during diff.
-// diffUserMapping implements RFC §14.10's structured diffing: "any change
+// diffUserMapping implements RFC Section 14.10's structured diffing: "any change
 // to the mapping is a full DROP USER MAPPING + CREATE USER MAPPING, not a
 // targeted ALTER USER MAPPING" is the RFC's own explicit, deliberately-
 // corrected semantics, so this is a single "did the non-sensitive OPTIONS
@@ -1779,11 +1779,11 @@ func diffUserMapping(o *ir.UserMapping, snap *snapshot.SnapOpaque) ([]pipeline.D
 	}
 	// Live path (snap.BodyHash == "", i.e. Reconstructed): the live side
 	// can never expose a real, comparable password value (see
-	// ir.UserMapping.Options' doc comment) — RFC §14.10's structured
+	// ir.UserMapping.Options' doc comment) — RFC Section 14.10's structured
 	// diffing input, per-field OPTIONS comparison excluding password-like
 	// keys entirely, closes G-live for the non-sensitive subset. Detecting
 	// a live-only password/secret-reference change remains genuinely
-	// inherent (same PostgreSQL-imposed limit RFC §24 already documents
+	// inherent (same PostgreSQL-imposed limit RFC Section 24 already documents
 	// for Subscription's subconninfo), not a gap this can close.
 	if !snap.OptionsStructured {
 		// Stale snapshot predating this structured field — same
@@ -1825,7 +1825,7 @@ func substituteConnection(body, resolved string) (string, error) {
 
 // subscriptionCreateOp is the DiffOp for a CREATE SUBSCRIPTION statement
 // whose CONNECTION clause may hold an unresolved secret reference (RFC
-// §13.2). SQL() always returns the placeholder/reference form (embedded
+// Section 13.2). SQL() always returns the placeholder/reference form (embedded
 // op.sql, unchanged) — used for plan output, migration-file archival, and
 // error messages, so a resolved secret is never persisted or logged.
 // ExecSQL resolves the native CONNECTION literal via pipeline.ResolveTemplate
@@ -1905,7 +1905,7 @@ func createSubscription(o *ir.Subscription) ([]pipeline.DiffOp, error) {
 	return ops, nil
 }
 
-// diffTablespace implements RFC §14.7's structured diffing (Location is the
+// diffTablespace implements RFC Section 14.7's structured diffing (Location is the
 // only property that decides DROP+CREATE — LOCATION cannot be changed after
 // creation in real PostgreSQL) in place of diffOpaqueIR's generic
 // Reconstructed-gated body-hash compare, which went silently unset (via
@@ -1985,7 +1985,7 @@ func diffTablespace(o *ir.Tablespace, snap *snapshot.SnapOpaque) ([]pipeline.Dif
 	return ops, nil
 }
 
-// diffCast implements RFC §14.5's structured diffing: PostgreSQL provides no
+// diffCast implements RFC Section 14.5's structured diffing: PostgreSQL provides no
 // ALTER CAST at all, so any change to Method, Function, or Context decides
 // DROP+CREATE, in place of diffOpaqueIR's generic Reconstructed-gated
 // body-hash compare (silently unset on every live path — see
@@ -2153,10 +2153,10 @@ func diffOperator(o *ir.Operator, snap *snapshot.SnapOpaque) ([]pipeline.DiffOp,
 	return ops, nil
 }
 
-// diffEventTrigger implements RFC §14.1's structured diffing: PostgreSQL has
+// diffEventTrigger implements RFC Section 14.1's structured diffing: PostgreSQL has
 // no ALTER EVENT TRIGGER for Event/Tags/Function (only ENABLE/DISABLE/
 // OWNER TO/RENAME TO, none modeled here), so any change to those three
-// decides DROP+CREATE — RFC §14.1 classifies this SAFE ("no data
+// decides DROP+CREATE — RFC Section 14.1 classifies this SAFE ("no data
 // involved"), unlike every other opaque-tier DROP+CREATE, which is why
 // dropObject's "event_trigger" case already uses safeOp instead of
 // destructiveOp. Replaces diffOpaqueIR's generic Reconstructed-gated
@@ -2328,7 +2328,7 @@ func alterOptionsSQL(desired, live []snapshot.SnapOptionKV) string {
 	return strings.Join(parts, ", ")
 }
 
-// diffCollation implements RFC §14.2's structured diffing: "any property
+// diffCollation implements RFC Section 14.2's structured diffing: "any property
 // change requires DROP COLLATION + CREATE COLLATION" (real PostgreSQL's
 // ALTER COLLATION supports only REFRESH VERSION/OWNER TO/RENAME TO/SET
 // SCHEMA, none of Provider/Collate/Ctype/ICULocale/Deterministic), so this
@@ -2338,7 +2338,7 @@ func alterOptionsSQL(desired, live []snapshot.SnapOptionKV) string {
 // closes the gap — see ir.Collation's doc comment. Replaces diffOpaqueIR's
 // generic Reconstructed-gated body-hash compare (silently unset on every
 // live path).
-// diffStatisticsObject implements RFC §14.6's structured diffing table:
+// diffStatisticsObject implements RFC Section 14.6's structured diffing table:
 // real PostgreSQL's ALTER STATISTICS supports only OWNER TO/RENAME TO/
 // SET SCHEMA/SET STATISTICS (confirmed live via `\h ALTER STATISTICS`
 // against a real PostgreSQL 17 server), so a Table, Kinds, or Columns
@@ -2539,7 +2539,7 @@ func diffCollation(o *ir.Collation, snap *snapshot.SnapOpaque) ([]pipeline.DiffO
 	return ops, nil
 }
 
-// diffFDW implements RFC §14.8's structured diffing: "any change to a FDW
+// diffFDW implements RFC Section 14.8's structured diffing: "any change to a FDW
 // requires drop + recreate" is the RFC's own explicit semantics (no
 // ALTER FOREIGN DATA WRAPPER path modeled, even though real PostgreSQL has
 // one — a deliberate DPG simplification), so this is a single "did
@@ -2617,7 +2617,7 @@ func diffFDW(o *ir.ForeignDataWrapper, snap *snapshot.SnapOpaque) ([]pipeline.Di
 	return ops, nil
 }
 
-// diffForeignServer implements RFC §14.9's structured diffing table: a
+// diffForeignServer implements RFC Section 14.9's structured diffing table: a
 // FDW-wrapper change decides DROP+CREATE (DESTRUCTIVE) — same for a TYPE
 // change, since real PostgreSQL's ALTER SERVER has no TYPE clause
 // (confirmed via `\h ALTER SERVER` against a live PostgreSQL 17 server:
@@ -2750,14 +2750,14 @@ func publishClause(o *ir.Publication) string {
 	return strings.Join(ops, ", ")
 }
 
-// diffPublication implements RFC §13.1's structured diffing table: a
+// diffPublication implements RFC Section 13.1's structured diffing table: a
 // FOR ALL TABLES publication can never be converted to/from an explicit
 // table list via ALTER (confirmed live against a real PostgreSQL 17
 // server: "Tables cannot be added to or dropped from FOR ALL TABLES
 // publications") — an AllTables change decides DROP+CREATE (DESTRUCTIVE,
-// matching dropObject's existing "publication" case and RFC §13.1's
+// matching dropObject's existing "publication" case and RFC Section 13.1's
 // "Publication removed" row). A Tables or WITH (publish = ...) change
-// each get their own real, targeted ALTER PUBLICATION (RFC §13.1: both
+// each get their own real, targeted ALTER PUBLICATION (RFC Section 13.1: both
 // rows SAFE) — a genuine new capability, not just detection. Replaces
 // diffOpaqueIR's generic Reconstructed-gated body-hash compare (silently
 // unset on every live path). FOR TABLES IN SCHEMA targets are a
@@ -4075,7 +4075,7 @@ func colGrantOp(g ir.Grant, tbl, col string, pos pipeline.SourcePos) pipeline.Di
 }
 
 // explicitRevokeOp emits the REVOKE for an explicit REVOCATION directive
-// (RFC §11.3) — distinct from the additive-model's implicit revoke (see
+// (RFC Section 11.3) — distinct from the additive-model's implicit revoke (see
 // colRevokeOp) that fires when a GRANT declaration is simply removed. Explicit
 // revocations are CAUTION (not SAFE): they can break access that something
 // else depends on. PG's REVOKE grammar has no IF EXISTS clause, so there's
@@ -4421,7 +4421,7 @@ func buildCompositeTypeSQL(o *ir.Type, vtypes map[string]string) string {
 
 // buildDomainSQL builds a full CREATE DOMAIN statement from ir.Type's
 // structured domain fields — never from o.Body, which (for a domain
-// declared via RFC §5.4's block syntax) may only ever have captured the
+// declared via RFC Section 5.4's block syntax) may only ever have captured the
 // bare "name AS basetype" from Part 1, missing any DEFAULT/CONSTRAINT/NOT
 // NULL the user put in the { } block instead. Building from the structured
 // fields is correct regardless of which syntax (real PG's own inline form,
@@ -4624,7 +4624,7 @@ func quoteQualifiedIdent(s string) string {
 }
 
 // writeRoleBoolOpt writes " ON" or " OFF" (PostgreSQL's toggle-pair keywords)
-// to b if v is non-nil, nothing otherwise — mirrors RFC §11.1's "any option
+// to b if v is non-nil, nothing otherwise — mirrors RFC Section 11.1's "any option
 // a declaration omits is simply not managed by DPG" rule at the SQL-building
 // level.
 func writeRoleBoolOpt(b *strings.Builder, v *bool, on, off string) {
@@ -4640,7 +4640,7 @@ func writeRoleBoolOpt(b *strings.Builder, v *bool, on, off string) {
 
 // roleAttrClause builds the "<opt1> <opt2> ..." portion of a CREATE
 // ROLE/ALTER ROLE statement for every non-PASSWORD, non-membership
-// attribute the declaration sets (RFC §11.1) — valid in both statement
+// attribute the declaration sets (RFC Section 11.1) — valid in both statement
 // forms, unlike IN ROLE/ROLE/ADMIN (create-time only) and unlike PASSWORD
 // (kept separate so callers can pass either the raw declared text or an
 // apply-time-resolved value; nil password omits the clause entirely).
@@ -4666,7 +4666,7 @@ func roleAttrClause(o *ir.Role, password *string) string {
 }
 
 // buildCreateRoleSQL builds a full CREATE ROLE statement, including the
-// create-time-only IN ROLE/ROLE/ADMIN membership clauses (RFC §11.1) —
+// create-time-only IN ROLE/ROLE/ADMIN membership clauses (RFC Section 11.1) —
 // PostgreSQL's ALTER ROLE has no membership clause at all, so this shape
 // (attrs + membership in one CREATE) is only ever used at creation time;
 // later membership changes are diffed as GRANT/REVOKE (see
@@ -4774,7 +4774,7 @@ func roleMembershipRevokeSQL(roleName string, m ir.RoleMembership) string {
 }
 
 // roleCreateOp is the DiffOp for a CREATE ROLE statement whose PASSWORD
-// option may hold an unresolved secret reference (RFC §11.1). SQL() always
+// option may hold an unresolved secret reference (RFC Section 11.1). SQL() always
 // returns the placeholder/declared form — used for plan output,
 // migration-file archival, and error messages, so a resolved password is
 // never persisted or logged. ExecSQL rebuilds the statement with PASSWORD's
@@ -5007,7 +5007,7 @@ func accessMethodOrDefault(am string) string {
 // verb regardless of whether the config was COPY'd from an existing one
 // (which pre-populates default mappings) or created from scratch — no need
 // to distinguish ADD vs ALTER, matching the RFC's own diffing-semantics
-// table (§12.1), which only ever uses ALTER MAPPING FOR.
+// table (Section 12.1), which only ever uses ALTER MAPPING FOR.
 func tsMappingAlterSQL(configIdent string, m pipeline.TSMappingDef) string {
 	dicts := make([]string, len(m.Dictionaries))
 	for i, d := range m.Dictionaries {
@@ -5028,7 +5028,7 @@ func tsMappingDropSQL(configIdent, tokenType string) string {
 }
 
 // opFamilyAddSQL/opFamilyDropSQL render a single-member "ALTER OPERATOR
-// FAMILY ... ADD/DROP ..." statement (RFC §14.4) — one statement per
+// FAMILY ... ADD/DROP ..." statement (RFC Section 14.4) — one statement per
 // member, not batched, so each DiffOp carries its own safety classification
 // and can be individually reviewed or skipped, matching how every other
 // per-element diff in this file (constraints, columns, grants) is emitted.
@@ -5058,7 +5058,7 @@ func opFamilyMemberSnapKey(m snapshot.SnapOpFamilyMember) string {
 }
 
 // qualifyOpFamilyOperandForCompare normalizes a loose member's operand
-// identity (RFC §14.4) for comparison purposes only — mirroring
+// identity (RFC Section 14.4) for comparison purposes only — mirroring
 // qualifyFuncForCompare's own reasoning (introspection always returns a
 // fully schema-qualified name; hand-written source commonly doesn't) and,
 // critically, its symmetric application: called on BOTH the desired and
@@ -5148,7 +5148,7 @@ func opFamilyMemberEqual(famSchema string, d pipeline.OpFamilyMember, s snapshot
 // only when desired and snap carry the exact same set of members (by Key()
 // and opFamilyMemberEqual's payload comparison), with none added or removed.
 // Unlike diffOpFamilyMembers, this never produces per-member ADD/DROP ops —
-// PostgreSQL has no incremental ALTER OPERATOR CLASS at all (RFC §14.4), so
+// PostgreSQL has no incremental ALTER OPERATOR CLASS at all (RFC Section 14.4), so
 // a real difference here can only ever mean DROP+CREATE, same as before this
 // fix. Its only purpose is telling "same members, cosmetically different
 // Body text" apart from "actually different members".
@@ -5316,7 +5316,7 @@ func diffOperatorClass(o *ir.OperatorClass, snap *snapshot.SnapOpaque) ([]pipeli
 	return renameOperatorIfUnchanged(ops, "OPERATOR CLASS", o.AccessMethod, snap, o.Schema, o.Name, o.SrcPos), nil
 }
 
-// diffOpFamilyMembers diffs an operator family's loose members (RFC §14.4)
+// diffOpFamilyMembers diffs an operator family's loose members (RFC Section 14.4)
 // at the per-slot level (Key(): kind+number+op_types — see
 // pipeline.OpFamilyMember.Key's doc comment: two members at the same slot
 // are the same catalog row changing shape, not independent members).
@@ -5692,7 +5692,7 @@ func diffTSTemplate(o *ir.TSTemplate, snap *snapshot.SnapOpaque) ([]pipeline.Dif
 }
 
 // diffTSConfig is diffOpaqueIR's TSConfig-specific wrapper: MAPPING FOR
-// entries (RFC §12.1) are a TSConfig-only concern diffOpaqueIR knows nothing
+// entries (RFC Section 12.1) are a TSConfig-only concern diffOpaqueIR knows nothing
 // about. When the base diff triggers a full DROP+CREATE (body/PARSER
 // changed — diffOpaqueIR calls createOpaque directly, not createObject, so
 // none of o.Mappings gets applied automatically), every declared mapping is
@@ -5733,7 +5733,7 @@ func diffTSConfig(o *ir.TSConfig, snap *snapshot.SnapOpaque) ([]pipeline.DiffOp,
 
 // diffOperatorFamily is diffOpaqueIR's OperatorFamily-specific wrapper,
 // cloning diffTSConfig's own DROP+CREATE-vs-incremental-diff structure
-// exactly: loose members (RFC §14.4) are a family-only concern diffOpaqueIR
+// exactly: loose members (RFC Section 14.4) are a family-only concern diffOpaqueIR
 // knows nothing about. When the base diff triggers a full DROP+CREATE
 // (body/AccessMethod changed — diffOpaqueIR calls createOpaque directly,
 // not createObject, so none of o.Members gets applied automatically), every
@@ -6028,7 +6028,7 @@ func intPtrEq(a, b *int) bool {
 }
 
 // roleAlterPasswordOp is the DiffOp for a standalone ALTER ROLE ... PASSWORD
-// statement (an existing role's password changed, RFC §11.1) — same
+// statement (an existing role's password changed, RFC Section 11.1) — same
 // SecretBearingOp contract as roleCreateOp/subscriptionCreateOp: SQL() is
 // always the placeholder/declared form, ExecSQL resolves it fresh for the
 // one execution call only.
@@ -6095,7 +6095,7 @@ func boolPtrDiffers(desired, snap *bool) bool {
 	return *desired != *snap
 }
 
-// diffRoleMembership diffs IN ROLE/ROLE/ADMIN membership (RFC §11.1,
+// diffRoleMembership diffs IN ROLE/ROLE/ADMIN membership (RFC Section 11.1,
 // audit item #32) as GRANT/REVOKE — PostgreSQL's ALTER ROLE has no
 // membership clause at all (confirmed via pg_query: addroleto/rolemembers/
 // adminmembers are CreateRoleStmt-only options), so an existing role's
@@ -6176,7 +6176,7 @@ func diffRole(o *ir.Role, snap *snapshot.SnapRole) []pipeline.DiffOp {
 
 	// PASSWORD is never compared as raw text — only its hash (of the
 	// declared text, never the resolved value) is ever stored, so this is
-	// the only way to detect a change offline (RFC §11.1's "Password drift
+	// the only way to detect a change offline (RFC Section 11.1's "Password drift
 	// detection").
 	if o.Password != nil && hashText(*o.Password) != snap.PasswordHash {
 		ops = append(ops, &roleAlterPasswordOp{
@@ -6338,7 +6338,7 @@ func diffSchema(o *ir.Schema, snap *snapshot.SnapSchema) []pipeline.DiffOp {
 }
 
 // viewOutputColumnsChanged reports whether a view's output column list —
-// compared by name and ordinal position, per RFC §8.1 — differs between the
+// compared by name and ordinal position, per RFC Section 8.1 — differs between the
 // previous (snap) and desired query text. This is exactly what CREATE OR
 // REPLACE VIEW itself enforces: PostgreSQL rejects a replacement whose
 // implicit or explicit output column name would change (SQLSTATE 42P16),
@@ -6477,7 +6477,7 @@ func diffView(o *ir.View, snap *snapshot.SnapView) ([]pipeline.DiffOp, error) {
 	}
 
 	if normalizeWS(o.Query) != normalizeWS(snap.Query) {
-		// RFC §8.1: "Output column list changed (any way) → DROP VIEW
+		// RFC Section 8.1: "Output column list changed (any way) → DROP VIEW
 		// CASCADE; CREATE VIEW → DESTRUCTIVE." Real PostgreSQL enforces this
 		// itself — CREATE OR REPLACE VIEW rejects a query whose replacement
 		// would change an existing output column's implicit or explicit
@@ -6705,7 +6705,7 @@ func diffType(o *ir.Type, snap *snapshot.SnapType, fullSnap *pipeline.Snapshot, 
 	}
 
 	if o.Variant == "DOMAIN" && snap.Variant == "DOMAIN" {
-		// RFC §5.4: unlike RANGE/BASE (hash-diffed opaque bodies, DROP+CREATE
+		// RFC Section 5.4: unlike RANGE/BASE (hash-diffed opaque bodies, DROP+CREATE
 		// on any change), a domain's properties are each diffed and altered
 		// individually — DEFAULT/NOT NULL/constraint changes never require
 		// recreating the domain, only a base-type change does. Found live-
@@ -6749,8 +6749,8 @@ func diffType(o *ir.Type, snap *snapshot.SnapType, fullSnap *pipeline.Snapshot, 
 		}
 		if o.DomainBaseType.String() != snap.DomainBaseType || o.DomainCollation != snap.DomainCollation {
 			// PG has no ALTER DOMAIN ... TYPE; the base type (and its
-			// COLLATE, RFC §5.4's own diffing table) is fixed at creation.
-			// RFC §5.4 explicitly requires DROP DOMAIN CASCADE for either.
+			// COLLATE, RFC Section 5.4's own diffing table) is fixed at creation.
+			// RFC Section 5.4 explicitly requires DROP DOMAIN CASCADE for either.
 			ops = append(ops, destructiveOp(fmt.Sprintf("DROP DOMAIN IF EXISTS %s CASCADE;", typeIdent), pos))
 			ops = append(ops, createType(o, vtypes)...)
 			return ops, nil
@@ -6880,7 +6880,7 @@ func diffType(o *ir.Type, snap *snapshot.SnapType, fullSnap *pipeline.Snapshot, 
 	}
 
 	if o.Variant == "BASE" && snap.Variant == "BASE" && snap.BaseStructured {
-		// RFC §5.5: a BASE type's 7 in-place-alterable properties (real
+		// RFC Section 5.5: a BASE type's 7 in-place-alterable properties (real
 		// PostgreSQL's ALTER TYPE ... SET (...) supports exactly these) get
 		// a targeted, SAFE ALTER; everything else about a BASE type is
 		// immutable, so a change to any of it still requires DROP+CREATE —
@@ -6941,7 +6941,7 @@ func diffType(o *ir.Type, snap *snapshot.SnapType, fullSnap *pipeline.Snapshot, 
 	}
 
 	if (o.Variant == "RANGE" || o.Variant == "BASE") && snap.Variant == o.Variant {
-		// RFC §5.3/§5.5: any change to a RANGE type's options, or to a BASE
+		// RFC Section 5.3/Section 5.5: any change to a RANGE type's options, or to a BASE
 		// type at all (pre-existing snapshot only — see the BaseStructured
 		// branch above for the current behavior), requires DROP + CREATE
 		// (RANGE explicitly says CASCADE; BASE's RFC text doesn't, so none
@@ -7050,7 +7050,7 @@ func diffType(o *ir.Type, snap *snapshot.SnapType, fullSnap *pipeline.Snapshot, 
 		ops = append(ops, renameOps...)
 
 		// ALTER TYPE ADD VALUE couldn't run inside a transaction block
-		// before PG 12 (RFC §5.1.1) — moot given RFC §1.4's documented
+		// before PG 12 (RFC Section 5.1.1) — moot given RFC Section 1.4's documented
 		// version floor of 14, so this always runs transactionally.
 		// Positional control (BEFORE/AFTER, audit item #18) is inferred
 		// purely from where a new value sits in the desired list relative
@@ -7311,7 +7311,7 @@ func diffTable(o *ir.Table, snap *snapshot.SnapTable, fullSnap *pipeline.Snapsho
 	// appear as an op, or a PROTECTED-only removal produces zero DiffOps and
 	// apply's len(ops)==0 short-circuit means the snapshot's stale
 	// Protected=true is never cleared, permanently blocking the very
-	// "remove PROTECTED first" workflow RFC §7.11 documents.
+	// "remove PROTECTED first" workflow RFC Section 7.11 documents.
 	if o.Protected != snap.Protected {
 		ops = append(ops, safeOp(fmt.Sprintf("-- PROTECTED %s on %s", map[bool]string{true: "enabled", false: "removed"}[o.Protected], tbl), pos))
 	}
@@ -8027,15 +8027,15 @@ func diffColumns(tbl string, o *ir.Table, snap *snapshot.SnapTable, vtypes map[s
 			// save, same pattern as the SERIAL case just above.
 		} else if resolvedType != sc.Type {
 			using := ""
-			// RFC §7.2/§17.2 "Column type change diffing": a type change is
+			// RFC Section 7.2/Section 17.2 "Column type change diffing": a type change is
 			// CAUTION when the user supplies an explicit USING expression
 			// (their own safe conversion), OR when no USING is given but
 			// PostgreSQL itself has an implicit cast (pg_cast.castcontext =
-			// 'i') between the old and new base types — RFC §17.2's own
+			// 'i') between the old and new base types — RFC Section 17.2's own
 			// "ALTER TABLE ALTER COLUMN TYPE (implicit cast) -> CAUTION" row
 			// — OR the change is a same-base-type modifier (length/
 			// precision/scale) widening PostgreSQL applies with no data
-			// loss, RFC §7.2's own primary example (VARCHAR(10) ->
+			// loss, RFC Section 7.2's own primary example (VARCHAR(10) ->
 			// VARCHAR(20)) — see typmod_widening.go for the full per-type-
 			// family rules, each verified live, not assumed. Anything else
 			// (no USING, no implicit cast, no provable widening) stays the
@@ -8821,7 +8821,7 @@ func matchedConstraintOps(tbl string, sc *snapshot.SnapConstraint, c *ir.Constra
 
 // validateConstraintOp emits ALTER <alterKW> ... VALIDATE CONSTRAINT ... when
 // a constraint that was previously added NOT VALID has had NOT VALID removed
-// from source — the second half of the RFC §7.3/§5.4 NOT VALID lifecycle
+// from source — the second half of the RFC Section 7.3/Section 5.4 NOT VALID lifecycle
 // (ADD CONSTRAINT ... NOT VALID, then later VALIDATE CONSTRAINT once the
 // author is ready to scan existing rows). alterKW is "TABLE" or "DOMAIN"
 // (real PostgreSQL's VALIDATE CONSTRAINT syntax is otherwise identical for
@@ -9143,7 +9143,7 @@ func schemaRelationNames(fullSnap *pipeline.Snapshot, schema, excludeTable strin
 }
 
 // diffViewIndexes is diffIndexes' sibling for a materialized view's INDICES
-// (RFC §8.2). Simpler than the table version: a view has no COLUMN block, so
+// (RFC Section 8.2). Simpler than the table version: a view has no COLUMN block, so
 // there's no RENAMED FROM / DROP COLUMN cascade to translate index
 // definitions through — indexes are matched by name and compared as-is.
 // diffViewIndexes mirrors diffIndexes' RENAMED FROM handling (see its own

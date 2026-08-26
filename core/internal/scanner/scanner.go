@@ -723,7 +723,7 @@ func (s *state) detectTypeKind(pos pipeline.SourcePos) (pipeline.ObjectKind, err
 	s.skipDottedName() // name
 	s.skipWS()
 	// peekWord() only captures word characters — it silently returns "" when
-	// the next token is "(" (BASE type's own form, RFC §5.5's "TYPE name
+	// the next token is "(" (BASE type's own form, RFC Section 5.5's "TYPE name
 	// (INPUT = ..., ...)"), so that case must be checked directly against the
 	// next byte, not against peekWord()'s result. This previously meant a
 	// BASE type could never be recognised at all — detectTypeKind always

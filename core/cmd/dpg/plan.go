@@ -55,7 +55,7 @@ func linterConfigFrom(c config.LinterConfig) pipeline.LinterConfig {
 // snake_case to the actual kebab-case rule IDs (RFC audit item #17):
 // Appendix D.3 gives kebab-case (e.g. "security-definer-search-path") as
 // authoritative, matching every real rule ID internal/linter/linter.go
-// emits, but §19.2's own worked config example still shows the broken
+// emits, but Section 19.2's own worked config example still shows the broken
 // snake_case form ("security_definer_search_path = ...") as if it works.
 // ApplyRuleSeverityOverrides does an exact-string lookup against the rule
 // ID a diagnostic actually carries, so an unnormalized snake_case key

@@ -329,7 +329,7 @@ func TestCompile_MultiFileTableMerge(t *testing.T) {
 }
 
 // TestCompile_MultiFileScalarMergeConflict proves Compile's second return
-// value surfaces a real scalar-merge-conflict diagnostic (RFC §19.1) when
+// value surfaces a real scalar-merge-conflict diagnostic (RFC Section 19.1) when
 // two files declare the same table with a conflicting OWNER — the same
 // last-file-wins-plus-diagnostic behavior internal/merger's own unit tests
 // exercise directly, verified here end-to-end through the real compiler
@@ -366,7 +366,7 @@ func TestCompile_MultiFileScalarMergeConflict(t *testing.T) {
 	if tbl == nil {
 		t.Fatal("merged 'users' table not found")
 	}
-	// Last-file-wins is unaffected by the diagnostic (RFC §3.7: "the winning
+	// Last-file-wins is unaffected by the diagnostic (RFC Section 3.7: "the winning
 	// value is used regardless").
 	if tbl.Owner == nil || *tbl.Owner != "bob" {
 		t.Errorf("Owner (last-wins, regardless of conflict): got %v", tbl.Owner)

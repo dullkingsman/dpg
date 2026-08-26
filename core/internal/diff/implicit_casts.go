@@ -22,7 +22,7 @@ import (
 //
 // against a real `postgres:17` container — the exact image every live
 // integration test in this repo already standardizes on. This is the
-// authoritative source RFC §17.2's "ALTER TABLE ALTER COLUMN TYPE (implicit
+// authoritative source RFC Section 17.2's "ALTER TABLE ALTER COLUMN TYPE (implicit
 // cast) -> CAUTION" row means by "implicit cast": PostgreSQL's own
 // ATExecAlterColumnType (tablecmds.c) builds a default `USING col::newtype`
 // when none is given, and a plain `::` cast succeeds for ANY registered cast

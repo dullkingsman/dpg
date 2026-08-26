@@ -334,7 +334,7 @@ func TestMultipleIndices(t *testing.T) {
 	}
 }
 
-// Mode B (§4.8 Dual Definition Modes): the singular INDEX keyword precedes a
+// Mode B (Section 4.8 Dual Definition Modes): the singular INDEX keyword precedes a
 // single entry outside a plural block and must parse without a wrapping '{ }'
 // (previously this went through the same brace-requiring parser as INDICES
 // and was a hard parse error, not just "unsupported").
@@ -788,7 +788,7 @@ func TestRevocations(t *testing.T) {
 	}
 }
 
-// Mode B (§4.8 Dual Definition Modes): the singular GRANT/REVOCATION keyword
+// Mode B (Section 4.8 Dual Definition Modes): the singular GRANT/REVOCATION keyword
 // precedes a single entry outside a plural block and must parse without a
 // wrapping '{ }' — previously this went through the same brace-requiring
 // parser as GRANTS/REVOCATIONS and was a hard parse error, exactly the same
@@ -1182,7 +1182,7 @@ func TestPolicyRenamedFromWithTrailingComment(t *testing.T) {
 	}
 }
 
-// Mode B (§4.8 Dual Definition Modes): the singular POLICY keyword precedes a
+// Mode B (Section 4.8 Dual Definition Modes): the singular POLICY keyword precedes a
 // single entry outside a plural block — previously this would have hit the
 // same conflation bug already fixed for INDEX/INDICES and GRANT/REVOCATION
 // (POLICY wasn't even in the dispatch switch at all, so it was "unknown block
@@ -1304,7 +1304,7 @@ func TestTriggerUpdateWithoutOfColumns(t *testing.T) {
 	}
 }
 
-// TestTriggerReferencingBothTables guards RFC §7.9 (audit item #2):
+// TestTriggerReferencingBothTables guards RFC Section 7.9 (audit item #2):
 // REFERENCING OLD TABLE AS ... NEW TABLE AS ... was a hard parse error
 // before this fix — internal/blockparser had no handling for it at all.
 func TestTriggerReferencingBothTables(t *testing.T) {
@@ -1592,7 +1592,7 @@ func TestConstraintRenamedFromWithNotValid(t *testing.T) {
 	}
 }
 
-// Mode A (§4.8 Dual Definition Modes): CONSTRAINTS { } is the plural-block
+// Mode A (Section 4.8 Dual Definition Modes): CONSTRAINTS { } is the plural-block
 // wrapper completing the pattern already offered for the other 7 collection
 // types (INDICES, POLICIES, TRIGGERS, GRANTS, REVOCATIONS, PARTITIONS,
 // COLUMNS) — previously CONSTRAINTS had no parser at all, only the singular
@@ -1837,7 +1837,7 @@ func TestPartitionModeBThenModeACanMix(t *testing.T) {
 	}
 }
 
-// Sub-partitioning (RFC §7.13): a partition entry may itself carry a nested
+// Sub-partitioning (RFC Section 7.13): a partition entry may itself carry a nested
 // PARTITION BY clause and PARTITIONS { } block.
 func TestPartitionSubPartitioned(t *testing.T) {
 	src := `PARTITIONS {
@@ -2089,7 +2089,7 @@ func TestTSMappingSingleDictionary(t *testing.T) {
 // TestTSMappingDictionaryFallbackChain guards a real PG feature (confirmed
 // real, not a DPG invention): "WITH dict1, dict2, ..." is a fallback chain —
 // dictionaries are tried in order until one recognizes the token. The RFC's
-// own worked example (§12.1) uses "WITH unaccent, english_stem". Before this,
+// own worked example (Section 12.1) uses "WITH unaccent, english_stem". Before this,
 // the parser only ever read a single identifier after WITH, then immediately
 // expected ';' — so a genuine, RFC-documented multi-dictionary mapping
 // failed to parse at all ("expected ';' after directive, got ','"), found
@@ -2646,7 +2646,7 @@ func TestIndexExpressionColumnBareFunctionCall(t *testing.T) {
 	}
 }
 
-// ── OPERATOR FAMILY loose members (RFC §14.4) ─────────────────────────────────
+// ── OPERATOR FAMILY loose members (RFC Section 14.4) ─────────────────────────────────
 
 // TestOpFamilyMemberCommaSeparatedList guards the approved source style: a
 // whole block is one comma-separated list of OPERATOR/FUNCTION items, each

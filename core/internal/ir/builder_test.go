@@ -729,7 +729,7 @@ func TestBuildTableWithBlock(t *testing.T) {
 	}
 }
 
-// TestBuildTableSubPartitioned guards RFC §7.13 sub-partitioning: a partition
+// TestBuildTableSubPartitioned guards RFC Section 7.13 sub-partitioning: a partition
 // entry may itself carry a nested PARTITION BY clause and PARTITIONS { }
 // block. Before this, the blockparser swallowed the whole nested clause as
 // opaque raw "Bounds" text and there was no IR field to hold structured
@@ -1338,7 +1338,7 @@ func TestBuildViewNoTablespaceOrStorageParams(t *testing.T) {
 	}
 }
 
-// TestBuildMaterializedViewIndices guards RFC §8.2's matview-block: a
+// TestBuildMaterializedViewIndices guards RFC Section 8.2's matview-block: a
 // materialized view's { } block MAY contain INDICES { } — previously
 // entirely unimplemented (no IR field existed to hold it, and the
 // blockparser's generically-parsed block.Indices was just never read here).
@@ -1493,7 +1493,7 @@ func TestBuildCompositeType(t *testing.T) {
 	}
 }
 
-// TestBuildCompositeTypeAttributeCollation guards RFC §5.2's attribute
+// TestBuildCompositeTypeAttributeCollation guards RFC Section 5.2's attribute
 // COLLATE clause — real PG grammar on ColumnDef itself (CollClause), no
 // DPG-specific parsing needed, extracted via buildColumn (shared with table
 // columns, which never populate it since DPG has no table-column COLLATE
@@ -1522,7 +1522,7 @@ func TestBuildCompositeTypeAttributeCollation(t *testing.T) {
 // for RFC audit item #12: buildCompositeType built CompositeAttrs purely
 // from the native CREATE TYPE ... AS ( ) coldeflist and never read
 // block.Columns at all — a COLUMN attr { RENAMED FROM old; } sub-block (RFC
-// §5.2: "the same [COLUMN] mechanism applies to composite type attributes")
+// Section 5.2: "the same [COLUMN] mechanism applies to composite type attributes")
 // was silently discarded before it ever reached the differ, which then saw
 // an unrelated drop+add of two differently-named attributes instead of a
 // rename.
@@ -1636,7 +1636,7 @@ func TestBuildBaseType(t *testing.T) {
 	}
 }
 
-// TestBuildDomainInlineSyntax guards RFC §5.4's structured domain diffing
+// TestBuildDomainInlineSyntax guards RFC Section 5.4's structured domain diffing
 // inputs (base type, DEFAULT, NOT NULL, CHECK) using real PostgreSQL's own
 // inline CREATE DOMAIN syntax — the form this codebase's demo project
 // already used before this fix (e.g. email_address), which buildDomain
@@ -1673,7 +1673,7 @@ func TestBuildDomainInlineSyntax(t *testing.T) {
 	}
 }
 
-// TestBuildDomainCollation guards RFC §5.4's "AS base_type [COLLATE
+// TestBuildDomainCollation guards RFC Section 5.4's "AS base_type [COLLATE
 // collation]" clause — real PG grammar on CreateDomainStmt itself
 // (CollClause), no DPG-specific parsing needed.
 func TestBuildDomainCollation(t *testing.T) {
@@ -1690,7 +1690,7 @@ func TestBuildDomainCollation(t *testing.T) {
 	}
 }
 
-// TestBuildDomainBlockSyntax guards the same extraction via RFC §5.4's own
+// TestBuildDomainBlockSyntax guards the same extraction via RFC Section 5.4's own
 // literal ABNF: DEFAULT/CONSTRAINT/NOT NULL declared in the { } block
 // instead of inline after AS. Real PG's CreateDomainStmt parser only sees
 // the bare "name AS basetype" in Part 1 here — this form is additive to,
@@ -2037,7 +2037,7 @@ func TestBuildAggregateOwner(t *testing.T) {
 // TestBuildProcedureDeprecatedAndRenamedFrom guards RFC audit items #8/#10:
 // PROCEDURE never got Function's identical DEPRECATED/RENAMED FROM
 // func-block directive support despite sharing the same grammar (RFC
-// §9.3/9.4) — both were silently discarded (no field on ir.Procedure at
+// Section 9.3/9.4) — both were silently discarded (no field on ir.Procedure at
 // all).
 func TestBuildProcedureDeprecatedAndRenamedFrom(t *testing.T) {
 	obj := buildObject(t, pipeline.KindProcedure,
@@ -3305,7 +3305,7 @@ func TestTypeRefBuiltIn(t *testing.T) {
 	}
 }
 
-// TestBuildTableRejectsUnknownColumnBlock guards the RFC §7.2 contract: a
+// TestBuildTableRejectsUnknownColumnBlock guards the RFC Section 7.2 contract: a
 // COLUMN block must reference a column that exists in the DDL. Silently
 // inventing one (the prior behaviour) leads to malformed migrations like an
 // `ALTER COLUMN ... TYPE ` with an empty type when the phantom flows into diff.
@@ -3968,7 +3968,7 @@ func TestBuildOperatorOverloadDistinctQualifiedNames(t *testing.T) {
 	}
 }
 
-// ── Subscription CONNECTION (RFC §13.2) ─────────────────────────────────────────
+// ── Subscription CONNECTION (RFC Section 13.2) ─────────────────────────────────────────
 
 func TestBuildSubscriptionPlainLiteral(t *testing.T) {
 	obj := buildObject(t, pipeline.KindSubscription,
@@ -4014,7 +4014,7 @@ func TestBuildSubscriptionComment(t *testing.T) {
 	}
 }
 
-// ── Role attributes (RFC §11.1) ──────────────────────────────────────────────
+// ── Role attributes (RFC Section 11.1) ──────────────────────────────────────────────
 
 func TestBuildRoleAllAttributes(t *testing.T) {
 	obj := buildObject(t, pipeline.KindRole,
@@ -4280,7 +4280,7 @@ func TestBuildEventTriggerEnableState(t *testing.T) {
 	}
 }
 
-// ── Collation structured diffing inputs (RFC §14.2) ────────────────────────────
+// ── Collation structured diffing inputs (RFC Section 14.2) ────────────────────────────
 // Regression guards for diffCollation's actual risk (see its doc comment):
 // LOCALE and LC_COLLATE/LC_CTYPE are different DPG source spellings that
 // must resolve to the SAME Collate/Ctype fields — proven here at the
@@ -4391,7 +4391,7 @@ func TestBuildCollationICUProviderLocaleSetsICULocaleOnly(t *testing.T) {
 	}
 }
 
-// ── StatisticsObject structured diffing inputs (RFC §14.6) ─────────────────────
+// ── StatisticsObject structured diffing inputs (RFC Section 14.6) ─────────────────────
 
 func TestBuildStatisticsObjectFields(t *testing.T) {
 	obj := buildObject(t, pipeline.KindStatisticsObject,
@@ -4476,7 +4476,7 @@ func TestBuildStatisticsObjectNoKindListDefaultsToAllThree(t *testing.T) {
 	}
 }
 
-// ── OPERATOR FAMILY loose members (RFC §14.4) ─────────────────────────────────
+// ── OPERATOR FAMILY loose members (RFC Section 14.4) ─────────────────────────────────
 
 func TestBuildOperatorFamilyMembers(t *testing.T) {
 	obj := buildObject(t, pipeline.KindOperatorFamily, `my_family USING btree`, `

@@ -290,7 +290,7 @@ func TestHashFunctionBodyNonSQLLanguageMatchesHashBody(t *testing.T) {
 }
 
 // TestParseTypeText guards the one thing that makes OPERATOR FAMILY member
-// op_types (RFC §14.4) comparable across source and introspection: a
+// op_types (RFC Section 14.4) comparable across source and introspection: a
 // hand-written alias must normalize to the exact string format_type()/
 // ::regtype::text produces, not just round-trip through pg_query
 // unchanged (which is what canonicalDDL-style Parse+Deparse alone would

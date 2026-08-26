@@ -8,7 +8,7 @@ import (
 	"github.com/dullkingsman/dpg/internal/pipeline"
 )
 
-// introspectXSecurityLabels below populate SecurityLabels (RFC §14.11) for
+// introspectXSecurityLabels below populate SecurityLabels (RFC Section 14.11) for
 // every kind PostgreSQL's real SECURITY LABEL statement supports. Two
 // separate system catalogs back this, split by PostgreSQL itself along the
 // per-database/shared-across-database boundary — confirmed live (a naive

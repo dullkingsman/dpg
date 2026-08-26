@@ -1,7 +1,7 @@
 // Package secrets implements pipeline.SecretResolver. It resolves secret URIs
 // to plaintext values at connection time — used for `dpg.toml`'s cluster
 // `link` field ("a secrets-provider URI resolved at connection time", RFC
-// §3.3), and, as of the operator-family-era secret-resolution work, for
+// Section 3.3), and, as of the operator-family-era secret-resolution work, for
 // structured secret-reference fields elsewhere in the IR.
 //
 // The package default (registered under pipeline.KeySecretResolver) is a

@@ -29,7 +29,7 @@ import (
 // ROLE app_admin rule already exists, automatically grants SELECT to
 // app_readonly with zero explicit GRANTS block on the table itself — only
 // possible if the table's CREATE TABLE genuinely ran as app_admin (RFC
-// §11.5's SET ROLE wrapping), not as the connecting superuser.
+// Section 11.5's SET ROLE wrapping), not as the connecting superuser.
 func TestApplyOwnerImpersonationFiresDefaultPrivileges(t *testing.T) {
 	ctx := context.Background()
 	connStr := testpg.Start(t)
@@ -153,7 +153,7 @@ TABLE widgets (
 }
 
 // TestApplyOwnerMembershipPreflight is the live-database regression guard for
-// RFC §11.5's pre-flight membership validation (DPG-E036): before any DDL in
+// RFC Section 11.5's pre-flight membership validation (DPG-E036): before any DDL in
 // a migration runs, the connecting role must be a member of every role a
 // SET ROLE/OWNER TO statement will target. Uses a real non-superuser
 // connecting role throughout (unlike the sibling default-privileges test,

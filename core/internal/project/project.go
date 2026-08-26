@@ -263,7 +263,7 @@ func discoverDatabases(clusterDir, reservedDir string) ([]*Database, error) {
 			// Normally this is just the (possibly not-yet-created) cluster
 			// objects directory itself — not a database, silently skip. But
 			// if it actually holds a [database]-declaring dpg.toml, that's a
-			// real naming conflict (RFC §3.5, DPG-E004): the user tried to
+			// real naming conflict (RFC Section 3.5, DPG-E004): the user tried to
 			// declare a database here, and without this check it would be
 			// silently discarded with no error at all, identical in shape to
 			// the duplicate-name bugs fixed alongside this.
@@ -297,7 +297,7 @@ func discoverDatabases(clusterDir, reservedDir string) ([]*Database, error) {
 // the cluster's reserved objects-dir name (a real conflict, DPG-E004) from
 // the ordinary case of that name simply not existing yet or holding
 // non-database content (no dpg.toml at all, matching how a cluster objects
-// directory is actually used per RFC §3.5).
+// directory is actually used per RFC Section 3.5).
 func hasDatabaseSection(path string) bool {
 	data, err := os.ReadFile(path)
 	if err != nil {

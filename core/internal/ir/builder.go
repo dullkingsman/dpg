@@ -40,7 +40,7 @@ func (b *Builder) Build(pg pipeline.PGParseResult, block pipeline.BlockAST) (pip
 	}
 	pos := pg.Pos
 
-	// OPERATOR/FUNCTION block directives (RFC §14.4's OPERATOR FAMILY loose
+	// OPERATOR/FUNCTION block directives (RFC Section 14.4's OPERATOR FAMILY loose
 	// members) are only meaningful on an OPERATOR FAMILY declaration — the
 	// BlockParser itself has no per-kind gating (it parses Part 2 without
 	// knowing what Part 1 declared), so this check has to live at the one
@@ -78,7 +78,7 @@ func (b *Builder) Build(pg pipeline.PGParseResult, block pipeline.BlockAST) (pip
 		} else {
 			// Plain "CREATE TABLE ... AS SELECT ..." — not a DPG-documented
 			// table-declaration form (tables are declared via an explicit
-			// column list, RFC §4); falls through to the generic opaque
+			// column list, RFC Section 4); falls through to the generic opaque
 			// fallback below, unchanged from before this case existed.
 			obj = &OpaqueObject{kind: "UNKNOWN", body: "", SrcPos: pos}
 		}
@@ -364,7 +364,7 @@ func (b *Builder) buildColumn(cd *pg_query.ColumnDef, pos pipeline.SourcePos) (*
 			col.NotNull = true // SERIAL implies NOT NULL in PG, independent of PRIMARY KEY
 		}
 	}
-	// CollClause (RFC §5.2's composite attribute COLLATE) is real PG grammar
+	// CollClause (RFC Section 5.2's composite attribute COLLATE) is real PG grammar
 	// on ColumnDef itself — no DPG-specific parsing needed. Harmless to
 	// extract unconditionally even for table columns (DPG has no
 	// table-column COLLATE feature): diffColumns never reads Collation,
@@ -898,7 +898,7 @@ func lastNamePart(nodes []*pg_query.Node) string {
 // FigureColname ports PostgreSQL's FigureColnameInternal (parser/
 // parse_target.c) — called via FigureIndexColname from parse_utilcmd.c's
 // transformIndexStmt for an EXCLUDE element's PredictedName, and via
-// internal/diff's view-rename detection (RFC §8.1's "compares the columns
+// internal/diff's view-rename detection (RFC Section 8.1's "compares the columns
 // produced by the view query by name and ordinal position") for an
 // unaliased SELECT target's implicit output column name — BEFORE
 // transformExpr runs — confirmed via source that this genuinely operates on
@@ -1253,7 +1253,7 @@ func mergeTableBlock(tbl *Table, block pipeline.BlockAST) error {
 	}
 	tbl.SecurityLabels = block.SecurityLabels
 
-	// Columns: per RFC §7.2, `COLUMN name { }` references an *existing* column
+	// Columns: per RFC Section 7.2, `COLUMN name { }` references an *existing* column
 	// in the DDL. A name that doesn't match is almost always a typo (e.g.
 	// "locality_ids" vs. "locality_id"); silently inventing a phantom column
 	// produces broken SQL downstream (empty type, mismatched FKs), so reject
@@ -1954,7 +1954,7 @@ func (b *Builder) buildCompositeType(cs *pg_query.CompositeTypeStmt, block pipel
 	t.SecurityLabels = block.SecurityLabels
 	t.NameMaps = block.NameMaps
 
-	// COLUMN attr { RENAMED FROM old; } sub-blocks (RFC §5.2: "the same
+	// COLUMN attr { RENAMED FROM old; } sub-blocks (RFC Section 5.2: "the same
 	// mechanism applies to composite type attributes") — buildCompositeType
 	// previously never read block.Columns at all, so a declared rename was
 	// silently ignored and diffType saw an unrelated drop+add instead of the
@@ -2251,7 +2251,7 @@ func roleSpecNames(list *pg_query.List) []string {
 	return names
 }
 
-// buildRole extracts every CREATE ROLE option (RFC §11.1) directly from
+// buildRole extracts every CREATE ROLE option (RFC Section 11.1) directly from
 // CreateRoleStmt.Options — native PostgreSQL grammar (LOGIN/SUPERUSER/
 // CREATEDB/CREATEROLE/INHERIT/REPLICATION/BYPASSRLS/CONNECTION LIMIT/
 // PASSWORD/VALID UNTIL/IN ROLE/ROLE/ADMIN), not a DPG block directive.
@@ -2489,14 +2489,14 @@ func (b *Builder) buildUserMapping(cs *pg_query.CreateUserMappingStmt, block pip
 
 // ── Domain ────────────────────────────────────────────────────────────────────
 
-// buildDomain extracts DOMAIN's structured RFC §5.4 diffing inputs
+// buildDomain extracts DOMAIN's structured RFC Section 5.4 diffing inputs
 // (base type, DEFAULT, NOT NULL, CHECK constraints) from Part 1's real PG
 // CreateDomainStmt node, then merges in anything additionally declared via
 // the { } block's DEFAULT/NOT NULL/CONSTRAINT directives — found live-
 // testing a demo project: none of this was ever extracted at all before
 // (buildDomain only read block.Comment), so diffType had nothing to diff a
 // changed DEFAULT/constraint/NOT NULL against and fell through to
-// comment-only diffing forever, contradicting RFC §5.4's explicit
+// comment-only diffing forever, contradicting RFC Section 5.4's explicit
 // per-property SAFE/CAUTION semantics.
 func (b *Builder) buildDomain(cs *pg_query.CreateDomainStmt, block pipeline.BlockAST, pos pipeline.SourcePos, body string) (pipeline.IRObject, error) {
 	schema, name := extractTypeName(cs.Domainname)
@@ -3425,7 +3425,7 @@ func (b *Builder) buildOpaque(node *pg_query.Node, block pipeline.BlockAST, pos 
 }
 
 // normalizeOpFamilyMembers canonicalizes and validates an OPERATOR FAMILY
-// { } block's raw parsed members (RFC §14.4) into their final IR form:
+// { } block's raw parsed members (RFC Section 14.4) into their final IR form:
 // op_types run through ParseTypeText so a hand-written "int4" compares equal
 // to introspection's canonical "integer", and duplicate catalog slots
 // (same Key(), see pipeline.OpFamilyMember.Key's doc comment) are rejected

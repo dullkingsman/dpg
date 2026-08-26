@@ -18,7 +18,7 @@ import (
 	"github.com/dullkingsman/dpg/internal/testpg"
 )
 
-// TestSubscriptionPlanLiveNoSpuriousRecreate proves the actual bug §6z/§6ff
+// TestSubscriptionPlanLiveNoSpuriousRecreate proves the actual bug (items 6z/6ff)
 // closed: before introspectSubscriptions existed, a subscription created via
 // apply was invisible to plan --live's live-comparison snapshot (built
 // purely from introspection — nothing else populates it), so plan --live

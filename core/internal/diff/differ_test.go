@@ -105,10 +105,10 @@ func TestDiffSchemaCommentAdded(t *testing.T) {
 	}
 }
 
-// TestDiffCreateSchemaWithOwnerUsesSetRole is RFC §11.5's (audit item #28)
+// TestDiffCreateSchemaWithOwnerUsesSetRole is RFC Section 11.5's (audit item #28)
 // regression guard: a brand-new object with a declared OWNER must be
 // created directly as that role via SET ROLE/RESET ROLE — PostgreSQL
-// attributes default-privilege eligibility (§11.4) to whoever executed
+// attributes default-privilege eligibility (Section 11.4) to whoever executed
 // CREATE, not to final ownership, so a role reassigned only afterward (via
 // ALTER ... OWNER TO, or via CREATE SCHEMA's own AUTHORIZATION clause
 // alone) never satisfies a matching DEFAULT PRIVILEGES FOR ROLE block.
@@ -1835,7 +1835,7 @@ func TestDiffEnumAddValue(t *testing.T) {
 		t.Errorf("expected pending value, got: %s", sql)
 	}
 	if ops[0].Safety() != pipeline.Safe {
-		t.Errorf("expected Safe safety for ADD VALUE (RFC §1.4's PG 14 floor is past the PG 12 transaction-block restriction)")
+		t.Errorf("expected Safe safety for ADD VALUE (RFC Section 1.4's PG 14 floor is past the PG 12 transaction-block restriction)")
 	}
 	if !ops[0].Transactional() {
 		t.Errorf("expected ADD VALUE to run transactionally")
@@ -2218,7 +2218,7 @@ func TestDiffMaterializedViewTablespaceUnchangedIsNoop(t *testing.T) {
 // replacement that changes an existing output column's implicit name
 // (SQLSTATE 42P16) — the exact shape of an unaliased "SELECT col FROM t"
 // whose source column got renamed elsewhere in the same migration. RFC
-// §8.1 requires detecting this and falling back to DROP VIEW CASCADE;
+// Section 8.1 requires detecting this and falling back to DROP VIEW CASCADE;
 // CREATE VIEW (DESTRUCTIVE) instead of a migration-aborting CREATE OR
 // REPLACE.
 func TestDiffViewUnaliasedColumnRenameDropsAndRecreates(t *testing.T) {
@@ -2299,7 +2299,7 @@ func TestDiffViewSameOutputColumnsStaysReplace(t *testing.T) {
 }
 
 // TestDiffViewAliasedColumnRenameStaysReplace proves an aliased SELECT
-// (RFC §7.6's mechanism doesn't even apply here — the alias itself, not the
+// (RFC Section 7.6's mechanism doesn't even apply here — the alias itself, not the
 // underlying source column, determines the output name) never triggers the
 // new DESTRUCTIVE path merely because the source column changed underneath
 // an unrelated, stable alias.
@@ -3182,7 +3182,7 @@ func TestDiffRegistration(t *testing.T) {
 	}
 }
 
-// TestDiffColumnRenameMissingSnapshotErrors verifies RFC §7.4 step 5: a
+// TestDiffColumnRenameMissingSnapshotErrors verifies RFC Section 7.4 step 5: a
 // RENAMED FROM that names a column the snapshot doesn't contain is a compiler
 // error rather than a silent fall-through to ADD COLUMN.
 func TestDiffColumnRenameMissingSnapshotErrors(t *testing.T) {
@@ -3346,7 +3346,7 @@ func TestDiffColumnRenamePostApplyIsNoop(t *testing.T) {
 // doesn't manufacture a spurious drop+recreate of constraints whose snapshot
 // expression still references the pre-rename column name.
 // TestDiffValidateConstraintOnNotValidRemoval guards a real gap found live-
-// testing a demo project: the RFC's NOT VALID lifecycle (§7.3) documents
+// testing a demo project: the RFC's NOT VALID lifecycle (Section 7.3) documents
 // that removing NOT VALID from source must emit
 // ALTER TABLE ... VALIDATE CONSTRAINT ..., but diffConstraints' identity key
 // (name/type/expr only) never compared NotValid at all — a constraint
@@ -4575,7 +4575,7 @@ func TestDiffColumnDeprecatedNoOpWhenUnchanged(t *testing.T) {
 // TestDiffTableDeprecatedEmitsComment, TestDiffViewDeprecatedEmitsComment,
 // and TestDiffFunctionDeprecatedEmitsComment guard the same gap as
 // TestDiffColumnDeprecatedEmitsComment, for the RFC's other three
-// DEPRECATED-bearing kinds (§19.1: "Applied to tables, columns, views,
+// DEPRECATED-bearing kinds (Section 19.1: "Applied to tables, columns, views,
 // functions"). ir.Table/View/Function.Deprecated was parsed, snapshotted
 // (for Table only — SnapView/SnapFunction didn't even have the field, a
 // deeper gap than Column's), and used by the linter, but never referenced
@@ -6985,7 +6985,7 @@ func TestDiffTableGrantUnchangedIsNoop(t *testing.T) {
 	}
 }
 
-// ── Explicit REVOCATIONS (RFC §11.3) ──────────────────────────────────────────
+// ── Explicit REVOCATIONS (RFC Section 11.3) ──────────────────────────────────────────
 //
 // Regression guard for the discovery that ir.Table/Column/View.Revocations was
 // parsed into the IR but never read anywhere in diff/create/emit — an explicit
@@ -7087,7 +7087,7 @@ func TestDiffTableRevocationRemoved(t *testing.T) {
 }
 
 // The idempotency guard: PG errors on REVOKE of an already-absent privilege
-// (RFC §11.3), so an unchanged REVOCATION must produce zero ops once it's
+// (RFC Section 11.3), so an unchanged REVOCATION must produce zero ops once it's
 // been applied and recorded in the snapshot — not re-issued on every apply.
 func TestDiffTableRevocationUnchangedIsNoop(t *testing.T) {
 	d := New()
@@ -7229,7 +7229,7 @@ func TestDiffCreateViewEmitsRevocation(t *testing.T) {
 // at all — an OWNER directive on a VIEW, RECURSIVE VIEW, or MATERIALIZED
 // VIEW silently vanished with no error, no diff, nothing.
 //
-// RFC §11.5 (audit item #28) changed how a new object's OWNER is applied: a
+// RFC Section 11.5 (audit item #28) changed how a new object's OWNER is applied: a
 // brand-new object is now created directly as its declared owner via
 // SET ROLE/RESET ROLE, not created as the connecting role and reassigned
 // afterward via a trailing ALTER ... OWNER TO — the latter never satisfies a
@@ -7274,7 +7274,7 @@ func TestDiffCreateMaterializedViewEmitsOwner(t *testing.T) {
 	}
 }
 
-// TestDiffCreateTableWithOwnerUsesSetRole is RFC §11.5's (audit item #28)
+// TestDiffCreateTableWithOwnerUsesSetRole is RFC Section 11.5's (audit item #28)
 // table-kind sibling of TestDiffCreateViewEmitsOwner.
 func TestDiffCreateTableWithOwnerUsesSetRole(t *testing.T) {
 	d := New()
@@ -7297,7 +7297,7 @@ func TestDiffCreateTableWithOwnerUsesSetRole(t *testing.T) {
 }
 
 // TestDiffCreateEnumTypeWithOwnerUsesSetRole and
-// TestDiffCreateDomainWithOwnerUsesSetRole are RFC §11.5's (audit item #28)
+// TestDiffCreateDomainWithOwnerUsesSetRole are RFC Section 11.5's (audit item #28)
 // TYPE-kind siblings — ENUM and DOMAIN take different createType code paths
 // (see createType's switch), so both need their own coverage.
 func TestDiffCreateEnumTypeWithOwnerUsesSetRole(t *testing.T) {
@@ -7589,7 +7589,7 @@ func TestDiffCollationRenamedFromAndPropertyChanged(t *testing.T) {
 	}
 }
 
-// TestDiffCreateMaterializedViewEmitsIndex guards RFC §8.2's matview-block
+// TestDiffCreateMaterializedViewEmitsIndex guards RFC Section 8.2's matview-block
 // INDICES support: a new materialized view's indexes must be created
 // alongside it, non-concurrently (it doesn't exist yet — same reasoning as
 // createTable's brand-new-table indexes).
@@ -8832,7 +8832,7 @@ func TestDiffTriggerUpdateOfColumnsUnchangedIsNoop(t *testing.T) {
 }
 
 // TestCreateTriggerEmitsReferencing and TestDiffTriggerReferencingChanged
-// guard RFC §7.9 (audit item #2): REFERENCING OLD/NEW TABLE AS was a hard
+// guard RFC Section 7.9 (audit item #2): REFERENCING OLD/NEW TABLE AS was a hard
 // parse error before this fix; ir.Trigger now carries the two transition
 // names through to CREATE TRIGGER emission and change diffing.
 func TestCreateTriggerEmitsReferencing(t *testing.T) {
@@ -9629,7 +9629,7 @@ func TestDiffPartitionBoundChangedDropsAndRecreates(t *testing.T) {
 	}
 }
 
-// TestDiffCreateTableWithSubPartitions guards RFC §7.13 sub-partitioning:
+// TestDiffCreateTableWithSubPartitions guards RFC Section 7.13 sub-partitioning:
 // a partition entry may itself be PARTITION BY'd, in which case its CREATE
 // TABLE ... PARTITION OF statement carries a trailing PARTITION BY clause,
 // and each of ITS partitions is created as PARTITION OF the sub-partitioned
@@ -11935,7 +11935,7 @@ func TestDiffCreateSequenceWithOwner(t *testing.T) {
 	if !containsSQL(ops, "CREATE SEQUENCE IF NOT EXISTS") {
 		t.Errorf("expected CREATE SEQUENCE, got: %v", sqlList(ops))
 	}
-	// RFC §11.5 (audit item #28): a brand-new object is created directly as
+	// RFC Section 11.5 (audit item #28): a brand-new object is created directly as
 	// its declared owner via SET ROLE/RESET ROLE, not reassigned afterward
 	// via ALTER ... OWNER TO — the latter never satisfies a matching
 	// DEFAULT PRIVILEGES FOR ROLE block.
@@ -12695,7 +12695,7 @@ func TestDiffDropOperatorFamilyUsesRecordedAccessMethod(t *testing.T) {
 	}
 }
 
-// ── Operator family loose members (RFC §14.4) ─────────────────────────────────
+// ── Operator family loose members (RFC Section 14.4) ─────────────────────────────────
 
 func opFamilyMemberObj(members ...pipeline.OpFamilyMember) *ir.OperatorFamily {
 	return &ir.OperatorFamily{
@@ -12976,7 +12976,7 @@ func TestDiffDropOperatorClassLegacyFallsBackToBtree(t *testing.T) {
 // list, dropping OPERATOR/STORAGETYPE entirely, while introspection captured
 // all three but only as flattened Body text) and the false-DESTRUCTIVE diff
 // it enabled: since PostgreSQL has no incremental ALTER OPERATOR CLASS (RFC
-// §14.4), any real AS-list change must fall back to DROP+CREATE — but a
+// Section 14.4), any real AS-list change must fall back to DROP+CREATE — but a
 // purely cosmetic Body-text difference (whitespace, item order, spelling)
 // between hand-written source and the snapshot must NOT trigger one.
 
@@ -13350,7 +13350,7 @@ func TestDiffOperatorClassStaleSnapshotFallsBackToBodyHash(t *testing.T) {
 // no body hash; comparing a real body against an empty snapshot hash must NOT
 // report spurious drift.
 // TestDiffOpaqueNoSpuriousDriftWhenSnapHashEmpty predates Collation's
-// structured diffing (RFC §14.2): originally asserted exactly 0 ops for a
+// structured diffing (RFC Section 14.2): originally asserted exactly 0 ops for a
 // snap.BodyHash == "" scenario. diffCollation's own stale-snapshot guard
 // (CollationStructured == false here, since this snap predates the field)
 // now deliberately emits one harmless refresh-metadata comment op instead
@@ -13598,7 +13598,7 @@ func TestCreatePublicationEmitsOwner(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// RFC §11.5 (audit item #28): a brand-new object is created directly as
+	// RFC Section 11.5 (audit item #28): a brand-new object is created directly as
 	// its declared owner via SET ROLE/RESET ROLE, not reassigned afterward
 	// via ALTER ... OWNER TO — the latter never satisfies a matching
 	// DEFAULT PRIVILEGES FOR ROLE block.
@@ -14239,7 +14239,7 @@ func TestCreateSubscriptionExecSQLResolveErrorPropagates(t *testing.T) {
 	}
 }
 
-// ── Role attributes (RFC §11.1) ──────────────────────────────────────────────
+// ── Role attributes (RFC Section 11.1) ──────────────────────────────────────────────
 
 func boolp(v bool) *bool { return &v }
 func intp(v int) *int    { return &v }
@@ -14635,7 +14635,7 @@ func TestDiffOpaqueOfflineEditEmitsStructuredDropRecreate(t *testing.T) {
 		wantDropSubstr   string
 		wantNewInBody    string
 		wantCreateSafety pipeline.Safety // zero value (Safe) unless overridden
-		dropIsSafe       bool            // false (Destructive) unless overridden — event_trigger is the sole exception, RFC §14.1
+		dropIsSafe       bool            // false (Destructive) unless overridden — event_trigger is the sole exception, RFC Section 14.1
 	}{
 		{
 			name:           "tablespace",
@@ -14658,7 +14658,7 @@ func TestDiffOpaqueOfflineEditEmitsStructuredDropRecreate(t *testing.T) {
 		},
 		{
 			// A FDW-wrapper change specifically (not an OPTIONS-only change,
-			// which RFC §14.9 gives a real, targeted ALTER SERVER for — see
+			// which RFC Section 14.9 gives a real, targeted ALTER SERVER for — see
 			// TestDiffForeignServerOptionsChangeIsSafeAlter — real PostgreSQL
 			// has no ALTER SERVER ... FOREIGN DATA WRAPPER at all, confirmed
 			// via `\h ALTER SERVER`).
@@ -14677,7 +14677,7 @@ func TestDiffOpaqueOfflineEditEmitsStructuredDropRecreate(t *testing.T) {
 		},
 		{
 			// An AllTables change specifically (not a Tables-list-only or
-			// WITH (publish = ...)-only change, which RFC §13.1 gives a
+			// WITH (publish = ...)-only change, which RFC Section 13.1 gives a
 			// real, targeted ALTER PUBLICATION for — see
 			// TestDiffPublicationTablesChangeIsSafeAlter/
 			// TestDiffPublicationPublishOptionsChangeIsSafeAlter — real
@@ -14718,7 +14718,7 @@ func TestDiffOpaqueOfflineEditEmitsStructuredDropRecreate(t *testing.T) {
 			wantDropSubstr: `DROP EVENT TRIGGER IF EXISTS "et";`,
 			wantNewInBody:  "f2()",
 			// Unlike every other opaque kind here, an event trigger holds no
-			// data and nothing depends on it — RFC §14.1 explicitly classifies
+			// data and nothing depends on it — RFC Section 14.1 explicitly classifies
 			// its DROP+CREATE as SAFE, unlike Collation/Cast/Operator below
 			// (all explicitly DESTRUCTIVE per their own RFC sections).
 			dropIsSafe: true,
@@ -14879,7 +14879,7 @@ func TestDiffOpaqueOfflineEditEmitsStructuredDropRecreate(t *testing.T) {
 	}
 }
 
-// ── TSConfig MAPPING FOR (RFC §12.1) ──────────────────────────────────────────
+// ── TSConfig MAPPING FOR (RFC Section 12.1) ──────────────────────────────────────────
 // tc.Mappings was parsed by the blockparser and copied onto ir.TSConfig by
 // the builder, but never read by the differ at all — a declared MAPPING FOR
 // entry silently produced no ALTER TEXT SEARCH CONFIGURATION statement
@@ -16869,7 +16869,7 @@ func TestDiffProcedureCommentAdded(t *testing.T) {
 	}
 }
 
-// ── FUNCTION/PROCEDURE Revocations (RFC §11.3) ────────────────────────────────
+// ── FUNCTION/PROCEDURE Revocations (RFC Section 11.3) ────────────────────────────────
 // Regression guard for a real bug found live-testing REVOCATIONS against a
 // demo project: ir.Function/ir.Procedure had no Revocations field at all, so
 // a declared REVOCATIONS block was parsed but silently dropped everywhere
@@ -17093,7 +17093,7 @@ func TestDiffFunctionRevocationRemoved(t *testing.T) {
 	}
 }
 
-// ── TABLE/INDEX Tablespace (RFC §14.7) ────────────────────────────────────────
+// ── TABLE/INDEX Tablespace (RFC Section 14.7) ────────────────────────────────────────
 // Regression guard for a real bug found live-testing TABLESPACE against a
 // demo project: ir.Table.Tablespace and ir.Index.Tablespace were both parsed
 // from source but never read anywhere downstream — createTable/diffTable and
@@ -17458,14 +17458,14 @@ func TestDiffIndexTablespaceChangedRecreates(t *testing.T) {
 	}
 }
 
-// ── RANGE/BASE type body-change diffing (RFC §5.3/§5.5) ───────────────────────
+// ── RANGE/BASE type body-change diffing (RFC Section 5.3/Section 5.5) ───────────────────────
 // Regression guard for a real bug found live-testing BASE/VIRTUAL types
 // against a demo project: diffType had explicit handling for COMPOSITE and
 // ENUM only — RANGE and BASE both fell through to just the generic COMMENT
 // check, so an already-applied RANGE or BASE type whose body changed was a
 // silent no-op forever. Confirmed live on a throwaway RANGE type: before the
 // fix, changing SUBTYPE produced "-- (no changes)"; after, it correctly
-// emits DROP TYPE CASCADE + CREATE TYPE (RFC §5.3's exact stated semantics).
+// emits DROP TYPE CASCADE + CREATE TYPE (RFC Section 5.3's exact stated semantics).
 
 func TestDiffRangeTypeBodyChangedRecreates(t *testing.T) {
 	d := New()
@@ -17525,10 +17525,10 @@ func TestDiffBaseTypeBodyChangedRecreatesNoCascade(t *testing.T) {
 		t.Fatal(err)
 	}
 	if !containsSQL(ops, `DROP TYPE IF EXISTS "public"."zz_base";`) {
-		t.Errorf("expected DROP TYPE (no CASCADE — RFC §5.5 doesn't specify it), got: %v", sqlList(ops))
+		t.Errorf("expected DROP TYPE (no CASCADE — RFC Section 5.5 doesn't specify it), got: %v", sqlList(ops))
 	}
 	if containsSQL(ops, "CASCADE") {
-		t.Errorf("BASE type drop must not add CASCADE (RANGE-only per RFC §5.3), got: %v", sqlList(ops))
+		t.Errorf("BASE type drop must not add CASCADE (RANGE-only per RFC Section 5.3), got: %v", sqlList(ops))
 	}
 }
 
@@ -17694,12 +17694,12 @@ func TestDiffRangeTypeReconstructedSnapshotSkipsComparison(t *testing.T) {
 	}
 }
 
-// ── DOMAIN structured diffing (RFC §5.4) ──────────────────────────────────────
+// ── DOMAIN structured diffing (RFC Section 5.4) ──────────────────────────────────────
 // Regression guard for a real bug found live-testing a demo project:
 // diffType had no case for DOMAIN at all — an already-applied domain whose
 // DEFAULT/NOT NULL/constraints changed was a silent no-op forever, only the
 // generic COMMENT check ever fired. Unlike RANGE/BASE (hash-diffed opaque
-// bodies), RFC §5.4 requires per-property diffing with distinct safety
+// bodies), RFC Section 5.4 requires per-property diffing with distinct safety
 // levels, so each case below checks both the emitted SQL and its safety.
 
 func TestDiffCreateDomainEmitsFullDefinition(t *testing.T) {
@@ -17865,7 +17865,7 @@ func TestDiffDomainDefaultAddedIsSafe(t *testing.T) {
 		t.Fatalf("expected SET DEFAULT op, got: %v", sqlList(ops))
 	}
 	if found.Safety() != pipeline.Safe {
-		t.Errorf("safety = %v, want Safe (RFC §5.4: adding a DEFAULT is SAFE)", found.Safety())
+		t.Errorf("safety = %v, want Safe (RFC Section 5.4: adding a DEFAULT is SAFE)", found.Safety())
 	}
 }
 
@@ -17889,7 +17889,7 @@ func TestDiffDomainDefaultDroppedIsSafe(t *testing.T) {
 	}
 	for _, o := range ops {
 		if strings.Contains(o.SQL(), "DROP DEFAULT") && o.Safety() != pipeline.Safe {
-			t.Errorf("safety = %v, want Safe (RFC §5.4: dropping a DEFAULT is SAFE)", o.Safety())
+			t.Errorf("safety = %v, want Safe (RFC Section 5.4: dropping a DEFAULT is SAFE)", o.Safety())
 		}
 	}
 }
@@ -17974,7 +17974,7 @@ func TestDiffDomainConstraintAddedIsCaution(t *testing.T) {
 		t.Fatalf("expected ADD CONSTRAINT op, got: %v", sqlList(ops))
 	}
 	if found.Safety() != pipeline.Caution {
-		t.Errorf("safety = %v, want Caution (RFC §5.4: adding a constraint is CAUTION)", found.Safety())
+		t.Errorf("safety = %v, want Caution (RFC Section 5.4: adding a constraint is CAUTION)", found.Safety())
 	}
 }
 
@@ -18061,7 +18061,7 @@ func TestDiffDomainConstraintDroppedIsSafe(t *testing.T) {
 	}
 	for _, o := range ops {
 		if strings.Contains(o.SQL(), "DROP CONSTRAINT") && o.Safety() != pipeline.Safe {
-			t.Errorf("safety = %v, want Safe (RFC §5.4: dropping a constraint is SAFE)", o.Safety())
+			t.Errorf("safety = %v, want Safe (RFC Section 5.4: dropping a constraint is SAFE)", o.Safety())
 		}
 	}
 }
@@ -18122,7 +18122,7 @@ func TestDiffDomainBaseTypeChangedRecreates(t *testing.T) {
 	}
 }
 
-// TestDiffDomainCollationChangedRecreates proves RFC §5.4's "Changing the
+// TestDiffDomainCollationChangedRecreates proves RFC Section 5.4's "Changing the
 // base type or COLLATE" row applies to a COLLATE-only change too (same base
 // type): PostgreSQL has no ALTER DOMAIN for it, only DROP DOMAIN CASCADE +
 // CREATE DOMAIN, the same as a base-type change.
@@ -18219,7 +18219,7 @@ func TestDiffDomainStaleSnapshotDoesNotRecreate(t *testing.T) {
 // body-hash comparison on verify/plan --live — a live-catalog-only change to
 // one of these 3 kinds went completely undetected. diffTablespace/diffCast/
 // diffEventTrigger replace that with field-level comparison (RFC
-// §14.7/§14.5/§14.1), which works identically whether the snapshot side came
+// Section 14.7/Section 14.5/Section 14.1), which works identically whether the snapshot side came
 // from source or from introspection, since it never depends on Reconstructed
 // or BodyHash at all.
 
@@ -18600,7 +18600,7 @@ func TestDiffEventTriggerTagChangeRecreatesAndIsSafe(t *testing.T) {
 	if !containsSQL(ops, "DROP SCHEMA") {
 		t.Errorf("expected recreate to reflect the new tag list, got: %v", sqlList(ops))
 	}
-	// RFC §14.1: event trigger DROP+CREATE is SAFE (no data involved),
+	// RFC Section 14.1: event trigger DROP+CREATE is SAFE (no data involved),
 	// unlike every other opaque-tier DROP+CREATE.
 	for _, op := range ops {
 		if op.Safety() != pipeline.Safe {
@@ -18954,7 +18954,7 @@ func TestDiffFDWOptionsChangeRecreates(t *testing.T) {
 	}
 	for _, op := range ops {
 		if strings.Contains(op.SQL(), "DROP FOREIGN DATA WRAPPER") && op.Safety() != pipeline.Destructive {
-			t.Errorf("expected DROP FOREIGN DATA WRAPPER to be Destructive (RFC §14.8), got %v: %s", op.Safety(), op.SQL())
+			t.Errorf("expected DROP FOREIGN DATA WRAPPER to be Destructive (RFC Section 14.8), got %v: %s", op.Safety(), op.SQL())
 		}
 	}
 }
@@ -19211,14 +19211,14 @@ func TestDiffForeignServerOptionsChangeIsSafeAlter(t *testing.T) {
 		t.Fatal(err)
 	}
 	if len(ops) != 1 {
-		t.Fatalf("expected exactly 1 op (targeted ALTER SERVER, RFC §14.9), got %d: %v", len(ops), sqlList(ops))
+		t.Fatalf("expected exactly 1 op (targeted ALTER SERVER, RFC Section 14.9), got %d: %v", len(ops), sqlList(ops))
 	}
 	sql := ops[0].SQL()
 	if !strings.HasPrefix(sql, "ALTER SERVER") {
 		t.Errorf("expected a targeted ALTER SERVER, not DROP+CREATE, got: %s", sql)
 	}
 	if ops[0].Safety() != pipeline.Safe {
-		t.Errorf("expected ALTER SERVER OPTIONS to be Safe (RFC §14.9), got %v: %s", ops[0].Safety(), sql)
+		t.Errorf("expected ALTER SERVER OPTIONS to be Safe (RFC Section 14.9), got %v: %s", ops[0].Safety(), sql)
 	}
 	if !strings.Contains(sql, "SET host 'b'") {
 		t.Errorf("expected SET host 'b', got: %s", sql)
@@ -19463,7 +19463,7 @@ func TestDiffUserMappingLiveOnlyNonSensitiveOptionsChangeDetected(t *testing.T) 
 }
 
 // TestDiffUserMappingLiveOnlyPasswordChangeStaysUndetected documents the
-// remaining, genuinely inherent limitation (RFC §24): the live side can
+// remaining, genuinely inherent limitation (RFC Section 24): the live side can
 // never expose a real password value to compare against, only a fixed
 // redaction placeholder, so a live-only password change cannot be detected
 // — this is a deliberate scope boundary, not an oversight. Non-sensitive
@@ -19544,14 +19544,14 @@ func TestDiffPublicationTablesChangeIsSafeAlter(t *testing.T) {
 		t.Fatal(err)
 	}
 	if len(ops) != 1 {
-		t.Fatalf("expected exactly 1 op (targeted ALTER PUBLICATION SET TABLE, RFC §13.1), got %d: %v", len(ops), sqlList(ops))
+		t.Fatalf("expected exactly 1 op (targeted ALTER PUBLICATION SET TABLE, RFC Section 13.1), got %d: %v", len(ops), sqlList(ops))
 	}
 	sql := ops[0].SQL()
 	if !strings.HasPrefix(sql, "ALTER PUBLICATION") || !strings.Contains(sql, "SET TABLE") {
 		t.Errorf("expected a targeted ALTER PUBLICATION ... SET TABLE, not DROP+CREATE, got: %s", sql)
 	}
 	if ops[0].Safety() != pipeline.Safe {
-		t.Errorf("expected ALTER PUBLICATION SET TABLE to be Safe (RFC §13.1), got %v: %s", ops[0].Safety(), sql)
+		t.Errorf("expected ALTER PUBLICATION SET TABLE to be Safe (RFC Section 13.1), got %v: %s", ops[0].Safety(), sql)
 	}
 	if !strings.Contains(sql, `"public"."t1"`) || !strings.Contains(sql, `"public"."t2"`) {
 		t.Errorf("expected both tables in the SET TABLE list, got: %s", sql)
@@ -19646,7 +19646,7 @@ func TestDiffPublicationAllTablesChangeRecreates(t *testing.T) {
 	}
 	for _, op := range ops {
 		if strings.Contains(op.SQL(), "DROP PUBLICATION") && op.Safety() != pipeline.Destructive {
-			t.Errorf("expected DROP PUBLICATION to be Destructive (RFC §13.1), got %v: %s", op.Safety(), op.SQL())
+			t.Errorf("expected DROP PUBLICATION to be Destructive (RFC Section 13.1), got %v: %s", op.Safety(), op.SQL())
 		}
 	}
 }
@@ -19825,7 +19825,7 @@ func TestDiffCollationLocaleChangeRecreates(t *testing.T) {
 	}
 	for _, op := range ops {
 		if strings.Contains(op.SQL(), "DROP COLLATION") && op.Safety() != pipeline.Destructive {
-			t.Errorf("expected DROP COLLATION to be Destructive (RFC §14.2), got %v: %s", op.Safety(), op.SQL())
+			t.Errorf("expected DROP COLLATION to be Destructive (RFC Section 14.2), got %v: %s", op.Safety(), op.SQL())
 		}
 	}
 }
@@ -20210,7 +20210,7 @@ func TestDiffStatisticsObjectKindsChangeRecreates(t *testing.T) {
 	}
 	for _, op := range ops {
 		if strings.Contains(op.SQL(), "DROP STATISTICS") && op.Safety() != pipeline.Destructive {
-			t.Errorf("expected DROP STATISTICS to be Destructive (RFC §14.6), got %v: %s", op.Safety(), op.SQL())
+			t.Errorf("expected DROP STATISTICS to be Destructive (RFC Section 14.6), got %v: %s", op.Safety(), op.SQL())
 		}
 	}
 }
@@ -20297,7 +20297,7 @@ func TestDiffStatisticsObjectTargetChangeIsSafeAlter(t *testing.T) {
 		t.Errorf("expected ALTER STATISTICS ... SET STATISTICS 500, got: %s", sql)
 	}
 	if ops[0].Safety() != pipeline.Safe {
-		t.Errorf("expected ALTER STATISTICS SET STATISTICS to be Safe (RFC §14.6), got %v: %s", ops[0].Safety(), sql)
+		t.Errorf("expected ALTER STATISTICS SET STATISTICS to be Safe (RFC Section 14.6), got %v: %s", ops[0].Safety(), sql)
 	}
 }
 
@@ -20501,12 +20501,12 @@ func TestDiffStatisticsObjectStaleSnapshotDoesNotRecreate(t *testing.T) {
 	}
 }
 
-// ── Table PROTECTED / DROP CASCADE (RFC §7.11) ────────────────────────────────
+// ── Table PROTECTED / DROP CASCADE (RFC Section 7.11) ────────────────────────────────
 // Regression guard for a real bug found live-testing PROTECTED against a
 // demo project: SnapTable.Protected was populated all the way from source
 // but the Pass-2 deletion loop never read it back — a PROTECTED table was
 // silently DROPped exactly like any other, with zero actual protection
-// (RFC §15.10 Phase 9 Pass 3 / DPG-E022 says the diff must instead error).
+// (RFC Section 15.10 Phase 9 Pass 3 / DPG-E022 says the diff must instead error).
 // DROP CASCADE was already correctly wired (found already-working while
 // investigating), so its test here is a regression guard, not a bug fix.
 
@@ -20703,13 +20703,13 @@ func TestDiffTableProtectedUnchangedIsNoop(t *testing.T) {
 	}
 }
 
-// ── Column type-change USING safety (RFC §7.2) ────────────────────────────────
+// ── Column type-change USING safety (RFC Section 7.2) ────────────────────────────────
 // Regression guard for a real bug found live-testing COLUMN { USING expr; }
 // against a demo project: the USING expression WAS correctly appended to the
 // emitted ALTER COLUMN TYPE SQL, but the op's safety was hardcoded
 // destructiveOp unconditionally — so a user-supplied, correct USING
 // conversion was still treated as DESTRUCTIVE (blocked without
-// --allow-destructive) exactly like a bare, unguarded type change. RFC §7.2
+// --allow-destructive) exactly like a bare, unguarded type change. RFC Section 7.2
 // is explicit: "unless a USING expression is present ... in which case it
 // is classified CAUTION."
 
@@ -21210,7 +21210,7 @@ func TestDiffPolicyRenamedFromStaleErrors(t *testing.T) {
 	}
 }
 
-// ── trivial helpers (coverage tail, see .dpg-notes/dpg-status-accounting.md §9's
+// ── trivial helpers (coverage tail, see .dpg-notes/dpg-status-accounting.md Section 9's
 // "#5 diff coverage push, remaining tail") ─────────────────────────────────────
 
 // TestOpPos guards the op.Pos() accessor — trivial but was the last uncovered
@@ -21259,7 +21259,7 @@ func TestInt64PtrEq(t *testing.T) {
 	}
 }
 
-// ── Composite type attribute diffing (RFC §5.2, RFC audit items #12/#13) ────
+// ── Composite type attribute diffing (RFC Section 5.2, RFC audit items #12/#13) ────
 // Regression guards for two related bugs: buildCompositeType never read
 // block.Columns at all, so a declared `COLUMN attr { RENAMED FROM old; }`
 // sub-block was silently ignored (a rename looked like an unrelated
@@ -21391,7 +21391,7 @@ func TestDiffCompositeAttrTypeChanged(t *testing.T) {
 }
 
 // TestDiffCompositeAttrRenamed proves a builder-populated RenamedFrom (RFC
-// §5.2: "the same [COLUMN] mechanism applies to composite type attributes")
+// Section 5.2: "the same [COLUMN] mechanism applies to composite type attributes")
 // emits ALTER TYPE RENAME ATTRIBUTE, not an unrelated drop+add of two
 // differently-named attributes.
 func TestDiffCompositeAttrRenamed(t *testing.T) {
@@ -21417,7 +21417,7 @@ func TestDiffCompositeAttrRenamed(t *testing.T) {
 	}
 }
 
-// TestDiffCompositeAttrAddedWithCollation proves RFC §5.2's attribute
+// TestDiffCompositeAttrAddedWithCollation proves RFC Section 5.2's attribute
 // COLLATE clause round-trips through ADD ATTRIBUTE as a trailing clause on
 // the type, not a separate statement.
 func TestDiffCompositeAttrAddedWithCollation(t *testing.T) {
@@ -21439,7 +21439,7 @@ func TestDiffCompositeAttrAddedWithCollation(t *testing.T) {
 }
 
 // TestDiffCompositeAttrCollationChanged proves a COLLATE-only change (same
-// type) is still DESTRUCTIVE via ALTER ATTRIBUTE TYPE, matching RFC §5.2's
+// type) is still DESTRUCTIVE via ALTER ATTRIBUTE TYPE, matching RFC Section 5.2's
 // diffing table, which groups "type or COLLATE" as one row.
 func TestDiffCompositeAttrCollationChanged(t *testing.T) {
 	d := New()
@@ -21468,7 +21468,7 @@ func TestDiffCompositeAttrCollationChanged(t *testing.T) {
 
 // ── Column type change: implicit-cast safety classification ────────────────
 
-// TestDiffColumnTypeImplicitCastNoUsingIsCaution proves RFC §17.2's
+// TestDiffColumnTypeImplicitCastNoUsingIsCaution proves RFC Section 17.2's
 // "ALTER TABLE ALTER COLUMN TYPE (implicit cast) -> CAUTION" row: widening
 // smallint -> integer with no USING clause must be CAUTION, not the
 // previous hardcoded DESTRUCTIVE default, since PostgreSQL has a real
@@ -21670,7 +21670,7 @@ func TestDiffColumnsLegacyTimestampSnapshotStillCatchesRealChange(t *testing.T) 
 
 // ── Column type change: typmod-widening safety classification ──────────────
 
-// TestDiffColumnTypeVarcharWideningNoUsingIsCaution proves RFC §7.2's own
+// TestDiffColumnTypeVarcharWideningNoUsingIsCaution proves RFC Section 7.2's own
 // primary example end to end: VARCHAR(10) -> VARCHAR(20) with no USING must
 // be CAUTION, not DESTRUCTIVE — this was the RFC's literal illustrative
 // case for "a type change PostgreSQL can apply implicitly," and it stayed
@@ -21780,7 +21780,7 @@ func TestDiffColumnTypeNumericScaleShrinkStaysDestructive(t *testing.T) {
 	}
 }
 
-// ── SECURITY LABEL (RFC §14.11) ─────────────────────────────────────────────
+// ── SECURITY LABEL (RFC Section 14.11) ─────────────────────────────────────────────
 // Regression guard for the whole feature: no ir kind previously had a
 // SecurityLabels field at all, so a declared "SECURITY LABEL [FOR
 // provider] '...'" directive had nowhere to go at any layer. Covers the

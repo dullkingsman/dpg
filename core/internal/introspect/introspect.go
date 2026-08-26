@@ -1348,7 +1348,7 @@ ORDER  BY n.nspname, c.relname, i.relname`
 }
 
 // introspectViewIndexes is introspectIndexes' sibling for a materialized
-// view's indexes (RFC §8.2) — real PostgreSQL only supports indexes on a
+// view's indexes (RFC Section 8.2) — real PostgreSQL only supports indexes on a
 // materialized view or a table, never a plain view, so this only ever
 // matches relkind = 'm'.
 func introspectViewIndexes(ctx context.Context, conn pipeline.Querier, views []pipeline.IRObject) error {
@@ -1795,7 +1795,7 @@ SELECT n.nspname, c.relname,
        pn.nspname AS func_schema,
        pg_get_triggerdef(t.oid, true) AS triggerdef,
        obj_description(t.oid, 'pg_trigger') AS comment,
-       -- RFC §7.9 (audit item #2): pg_trigger.tgoldtable/tgnewtable hold
+       -- RFC Section 7.9 (audit item #2): pg_trigger.tgoldtable/tgnewtable hold
        -- the REFERENCING OLD/NEW TABLE AS transition-table names directly
        -- (NULL when REFERENCING wasn't used for that side) — no deparse
        -- needed, unlike the WHEN condition below.
@@ -2587,7 +2587,7 @@ ORDER  BY n.nspname, t.typname, a.attnum`
 	return rs.Err()
 }
 
-// introspectDomainBodies populates each DOMAIN's structured RFC §5.4
+// introspectDomainBodies populates each DOMAIN's structured RFC Section 5.4
 // diffing inputs (base type, DEFAULT, NOT NULL, CHECK constraints) —
 // previously all four were concatenated into a single opaque Body string
 // ("basetype NOT NULL DEFAULT expr CONSTRAINT c CHECK (...) ...", the same
@@ -2706,7 +2706,7 @@ ORDER  BY n.nspname, t.typname, con.conname`
 //
 // SUBTYPE_OPCLASS is only rendered when it differs from the subtype's own
 // default btree opclass — same "suppress when it matches the type's default"
-// discipline already used for column STORAGE (§6m) — otherwise nearly every
+// discipline already used for column STORAGE (item 6m) — otherwise nearly every
 // range type would render a redundant SUBTYPE_OPCLASS clause. COLLATION,
 // CANONICAL, and SUBTYPE_DIFF are only rendered when actually set (PG
 // reports 0/no-collation for the common case of a non-collatable subtype
@@ -2777,9 +2777,9 @@ ORDER  BY n.nspname, t.typname`
 }
 
 // introspectBaseBody reconstructs a BASE type's CREATE TYPE options list
-// (RFC §5.5: "INPUT = func, OUTPUT = func, ...") from pg_type — the same
+// (RFC Section 5.5: "INPUT = func, OUTPUT = func, ...") from pg_type — the same
 // "reconstruct from catalog" pattern as introspectRangeBodies above. Diffing
-// stays hash-only (RFC §5.5: any change is DESTRUCTIVE), so completeness
+// stays hash-only (RFC Section 5.5: any change is DESTRUCTIVE), so completeness
 // here only affects how faithfully a dumped base type round-trips, not
 // diffing behavior.
 func introspectBaseBody(ctx context.Context, conn pipeline.Querier, types []pipeline.IRObject) error {
@@ -3150,14 +3150,14 @@ ORDER  BY n.nspname, c.relname, grantee, a.privilege_type`
 	return nil
 }
 
-// introspectRoles reads every Role attribute (RFC §11.1) except PASSWORD:
+// introspectRoles reads every Role attribute (RFC Section 11.1) except PASSWORD:
 // PostgreSQL restricts pg_authid (where a role's password, hashed, actually
 // lives) to superuser, and pg_roles.rolpassword itself returns the fixed
 // placeholder string '********' for any non-superuser caller regardless of
 // whether a password is even set — confirmed live — so there's no reliable
 // non-superuser proxy for "has a password" at all, let alone its value.
 // PASSWORD stays source-side-only (never introspected, never live-diffed),
-// same boundary as Subscription CONNECTION (§6z/§13.2).
+// same boundary as Subscription CONNECTION (item 6z/Section 13.2).
 //
 // rolvaliduntil is cast to text as introspected; PostgreSQL's own timestamp
 // formatting may not byte-match a hand-written VALID UNTIL literal in every
@@ -3874,7 +3874,7 @@ ORDER  BY n.nspname, c.relname, a.attname, grantee, acl.privilege_type`
 }
 
 // introspectPartitions populates PartitionBy and Partitions on partitioned
-// tables, recursing into sub-partitioned children (RFC §7.13) — a partition
+// tables, recursing into sub-partitioned children (RFC Section 7.13) — a partition
 // has relkind 'p' too when it's itself further partitioned, so both queries
 // below deliberately cover ALL partitioned relations, not just top-level
 // tables in idx. Two queries are used: one for the partition key

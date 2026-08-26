@@ -22,7 +22,7 @@ import (
 // TestRoundtripCompositeTypeAttrAddedIsGranular is the regression guard for
 // RFC audit item #13: any composite type attribute change — including a
 // pure, RFC-promised-safe addition — used to force a bare
-// "DROP TYPE; CREATE TYPE" instead of the RFC §5.2 granular
+// "DROP TYPE; CREATE TYPE" instead of the RFC Section 5.2 granular
 // "ALTER TYPE ... ADD ATTRIBUTE" (SAFE). Proves the granular op is actually
 // what gets applied against a real database, and that the type's OID
 // survives (DROP+CREATE would have assigned a new one).

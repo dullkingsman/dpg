@@ -1,5 +1,5 @@
 // Package snapshot implements pipeline.SnapshotStore. It reads and writes the
-// committed JSON snapshot format from RFC §4.2 as JSON files in the project's
+// committed JSON snapshot format from RFC Section 4.2 as JSON files in the project's
 // .dpg/snapshots/ directory.
 package snapshot
 

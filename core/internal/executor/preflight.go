@@ -11,7 +11,7 @@ import (
 )
 
 // ownerRoleRefRe matches the quoted role identifier in "SET ROLE "x";" (the
-// creation-time impersonation wrapper, RFC §11.5) and "... OWNER TO "x";"
+// creation-time impersonation wrapper, RFC Section 11.5) and "... OWNER TO "x";"
 // (reassigning an existing object's owner) — both require the connecting
 // role to be a member of the target role in real PostgreSQL, so both are
 // pre-flight-checked identically.
@@ -41,7 +41,7 @@ func DistinctOwnerRoles(ops []pipeline.DiffOp) []string {
 	return roles
 }
 
-// ValidateOwnerMembership implements RFC §11.5's pre-flight membership check:
+// ValidateOwnerMembership implements RFC Section 11.5's pre-flight membership check:
 // before any DDL in the migration executes, the connecting role must be a
 // member of every role a SET ROLE/OWNER TO statement in ops will target.
 // Checking this upfront turns a bare PostgreSQL "permission denied to set

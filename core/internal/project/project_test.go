@@ -294,7 +294,7 @@ func TestCluster_ClusterObjectsDirExcludedFromDatabases(t *testing.T) {
 }
 
 // TestDiscover_DatabaseNamedLikeClusterObjectsDirErrors proves DPG-E004
-// (reserved_name_conflict, documented in the RFC §3.5 but never enforced by
+// (reserved_name_conflict, documented in the RFC Section 3.5 but never enforced by
 // the reference implementation): a directory that shares the cluster's
 // reserved objects-dir name but actually declares a [database] section must
 // be rejected with a clear error, not silently discarded as if it were the

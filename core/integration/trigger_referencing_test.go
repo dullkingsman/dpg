@@ -20,7 +20,7 @@ import (
 	"github.com/dullkingsman/dpg/internal/testpg"
 )
 
-// TestRoundtripTriggerReferencing is the regression guard for RFC §7.9
+// TestRoundtripTriggerReferencing is the regression guard for RFC Section 7.9
 // (audit item #2): REFERENCING OLD TABLE AS ... NEW TABLE AS ... was
 // already specified in the RFC's own ABNF grammar and worked example, but
 // was a hard parse error in the reference implementation — blockparser had

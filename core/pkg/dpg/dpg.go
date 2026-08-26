@@ -534,7 +534,7 @@ func (c *chainLinter) Lint(objects []IRObject, cfg LinterConfig) ([]LintDiagnost
 // topological sort), and returns a sorted slice of fully-resolved IRObjects.
 //
 // The second return value holds "scalar-merge-conflict" LintDiagnostics
-// (RFC §19.1) surfaced by the merge stage — always populated regardless of
+// (RFC Section 19.1) surfaced by the merge stage — always populated regardless of
 // LinterConfig; pass it through FilterMergeDiagnostics (with the same
 // LinterConfig later given to Lint) before combining it with Lint's own
 // diagnostics, the same gating the built-in CLI applies.
@@ -565,7 +565,7 @@ func FilterMergeDiagnostics(mergeDiags []LintDiagnostic, cfg LinterConfig) []Lin
 	return linter.FilterMergeDiagnostics(mergeDiags, cfg)
 }
 
-// ApplyRuleSeverityOverrides applies [linter.rules] (RFC §19.2) per-rule
+// ApplyRuleSeverityOverrides applies [linter.rules] (RFC Section 19.2) per-rule
 // severity overrides ("error"/"warning"/"off") to diags, matched by
 // d.Rule. Thin wrapper around internal/linter.ApplyRuleSeverityOverrides,
 // re-exported for the same reason as FilterMergeDiagnostics above.

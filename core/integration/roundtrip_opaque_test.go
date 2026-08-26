@@ -264,7 +264,7 @@ EVENT TRIGGER evt_test ON sql_drop
 	}
 	for _, op := range driftOps {
 		if op.Safety() != pipeline.Safe {
-			t.Errorf("expected event trigger DROP+CREATE to be Safe (RFC §14.1), got %v: %s", op.Safety(), op.SQL())
+			t.Errorf("expected event trigger DROP+CREATE to be Safe (RFC Section 14.1), got %v: %s", op.Safety(), op.SQL())
 		}
 	}
 }
@@ -312,7 +312,7 @@ func TestGLiveTablespaceLocationChangeDetected(t *testing.T) {
 	}
 
 	// Mutate directly via raw SQL: LOCATION cannot be changed after
-	// creation (RFC §14.7) — DROP + CREATE at the second directory,
+	// creation (RFC Section 14.7) — DROP + CREATE at the second directory,
 	// matching a hand-run migration outside DPG.
 	if _, err := conn.Exec(ctx, `DROP TABLESPACE gl_ts;`); err != nil {
 		t.Fatalf("drop tablespace: %v", err)
@@ -391,7 +391,7 @@ func TestGLiveFDWHandlerChangeDetected(t *testing.T) {
 	}
 
 	// Mutate directly via raw SQL: real PostgreSQL does support
-	// ALTER FOREIGN DATA WRAPPER, but RFC §14.8 deliberately treats any
+	// ALTER FOREIGN DATA WRAPPER, but RFC Section 14.8 deliberately treats any
 	// change as DROP+CREATE — so the live-catalog-only mutation here still
 	// uses DROP+CREATE, matching a hand-run migration outside DPG.
 	if _, err := conn.Exec(ctx, `DROP FOREIGN DATA WRAPPER gl_fdw;`); err != nil {
@@ -436,7 +436,7 @@ func TestGLiveFDWHandlerChangeDetected(t *testing.T) {
 // TestGLiveForeignServerOptionsChangeDetectedAsAlter is the live-catalog
 // proof for the new capability, not just the G-live gap closure: a
 // live-only OPTIONS change is not just detected, it's detected as a real,
-// targeted ALTER SERVER (RFC §14.9), not a spurious DROP+CREATE — the
+// targeted ALTER SERVER (RFC Section 14.9), not a spurious DROP+CREATE — the
 // generic diffOpaqueIR path this replaces could only ever have produced
 // DROP+CREATE once un-blinded, never the correct minimal-diff ALTER.
 func TestGLiveForeignServerOptionsChangeDetectedAsAlter(t *testing.T) {
@@ -573,7 +573,7 @@ USER MAPPING FOR PUBLIC SERVER gl_srv3 OPTIONS (user 'app_v1');`
 		t.Fatalf("compile: %v", err)
 	}
 
-	// Mutate directly via raw SQL: RFC §14.10 gives UserMapping no ALTER
+	// Mutate directly via raw SQL: RFC Section 14.10 gives UserMapping no ALTER
 	// path (DROP+CREATE only), matching a hand-run migration outside DPG.
 	if _, err := conn.Exec(ctx, `DROP USER MAPPING FOR PUBLIC SERVER gl_srv3;`); err != nil {
 		t.Fatalf("drop user mapping: %v", err)
@@ -617,7 +617,7 @@ USER MAPPING FOR PUBLIC SERVER gl_srv3 OPTIONS (user 'app_v1');`
 // TestGLivePublicationChangesDetectedAsAlter is the live-catalog proof for
 // Publication's new capability, not just the G-live gap closure: live-only
 // Tables and WITH (publish = ...) changes are each detected as a real,
-// targeted ALTER PUBLICATION (RFC §13.1), not a spurious DROP+CREATE.
+// targeted ALTER PUBLICATION (RFC Section 13.1), not a spurious DROP+CREATE.
 func TestGLivePublicationChangesDetectedAsAlter(t *testing.T) {
 	connStr := testpg.Start(t)
 	ctx := context.Background()
@@ -800,7 +800,7 @@ PUBLICATION gl_pub2 FOR TABLE gl_t3;`
 // TestGLivePublicationFilteredTableChangeFallsBackToDropCreate is the
 // live-catalog correctness proof for HasFilteredTables: a table-list
 // change on a publication using a column-list/WHERE filter (the exact
-// shape RFC §13.1's own worked example uses) must fall back to DROP+CREATE
+// shape RFC Section 13.1's own worked example uses) must fall back to DROP+CREATE
 // rather than a targeted ALTER PUBLICATION ... SET TABLE — the latter
 // would silently rebuild the table list without the filter, an
 // unintentional widening of what's replicated.
@@ -974,7 +974,7 @@ func TestGLiveCollationLocaleChangeDetected(t *testing.T) {
 // TestGLiveStatisticsObjectTargetChangeDetectedAsAlter is the live-catalog
 // proof for StatisticsObject's new capability, not just the G-live gap
 // closure: a live-only STATISTICS target change is detected as a real,
-// targeted ALTER STATISTICS (RFC §14.6), not a spurious DROP+CREATE.
+// targeted ALTER STATISTICS (RFC Section 14.6), not a spurious DROP+CREATE.
 func TestGLiveStatisticsObjectTargetChangeDetectedAsAlter(t *testing.T) {
 	connStr := testpg.Start(t)
 	ctx := context.Background()
@@ -1149,7 +1149,7 @@ STATISTICS gl_stats2 (ndistinct) ON id, val FROM gl_stats_t2;`
 	}
 }
 
-// ── Operator family loose members (RFC §14.4) ─────────────────────────────────
+// ── Operator family loose members (RFC Section 14.4) ─────────────────────────────────
 
 // TestRoundtripOpFamilyLooseMembers proves reconstruction matches source
 // exactly for a family with loose (ALTER OPERATOR FAMILY ... ADD-shaped)
@@ -1173,7 +1173,7 @@ func TestRoundtripOpFamilyLooseMembers(t *testing.T) {
 }
 
 // TestGLiveOpFamilyLooseMemberAddDetected is the G-live guard for RFC
-// §14.4's loose members: a member added directly against the live catalog
+// Section 14.4's loose members: a member added directly against the live catalog
 // (bypassing DPG) must show up as a DESTRUCTIVE DROP in plan --live's drift
 // output (the declared state has no such member, so the differ proposes
 // removing it) — before this feature, loose members were never introspected
@@ -1525,7 +1525,7 @@ OPERATOR CLASS public.rt_same_name FOR TYPE integer USING btree FAMILY rt_same_n
 
 // TestRoundtripTableInherits is the permanent regression guard flagged as
 // missing by the 2026-08-17 audit-followup's Part D (process/test-coverage
-// gaps): Table.Inherits' dump round trip (§2b item 6) had only ever been
+// gaps): Table.Inherits' dump round trip (Part 2b item 6) had only ever been
 // manually live-verified in-session, with nothing committed to CI to catch a
 // future regression the way integration/trigger_condition_test.go does for
 // its own fix. Exercises the full apply → introspect → diff pipeline for a
@@ -1537,7 +1537,7 @@ TABLE rt_child (extra TEXT) INHERITS (rt_parent);`)
 
 // TestRoundtripBaseType is the permanent regression guard flagged as missing
 // by the 2026-08-17 audit-followup's Part D: BASE type's dump round trip
-// (§2b item 7) had likewise only ever been manually live-verified in-
+// (Part 2b item 7) had likewise only ever been manually live-verified in-
 // session. Built via PostgreSQL's own documented "reuse an existing
 // internal function" bootstrapping trick (a genuine C-extension base type
 // isn't buildable without a compiler in this environment) — the same
@@ -1567,7 +1567,7 @@ func TestRoundtripIndexVariants(t *testing.T) {
 }`)
 }
 
-// TestRoundtripIndexModeB is the live-catalog guard for the Mode-B (RFC §4.8
+// TestRoundtripIndexModeB is the live-catalog guard for the Mode-B (RFC Section 4.8
 // singular keyword) fix: previously "INDEX name (...)" outside an INDICES{}
 // block was a hard parse error, so it could never reach a live database at
 // all. This proves the whole pipeline — parse Mode-B, build IR, emit CREATE
@@ -1583,7 +1583,7 @@ func TestRoundtripIndexModeB(t *testing.T) {
 }
 
 // TestRoundtripPolicyTriggerPartitionModeB is the live-catalog guard for the
-// Mode-B fix applied to POLICY, TRIGGER, and PARTITION (RFC §4.8 singular
+// Mode-B fix applied to POLICY, TRIGGER, and PARTITION (RFC Section 4.8 singular
 // keyword): previously these three keywords weren't in the block dispatch
 // switch at all (unlike INDEX/GRANT/REVOCATION, which at least hit the wrong,
 // brace-requiring parser), so "POLICY ...;"/"TRIGGER ...;"/"PARTITION ...;"
@@ -1648,7 +1648,7 @@ TABLE "select".t (a INTEGER);`)
 }
 
 // TestRoundtripConstraintsBlockModeA is the live-catalog guard for the new
-// CONSTRAINTS { } plural block (Mode A, RFC §4.8): previously only the
+// CONSTRAINTS { } plural block (Mode A, RFC Section 4.8): previously only the
 // singular CONSTRAINT form parsed at all — CONSTRAINTS had no parser
 // whatsoever, unlike the other 7 collection types, which at least had both
 // forms even when one was buggy. This proves the new block form parses,
@@ -1665,7 +1665,7 @@ func TestRoundtripConstraintsBlockModeA(t *testing.T) {
 }
 
 // TestRoundtripGrantRevocationModeBAppliesLive is the live-catalog guard for
-// the GRANT/GRANTS + REVOCATION/REVOCATIONS Mode-B fix (RFC §4.8 singular
+// the GRANT/GRANTS + REVOCATION/REVOCATIONS Mode-B fix (RFC Section 4.8 singular
 // keyword): previously "GRANT ...;"/"REVOCATION ...;" outside a
 // GRANTS{}/REVOCATIONS{} block was a hard parse error — the identical
 // conflation bug fixed for INDEX/INDICES, both keywords routed to the same
@@ -2145,7 +2145,7 @@ func TestRoundtripSequenceOwner(t *testing.T) {
 	if _, err := conn.Exec(ctx, `CREATE ROLE rt_seq_owner_b`); err != nil {
 		t.Fatalf("create role rt_seq_owner_b: %v", err)
 	}
-	// RFC §11.5: a declared OWNER now creates the sequence directly as that
+	// RFC Section 11.5: a declared OWNER now creates the sequence directly as that
 	// role via SET ROLE, not as the connecting superuser reassigned
 	// afterward — so rt_seq_owner_a genuinely needs CREATE on schema public
 	// itself (postgres:17 revokes it from PUBLIC by default, unlike pre-15).
@@ -3375,7 +3375,7 @@ $$ {}`
 }
 
 // TestRoundtripFunctionSQLBodyReformattingNoSpuriousDrift proves
-// ir.HashFunctionBody's LANGUAGE SQL canonicalisation (RFC §9.5) actually
+// ir.HashFunctionBody's LANGUAGE SQL canonicalisation (RFC Section 9.5) actually
 // closes the spurious-drift gap end to end: a LANGUAGE SQL function is
 // applied, then its source is edited to a cosmetically-reformatted (case,
 // whitespace) but semantically identical body — re-diffing against the
@@ -3462,7 +3462,7 @@ $$ {}`
 // TestRoundtripFunctionSQLBodyReformattingNoSpuriousDrift's plpgsql sibling,
 // exercising the builder-side half of ir.HashFunctionBody's plpgsql
 // canonicalisation (both "desired" computations below go through
-// buildFunction/HashFunctionBody with a real fullStatement — see RFC §9.5).
+// buildFunction/HashFunctionBody with a real fullStatement — see RFC Section 9.5).
 // The body deliberately assigns to its own declared parameter ("n := n +
 // 1"), the case the whole shim design exists for: the PL/pgSQL compiler
 // must resolve "n" against the function's own argument list at compile

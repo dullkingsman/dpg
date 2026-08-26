@@ -286,7 +286,7 @@ func runApply(
 	}
 	defer conn.Close(ctx)
 
-	// RFC §11.5: before any DDL runs, every role a SET ROLE/OWNER TO
+	// RFC Section 11.5: before any DDL runs, every role a SET ROLE/OWNER TO
 	// statement in this migration will target must count the connecting
 	// role as a member — checked upfront so a missing membership surfaces
 	// as one DPG-E036 error, not a bare PostgreSQL failure mid-migration.

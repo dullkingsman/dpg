@@ -164,7 +164,7 @@ func TestSubscriptionConnectionSecretRoundtrip(t *testing.T) {
 	defer subConn.Close(ctx)
 
 	// ── DPG source: the secret reference embedded directly in the native
-	// CONNECTION literal (RFC §13.2) — no separate block form.
+	// CONNECTION literal (RFC Section 13.2) — no separate block form.
 	fixture := "SUBSCRIPTION my_sub\n" +
 		"    CONNECTION '{{vault:secret/repl/pub#conninfo}}'\n" +
 		"    PUBLICATION my_pub\n" +

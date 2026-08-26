@@ -39,7 +39,7 @@ func toSnapOptions(opts []pipeline.StorageParam) []SnapOptionKV {
 }
 
 // toSnapOpFamilyMembers converts an OPERATOR FAMILY's loose members (RFC
-// §14.4) to their snapshot form. FuncArgs is always non-nil (never omitted)
+// Section 14.4) to their snapshot form. FuncArgs is always non-nil (never omitted)
 // even for a zero-arg function, distinguishing "explicitly zero arguments"
 // from a stale/unpopulated slice the same way OpFamilyMembersStructured
 // distinguishes the outer slice being empty from being stale.
@@ -62,7 +62,7 @@ func toSnapOpFamilyMembers(members []pipeline.OpFamilyMember) []SnapOpFamilyMemb
 }
 
 // toSnapSecurityLabels converts a declared/introspected SECURITY LABEL list
-// (RFC §14.11) to its snapshot form. Order-independent by nature (see
+// (RFC Section 14.11) to its snapshot form. Order-independent by nature (see
 // diffSecurityLabelSet in internal/diff), so unlike toSnapOpFamilyMembers no
 // ordering guarantee is implied here.
 func toSnapSecurityLabels(labels []pipeline.SecurityLabel) []SnapSecurityLabel {
@@ -526,7 +526,7 @@ func toSnapExtension(o *ir.Extension) *SnapExtension {
 }
 
 // toSnapPartition converts an ir.Partition into a SnapPartition, recursing
-// into nested sub-partitions (RFC §7.13). schema is the owning table's (or
+// into nested sub-partitions (RFC Section 7.13). schema is the owning table's (or
 // parent partition's) schema, since a partition itself carries no schema
 // field.
 func toSnapPartition(schema string, p *ir.Partition) SnapPartition {

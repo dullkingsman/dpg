@@ -135,7 +135,7 @@ func TestLintHardcodedRolePassword(t *testing.T) {
 		if d.Rule == "hardcoded-role-password" {
 			found = true
 			if !d.IsError {
-				t.Error("expected hardcoded ROLE PASSWORD to be an error, not a warning (RFC §11.1 MUST)")
+				t.Error("expected hardcoded ROLE PASSWORD to be an error, not a warning (RFC Section 11.1 MUST)")
 			}
 		}
 	}
@@ -190,7 +190,7 @@ func TestLintHardcodedFDWPassword(t *testing.T) {
 		if d.Rule == "hardcoded-fdw-password" {
 			found = true
 			if !d.IsError {
-				t.Error("expected hardcoded FDW password to be an error (RFC §19.1 hardcoded_fdw_password)")
+				t.Error("expected hardcoded FDW password to be an error (RFC Section 19.1 hardcoded_fdw_password)")
 			}
 		}
 	}

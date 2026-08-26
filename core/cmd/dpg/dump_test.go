@@ -330,7 +330,7 @@ func TestRenderTemporalForeignKeyCompiles(t *testing.T) {
 
 // TestRenderIndexUsingMethodCompiles guards a real bug found live-testing a
 // demo project: the RFC's ABNF and every one of its worked examples
-// (rfc/dpg-1.md §7.7, e.g. "idx_location USING gist (location);") place
+// (rfc/dpg-1.md Section 7.7, e.g. "idx_location USING gist (location);") place
 // USING before the column list, matching real PostgreSQL's own
 // CREATE INDEX ... USING method (columns) order — but the blockparser used
 // to accept USING only AFTER the columns, silently rejecting the RFC's own
@@ -893,7 +893,7 @@ func TestRenderTableAndIndexTablespaceCompiles(t *testing.T) {
 // project: renderObjectDPG had no case at all for *ir.VirtualType — a
 // declared VIRTUAL TYPE silently vanished from dump output entirely. Doubly
 // consequential for this kind: since virtual types are DPG-native (RFC
-// §5.6, no backing CREATE TYPE), running `dpg dump` against a project that
+// Section 5.6, no backing CREATE TYPE), running `dpg dump` against a project that
 // already had one declared didn't just fail to render it — with nothing in
 // the live catalog for introspection to find, `dpg dump` overwrote the
 // project's own snapshot with zero virtual_type entries, a genuine, silent
@@ -966,7 +966,7 @@ func TestRenderVirtualTypeCompiles(t *testing.T) {
 	}
 }
 
-// TestRenderDomainCompiles guards RFC §5.4's structured domain rendering:
+// TestRenderDomainCompiles guards RFC Section 5.4's structured domain rendering:
 // case "DOMAIN" previously rendered the entire domain (base type, DEFAULT,
 // NOT NULL, every CHECK) as one opaque Body string crammed inline after AS
 // — not just a cosmetically different shape from the RFC's own worked
@@ -974,7 +974,7 @@ func TestRenderVirtualTypeCompiles(t *testing.T) {
 // property-level diffing (an inline blob recompiles back into Body, never
 // into DomainDefault/DomainConstraints/etc., so a dumped-then-reapplied
 // domain would silently lose all future per-property diffing). Now renders
-// via the RFC §5.4 block form directly.
+// via the RFC Section 5.4 block form directly.
 func TestRenderDomainCompiles(t *testing.T) {
 	fmtOpts := format.Options{IndentSize: 4, KeywordCase: "upper"}
 	def := "1"
@@ -1099,7 +1099,7 @@ func TestMergeExistingVirtualTypesBrokenSourceIsNotFatal(t *testing.T) {
 // so a dumped project could never detect drift on them. Uses the flat Mode B
 // GRANT/REVOCATION style (matching writeViewBlock's existing convention),
 // both at the table level and nested inside a per-column COLUMNS entry —
-// mirroring the RFC §7.5 worked example's "COLUMN ssn { GRANTS {...}
+// mirroring the RFC Section 7.5 worked example's "COLUMN ssn { GRANTS {...}
 // REVOCATIONS {...} }" shape.
 func TestRenderTableGrantsAndRevocationsCompiles(t *testing.T) {
 	fmtOpts := format.Options{IndentSize: 4, KeywordCase: "upper"}
@@ -1176,7 +1176,7 @@ func TestRenderTableGrantsAndRevocationsCompiles(t *testing.T) {
 }
 
 // TestRenderSubPartitionedTableCompiles guards a real, pre-existing gap
-// found while implementing RFC §7.13 sub-partitioning: dump had NO support
+// found while implementing RFC Section 7.13 sub-partitioning: dump had NO support
 // for rendering PARTITION BY or PARTITIONS { } at all (not even the flat,
 // non-nested case) — a dumped partitioned table silently lost its entire
 // partition structure. This exercises both the top-level PARTITION BY clause
@@ -1297,7 +1297,7 @@ func TestRenderMaterializedViewCompiles(t *testing.T) {
 		t.Errorf("rendered materialized view missing GRANT: %q", rendered)
 	}
 	if !strings.Contains(rendered, "REVOCATION SELECT FROM PUBLIC") {
-		t.Errorf("rendered materialized view missing REVOCATION (RFC §11.3 Mode B singular keyword — not REVOKE, which the block parser doesn't recognize): %q", rendered)
+		t.Errorf("rendered materialized view missing REVOCATION (RFC Section 11.3 Mode B singular keyword — not REVOKE, which the block parser doesn't recognize): %q", rendered)
 	}
 	if !strings.Contains(rendered, "INDICES") || !strings.Contains(rendered, "order_status_totals_status_uq") {
 		t.Errorf("rendered materialized view missing INDICES block: %q", rendered)
@@ -1672,7 +1672,7 @@ func TestRenderOpaqueObjectsWithCommentCompile(t *testing.T) {
 	}
 }
 
-// TestRenderTSConfigMappingCompiles guards RFC §12.1's MAPPING FOR block on
+// TestRenderTSConfigMappingCompiles guards RFC Section 12.1's MAPPING FOR block on
 // a TEXT SEARCH CONFIGURATION — previously dropped entirely: renderOpaqueBody
 // only ever knew about Comment/Grants, with no path at all for
 // o.Mappings, so a declared (or introspected) mapping never round-tripped
@@ -1785,7 +1785,7 @@ func TestRenderTSConfigOwnerRoundtrip(t *testing.T) {
 	}
 }
 
-// ── Operator family loose members (RFC §14.4) ─────────────────────────────────
+// ── Operator family loose members (RFC Section 14.4) ─────────────────────────────────
 
 // TestRenderOpFamilyBareFormNoChurn guards zero output churn for the common
 // case — a family with only class-owned members (e.g. the demo project's
@@ -1930,7 +1930,7 @@ func TestRenderCompositeAndRangeTypesCompile(t *testing.T) {
 	}
 }
 
-// TestRenderRoleAttributesCompile guards dump's Role rendering (RFC §11.1):
+// TestRenderRoleAttributesCompile guards dump's Role rendering (RFC Section 11.1):
 // every attribute except PASSWORD (never introspected, see the renderer's
 // own doc comment) must round-trip through dump -> recompile with matching
 // values — a bare "ROLE name;" would silently drop LOGIN/SUPERUSER/
@@ -2554,7 +2554,7 @@ func TestRenderOwnerAndColumnStorage(t *testing.T) {
 // from generated source. dump can now actually reconstruct both, using
 // Attrs.Body (already populated by the IR builder from source, and now also
 // by introspection from pg_proc.prosrc). Also guards the "no CREATE verb"
-// rule (RFC §3.4-adjacent convention already enforced elsewhere in this
+// rule (RFC Section 3.4-adjacent convention already enforced elsewhere in this
 // file, e.g. renderOpaqueBody) — a naive port of differ.go's
 // buildFunctionSQL/createProcedure (which DO emit CREATE, since that's real
 // SQL, not DPG source) would have produced unparseable DPG source.
@@ -2607,7 +2607,7 @@ func TestRenderFunctionAndProcedureBody(t *testing.T) {
 		t.Errorf("expected function GRANT, got:\n%s", rendered)
 	}
 	if !strings.Contains(rendered, "REVOCATION EXECUTE FROM PUBLIC;") {
-		t.Errorf("expected function REVOCATION (RFC §11.3 REVOCATIONS, Mode B singular keyword), got:\n%s", rendered)
+		t.Errorf("expected function REVOCATION (RFC Section 11.3 REVOCATIONS, Mode B singular keyword), got:\n%s", rendered)
 	}
 	if !strings.Contains(rendered, "PROCEDURE recalc(") {
 		t.Errorf("expected a PROCEDURE declaration (previously dropped entirely), got:\n%s", rendered)
@@ -3756,7 +3756,7 @@ func TestConfirmOverwriteOnlyExistingPathsWarned(t *testing.T) {
 	}
 }
 
-// TestRenderSecurityLabelsRoundtrip guards RFC §14.11 across every kind
+// TestRenderSecurityLabelsRoundtrip guards RFC Section 14.11 across every kind
 // PostgreSQL's real SECURITY LABEL statement supports: previously no IR
 // kind had a SecurityLabels field at all, so a declared SECURITY LABEL
 // directive had nowhere to go at any layer. One multi-provider entry per

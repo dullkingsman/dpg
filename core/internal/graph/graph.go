@@ -310,7 +310,7 @@ func (r *Resolver) Sort(objects []pipeline.IRObject) ([]pipeline.IRObject, error
 	}
 
 	// tableRefEdges adds a dependency from objIdx to every table statically
-	// referenced in body — a real AST walk (ir.ExtractTableRefs, RFC §22.1
+	// referenced in body — a real AST walk (ir.ExtractTableRefs, RFC Section 22.1
 	// item 9), not a heuristic: used for a view's query and a LANGUAGE sql
 	// function/procedure body (LANGUAGE plpgsql is deliberately never
 	// passed here — see the *ir.Function/*ir.Procedure call sites for why).
@@ -477,7 +477,7 @@ func (r *Resolver) Sort(objects []pipeline.IRObject) ([]pipeline.IRObject, error
 			// View depends on its schema.
 			schemaEdge(i, o.Schema)
 			// Depends on every table its query statically references (RFC
-			// §22.1 item 9) — a real AST walk of Query, not a heuristic.
+			// Section 22.1 item 9) — a real AST walk of Query, not a heuristic.
 			tableRefEdges(i, "sql", o.Query)
 
 		case *ir.Cast:
@@ -504,7 +504,7 @@ func (r *Resolver) Sort(objects []pipeline.IRObject) ([]pipeline.IRObject, error
 			// RANGE type's CANONICAL/SUBTYPE_DIFF) must already exist before
 			// CREATE TYPE runs — confirmed live: "type ... does not exist"
 			// when the type is created first. Body is opaque free text (RFC
-			// §5.3/§5.5), so this reuses bodyCallsFuncEdge's whole-word scan
+			// Section 5.3/Section 5.5), so this reuses bodyCallsFuncEdge's whole-word scan
 			// rather than parsing it — same ordering hazard, found the same
 			// way, as a LANGUAGE sql body's function calls.
 			if o.Variant == "BASE" || o.Variant == "RANGE" {
@@ -534,7 +534,7 @@ func (r *Resolver) Sort(objects []pipeline.IRObject) ([]pipeline.IRObject, error
 			if strings.EqualFold(o.Attrs.Language, "sql") {
 				bodyCallsFuncEdge(i, o.Attrs.Body)
 				// Depends on every table its body statically references
-				// (RFC §22.1 item 9) — real AST analysis; dynamic SQL
+				// (RFC Section 22.1 item 9) — real AST analysis; dynamic SQL
 				// (EXECUTE '...') is invisible to it by design. LANGUAGE
 				// plpgsql is deliberately NOT scanned here, same reasoning
 				// as bodyCallsFuncEdge's own plpgsql skip just above:
@@ -542,7 +542,7 @@ func (r *Resolver) Sort(objects []pipeline.IRObject) ([]pipeline.IRObject, error
 				// embedded SQL against the catalog at CREATE FUNCTION time,
 				// so a function→table edge isn't correctness-load-bearing
 				// for it. Forcing one anyway can manufacture a 2-node cycle
-				// §22.2's FK-only cycle-breaker has no mechanism to
+				// Section 22.2's FK-only cycle-breaker has no mechanism to
 				// resolve — e.g. an entirely ordinary validation/audit
 				// trigger function that queries its own table, which
 				// already has a table→function edge from the trigger
@@ -611,7 +611,7 @@ func (r *Resolver) Sort(objects []pipeline.IRObject) ([]pipeline.IRObject, error
 
 		case *ir.OperatorFamily:
 			schemaEdge(i, o.Schema)
-			// Loose members (RFC §14.4) reference operators/functions/types
+			// Loose members (RFC Section 14.4) reference operators/functions/types
 			// the same way OperatorClass's AS-list members do above — same
 			// ordering hazard (ALTER OPERATOR FAMILY ... ADD referencing a
 			// not-yet-created operator/function/type fails at apply time),

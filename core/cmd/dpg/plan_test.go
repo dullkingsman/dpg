@@ -15,7 +15,7 @@ import (
 
 // TestNormalizeLinterRuleKeysSnakeToKebab guards RFC audit item #17: the
 // RFC documents/exemplifies snake_case rule IDs
-// ("security_definer_search_path", §19.2's own worked example) while the
+// ("security_definer_search_path", Section 19.2's own worked example) while the
 // actual code emits kebab-case ("security-definer-search-path"), and
 // ApplyRuleSeverityOverrides does an exact-string lookup — so an
 // unnormalized snake_case config key silently matched nothing.
@@ -52,7 +52,7 @@ func TestLinterConfigFromNormalizesRuleKeys(t *testing.T) {
 }
 
 // TestLinterConfigFromRFCWorkedExampleActuallyWorks is the full end-to-end
-// guard for RFC audit item #17: §19.2's own worked config example
+// guard for RFC audit item #17: Section 19.2's own worked config example
 // ("security_definer_search_path = \"error\"", snake_case) previously
 // silently no-op'd — a SECURITY DEFINER function missing a search_path
 // reference stayed a warning instead of promoting to an error, exactly as
@@ -98,7 +98,7 @@ func TestLinterConfigFromRFCWorkedExampleActuallyWorks(t *testing.T) {
 // writes and parses a genuine dpg.toml file on disk via config.LoadRoot
 // (the exact function every dpg CLI command uses to read a real project's
 // config) instead of hand-building a config.LinterConfig struct in Go —
-// proving RFC §19.2's own worked example text, verbatim, round-trips
+// proving RFC Section 19.2's own worked example text, verbatim, round-trips
 // through the real TOML parser and still ends up correctly normalized.
 // #17 (unlike #1/#14/#15/#16) has no live-database touchpoint at all: `dpg
 // plan`'s linting step is offline-first by design (see CLAUDE.md) and
@@ -109,7 +109,7 @@ func TestLinterConfigFromRFCWorkedExampleActuallyWorks(t *testing.T) {
 func TestLinterConfigFromRFCWorkedExampleFromRealTOMLFile(t *testing.T) {
 	dir := t.TempDir()
 	tomlPath := filepath.Join(dir, "dpg.toml")
-	// Verbatim shape of RFC §19.2's own worked config example.
+	// Verbatim shape of RFC Section 19.2's own worked config example.
 	tomlContent := "[linter.rules]\nsecurity_definer_search_path = \"error\"\n"
 	if err := os.WriteFile(tomlPath, []byte(tomlContent), 0o644); err != nil {
 		t.Fatalf("write dpg.toml: %v", err)
@@ -155,7 +155,7 @@ func TestLinterConfigFromRFCWorkedExampleFromRealTOMLFile(t *testing.T) {
 }
 
 // TestPlanPrintsScalarMergeConflict proves a scalar-merge-conflict
-// diagnostic (RFC §19.1, surfaced via compiler.Compile's second return
+// diagnostic (RFC Section 19.1, surfaced via compiler.Compile's second return
 // value) reaches buildPlan's print logic and can block planning on its own,
 // same as TestApplyPrintsScalarMergeConflict in apply_test.go — [linter.rules]
 // promotes it to an error here (plan has no --strict flag of its own) to

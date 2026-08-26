@@ -1,6 +1,6 @@
 // Package blockparser implements pipeline.BlockParser. It parses the raw text
 // from a DPG { } block into a pipeline.BlockAST, handling all Part 2 directives
-// defined in the DPG RFC §7.
+// defined in the DPG RFC Section 7.
 package blockparser
 
 import (
@@ -164,7 +164,7 @@ func (b *blockParser) peekWord() string {
 	return w
 }
 
-// readQuotedString reads a double-quoted DPG string literal (RFC §3).
+// readQuotedString reads a double-quoted DPG string literal (RFC Section 3).
 // The opening " must NOT have been consumed. Returns the unquoted content.
 func (b *blockParser) readQuotedString() (string, error) {
 	if b.peek() != '"' {
@@ -525,7 +525,7 @@ func (b *blockParser) parseBlock(pos pipeline.SourcePos) (pipeline.BlockAST, err
 			indices, err = b.parseIndices(dirPos)
 			ast.Indices = append(ast.Indices, indices...)
 		case "INDEX":
-			// Mode B (§4.8 Dual Definition Modes): the singular keyword precedes
+			// Mode B (Section 4.8 Dual Definition Modes): the singular keyword precedes
 			// a single entry outside a plural block, so unlike INDICES this must
 			// not consume a wrapping '{ }'.
 			var idx pipeline.IndexDef
@@ -560,7 +560,7 @@ func (b *blockParser) parseBlock(pos pipeline.SourcePos) (pipeline.BlockAST, err
 			cst, err = b.parseConstraint(dirPos)
 			ast.Constraints = append(ast.Constraints, cst)
 		case "CONSTRAINTS":
-			// Mode A (§4.8 Dual Definition Modes): plural block header wrapping
+			// Mode A (Section 4.8 Dual Definition Modes): plural block header wrapping
 			// multiple entries, each omitting the singular keyword — completes
 			// the pattern already offered for the other 7 collection types.
 			var csts []pipeline.ConstraintDef
@@ -571,7 +571,7 @@ func (b *blockParser) parseBlock(pos pipeline.SourcePos) (pipeline.BlockAST, err
 			policies, err = b.parsePolicies(dirPos)
 			ast.Policies = append(ast.Policies, policies...)
 		case "POLICY":
-			// Mode B (§4.8 Dual Definition Modes): singular entry, no wrapping '{ }'.
+			// Mode B (Section 4.8 Dual Definition Modes): singular entry, no wrapping '{ }'.
 			var pol pipeline.PolicyDef
 			pol, err = b.parseOnePolicy()
 			ast.Policies = append(ast.Policies, pol)
@@ -589,7 +589,7 @@ func (b *blockParser) parseBlock(pos pipeline.SourcePos) (pipeline.BlockAST, err
 			grants, err = b.parseGrantsBlock(dirPos)
 			ast.Grants = append(ast.Grants, grants...)
 		case "GRANT":
-			// Mode B (§4.8 Dual Definition Modes): singular entry, no wrapping '{ }'.
+			// Mode B (Section 4.8 Dual Definition Modes): singular entry, no wrapping '{ }'.
 			var g pipeline.GrantEntry
 			g, err = b.parseOneGrant(dirPos)
 			ast.Grants = append(ast.Grants, g)
@@ -603,7 +603,7 @@ func (b *blockParser) parseBlock(pos pipeline.SourcePos) (pipeline.BlockAST, err
 			r, err = b.parseOneRevocation(dirPos)
 			ast.Revocations = append(ast.Revocations, r)
 		case "SECURITY":
-			// Repeatable, one per label provider (RFC §14.11) — unlike
+			// Repeatable, one per label provider (RFC Section 14.11) — unlike
 			// COMMENT, real PostgreSQL lets several independent providers
 			// label the same object simultaneously.
 			var sl pipeline.SecurityLabel
@@ -643,7 +643,7 @@ func (b *blockParser) parseBlock(pos pipeline.SourcePos) (pipeline.BlockAST, err
 				ast.DependsOnExtensions = append(ast.DependsOnExtensions, ext)
 			}
 		case "NO":
-			// RFC §9.1's "NO DEPENDS ON EXTENSION ext;" — mirrors real
+			// RFC Section 9.1's "NO DEPENDS ON EXTENSION ext;" — mirrors real
 			// PostgreSQL's own ALTER FUNCTION grammar shape (which allows
 			// removing a dependency the same way it was added) for
 			// familiarity, but contributes nothing to DependsOnExtensions:
@@ -656,7 +656,7 @@ func (b *blockParser) parseBlock(pos pipeline.SourcePos) (pipeline.BlockAST, err
 			_, err = b.parseNoDependsOnExtension(dirPos)
 		case "DEFAULT":
 			// Overloaded keyword, disambiguated by what follows: "DEFAULT
-			// PRIVILEGES ..." (existing) vs. RFC §5.4's DOMAIN-only bare
+			// PRIVILEGES ..." (existing) vs. RFC Section 5.4's DOMAIN-only bare
 			// "DEFAULT expr;" directive. peekWord doesn't consume, so a
 			// non-match falls through to parseDefaultPrivileges's own
 			// b.expect("PRIVILEGES") — which would just fail with a
@@ -678,7 +678,7 @@ func (b *blockParser) parseBlock(pos pipeline.SourcePos) (pipeline.BlockAST, err
 				}
 			}
 		case "NOT":
-			// RFC §5.4's DOMAIN-only "NOT NULL;" block directive.
+			// RFC Section 5.4's DOMAIN-only "NOT NULL;" block directive.
 			b.skipWS()
 			w2 := strings.ToUpper(b.readWord())
 			if w2 != "NULL" {
@@ -691,7 +691,7 @@ func (b *blockParser) parseBlock(pos pipeline.SourcePos) (pipeline.BlockAST, err
 			m, err = b.parseTSMapping(dirPos)
 			ast.Mappings = append(ast.Mappings, m)
 		case "OPERATOR", "FUNCTION":
-			// RFC §14.4's OPERATOR FAMILY { } members — real PG's own
+			// RFC Section 14.4's OPERATOR FAMILY { } members — real PG's own
 			// ALTER OPERATOR FAMILY ... ADD list-item grammar, minus the
 			// ALTER/family header. Each item restates its own OPERATOR/
 			// FUNCTION keyword (unlike the real ALTER statement's single
@@ -1553,7 +1553,7 @@ func splitIndexParenGroup(s string) (inner, rest string, ok bool) {
 
 // parseIndexColumnEntry parses one index-col entry per real PostgreSQL's own
 // CREATE INDEX grammar and left-to-right clause order (verified live via
-// direct pg_query.Parse — RFC §7.7's own ABNF lists ASC/DESC/NULLS before
+// direct pg_query.Parse — RFC Section 7.7's own ABNF lists ASC/DESC/NULLS before
 // COLLATE/opclass, the reverse of what PostgreSQL's parser actually accepts,
 // e.g. "a DESC COLLATE x" is a syntax error but "a COLLATE x DESC" is not):
 // column name or "(expr)", then optional COLLATE identifier, then optional
@@ -1783,7 +1783,7 @@ func (b *blockParser) fillColumnBlock(col *pipeline.ColumnBlock) error {
 				col.Grants = append(col.Grants, grants...)
 			}
 		case "GRANT":
-			// Mode B (§4.8 Dual Definition Modes): singular entry, no wrapping '{ }'.
+			// Mode B (Section 4.8 Dual Definition Modes): singular entry, no wrapping '{ }'.
 			g, e2 := b.parseOneGrant(dirPos)
 			if e2 != nil {
 				err = e2
@@ -1880,7 +1880,7 @@ func (b *blockParser) parseStatisticsValue(pos pipeline.SourcePos) (*int, error)
 // parseDependsOnExtension reads: ON EXTENSION ext_name; — the caller has
 // already consumed the leading "DEPENDS" keyword (either directly, for the
 // positive form, or via parseNoDependsOnExtension after "NO", for the
-// negative form, RFC §9.1).
+// negative form, RFC Section 9.1).
 func (b *blockParser) parseDependsOnExtension(pos pipeline.SourcePos) (string, error) {
 	name, err := b.parseOnExtensionName()
 	if err != nil {
@@ -1893,7 +1893,7 @@ func (b *blockParser) parseDependsOnExtension(pos pipeline.SourcePos) (string, e
 }
 
 // parseNoDependsOnExtension reads: DEPENDS ON EXTENSION ext_name; — the
-// caller has already consumed the leading "NO" keyword (RFC §9.1's negative
+// caller has already consumed the leading "NO" keyword (RFC Section 9.1's negative
 // form).
 func (b *blockParser) parseNoDependsOnExtension(pos pipeline.SourcePos) (string, error) {
 	if err := b.expect("DEPENDS"); err != nil {
@@ -2240,7 +2240,7 @@ func (b *blockParser) parseOneTrigger() (pipeline.TriggerDef, error) {
 
 	// Optional REFERENCING { OLD | NEW } TABLE [AS] name [...] — real
 	// PostgreSQL grammar places this after the event list, before FOR EACH
-	// (RFC §7.9, audit item #2).
+	// (RFC Section 7.9, audit item #2).
 	b.skipWS()
 	refMark := b.cur()
 	if strings.ToUpper(b.peekWord()) == "REFERENCING" {
@@ -2854,7 +2854,7 @@ func findTopLevelWord(fp *blockParser, word string) int {
 // (cols) { PARTITIONS {...} }];" entry, shared by parsePartitionsBlock
 // (Mode A, inside a PARTITIONS { } block) and the PARTITION singular-keyword
 // dispatch case (Mode B). The trailing PARTITION BY clause is optional and
-// describes sub-partitioning (RFC §7.13): a partition entry may itself be
+// describes sub-partitioning (RFC Section 7.13): a partition entry may itself be
 // further partitioned, recursively.
 func (b *blockParser) parseOnePartitionBound() (pipeline.PartitionBound, error) {
 	pPos := b.srcPos()
@@ -3160,7 +3160,7 @@ func (b *blockParser) parseDefaultPrivilegesEntries(dp *pipeline.DefaultPrivileg
 			}
 			dp.Grants = append(dp.Grants, grants...)
 		case "GRANT":
-			// Mode B (§4.8 Dual Definition Modes): singular entry, no wrapping '{ }'.
+			// Mode B (Section 4.8 Dual Definition Modes): singular entry, no wrapping '{ }'.
 			g, err := b.parseOneDefaultPrivilegeGrant(dirPos)
 			if err != nil {
 				return err
@@ -3972,7 +3972,7 @@ func (b *blockParser) readTypeListParen() ([]string, error) {
 }
 
 // parseOpFamilyMember parses one OPERATOR/FUNCTION item inside an
-// OPERATOR FAMILY { } block (RFC §14.4) — real PG's own
+// OPERATOR FAMILY { } block (RFC Section 14.4) — real PG's own
 // "ALTER OPERATOR FAMILY ... ADD" list-item grammar, just without the
 // ALTER/family header (already stated by the family's own declaration). The
 // leading OPERATOR/FUNCTION keyword has already been consumed by the

@@ -110,7 +110,7 @@ func TestRoleIntrospectionZeroDrift(t *testing.T) {
 }
 
 // TestRoleAttributesAndPasswordSecretRoundtrip proves Role's new structured
-// attribute support (RFC §11.1) end-to-end against a real server: a ROLE
+// attribute support (RFC Section 11.1) end-to-end against a real server: a ROLE
 // declaration with LOGIN/CONNECTION LIMIT/membership and a PASSWORD held as
 // a {{vault:...}} reference (a) is accepted by, and actually works against,
 // a real PostgreSQL instance — a role created with a broken/unresolved
@@ -262,7 +262,7 @@ WHERE member.rolname = 'app_service'`)
 	// spurious CREATE/DROP) and that the rotated password actually takes
 	// effect live too. The declared {{...}} text itself must change, not
 	// just the value it happens to resolve to right now — PASSWORD drift
-	// detection hashes the declared reference (RFC §11.1), by design, the
+	// detection hashes the declared reference (RFC Section 11.1), by design, the
 	// same as Subscription CONNECTION; if only the underlying Vault value
 	// changed under an unchanged reference string, DPG has no way to know
 	// (and isn't supposed to — that's a live-secret-backend concern, not a

@@ -136,7 +136,7 @@ func TestIntrospectTSConfigParserFields(t *testing.T) {
 	}
 }
 
-// TestIntrospectTSConfigMappings is the live-catalog guard for RFC §12.1's
+// TestIntrospectTSConfigMappings is the live-catalog guard for RFC Section 12.1's
 // MAPPING FOR block: before this, pg_ts_config_map was never queried at
 // all, so TSConfig.Mappings was always empty from introspection — a live
 // config's mappings (including PG's own real multi-dictionary fallback-chain
@@ -283,7 +283,7 @@ func TestIntrospectRangeTypeNonDefaultOpclass(t *testing.T) {
 	}
 }
 
-// TestIntrospectDomainStructuredFields guards RFC §5.4's structured domain
+// TestIntrospectDomainStructuredFields guards RFC Section 5.4's structured domain
 // diffing inputs: introspectDomainBodies/introspectDomainConstraints
 // previously concatenated base type, NOT NULL, DEFAULT, and every CHECK
 // constraint into one opaque Body string (the same "just hash it" treatment
@@ -713,7 +713,7 @@ func TestIntrospectCollationFiltersSystem(t *testing.T) {
 	}
 }
 
-// TestIntrospectSubscription guards §6z/§6ff's closing piece: introspection
+// TestIntrospectSubscription guards items 6z/6ff's closing piece: introspection
 // must reconstruct every Subscription attribute except subconninfo (never
 // selected — see subscriptionConnInfoPlaceholder's doc comment), non-default
 // WITH options included, while never leaking the real connection string

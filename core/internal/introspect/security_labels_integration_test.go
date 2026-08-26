@@ -13,7 +13,7 @@ import (
 	"github.com/dullkingsman/dpg/internal/testpg"
 )
 
-// TestIntrospectSecurityLabels is the live-catalog guard for RFC §14.11
+// TestIntrospectSecurityLabels is the live-catalog guard for RFC Section 14.11
 // across every kind PostgreSQL's real SECURITY LABEL statement supports:
 // previously no introspect function for this existed at all, so a live
 // label was always silently invisible to `dpg dump`/`plan --live`.
@@ -29,7 +29,7 @@ import (
 // with no provider loaded at all — nothing in Postgres enforces "a real
 // provider set this row" at the storage layer, only the SECURITY LABEL
 // statement's own execution path does), which is exactly what this test
-// exercises — the SQL this package generates to WRITE a label (RFC §14.11's
+// exercises — the SQL this package generates to WRITE a label (RFC Section 14.11's
 // other half) is covered separately and directly against a real loaded
 // provider by internal/diff's SecurityLabel test suite plus this feature's
 // original live verification (see project memory).

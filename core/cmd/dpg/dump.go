@@ -388,7 +388,7 @@ func runDump(
 }
 
 // mergeExistingVirtualTypes recovers any VIRTUAL TYPE declarations (RFC
-// §5.6) from the project's own current source before dump overwrites it.
+// Section 5.6) from the project's own current source before dump overwrites it.
 // Virtual types are DPG-native — no CREATE TYPE is ever emitted for one, so
 // nothing about them exists in the live catalog for introspector.Introspect
 // to find. Without this, running `dpg dump` against an already-mature
@@ -397,7 +397,7 @@ func runDump(
 // declared virtual types had 0 left in its snapshot immediately after a
 // dump run) — genuine, silent data loss of the exact structural type
 // information the snapshot exists to preserve for downstream consumers
-// (pkg/dpg, RFC §5.6). A brand-new project (db.SourceFiles empty, nothing
+// (pkg/dpg, RFC Section 5.6). A brand-new project (db.SourceFiles empty, nothing
 // to bootstrap from) returns nil, matching dump's inherent inability to
 // discover virtual types from a live database in that case.
 func mergeExistingVirtualTypes(db *project.Database) []pipeline.IRObject {
@@ -905,7 +905,7 @@ func renderObjectDPGWithRoleInheritDefaults(b *strings.Builder, obj pipeline.IRO
 					b.WriteString("\n")
 				}
 				// Mode A (PARTITIONS { … }) — the form the scanner accepts. A
-				// partition entry may itself be sub-partitioned (RFC §7.13),
+				// partition entry may itself be sub-partitioned (RFC Section 7.13),
 				// rendered as a trailing "PARTITION BY strategy (cols) { PARTITIONS
 				// {...} }" clause, recursively.
 				fmt.Fprintf(b, "%s%s {\n", ind, kw("PARTITIONS"))
@@ -947,7 +947,7 @@ func renderObjectDPGWithRoleInheritDefaults(b *strings.Builder, obj pipeline.IRO
 				if blockHasContent {
 					b.WriteString("\n")
 				}
-				// Mode B (§4.8 Dual Definition Modes) — matches writeViewBlock's
+				// Mode B (Section 4.8 Dual Definition Modes) — matches writeViewBlock's
 				// existing flat-directive style for object-level grants.
 				for _, g := range o.Grants {
 					priv := "ALL"
@@ -1133,7 +1133,7 @@ func renderObjectDPGWithRoleInheritDefaults(b *strings.Builder, obj pipeline.IRO
 			b.WriteString(")")
 			writeTypeOwnerCommentBlock(b, ind, fmtOpts, o.Owner, o.Comment, o.Grants, o.Revocations, o.SecurityLabels)
 		case "DOMAIN":
-			// Renders via the structured Domain* fields (RFC §5.4's block
+			// Renders via the structured Domain* fields (RFC Section 5.4's block
 			// syntax), not o.Body — previously the entire domain (base type,
 			// DEFAULT, NOT NULL, every CHECK) was crammed into one opaque
 			// Body string rendered inline after AS, which not only never
@@ -1234,7 +1234,7 @@ func renderObjectDPGWithRoleInheritDefaults(b *strings.Builder, obj pipeline.IRO
 	case *ir.VirtualType:
 		// No case existed here at all — a declared VIRTUAL TYPE silently
 		// vanished from dump output entirely. Doubly consequential for this
-		// kind specifically: virtual types are DPG-native (RFC §5.6, no
+		// kind specifically: virtual types are DPG-native (RFC Section 5.6, no
 		// backing CREATE TYPE), so live-catalog introspection can never
 		// rediscover one on its own — runDump's caller merges any
 		// already-declared virtual types back in before this ever runs (see
@@ -1331,14 +1331,14 @@ func renderObjectDPGWithRoleInheritDefaults(b *strings.Builder, obj pipeline.IRO
 		}
 
 	case *ir.Role:
-		// Every attribute except PASSWORD (never introspected — RFC §11.1,
+		// Every attribute except PASSWORD (never introspected — RFC Section 11.1,
 		// confirmed live that pg_authid/pg_roles.rolpassword are
 		// superuser-only, no reliable non-superuser proxy exists even for
 		// "has a password", so there is nothing to render or manage from a
 		// live dump). Rendering the rest is required, not optional: a bare
 		// "ROLE name;" would silently drop LOGIN/SUPERUSER/membership/etc.
 		// from dumped source, which — thanks to "undeclared means
-		// unmanaged" (RFC §11.1) — wouldn't cause spurious plan --live
+		// unmanaged" (RFC Section 11.1) — wouldn't cause spurious plan --live
 		// drift, but would make dump fail its actual purpose of capturing
 		// a live role's real configuration.
 		name := quoteIdentIfNeeded(o.Name)
@@ -1759,7 +1759,7 @@ func writeFuncBlock(b *strings.Builder, ind string, fmtOpts format.Options, comm
 }
 
 // writeFuncBlockWithLabels is writeFuncBlock plus SecurityLabels (RFC
-// §14.11) — kept as a separate entry point rather than adding a parameter
+// Section 14.11) — kept as a separate entry point rather than adding a parameter
 // to writeFuncBlock itself so every existing zero-SecurityLabels call site
 // (Extension, and any future FUNCTION-shaped kind that never gets one)
 // doesn't need a trailing nil.
@@ -1898,7 +1898,7 @@ func writeFuncBlockWithDepends(b *strings.Builder, ind string, fmtOpts format.Op
 }
 
 // writeSecurityLabels renders each declared SECURITY LABEL entry (RFC
-// §14.11) as its own "SECURITY LABEL [FOR provider] '...';" directive line
+// Section 14.11) as its own "SECURITY LABEL [FOR provider] '...';" directive line
 // — the same DPG block syntax the block parser accepts (see
 // blockParser.parseSecurityLabel), reused by every kind's block-rendering
 // code below, not just writeFuncBlockWithLabels' FUNCTION-shaped callers.
@@ -2312,7 +2312,7 @@ func renderTSDictBody(b *strings.Builder, ind string, fmtOpts format.Options, o 
 
 // renderTSConfigBody is renderOpaqueBody's TSConfig-specific variant: a text
 // search configuration's { } block may also carry MAPPING FOR entries (RFC
-// §12.1) — previously dropped entirely, since renderOpaqueBody's block only
+// Section 12.1) — previously dropped entirely, since renderOpaqueBody's block only
 // ever knows about Comment/Grants. Reuses renderOpaqueBody's CREATE-prefix
 // stripping (DPG source never starts a declaration with CREATE) but builds
 // its own block instead of delegating to writeFuncBlock.
@@ -2349,7 +2349,7 @@ func renderTSConfigBody(b *strings.Builder, ind string, fmtOpts format.Options, 
 	b.WriteString("}\n")
 }
 
-// renderOpFamilyBody renders an OPERATOR FAMILY declaration, RFC §14.4:
+// renderOpFamilyBody renders an OPERATOR FAMILY declaration, RFC Section 14.4:
 // bare CREATE OPERATOR FAMILY (Part 1, untouched real PG SQL) plus a { }
 // block for the family's loose members — the same shape renderTSConfigBody
 // uses for MAPPING FOR entries. Members render via m.AddClause(), the exact
@@ -2558,7 +2558,7 @@ func inlineConstraintClause(cst *ir.Constraint) string {
 // explicitly or introspection found a live index that used it — dump never
 // invents one from a project's concurrent_indexes default, since that
 // default is a compile-time behavior, not a fact about the object itself.
-// renderVtypeBody renders a VIRTUAL TYPE's structured body (RFC §5.6) back
+// renderVtypeBody renders a VIRTUAL TYPE's structured body (RFC Section 5.6) back
 // into DPG source syntax: a bare type reference, a "(field type, ...)"
 // composite, or a "term | term | ..." union of either. Mirrors
 // ir.VtypeTypeRef.String() for the leaf case, extended to composite/union.

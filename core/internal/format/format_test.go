@@ -282,7 +282,7 @@ func TestFormat_EmptyFile(t *testing.T) {
 
 // ── Idempotence ───────────────────────────────────────────────────────────────
 
-// ── Column alignment (RFC §18.7) ────────────────────────────────────────────
+// ── Column alignment (RFC Section 18.7) ────────────────────────────────────────────
 
 func TestFormat_ColumnAlignment(t *testing.T) {
 	src := `TABLE orders (

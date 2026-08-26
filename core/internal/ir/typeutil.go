@@ -120,7 +120,7 @@ func typeNameToRef(tn *pg_query.TypeName) TypeRef {
 
 // ParseTypeText converts a source-written type name ("int4", "integer",
 // "varchar(20)", "myschema.mytype") into canonical TypeRef form, so a
-// hand-written OPERATOR FAMILY member's op_type (RFC §14.4) compares equal
+// hand-written OPERATOR FAMILY member's op_type (RFC Section 14.4) compares equal
 // to introspection's `::regtype::text` form. canonicalDDL/canonicalizeSQLBody
 // can't do this: pg_query only rewrites an explicit "pg_catalog.int4"
 // reference, never a bare "int4" (it has no catalog access at parse time to
@@ -322,7 +322,7 @@ func HashBody(body string) string {
 // HashBody(body) unchanged; a hashing nicety must never block a build or
 // introspection. Every other language (c, internal, other PL extensions) is
 // NOT canonicalised and behaves exactly as HashBody always has. See RFC
-// §9.5.
+// Section 9.5.
 func HashFunctionBody(language, body, fullStatement string) string {
 	if strings.EqualFold(language, "sql") {
 		if canon, ok := canonicalizeSQLBody(body); ok {

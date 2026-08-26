@@ -90,7 +90,7 @@ type Column struct {
 	// as an ir.Column scalar, on either the source-built or introspected
 	// side, so the differ never has anything to compare there. NotNull is
 	// always true when Serial is set (SERIAL implies NOT NULL in real
-	// PostgreSQL, independent of any PRIMARY KEY). RFC §10: the backing
+	// PostgreSQL, independent of any PRIMARY KEY). RFC Section 10: the backing
 	// sequence itself is never declared in DPG and never appears as a
 	// separate ir.Sequence object — introspectSequences's existing
 	// deptype-'a'/'i'/'e' exclusion already (and correctly) excludes
@@ -350,7 +350,7 @@ type Trigger struct {
 	// a column-scoped trigger silently fired on every column update
 	// instead of just the declared ones.
 	UpdateOfColumns []string
-	// OldTransitionName/NewTransitionName are RFC §7.9's "REFERENCING OLD
+	// OldTransitionName/NewTransitionName are RFC Section 7.9's "REFERENCING OLD
 	// TABLE AS ... NEW TABLE AS ..." transition-table names (audit item
 	// #2) — nil when REFERENCING isn't present, or for whichever of
 	// OLD/NEW wasn't named. Mirrors UpdateOfColumns' optional-field
@@ -701,7 +701,7 @@ type View struct {
 	StorageParams []pipeline.StorageParam
 	// Indexes is only meaningful when Materialized is true — real PostgreSQL
 	// does not support indexes on a plain or recursive view, only on a
-	// materialized view (or a table). RFC §8.2's matview-block grammar is
+	// materialized view (or a table). RFC Section 8.2's matview-block grammar is
 	// the only view-block variant that includes indices-block.
 	Indexes        []*Index
 	SecurityLabels []pipeline.SecurityLabel
@@ -762,7 +762,7 @@ type Procedure struct {
 	BodyHash string // SHA-256 of normalised body
 	Comment  *string
 	// Deprecated/RenamedFrom mirror ir.Function's identical func-block
-	// directives (RFC §9.3/9.4 point Function/Procedure/Aggregate at the
+	// directives (RFC Section 9.3/9.4 point Function/Procedure/Aggregate at the
 	// same grammar) — RFC audit items #8/#10: Procedure never got them
 	// despite sharing the grammar, so DEPRECATED was silently discarded and
 	// a rename was treated as an unrelated DROP+CREATE instead of
@@ -882,14 +882,14 @@ type Type struct {
 	Revocations []Revocation
 	NameMaps    []pipeline.NameMapEntry
 	// DomainBaseType/DomainDefault/DomainNotNull/DomainConstraints (DOMAIN
-	// only) are RFC §5.4's structured domain diffing inputs — a domain is
+	// only) are RFC Section 5.4's structured domain diffing inputs — a domain is
 	// NOT purely opaque like RANGE/BASE despite sharing the Body field, so
 	// property-level changes (DEFAULT, NOT NULL, individual CHECK
 	// constraints) can each get their own targeted ALTER DOMAIN op instead
 	// of an unconditional DROP+CREATE. Populated from whichever source the
 	// user wrote: real PG's own inline "CREATE DOMAIN name AS type DEFAULT
 	// expr CONSTRAINT c CHECK (...)" syntax (parsed from Part 1 via
-	// pg_query), RFC §5.4's block-based "{ DEFAULT expr; CONSTRAINT c
+	// pg_query), RFC Section 5.4's block-based "{ DEFAULT expr; CONSTRAINT c
 	// CHECK (...); }" form, or both merged together.
 	DomainBaseType TypeRef
 	// DomainCollation is RFC Section 5.4's "CREATE DOMAIN name AS base_type
@@ -925,7 +925,7 @@ type Sequence struct {
 	Owner    *string
 	Comment  *string
 	Grants   []Grant
-	// Revocations is RFC §11.3's explicit REVOCATION block support (RFC
+	// Revocations is RFC Section 11.3's explicit REVOCATION block support (RFC
 	// audit item #24) — Grants was already populated by the builder, but
 	// neither createSequence/diffSequence ever referenced Grants (a total
 	// silent-discard) and there was no Revocations slot at all.
@@ -988,7 +988,7 @@ func (s *Sequence) QualifiedName() string   { return qualName(s.Schema, s.Name) 
 func (s *Sequence) Pos() pipeline.SourcePos { return s.SrcPos }
 func (s *Sequence) irObject()               {}
 
-// Role is a CREATE ROLE declaration (RFC §11.1). Every attribute is native
+// Role is a CREATE ROLE declaration (RFC Section 11.1). Every attribute is native
 // PostgreSQL CREATE ROLE/ALTER ROLE grammar, extracted from
 // CreateRoleStmt.Options — not a DPG-invented block directive.
 //
@@ -999,7 +999,7 @@ func (s *Sequence) irObject()               {}
 //
 // Password is the raw declared PASSWORD text, verbatim — a literal, or one
 // containing {{<secret-uri>}} placeholders resolved only at apply time (see
-// pipeline.ResolveTemplate), same mechanism as Subscription.ConnInfo (§13.2).
+// pipeline.ResolveTemplate), same mechanism as Subscription.ConnInfo (Section 13.2).
 // Never the resolved value.
 type Role struct {
 	Name            string
@@ -1103,7 +1103,7 @@ type RoleMembership struct {
 // Tablespace is a CREATE TABLESPACE declaration.
 type Tablespace struct {
 	Name string
-	// Location is RFC §14.7's structured diffing input: LOCATION cannot be
+	// Location is RFC Section 14.7's structured diffing input: LOCATION cannot be
 	// changed after creation in real PostgreSQL, so a Location mismatch is
 	// what actually decides DROP+CREATE — previously only Body's opaque
 	// hash decided this, which (via Reconstructed, below) went silently
@@ -1150,7 +1150,7 @@ func (ts *Tablespace) irObject()               {}
 // ForeignDataWrapper is a CREATE FOREIGN DATA WRAPPER declaration.
 type ForeignDataWrapper struct {
 	Name string
-	// Handler/Validator/Options are RFC §14.8's structured diffing inputs:
+	// Handler/Validator/Options are RFC Section 14.8's structured diffing inputs:
 	// "any change to a FDW requires drop + recreate" is the RFC's own
 	// documented semantics (no ALTER FOREIGN DATA WRAPPER path, even
 	// though real PostgreSQL has one — a deliberate DPG simplification),
@@ -1189,11 +1189,11 @@ func (f *ForeignDataWrapper) irObject()               {}
 // ForeignServer is a CREATE SERVER declaration.
 type ForeignServer struct {
 	Name string
-	// FDWName/Type/Options are RFC §14.9's structured diffing inputs: a
+	// FDWName/Type/Options are RFC Section 14.9's structured diffing inputs: a
 	// FDW-wrapper change or a TYPE change (real PostgreSQL has no
 	// ALTER SERVER ... TYPE) decides DROP+CREATE, same reasoning as
 	// ForeignDataWrapper.Handler/Validator/Options above; a VERSION or
-	// OPTIONS change gets a real, targeted ALTER SERVER per RFC §14.9's
+	// OPTIONS change gets a real, targeted ALTER SERVER per RFC Section 14.9's
 	// own diffing table ("OPTIONS changed" -> SAFE). Previously only
 	// Body's opaque hash decided any of this, which (via Reconstructed,
 	// below) went silently unset on every live path.
@@ -1226,10 +1226,10 @@ func (f *ForeignServer) irObject()               {}
 type UserMapping struct {
 	User   string
 	Server string
-	// Options is RFC §14.10's structured diffing input: "any change to
+	// Options is RFC Section 14.10's structured diffing input: "any change to
 	// the mapping is a full DROP USER MAPPING + CREATE USER MAPPING, not
 	// a targeted ALTER USER MAPPING" is the RFC's own explicit,
-	// deliberately-corrected semantics (§14.10's text notes an earlier
+	// deliberately-corrected semantics (Section 14.10's text notes an earlier
 	// draft described a targeted ALTER that was never implemented), so —
 	// same as ForeignDataWrapper — this drives a single "did anything
 	// change" comparison, not field-level ALTER clauses. Previously only
@@ -1279,14 +1279,14 @@ type Publication struct {
 	// only — FOR TABLES IN SCHEMA/FOR ALL TABLES have no single fixed table
 	// to order against). See PublicationTableRef.
 	Tables []PublicationTableRef
-	// AllTables/Insert/Update/Delete/Truncate are RFC §13.1's structured
+	// AllTables/Insert/Update/Delete/Truncate are RFC Section 13.1's structured
 	// diffing inputs, alongside Tables above: a FOR ALL TABLES publication
 	// can never be converted to/from an explicit table list via ALTER
 	// (confirmed live against a real PostgreSQL 17 server: "Tables cannot
 	// be added to or dropped from FOR ALL TABLES publications"), so an
 	// AllTables change decides DROP+CREATE, while a Tables or WITH
 	// (publish = ...) change each get their own real, targeted
-	// ALTER PUBLICATION (RFC §13.1's own diffing table: both rows say
+	// ALTER PUBLICATION (RFC Section 13.1's own diffing table: both rows say
 	// SAFE). Insert/Update/Delete/Truncate always hold PostgreSQL's
 	// concrete resolved value (true for all four when WITH (publish = ...)
 	// is omitted — PostgreSQL's own default, not a DPG-invented one) on
@@ -1365,7 +1365,7 @@ func (s *Subscription) irObject()               {}
 // EventTrigger is a CREATE EVENT TRIGGER declaration.
 type EventTrigger struct {
 	Name string
-	// Event/Tags are RFC §14.1's structured diffing inputs, alongside
+	// Event/Tags are RFC Section 14.1's structured diffing inputs, alongside
 	// Function below: PostgreSQL has no ALTER EVENT TRIGGER for any of
 	// these three (only ENABLE/DISABLE/OWNER TO/RENAME TO, none modeled
 	// here), so any change to Event, Tags, or Function decides DROP+CREATE
@@ -1426,7 +1426,7 @@ func (e *EventTrigger) irObject()               {}
 type Collation struct {
 	Schema string
 	Name   string
-	// Provider/Collate/Ctype/ICULocale/Deterministic are RFC §14.2's
+	// Provider/Collate/Ctype/ICULocale/Deterministic are RFC Section 14.2's
 	// structured diffing inputs: "any property change requires DROP
 	// COLLATION + CREATE COLLATION" (real PostgreSQL's ALTER COLLATION
 	// supports only REFRESH VERSION/OWNER TO/RENAME TO/SET SCHEMA, none
@@ -1608,7 +1608,7 @@ type OperatorClass struct {
 	// class represented inconsistently depending on which path produced it).
 	// Diffing still can't be incremental the way OperatorFamily's loose
 	// members are (PostgreSQL has no ALTER OPERATOR CLASS ADD/DROP at all —
-	// RFC §14.4), so Body remains the source of truth for DROP+CREATE SQL;
+	// RFC Section 14.4), so Body remains the source of truth for DROP+CREATE SQL;
 	// Members/StorageType exist so the differ can compare structurally
 	// instead of on raw BodyHash, avoiding a false DESTRUCTIVE diff when
 	// hand-written source and an introspected reconstruction differ only in
@@ -1652,7 +1652,7 @@ type OperatorFamily struct {
 	// Members are the family's "loose" members — the ones real PG only lets
 	// you attach via ALTER OPERATOR FAMILY ... ADD, i.e. those that belong to
 	// the family directly rather than to one of its operator classes'
-	// AS-lists (RFC §14.4). Declared in the DPG { } block (Part 2), so Part 1
+	// AS-lists (RFC Section 14.4). Declared in the DPG { } block (Part 2), so Part 1
 	// stays exactly the bare, valid CREATE OPERATOR FAMILY statement
 	// pgparser/reconstruct.go's "CREATE OPERATOR FAMILY " prefix assumes.
 	// Populated for both source-declared and introspected/reconstructed
@@ -1683,7 +1683,7 @@ func (o *OperatorFamily) irObject()               {}
 type Cast struct {
 	SourceType TypeRef
 	TargetType TypeRef
-	// Method/Context are RFC §14.5's structured diffing inputs, alongside
+	// Method/Context are RFC Section 14.5's structured diffing inputs, alongside
 	// Function below: PostgreSQL provides no ALTER CAST at all, so any
 	// change to Method, Function, or Context decides DROP+CREATE —
 	// previously only Body's opaque hash decided this, which (via
@@ -1720,7 +1720,7 @@ func (c *Cast) irObject()               {}
 type StatisticsObject struct {
 	Schema string
 	Name   string
-	// Table/Kinds/Columns/StatisticsTarget are RFC §14.6's structured
+	// Table/Kinds/Columns/StatisticsTarget are RFC Section 14.6's structured
 	// diffing inputs: real PostgreSQL's ALTER STATISTICS supports only
 	// OWNER TO/RENAME TO/SET SCHEMA/SET STATISTICS (confirmed live via
 	// `\h ALTER STATISTICS` against a real PostgreSQL 17 server), so a

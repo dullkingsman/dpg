@@ -51,15 +51,15 @@ type SnapOpaque struct {
 	Deprecated  *string     `json:"deprecated,omitempty"`
 	Grants      []SnapGrant `json:"grants,omitempty"`      // aggregate and procedure
 	Revocations []SnapGrant `json:"revocations,omitempty"` // procedure and aggregate
-	// SecurityLabels (RFC §14.11) covers every opaque kind SECURITY LABEL
+	// SecurityLabels (RFC Section 14.11) covers every opaque kind SECURITY LABEL
 	// applies to: procedure, aggregate, tablespace, publication,
 	// subscription, event_trigger.
 	SecurityLabels []SnapSecurityLabel `json:"security_labels,omitempty"`
-	Mappings       []SnapTSMapping     `json:"mappings,omitempty"` // ts_config only (RFC §12.1 MAPPING FOR)
+	Mappings       []SnapTSMapping     `json:"mappings,omitempty"` // ts_config only (RFC Section 12.1 MAPPING FOR)
 	NameMaps       []SnapNameMapEntry  `json:"name_maps,omitempty"`
-	// TablespaceLocation (RFC §14.7), CastMethod/CastContext/CastFunction
-	// (RFC §14.5), and EventTriggerEvent/EventTriggerTags/
-	// EventTriggerFunction (RFC §14.1) are structured diffing inputs for
+	// TablespaceLocation (RFC Section 14.7), CastMethod/CastContext/CastFunction
+	// (RFC Section 14.5), and EventTriggerEvent/EventTriggerTags/
+	// EventTriggerFunction (RFC Section 14.1) are structured diffing inputs for
 	// their respective kinds only — see ir.Tablespace.Location/ir.Cast.
 	// Method/ir.EventTrigger.Event's doc comments for why BodyHash alone
 	// was insufficient (it goes unset, via Reconstructed, on every live
@@ -139,7 +139,7 @@ type SnapOpaque struct {
 	ProcedureAtomicBody bool     `json:"procedure_atomic_body,omitempty"`
 	// OptionsStructured/FDWHandler/FDWValidator/FDWOptions/ServerFDWName/
 	// ServerType/ServerVersion/ServerOptions/UserMappingOptions are RFC
-	// §14.8/§14.9/§14.10's structured diffing inputs for fdw/server/
+	// Section 14.8/Section 14.9/Section 14.10's structured diffing inputs for fdw/server/
 	// user_mapping respectively. Unlike Tablespace/Cast/EventTrigger
 	// (Tier 1), none of these three kinds has a field guaranteed non-empty
 	// on every real object (a bare FOREIGN DATA WRAPPER with no HANDLER/
@@ -164,7 +164,7 @@ type SnapOpaque struct {
 	ServerOwner        *string        `json:"server_owner,omitempty"`
 	UserMappingOptions []SnapOptionKV `json:"user_mapping_options,omitempty"`
 	// PublicationStructured/PublicationAllTables/PublicationTables/
-	// PublicationInsert/Update/Delete/Truncate are RFC §13.1's structured
+	// PublicationInsert/Update/Delete/Truncate are RFC Section 13.1's structured
 	// diffing inputs — see ir.Publication.AllTables' doc comment.
 	// PublicationTables holds "schema.name" qualified strings, compared as
 	// a set (order-independent). PublicationStructured is the same
@@ -184,7 +184,7 @@ type SnapOpaque struct {
 	PublicationHasFilteredTables bool     `json:"publication_has_filtered_tables,omitempty"`
 	// CollationStructured/CollationProvider/CollationCollate/
 	// CollationCtype/CollationICULocale/CollationDeterministic are RFC
-	// §14.2's structured diffing inputs — see ir.Collation.Provider's doc
+	// Section 14.2's structured diffing inputs — see ir.Collation.Provider's doc
 	// comment. CollationStructured is the same explicit-sentinel pattern
 	// as OptionsStructured above (Provider "c" is itself PostgreSQL's real
 	// default, not a reliable "unpopulated" signal).
@@ -223,7 +223,7 @@ type SnapOpaque struct {
 	// same reasoning as BaseImmutableHash for BASE types.
 	OperatorCoreHash string `json:"operator_core_hash,omitempty"`
 	// StatisticsStructured/StatisticsTable/StatisticsKinds/
-	// StatisticsColumns/StatisticsTarget are RFC §14.6's structured
+	// StatisticsColumns/StatisticsTarget are RFC Section 14.6's structured
 	// diffing inputs — see ir.StatisticsObject.Table's doc comment.
 	// StatisticsStructured is the same explicit-sentinel pattern as
 	// OptionsStructured above (an empty Kinds/Columns list is not itself
@@ -234,7 +234,7 @@ type SnapOpaque struct {
 	StatisticsKinds      []string `json:"statistics_kinds,omitempty"`
 	StatisticsColumns    []string `json:"statistics_columns,omitempty"`
 	StatisticsTarget     *int     `json:"statistics_target,omitempty"`
-	// OpFamilyMembersStructured/OpFamilyMembers are RFC §14.4's structured
+	// OpFamilyMembersStructured/OpFamilyMembers are RFC Section 14.4's structured
 	// diffing input for an operator family's "loose" members — see
 	// ir.OperatorFamily.Members's doc comment. OpFamilyMembersStructured is
 	// the same explicit-sentinel pattern as OptionsStructured above: a real
@@ -285,7 +285,7 @@ type SnapOpaque struct {
 	AggregateOptions           []SnapOptionKV `json:"aggregate_options,omitempty"`
 }
 
-// SnapOpFamilyMember is one "loose" OPERATOR FAMILY member (RFC §14.4) —
+// SnapOpFamilyMember is one "loose" OPERATOR FAMILY member (RFC Section 14.4) —
 // the snapshot-side mirror of pipeline.OpFamilyMember.
 type SnapOpFamilyMember struct {
 	IsFunction       bool     `json:"is_function,omitempty"`
@@ -307,7 +307,7 @@ type SnapOptionKV struct {
 	Value string `json:"value"`
 }
 
-// SnapTSMapping is one MAPPING FOR entry (RFC §12.1) on a text search
+// SnapTSMapping is one MAPPING FOR entry (RFC Section 12.1) on a text search
 // configuration. Dictionaries is a fallback chain — real PG syntax, tried in
 // order until one recognizes the token.
 type SnapTSMapping struct {
@@ -381,7 +381,7 @@ type SnapTable struct {
 }
 
 // SnapPartition is one partition entry attached to a partitioned table.
-// PartitionBy/Partitions describe sub-partitioning (RFC §7.13): PartitionBy
+// PartitionBy/Partitions describe sub-partitioning (RFC Section 7.13): PartitionBy
 // is "" for a leaf partition; when set, Partitions holds that partition's
 // own nested partition entries, recursively.
 type SnapPartition struct {
@@ -501,7 +501,7 @@ type SnapTrigger struct {
 	// column list, comma-separated — see ir.Trigger.UpdateOfColumns' doc
 	// comment.
 	UpdateOfColumns string `json:"update_of_columns,omitempty"`
-	// OldTransitionName/NewTransitionName are RFC §7.9's "REFERENCING OLD
+	// OldTransitionName/NewTransitionName are RFC Section 7.9's "REFERENCING OLD
 	// TABLE AS ... NEW TABLE AS ..." transition-table names (audit item
 	// #2) — "" means REFERENCING wasn't present for that side, same
 	// empty-means-unspecified convention as Condition below.
@@ -535,7 +535,7 @@ type SnapGrant struct {
 	GrantedBy *string `json:"granted_by,omitempty"`
 }
 
-// SnapSecurityLabel is one SECURITY LABEL entry (RFC §14.11) — the
+// SnapSecurityLabel is one SECURITY LABEL entry (RFC Section 14.11) — the
 // snapshot-side mirror of pipeline.SecurityLabel. Provider == "" is the
 // unqualified form (resolves to the sole loaded provider at apply time).
 type SnapSecurityLabel struct {
@@ -651,7 +651,7 @@ type SnapType struct {
 	BaseSubscript     *string `json:"base_subscript,omitempty"`
 	BaseStorage       *string `json:"base_storage,omitempty"`
 	// DomainBaseType/DomainDefault/DomainNotNull/DomainConstraints are
-	// DOMAIN-only (RFC §5.4): structured diffing inputs, not just an opaque
+	// DOMAIN-only (RFC Section 5.4): structured diffing inputs, not just an opaque
 	// body hash, so property-level changes get their own targeted ALTER
 	// DOMAIN op instead of an unconditional DROP+CREATE.
 	DomainBaseType string `json:"domain_base_type,omitempty"`
@@ -700,10 +700,10 @@ type SnapSequence struct {
 	NameMaps       []SnapNameMapEntry  `json:"name_maps,omitempty"`
 }
 
-// SnapRole is a Role's stored state (RFC §11.1). PasswordHash is a hash of
+// SnapRole is a Role's stored state (RFC Section 11.1). PasswordHash is a hash of
 // the *declared* PASSWORD text (literal or {{secret-uri}} reference,
 // verbatim) — never the resolved value; see ir.Role's doc comment and RFC
-// §11.1's "Password drift detection" for why hashing the declared text
+// Section 11.1's "Password drift detection" for why hashing the declared text
 // (not just a boolean has_password) is safe and enables rotation detection.
 type SnapRole struct {
 	Name            string  `json:"name"`

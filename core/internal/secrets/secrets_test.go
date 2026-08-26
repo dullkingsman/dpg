@@ -48,7 +48,7 @@ func TestResolveEnvEmptyName(t *testing.T) {
 }
 
 // TestResolveLinkPrefixIsNotAScheme guards against reviving the removed
-// link:-as-URI-prefix behavior: `link` is a dpg.toml *key* name (RFC §3.3),
+// link:-as-URI-prefix behavior: `link` is a dpg.toml *key* name (RFC Section 3.3),
 // never a URI scheme, so a literal "link:" prefix inside a value is just an
 // ordinary unrecognized scheme like any other typo, not special-cased.
 func TestResolveLinkPrefixIsNotAScheme(t *testing.T) {

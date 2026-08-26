@@ -17,7 +17,7 @@ import (
 )
 
 // TestApplyFunctionBodyReferencesTableOrdering is the live-database
-// regression guard for RFC §22.1 item 9 (audit item #30): a function body's
+// regression guard for RFC Section 22.1 item 9 (audit item #30): a function body's
 // static table references now create real dependency-graph edges, so a
 // function that references a table it needs must be ordered after that
 // table exists — function/procedure bodies were previously completely
@@ -82,13 +82,13 @@ TABLE events (
 }
 
 // TestApplyTriggerFunctionSelfReferenceNoSpuriousCycle is the live-database
-// proof of the specific regression the RFC §22.1 item 9 design conversation
+// proof of the specific regression the RFC Section 22.1 item 9 design conversation
 // identified when weighing a cheaper "function depends on all tables"
 // heuristic against the real AST walk actually implemented: combined with
 // the pre-existing table→trigger-function edge (edge source 6 — a trigger's
 // EXECUTE FUNCTION target must exist first), a blunt heuristic would
 // manufacture a 2-node cycle for every trigger-bearing table (the heuristic
-// always includes the trigger's own table), and §22.2's cycle-breaker has no
+// always includes the trigger's own table), and Section 22.2's cycle-breaker has no
 // mechanism for a function↔table cycle — only FK cycles. A real AST walk
 // doesn't have this problem for the overwhelmingly common case of a trigger
 // function that only touches NEW/OLD and never references its own table in
@@ -158,7 +158,7 @@ TABLE widgets (
 // trigger is on). That combines the pre-existing table→trigger-function edge
 // (edge source 6) with a function→table edge from the plpgsql body (edge
 // source 9) into a genuine 2-node cycle with zero FK constraints anywhere in
-// it — a shape §22.2's cycle-breaker has no mechanism to resolve (it only
+// it — a shape Section 22.2's cycle-breaker has no mechanism to resolve (it only
 // knows how to break FK cycles via DEFERRABLE). Fixed by not scanning
 // plpgsql bodies for table references at all (see graph.go's *ir.Function
 // case): PostgreSQL compiles plpgsql lazily and never resolves embedded SQL

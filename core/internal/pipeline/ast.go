@@ -130,7 +130,7 @@ type TriggerDef struct {
 	// all (fires on any column update, PostgreSQL's own default). Only
 	// ever set when Events contains "UPDATE".
 	UpdateOfColumns []string
-	// OldTransitionName/NewTransitionName are RFC §7.9's "REFERENCING OLD
+	// OldTransitionName/NewTransitionName are RFC Section 7.9's "REFERENCING OLD
 	// TABLE AS ... NEW TABLE AS ..." transition-table names (audit item
 	// #2) — nil when REFERENCING isn't present, or for whichever of
 	// OLD/NEW wasn't named. A transition relation name is always a plain,
@@ -181,7 +181,7 @@ type ColumnBlock struct {
 
 // SecurityLabel is one "SECURITY LABEL [FOR provider] '...'" directive
 // inside a { } block, mirroring real PostgreSQL's SECURITY LABEL statement
-// (RFC §14.11 — only meaningful with a label provider installed, e.g.
+// (RFC Section 14.11 — only meaningful with a label provider installed, e.g.
 // sepgsql). Provider == "" is the unqualified form: PostgreSQL resolves it
 // to the sole loaded provider, and errors if zero or more than one is
 // loaded. Unlike Comment (a single nilable value), a block may declare
@@ -367,7 +367,7 @@ type TSMappingDef struct {
 // OpFamilyMember is one "loose" (family-level) member declared in an
 // OPERATOR FAMILY { } block — real PG only lets you attach these via
 // ALTER OPERATOR FAMILY ... ADD, since a member may belong to the family
-// directly rather than to any one of its operator classes (RFC §14.4). Each
+// directly rather than to any one of its operator classes (RFC Section 14.4). Each
 // item's grammar is copied verbatim from that ALTER statement's own ADD
 // list-item grammar, just without repeating the ALTER/family header.
 type OpFamilyMember struct {
@@ -485,7 +485,7 @@ type BlockAST struct {
 	// fails compilation. NameMaps above has already been deduped to the
 	// winning (last) entry per tool by the time this is populated.
 	NameMapWarnings []LintDiagnostic
-	// DomainDefault/DomainNotNull are RFC §5.4's DOMAIN-only "DEFAULT expr;"
+	// DomainDefault/DomainNotNull are RFC Section 5.4's DOMAIN-only "DEFAULT expr;"
 	// and "NOT NULL;" block directives, MERGED with any DEFAULT/NOT NULL/
 	// CHECK already present in the domain's Part 1 (real PG's own inline
 	// CREATE DOMAIN syntax remains fully supported; this block form is

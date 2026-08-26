@@ -91,7 +91,7 @@ func TestRunValidateStrictNoErrorsOrWarnings(t *testing.T) {
 }
 
 // TestRunValidatePrintsScalarMergeConflict proves the scalar-merge-conflict
-// diagnostic (RFC §19.1) surfaced by compiler.Compile's merge stage is
+// diagnostic (RFC Section 19.1) surfaced by compiler.Compile's merge stage is
 // actually visible in real `dpg validate` output — not just detected
 // internally by internal/merger's own unit tests — using real multi-file
 // .dpg source (two files declaring the same table with a conflicting

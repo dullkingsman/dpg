@@ -81,12 +81,12 @@ type IRBuilder interface {
 }
 
 // Merger merges same-object IRObject declarations from multiple .dpg files
-// according to RFC §3.7 set/scalar merge rules. The second return value
-// holds "scalar-merge-conflict" LintDiagnostics (RFC §19.1) — always
+// according to RFC Section 3.7 set/scalar merge rules. The second return value
+// holds "scalar-merge-conflict" LintDiagnostics (RFC Section 19.1) — always
 // computed, unconditionally of any config: gating by WarnOnScalarMergeConflict
 // and [linter.rules] severity overrides happens once, centrally, in
 // internal/linter.FilterMergeDiagnostics, not here. Merger itself never
-// changes what wins (last-file-wins per RFC §3.7 always applies); the
+// changes what wins (last-file-wins per RFC Section 3.7 always applies); the
 // diagnostics only add visibility into when that rule actually fired.
 // Default implementation: internal/merger.
 type Merger interface {
@@ -117,7 +117,7 @@ type Differ interface {
 }
 
 // Emitter converts ordered DiffOps into a Migration.
-// Default implementation: internal/emit.SQLEmitter (RFC §20.2 SQL format).
+// Default implementation: internal/emit.SQLEmitter (RFC Section 20.2 SQL format).
 // Alternatives: JSONEmitter (machine-readable), DryRunEmitter (human-readable plan).
 type Emitter interface {
 	Emit(ops []DiffOp, meta MigrationMeta) (Migration, error)

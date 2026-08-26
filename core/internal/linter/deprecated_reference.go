@@ -7,7 +7,7 @@ import (
 	"github.com/dullkingsman/dpg/internal/pipeline"
 )
 
-// checkDeprecatedReference implements RFC §19.1's deprecated-reference rule:
+// checkDeprecatedReference implements RFC Section 19.1's deprecated-reference rule:
 // warn when a non-deprecated object references a deprecated object or
 // column. v1 scope, deliberately narrow (see rfc/dpg-1.md Appendix D.3 for
 // the full residual list): FOREIGN KEY table/column references, and

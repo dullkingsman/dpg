@@ -20,7 +20,7 @@ import (
 // schemas/ hierarchy is a compile error.
 //
 // The second return value holds "scalar-merge-conflict" LintDiagnostics
-// (RFC §19.1) surfaced by the merge stage — always populated regardless of
+// (RFC Section 19.1) surfaced by the merge stage — always populated regardless of
 // config, same as pipeline.Merger.Merge itself; see that interface's doc
 // comment for why gating (WarnOnScalarMergeConflict, [linter.rules]) is the
 // caller's job via internal/linter.FilterMergeDiagnostics, not this
@@ -133,7 +133,7 @@ func Compile(files []string, dbDir string, reg *pipeline.Registry) ([]pipeline.I
 		// fails pg_query with a syntax error, since the unquoted form is
 		// only valid for non-reserved identifiers (confirmed live via
 		// pg_query.Parse: "CREATE SCHEMA order" errors, "CREATE SCHEMA
-		// \"order\"" doesn't) — same bug class as §6k's explicit-declaration
+		// \"order\"" doesn't) — same bug class as item 6k's explicit-declaration
 		// fix, just never extended to this synthetic path.
 		part1 := `"` + strings.ReplaceAll(name, `"`, `""`) + `"`
 		rawObjects = append(rawObjects, pipeline.RawObject{

@@ -8,7 +8,7 @@ import (
 // typmodWideningSafe reports whether a same-base-type column type change
 // from "from" to "to" (both fully-rendered TypeRef.String() text) is a pure
 // modifier (length/precision/scale) widening PostgreSQL can apply with no
-// data loss and no USING clause — RFC §7.2's own primary example for the
+// data loss and no USING clause — RFC Section 7.2's own primary example for the
 // "implicit cast -> CAUTION" rule, VARCHAR(10) -> VARCHAR(20). This is a
 // genuinely different mechanism from hasImplicitCast/implicit_casts.go:
 // pg_cast has no entry for a type to itself (a same-type "cast" is trivial

@@ -418,7 +418,7 @@ func TestPopulateOperatorFamilyUsing(t *testing.T) {
 	}
 }
 
-// TestPopulateOperatorFamilyMembers guards RFC §14.4's loose-member
+// TestPopulateOperatorFamilyMembers guards RFC Section 14.4's loose-member
 // persistence, including the G-live regression case: members must survive
 // Populate even for a Reconstructed (live-introspected) family, unlike
 // BodyHash — sourceBodyHash intentionally returns "" for a reconstructed

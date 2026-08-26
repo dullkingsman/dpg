@@ -174,7 +174,7 @@ func isUserMappingPasswordKey(key string) bool {
 // {{secret-uri}} reference (if any) that originally produced it via
 // pipeline.ResolveTemplate at apply time, so a dump has no way to recover
 // the original reference, only to stop leaking the live plaintext into a
-// file that's normally git-committed (see RFC §14.10/§24). Mirrors
+// file that's normally git-committed (see RFC Section 14.10/Section 24). Mirrors
 // subscriptionConnInfoPlaceholder's approach. Deliberately does NOT contain
 // "{{" so internal/linter's hardcoded-fdw-password rule still hard-errors if
 // a user tries to plan/apply the dumped file unmodified (checkUserMapping's
@@ -186,7 +186,7 @@ const UserMappingRedactedPlaceholder = "live value redacted -- replace with a se
 // formatUserMappingOptions is formatOptions' UserMapping-specific variant:
 // redacts password-like OPTIONS values, leaving every other key untouched.
 // FDW/Server OPTIONS (formatOptions, still called directly for those) are
-// never redacted — RFC §24 treats them as non-sensitive by convention.
+// never redacted — RFC Section 24 treats them as non-sensitive by convention.
 func formatUserMappingOptions(opts []string) string {
 	var parts []string
 	for _, o := range opts {
@@ -757,7 +757,7 @@ ORDER  BY p.pubname`
 // grant), and even a privileged caller who CAN read it would have no way to
 // map the resolved value back to whatever {{secret-uri}} the original
 // CONNECTION clause held, if any — same inherent limitation already
-// documented for UserMapping OPTIONS (§14.10/§6ff). subconninfo is never
+// documented for UserMapping OPTIONS (Section 14.10/item 6ff). subconninfo is never
 // selected at all, by design, not merely omitted on error.
 //
 // Must be syntactically valid libpq keyword/value conninfo syntax, not just
@@ -777,7 +777,7 @@ const subscriptionConnInfoPlaceholder = "host=REDACTED port=0 dbname=REDACTED us
 // never causes a spurious DROP+CREATE loop; introspecting at all is what
 // closes the actual bug this fixes — without it, plan --live has no entry
 // for an already-applied subscription and proposes a spurious re-CREATE that
-// then errors on apply (§6z).
+// then errors on apply (item 6z).
 //
 // The reconstructed WITH clause always forces connect = false, create_slot =
 // false, and enabled = false, regardless of the live subscription's actual
@@ -935,7 +935,7 @@ ORDER  BY s.subname`, twoPhaseCol, disableOnErrCol, pwReqCol, runAsOwnerCol, fai
 // publicationTableRefs is the structured counterpart to publicationTargets'
 // own table query (same underlying pg_publication_rel/pg_class join),
 // returning ir.PublicationTableRef instead of pre-quoted display strings —
-// used for RFC §13.1's structured Tables diffing input rather than Body
+// used for RFC Section 13.1's structured Tables diffing input rather than Body
 // reconstruction.
 func publicationTableRefs(ctx context.Context, conn pipeline.Querier, pubid uint32) ([]ir.PublicationTableRef, error) {
 	rs, err := conn.QueryRows(ctx, `
@@ -1621,7 +1621,7 @@ ORDER  BY n.nspname, c.cfgname`
 	return out, nil
 }
 
-// introspectTSConfigMappings populates Mappings (RFC §12.1) for every
+// introspectTSConfigMappings populates Mappings (RFC Section 12.1) for every
 // TSConfig in idx from pg_ts_config_map — previously never queried at all
 // (a comment here even claimed mappings were "a separate IR concern",
 // implying somewhere else handled it, but nothing did: TSConfig.Mappings
@@ -1797,7 +1797,7 @@ ORDER  BY n.nspname, f.opfname`
 // opFamilyLooseMembers returns every "loose" member of the operator family
 // identified by famOID — i.e. a member added via ALTER OPERATOR FAMILY ...
 // ADD rather than inherited from one of the family's operator classes' own
-// AS-lists (RFC §14.4). The distinguishing catalog signal (confirmed live
+// AS-lists (RFC Section 14.4). The distinguishing catalog signal (confirmed live
 // against PG 17) is NOT any column on pg_amop/pg_amproc itself — amopfamily/
 // amprocfamily point at the family either way — it's the row's OWNING
 // pg_depend entry: a class-owned member's pg_amop/pg_amproc row depends on

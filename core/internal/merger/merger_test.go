@@ -221,7 +221,7 @@ func TestMerge_ColumnScalarLastWins(t *testing.T) {
 	}
 }
 
-// ── scalar-merge-conflict detection (RFC §3.7) ─────────────────────────────────
+// ── scalar-merge-conflict detection (RFC Section 3.7) ─────────────────────────────────
 
 func findRule(diags []pipeline.LintDiagnostic, rule string) []pipeline.LintDiagnostic {
 	var out []pipeline.LintDiagnostic

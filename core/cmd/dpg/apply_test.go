@@ -202,7 +202,7 @@ TABLE legacy_data (
 }
 
 // TestApplyPrintsScalarMergeConflict proves a scalar-merge-conflict
-// diagnostic (RFC §19.1, surfaced via compiler.Compile's second return
+// diagnostic (RFC Section 19.1, surfaced via compiler.Compile's second return
 // value) reaches runApply's print/--strict logic and can block apply on its
 // own — no Linter-registered rule involved at all (no DEPRECATED, no
 // hardcoded password, nothing checkTable/checkCrossObjectRules would ever

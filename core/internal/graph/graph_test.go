@@ -470,7 +470,7 @@ func TestSort_UnresolvedFKInExternalSchemaAllowed(t *testing.T) {
 
 // ── View heuristic ────────────────────────────────────────────────────────────
 
-// TestSort_ViewAfterReferencedTables is RFC §22.1 item 9's (audit item #30)
+// TestSort_ViewAfterReferencedTables is RFC Section 22.1 item 9's (audit item #30)
 // regression guard: a view's dependency edges now come from a real AST walk
 // of its query (ir.ExtractTableRefs), not the old "depends on every table in
 // the object set" heuristic (graph.go used to comment this explicitly:
@@ -716,7 +716,7 @@ func TestSort_PublicationNoTableTargetNoError(t *testing.T) {
 // FUNCTION time (unlike plpgsql, compiled lazily), so a LANGUAGE sql
 // function calling another not-yet-created function fails at apply time.
 // TestSort_SqlFunctionBodyReferencesTable and
-// TestSort_PlpgsqlFunctionBodyReferencesTable are RFC §22.1 item 9's (audit
+// TestSort_PlpgsqlFunctionBodyReferencesTable are RFC Section 22.1 item 9's (audit
 // item #30) core regression guard: a function/procedure body's SQL is now
 // scanned for real table references (bodies were previously opaque to the
 // dependency graph entirely, for every language) — a function that INSERTs
@@ -776,7 +776,7 @@ func TestSort_ProcedureBodyReferencesTable(t *testing.T) {
 }
 
 // TestSort_TriggerFunctionNotSelfReferencingNoCycle guards the exact
-// regression the RFC §22.1 item 9 design conversation identified and
+// regression the RFC Section 22.1 item 9 design conversation identified and
 // rejected a cheaper "function depends on all tables" heuristic over:
 // combined with the existing table→trigger-function edge (a trigger's
 // EXECUTE FUNCTION target must exist first), a blunt function→all-tables
@@ -806,7 +806,7 @@ func TestSort_TriggerFunctionNotSelfReferencingNoCycle(t *testing.T) {
 // body queries its OWN table (e.g. `SELECT count(*) FROM app.orders`) closes
 // a 2-node cycle with the pre-existing table→trigger-function edge (source
 // 6) plus a function→table edge from the same table (source 9) — a shape
-// §22.2's cycle-breaker can't resolve since it only knows how to break FK
+// Section 22.2's cycle-breaker can't resolve since it only knows how to break FK
 // cycles via DEFERRABLE, and there is no FK anywhere in this cycle. Must not
 // error.
 func TestSort_TriggerFunctionSelfReferencingNoCycle(t *testing.T) {
@@ -927,7 +927,7 @@ func TestSort_FunctionBuiltinTypesNoError(t *testing.T) {
 	}
 }
 
-// ── Operator family loose members (RFC §14.4) ─────────────────────────────────
+// ── Operator family loose members (RFC Section 14.4) ─────────────────────────────────
 
 // TestSort_FunctionBeforeOpFamilyMember guards the same ordering hazard as
 // TestSort_FunctionBeforeOperatorClass, one level down: a FUNCTION loose

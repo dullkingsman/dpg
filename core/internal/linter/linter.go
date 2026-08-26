@@ -59,7 +59,7 @@ func FilterMergeDiagnostics(mergeDiags []pipeline.LintDiagnostic, cfg pipeline.L
 	return ApplyRuleSeverityOverrides(mergeDiags, cfg.Rules)
 }
 
-// ApplyRuleSeverityOverrides applies RFC §19.2's [linter.rules] per-rule
+// ApplyRuleSeverityOverrides applies RFC Section 19.2's [linter.rules] per-rule
 // severity overrides ("error", "warning", or "off") to diags, matched by
 // d.Rule. A rule ID absent from rules is left at its own default severity.
 // This runs once here, inside the one function every external Lint caller
@@ -323,7 +323,7 @@ func checkView(v *ir.View, cfg pipeline.LinterConfig) []pipeline.LintDiagnostic 
 
 // ── Role rules ────────────────────────────────────────────────────────────────
 
-// checkRole implements RFC §11.1's "Hardcoded passwords" rule: a ROLE
+// checkRole implements RFC Section 11.1's "Hardcoded passwords" rule: a ROLE
 // PASSWORD with no {{secret-uri}} placeholder at all is a literal
 // credential sitting in plaintext in the .dpg source file. IsError (not a
 // warning) when cfg.ForbidHardcodedPasswords is enabled (default true),
@@ -335,7 +335,7 @@ func checkView(v *ir.View, cfg pipeline.LinterConfig) []pipeline.LintDiagnostic 
 // Rule ID is "hardcoded-role-password", not "hardcoded-password" — the
 // latter is the pre-existing, semantically distinct table-column-default
 // rule above (checkTable), which checks a completely different thing.
-// RFC §19.1's rules table now lists both under their real, disambiguated
+// RFC Section 19.1's rules table now lists both under their real, disambiguated
 // code names (kebab-case, matching every rule ID actually in code); it
 // used to conflate this rule alone under a single snake_case
 // `hardcoded_password` entry with no table-column entry at all.
@@ -409,7 +409,7 @@ func checkCrossObjectRules(objects []pipeline.IRObject, cfg pipeline.LinterConfi
 	return diags
 }
 
-// checkSerialSequenceDeclared implements RFC §19.1's serial_sequence_declared
+// checkSerialSequenceDeclared implements RFC Section 19.1's serial_sequence_declared
 // rule, covering both GENERATED ... AS IDENTITY columns and SERIAL/
 // BIGSERIAL/SMALLSERIAL columns (SERIAL now has a distinct IR representation
 // via ir.Column.Serial, so it's no longer out of scope the way an earlier
@@ -461,7 +461,7 @@ func checkSerialSequenceDeclared(objects []pipeline.IRObject) []pipeline.LintDia
 
 // ── helpers ───────────────────────────────────────────────────────────────────
 
-// checkUnnecessaryRevocation implements RFC §19.1's unnecessary_revocation
+// checkUnnecessaryRevocation implements RFC Section 19.1's unnecessary_revocation
 // rule, scoped to a single object's own declaration (see rfc/dpg-1.md
 // Appendix D.3): warns when revocations names a (role, privilege) pair
 // with no matching entry in grants for that same object — catching a
