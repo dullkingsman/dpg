@@ -2401,6 +2401,28 @@ func (b *blockParser) parseOneTrigger() (pipeline.TriggerDef, error) {
 		b.restore(dependsMark)
 	}
 
+	// RENAMED FROM (Section 7.9): the last optional clause on a
+	// trigger-decl, right before the terminating ';' — same inline,
+	// no-own-semicolon shape as Constraint/Index/Policy's identical
+	// sub-object RENAMED FROM, not the top-level BLOCK directive
+	// parseRenamedFrom handles.
+	b.skipWS()
+	renameMark := b.cur()
+	if strings.ToUpper(b.peekWord()) == "RENAMED" {
+		b.readWord()
+		if err := b.expect("FROM"); err != nil {
+			return trig, err
+		}
+		b.skipWS()
+		renamed, rerr := b.readIdentifier()
+		if rerr != nil {
+			return trig, rerr
+		}
+		trig.RenamedFrom = &renamed
+	} else {
+		b.restore(renameMark)
+	}
+
 	comment, err := b.parseTrailingCommentBlock()
 	if err != nil {
 		return trig, err

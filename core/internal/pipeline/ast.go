@@ -153,8 +153,12 @@ type TriggerDef struct {
 	// #75) — the complete desired set, same shape as Function/Procedure's
 	// identical field.
 	DependsOnExtensions []string
-	Comment             *StringLit
-	Pos                 SourcePos
+	// RenamedFrom names the trigger's prior identity (RENAMED FROM, RFC
+	// Section 7.9) — matched within the same table only, like
+	// Constraint/Index/Policy's identical sub-object RENAMED FROM.
+	RenamedFrom *Identifier
+	Comment     *StringLit
+	Pos         SourcePos
 }
 
 // ColumnBlock holds DPG-specific attributes for a single column.

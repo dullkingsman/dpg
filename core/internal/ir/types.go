@@ -370,8 +370,11 @@ type Trigger struct {
 	// uniformity with Function/Procedure's identical field and to make
 	// the differ's shared stringSetDiff-based helper reusable as-is).
 	DependsOnExtensions []string
-	Comment             *string
-	Pos                 pipeline.SourcePos
+	// RenamedFrom names the trigger's prior identity (RENAMED FROM,
+	// Section 7.9) — see pipeline.TriggerDef.RenamedFrom's doc comment.
+	RenamedFrom *string
+	Comment     *string
+	Pos         pipeline.SourcePos
 }
 
 // Grant is a single GRANT directive.

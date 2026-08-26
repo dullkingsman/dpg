@@ -7407,7 +7407,11 @@ func diffTable(o *ir.Table, snap *snapshot.SnapTable, fullSnap *pipeline.Snapsho
 		return nil, err
 	}
 	ops = append(ops, policyOps...)
-	ops = append(ops, diffTriggers(o.Schema, o.Name, o, snap)...)
+	triggerOps, err := diffTriggers(o.Schema, o.Name, o, snap)
+	if err != nil {
+		return nil, err
+	}
+	ops = append(ops, triggerOps...)
 	ops = append(ops, diffTableInherits(tbl, o, snap, pos)...)
 	ops = append(ops, diffGrantSet(snap.Grants, o.Grants, "TABLE "+tbl, pos)...)
 	ops = append(ops, diffRevocationSet(snap.Revocations, o.Revocations, "TABLE "+tbl, pos)...)
@@ -10189,7 +10193,36 @@ func diffPolicies(schema, table string, o *ir.Table, snap *snapshot.SnapTable) (
 	return ops, nil
 }
 
-func diffTriggers(schema, table string, o *ir.Table, snap *snapshot.SnapTable) []pipeline.DiffOp {
+// validateTriggerRenames mirrors validatePolicyRenames — see its doc comment
+// for the general shape shared by every sub-object RENAMED FROM.
+func validateTriggerRenames(desired []*ir.Trigger, desiredByName map[string]*ir.Trigger, snapByName map[string]*snapshot.SnapTrigger) (map[string]string, error) {
+	renamedFrom := make(map[string]string) // snap name -> desired name
+	for _, trg := range desired {
+		if trg.RenamedFrom == nil {
+			continue
+		}
+		if _, collide := desiredByName[*trg.RenamedFrom]; collide {
+			return nil, pipeline.Errorf(trg.Pos,
+				"RENAMED FROM %q on trigger %q collides with another trigger of the same name in the desired declaration. Remove the stale trigger.",
+				*trg.RenamedFrom, trg.Name)
+		}
+		_, oldInSnap := snapByName[*trg.RenamedFrom]
+		_, newInSnap := snapByName[trg.Name]
+		if newInSnap {
+			// Post-apply / no-op state: the snapshot already has the new name.
+			continue
+		}
+		if !oldInSnap {
+			return nil, pipeline.ErrorfCode(trg.Pos, "DPG-E021",
+				"RENAMED FROM %q on trigger %q does not match the snapshot — neither the old nor the new name exists there. Remove RENAMED FROM if this is a genuinely new trigger.",
+				*trg.RenamedFrom, trg.Name)
+		}
+		renamedFrom[*trg.RenamedFrom] = trg.Name
+	}
+	return renamedFrom, nil
+}
+
+func diffTriggers(schema, table string, o *ir.Table, snap *snapshot.SnapTable) ([]pipeline.DiffOp, error) {
 	var ops []pipeline.DiffOp
 	tblIdent := qualIdent(schema, table)
 
@@ -10202,18 +10235,34 @@ func diffTriggers(schema, table string, o *ir.Table, snap *snapshot.SnapTable) [
 		desiredByName[t.Name] = t
 	}
 
+	renamedFrom, err := validateTriggerRenames(o.Triggers, desiredByName, snapByName)
+	if err != nil {
+		return nil, err
+	}
+
 	for _, st := range snap.Triggers {
-		if _, ok := desiredByName[st.Name]; !ok {
-			// A dropped trigger silently stops enforcing whatever business
-			// logic it implemented — behavior-changing (RFC audit item #26).
-			ops = append(ops, cautionOp(
-				fmt.Sprintf("DROP TRIGGER IF EXISTS %s ON %s;", quoteIdent(st.Name), tblIdent),
-				pipeline.SourcePos{},
-			))
+		if _, ok := desiredByName[st.Name]; ok {
+			continue
 		}
+		if _, wasRenamed := renamedFrom[st.Name]; wasRenamed {
+			continue
+		}
+		// A dropped trigger silently stops enforcing whatever business
+		// logic it implemented — behavior-changing (RFC audit item #26).
+		ops = append(ops, cautionOp(
+			fmt.Sprintf("DROP TRIGGER IF EXISTS %s ON %s;", quoteIdent(st.Name), tblIdent),
+			pipeline.SourcePos{},
+		))
 	}
 	for _, trg := range o.Triggers {
 		existing, exists := snapByName[trg.Name]
+		var renaming bool
+		if !exists && trg.RenamedFrom != nil {
+			if oldSt, ok := snapByName[*trg.RenamedFrom]; ok {
+				existing, exists = oldSt, true
+				renaming = true
+			}
+		}
 		if !exists {
 			ops = append(ops, createTrigger(schema, table, trg)...)
 		} else if trg.When != existing.When ||
@@ -10224,12 +10273,35 @@ func diffTriggers(schema, table string, o *ir.Table, snap *snapshot.SnapTable) [
 			ptrStr(trg.NewTransitionName) != existing.NewTransitionName ||
 			qualifyFuncForCompare(trg.Function) != qualifyFuncForCompare(existing.Function) ||
 			foldTriggerPseudoRelNames(normalizeExprForCompare(ptrStr(trg.Condition))) != foldTriggerPseudoRelNames(normalizeExprForCompare(existing.Condition)) {
+			// RENAMED FROM (Section 7.9): when another property change
+			// already forces a drop+recreate, the recreated trigger is
+			// created directly under its final (new) name, so the DROP
+			// must target the trigger's CURRENT (old) name in the
+			// catalog — no separate RENAME TO is emitted in this case.
+			dropName := trg.Name
+			if renaming {
+				dropName = existing.Name
+			}
 			ops = append(ops, cautionOp(
-				fmt.Sprintf("DROP TRIGGER IF EXISTS %s ON %s;", quoteIdent(trg.Name), tblIdent),
+				fmt.Sprintf("DROP TRIGGER IF EXISTS %s ON %s;", quoteIdent(dropName), tblIdent),
 				trg.Pos,
 			))
 			ops = append(ops, createTrigger(schema, table, trg)...)
 		} else {
+			if renaming {
+				// RENAMED FROM on a trigger (Section 7.9): SAFE,
+				// metadata-only — matches Constraint/Index/Policy's
+				// identical sub-object rename classification. Emitted
+				// before any other change below so that the
+				// DEPENDS ON EXTENSION ops that follow can reference the
+				// trigger by its new name, per real PostgreSQL's
+				// ALTER TRIGGER not allowing RENAME TO and
+				// DEPENDS ON EXTENSION in the same statement.
+				ops = append(ops, safeOp(
+					fmt.Sprintf("ALTER TRIGGER %s ON %s RENAME TO %s;", quoteIdent(existing.Name), tblIdent, quoteIdent(trg.Name)),
+					trg.Pos,
+				))
+			}
 			if ptrStr(trg.Comment) != existing.Comment {
 				if trg.Comment != nil {
 					ops = append(ops, safeOp(
@@ -10271,7 +10343,7 @@ func diffTriggers(schema, table string, o *ir.Table, snap *snapshot.SnapTable) [
 			}
 		}
 	}
-	return ops
+	return ops, nil
 }
 
 // qualifyFuncForCompare normalizes a trigger's EXECUTE FUNCTION reference for

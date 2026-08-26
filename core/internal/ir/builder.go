@@ -3793,6 +3793,9 @@ func blockTriggerToIR(tr pipeline.TriggerDef) *Trigger {
 	if tr.Condition != nil {
 		t.Condition = &tr.Condition.Text
 	}
+	if tr.RenamedFrom != nil {
+		t.RenamedFrom = &tr.RenamedFrom.Name
+	}
 	if tr.Comment != nil {
 		t.Comment = &tr.Comment.Value
 	}
