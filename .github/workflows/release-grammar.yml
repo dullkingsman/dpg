@@ -92,6 +92,26 @@ jobs:
             grammar-src/scanner.c
             grammar-src/node-types.json
 
+  # Publishes tree-sitter-dpg to npm via OIDC trusted publishing (no stored
+  # token). The trusted-publisher entry on npmjs.com is keyed to a single
+  # workflow FILENAME, and npm (unlike crates.io) allows only one such entry
+  # per package. That entry is currently set to `release.yml`, because this
+  # job runs as a reusable workflow called from release.yml during a normal
+  # `v*` release cascade — GitHub's OIDC token identifies the job by the
+  # *calling* workflow file in that case, not this one.
+  #
+  # If you push a `grammar-v*` tag directly (a grammar-only release, with no
+  # `v*` cascade), this job runs standalone and the OIDC token's workflow
+  # identity is `release-grammar.yml` instead — which will NOT match the
+  # `release.yml` entry and the publish will fail with a 404.
+  #
+  # To do a grammar-only release: on npmjs.com → tree-sitter-dpg → Trusted
+  # Publisher settings, temporarily change the workflow filename to
+  # `release-grammar.yml`, push the `grammar-v*` tag, confirm the publish
+  # succeeds, then change it back to `release.yml` so the next full `v*`
+  # release keeps working. (crates.io doesn't have this limitation — it has
+  # separate trusted-publisher entries for both `release.yml` and
+  # `release-grammar.yml` registered at once.)
   publish-npm:
     name: Publish to npm
     needs: [resolve-meta, generate]

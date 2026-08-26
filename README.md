@@ -178,6 +178,8 @@ git push && git push origin <tag>
 
 CI picks up the tag and publishes the release automatically.
 
+**Grammar-only releases**: `tree-sitter-dpg`'s npm trusted-publisher entry only supports one workflow filename, and it's normally set to `release.yml` (the full-cascade path). Pushing a standalone `grammar-v*` tag runs `release-grammar.yml` directly instead, which won't match and will fail npm publish with a 404 — see the comment above the `publish-npm` job in [`release-grammar.yml`](.github/workflows/release-grammar.yml) for the toggle steps.
+
 ## Contributing
 
 See [CONTRIBUTING.md](CONTRIBUTING.md).
