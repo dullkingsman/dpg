@@ -2934,6 +2934,24 @@ TABLE orders ( ... )
 }
 ```
 
+   **RLS on a partitioned table does not protect direct partition
+   access.** Confirmed live against PostgreSQL 17: `ENABLE ROW LEVEL
+   SECURITY` and a policy declared on a partitioned parent apply only
+   to queries against the parent — a role granted access directly to a
+   leaf partition can query that partition by name and see every row,
+   completely bypassing the parent's policy (`pg_class.relrowsecurity`
+   is `false` on the partition itself unless set there explicitly;
+   `pg_policies` never lists a policy against a partition it wasn't
+   declared on). Separately enabling RLS on the partition without also
+   declaring an equivalent policy on it does not inherit or otherwise
+   apply the parent's policy — it instead denies every row for every
+   role, PostgreSQL's own fail-closed default when RLS is enabled and
+   no applicable policy exists. Protecting direct partition access
+   therefore requires declaring RLS and the desired policies on each
+   partition individually, in addition to the parent; DPG does not do
+   this automatically, and unlike indexes (Section 7.13, "automatically
+   inherited by all partitions"), RLS state is not inherited at all.
+
 ### 7.9. Triggers
 
    Triggers are declared in the `TRIGGERS { }` block inside a table's
@@ -3440,7 +3458,11 @@ detached-from-dir = "DETACHED FROM" WSP table-ref [ WSP "CONCURRENTLY" ] ";"
    Indexes declared at the parent partitioned table level are
    automatically inherited by all partitions.  The compiler MUST NOT
    emit duplicate `CREATE INDEX` statements on partitions that already
-   inherit a parent-level index.
+   inherit a parent-level index. Row Level Security is a notable
+   exception to this inheritance: see Section 7.8's confirmed-live note
+   — a policy declared on the parent does not protect a partition
+   queried directly, and must be declared on each partition separately
+   if that protection is needed.
 
 ---
 
