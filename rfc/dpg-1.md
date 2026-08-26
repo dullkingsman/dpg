@@ -6603,6 +6603,10 @@ Options:
              Does not modify files. Useful as a CI gate.
   --diff     Print a unified diff of the proposed reformatting.
              Does not modify files.
+  --stdin    Read source from stdin, write formatted output to stdout.
+             Ignores any <file> arguments and --check/--diff; for editor
+             integrations that pipe a buffer's content through the
+             formatter rather than operating on a file on disk.
 ```
 
    Configured via the root `dpg.toml` `[fmt]` section (Section 3.2); the
