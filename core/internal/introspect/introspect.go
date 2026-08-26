@@ -3977,6 +3977,10 @@ ORDER  BY pn.nspname, pc.relname, cc.relname`
 		}
 	}
 
+	if err := introspectPartitionConstraints(ctx, conn, byKey); err != nil {
+		return err
+	}
+
 	for key, t := range idx {
 		if keyDef, ok := partKeys[key]; ok {
 			t.PartitionBy = parsePartitionKey(keyDef)
@@ -3984,6 +3988,102 @@ ORDER  BY pn.nspname, pc.relname, cc.relname`
 		}
 	}
 	return nil
+}
+
+// introspectPartitionConstraints populates Constraints on every partition
+// node in byKey (keyed "schema.partition_name") with constraints genuinely
+// LOCAL to that partition — never inherited from its parent. This is the
+// read-back half of RFC Section 7.3's "DROP CONSTRAINT ... ONLY" gap
+// (PostgreSQL 18+): after "ALTER TABLE ONLY parent DROP CONSTRAINT x", real
+// PostgreSQL flips the constraint's existing row on every current partition
+// from inherited (conislocal=false, coninhcount=1) to local (conislocal=true,
+// coninhcount=0) instead of dropping it there too — confirmed live (PG18)
+// this is the EXACT SAME catalog signature an ordinary "ALTER TABLE
+// partition_name ADD CONSTRAINT" (declared directly on the partition, never
+// on the parent at all) produces from the start; PostgreSQL itself draws no
+// distinction between the two histories, so ir.Partition.Constraints
+// doesn't either. Deliberately narrower than introspectConstraints above:
+// no NOT NULL collapse-to-bool special case (a partition never has an
+// independently-declared Column of its own to collapse onto — see
+// ir.Partition's doc comment) and no single-column extraction (Columns
+// exists on ir.Constraint solely to reconstruct an UNNAMED constraint's
+// PostgreSQL-generated name, which a partition's constraint, always named
+// per its { }-block grammar — RFC Section 7.3 — never needs).
+func introspectPartitionConstraints(ctx context.Context, conn pipeline.Querier, byKey map[string]*ir.Partition) error {
+	if len(byKey) == 0 {
+		return nil
+	}
+	enforcedCol := "true"
+	if serverVersionNum(ctx, conn) >= 180000 {
+		enforcedCol = "con.conenforced"
+	}
+	q := fmt.Sprintf(`
+SELECT n.nspname, c.relname,
+       con.conname,
+       CASE con.contype
+           WHEN 'p' THEN 'PRIMARY KEY' WHEN 'u' THEN 'UNIQUE'
+           WHEN 'c' THEN 'CHECK'       WHEN 'f' THEN 'FOREIGN KEY'
+           WHEN 'x' THEN 'EXCLUDE'     WHEN 'n' THEN 'NOT NULL'
+           ELSE con.contype::text
+       END AS con_type,
+       pg_get_constraintdef(con.oid) AS def,
+       NOT con.convalidated AS not_valid,
+       NOT (%s) AS not_enforced,
+       obj_description(con.oid, 'pg_constraint') AS comment
+FROM   pg_constraint con
+JOIN   pg_class c     ON c.oid = con.conrelid
+JOIN   pg_namespace n ON n.oid = c.relnamespace
+WHERE  c.relispartition
+AND    c.relkind IN ('r', 'p', 'f')
+-- Both conditions together (not conislocal alone, as introspectConstraints
+-- uses above for a top-level table) are what isolate a genuinely
+-- non-inherited row here — see this function's own doc comment for why a
+-- partition additionally needs the coninhcount check: unlike a plain
+-- table under classic INHERITS, PRIMARY KEY/UNIQUE/FOREIGN KEY/EXCLUDE (and,
+-- PostgreSQL 18+, NOT NULL) all DO propagate onto a declarative partition
+-- with their own conislocal=false row, so conislocal alone isn't a reliable
+-- signal here the way it is for classic multi-parent inheritance's
+-- CHECK-only propagation.
+AND    con.conislocal
+AND    con.coninhcount = 0
+AND    n.nspname NOT IN ('pg_catalog','information_schema','pg_toast')
+ORDER  BY n.nspname, c.relname, con.conname`, enforcedCol)
+
+	rs, err := conn.QueryRows(ctx, q)
+	if err != nil {
+		return fmt.Errorf("introspect partition constraints: %w", err)
+	}
+	defer rs.Close()
+
+	for rs.Next() {
+		var schema, table, name, typ, expr string
+		var notValid, notEnforced bool
+		var comment *string
+		if err := rs.Scan(&schema, &table, &name, &typ, &expr, &notValid, &notEnforced, &comment); err != nil {
+			return err
+		}
+		part, ok := byKey[schema+"."+table]
+		if !ok {
+			continue
+		}
+		// Same stripping as introspectConstraints above — pg_get_constraintdef
+		// bakes NOT VALID/NOT ENFORCED into def itself.
+		if notValid {
+			expr = strings.TrimSpace(strings.TrimSuffix(strings.TrimSpace(expr), "NOT VALID"))
+		}
+		if notEnforced {
+			expr = strings.TrimSpace(strings.TrimSuffix(strings.TrimSpace(expr), "NOT ENFORCED"))
+		}
+		part.Constraints = append(part.Constraints, &ir.Constraint{
+			Name:        name,
+			Type:        typ,
+			Expr:        expr,
+			NotValid:    notValid,
+			NotEnforced: notEnforced,
+			Comment:     comment,
+		})
+	}
+	return rs.Err()
 }
 
 // parsePartitionKey converts a pg_get_partkeydef result (e.g. "RANGE (logdate)")

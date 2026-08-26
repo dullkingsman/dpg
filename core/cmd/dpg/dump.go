@@ -2611,12 +2611,32 @@ func renderPartitionEntry(b *strings.Builder, p *ir.Partition, ind string, fmtOp
 		}
 	}
 	if p.PartitionBy != nil {
-		fmt.Fprintf(b, " %s %s %s (%s) {\n", kw("PARTITION"), kw("BY"), kw(p.PartitionBy.Strategy), strings.Join(p.PartitionBy.Columns, ", "))
-		fmt.Fprintf(b, "%s%s {\n", ind+baseInd, kw("PARTITIONS"))
-		for _, sub := range p.Partitions {
-			renderPartitionEntry(b, sub, ind+baseInd+baseInd, fmtOpts)
+		fmt.Fprintf(b, " %s %s %s (%s)", kw("PARTITION"), kw("BY"), kw(p.PartitionBy.Strategy), strings.Join(p.PartitionBy.Columns, ", "))
+	}
+	if p.PartitionBy != nil || len(p.Constraints) > 0 {
+		b.WriteString(" {\n")
+		if p.PartitionBy != nil {
+			fmt.Fprintf(b, "%s%s {\n", ind+baseInd, kw("PARTITIONS"))
+			for _, sub := range p.Partitions {
+				renderPartitionEntry(b, sub, ind+baseInd+baseInd, fmtOpts)
+			}
+			fmt.Fprintf(b, "%s}\n", ind+baseInd)
 		}
-		fmt.Fprintf(b, "%s}\n", ind+baseInd)
+		// RFC Section 7.3's "DROP CONSTRAINT ... ONLY" gap (PostgreSQL 18+) —
+		// a constraint declared directly on this partition, independent of
+		// the parent. Mode B (singular, unwrapped): the only form used here,
+		// since this body already coexists with PARTITIONS above rather than
+		// needing its own CONSTRAINTS { } wrapper.
+		for _, cst := range p.Constraints {
+			fmt.Fprintf(b, "%s%s %s %s", ind+baseInd, kw("CONSTRAINT"), quoteIdentIfNeeded(cst.Name), cst.Expr)
+			if cst.NotValid {
+				fmt.Fprintf(b, " %s %s", kw("NOT"), kw("VALID"))
+			}
+			if cst.NotEnforced {
+				fmt.Fprintf(b, " %s %s", kw("NOT"), kw("ENFORCED"))
+			}
+			b.WriteString(";\n")
+		}
 		fmt.Fprintf(b, "%s}", ind)
 	}
 	b.WriteString(";\n")

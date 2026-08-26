@@ -1826,6 +1826,98 @@ func TestPartitionModeAAndBCanMix(t *testing.T) {
 	}
 }
 
+// TestPartitionLocalConstraint guards RFC Section 7.3's "DROP CONSTRAINT ...
+// ONLY" gap (PostgreSQL 18+): a leaf partition (no PARTITION BY at all) may
+// now carry its own trailing { } body declaring constraints independently
+// of the parent, using the same singular CONSTRAINT directive a table's own
+// block accepts.
+func TestPartitionLocalConstraint(t *testing.T) {
+	src := `PARTITIONS {
+		events_2024 FOR VALUES FROM ('2024-01-01') TO ('2025-01-01') {
+			CONSTRAINT ck_amount CHECK (amount > 0);
+		};
+	}`
+	ast := parse(t, src)
+	if ast.Partitions == nil || len(ast.Partitions.Partitions) != 1 {
+		t.Fatalf("expected 1 partition, got %v", ast.Partitions)
+	}
+	p := ast.Partitions.Partitions[0]
+	if len(p.Constraints) != 1 {
+		t.Fatalf("expected 1 local constraint, got %v", p.Constraints)
+	}
+	cst := p.Constraints[0]
+	if cst.Name.Name != "ck_amount" {
+		t.Errorf("Name: got %q, want %q", cst.Name.Name, "ck_amount")
+	}
+	if cst.Expr.Text != "CHECK (amount > 0)" {
+		t.Errorf("Expr.Text: got %q", cst.Expr.Text)
+	}
+}
+
+// TestPartitionLocalConstraintsPluralBlock guards the Mode A (CONSTRAINTS
+// { }) wrapped form inside a partition's own body, mirroring the table-level
+// Dual Definition Mode.
+func TestPartitionLocalConstraintsPluralBlock(t *testing.T) {
+	src := `PARTITIONS {
+		events_2024 FOR VALUES FROM ('2024-01-01') TO ('2025-01-01') {
+			CONSTRAINTS {
+				ck_amount CHECK (amount > 0);
+				ck_qty CHECK (qty >= 0) NOT VALID;
+			}
+		};
+	}`
+	ast := parse(t, src)
+	p := ast.Partitions.Partitions[0]
+	if len(p.Constraints) != 2 {
+		t.Fatalf("expected 2 local constraints, got %v", p.Constraints)
+	}
+	if p.Constraints[1].Name.Name != "ck_qty" || !p.Constraints[1].NotValid {
+		t.Errorf("second constraint: got %+v", p.Constraints[1])
+	}
+}
+
+// TestPartitionLocalConstraintWithSubPartitioning confirms a partition's own
+// local constraints and its PARTITION BY sub-partitioning suffix can coexist
+// in the same trailing { } body, in either order.
+func TestPartitionLocalConstraintWithSubPartitioning(t *testing.T) {
+	src := `PARTITIONS {
+		events_2024 FOR VALUES FROM ('2024-01-01') TO ('2025-01-01')
+			PARTITION BY LIST (region) {
+				PARTITIONS {
+					events_2024_us FOR VALUES IN ('us-east');
+				}
+				CONSTRAINT ck_amount CHECK (amount > 0);
+			};
+	}`
+	ast := parse(t, src)
+	p := ast.Partitions.Partitions[0]
+	if p.SubStrategy != "LIST" || len(p.SubPartitions) != 1 {
+		t.Fatalf("expected sub-partitioning to still parse correctly, got %+v", p)
+	}
+	if len(p.Constraints) != 1 || p.Constraints[0].Name.Name != "ck_amount" {
+		t.Fatalf("expected 1 local constraint, got %v", p.Constraints)
+	}
+}
+
+// TestPartitionPartitionsWithoutPartitionByRejected guards against a
+// PARTITIONS { } sub-block appearing without a preceding PARTITION BY clause
+// on the same entry — meaningless (there is no sub-strategy to attach
+// children to) and previously would have silently misparsed rather than
+// erroring clearly.
+func TestPartitionPartitionsWithoutPartitionByRejected(t *testing.T) {
+	src := `PARTITIONS {
+		events_2024 FOR VALUES FROM ('2024-01-01') TO ('2025-01-01') {
+			PARTITIONS {
+				events_2024_us FOR VALUES IN ('us-east');
+			}
+		};
+	}`
+	err := parseErr(t, src)
+	if err == nil {
+		t.Fatal("expected an error for PARTITIONS without a preceding PARTITION BY clause")
+	}
+}
+
 func TestPartitionModeBThenModeACanMix(t *testing.T) {
 	src := `
 		PARTITION events_2024_q1 FOR VALUES FROM ('2024-01-01') TO ('2024-04-01');

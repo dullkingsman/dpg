@@ -10203,6 +10203,268 @@ func TestDiffPartitionUnchangedIsNoop(t *testing.T) {
 	}
 }
 
+// TestDiffPartitionConstraintDroppedViaOnly guards RFC Section 7.3's "DROP
+// CONSTRAINT ... ONLY" gap (PostgreSQL 18+): a constraint disappearing from
+// the parent's own declaration while a direct partition independently
+// declares a local constraint of that same name must emit
+// "ALTER TABLE ONLY parent DROP CONSTRAINT" (SAFE), not the ordinary
+// cascading drop — and must NOT also emit a redundant ADD CONSTRAINT for the
+// partition (already physically local there as a result of the ONLY drop).
+func TestDiffPartitionConstraintDroppedViaOnly(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.orders", &snapshot.SnapObject{
+		Kind: "table",
+		Table: &snapshot.SnapTable{
+			Schema:      "public",
+			Name:        "orders",
+			PartitionBy: "RANGE (id)",
+			Columns:     []snapshot.SnapColumn{{Name: "id", Type: "bigint"}, {Name: "amount", Type: "numeric"}},
+			Constraints: []snapshot.SnapConstraint{
+				{Name: "ck_amount", Type: "CHECK", Expr: "CHECK (amount > 0)"},
+			},
+			Partitions: []snapshot.SnapPartition{
+				{Schema: "public", Name: "orders_1", Bound: "FOR VALUES FROM (1) TO (1000)"},
+			},
+		},
+	})
+	desired := []pipeline.IRObject{
+		&ir.Table{
+			Schema: "public",
+			Name:   "orders",
+			PartitionBy: &ir.PartitionSpec{
+				Strategy: "RANGE", Columns: []string{"id"},
+			},
+			Columns: []*ir.Column{
+				{Name: "id", Type: ir.TypeRef{Name: "bigint"}},
+				{Name: "amount", Type: ir.TypeRef{Name: "numeric"}},
+			},
+			Partitions: []*ir.Partition{
+				{
+					Name:   "orders_1",
+					Bounds: "FOR VALUES FROM (1) TO (1000)",
+					Constraints: []*ir.Constraint{
+						{Name: "ck_amount", Type: "CHECK", Expr: "CHECK (amount > 0)"},
+					},
+				},
+			},
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := `ALTER TABLE ONLY "public"."orders" DROP CONSTRAINT "ck_amount";`
+	op := findOpSQL(ops, want)
+	if op == nil {
+		t.Fatalf("expected %q, got: %v", want, sqlList(ops))
+	}
+	if op.Safety() != pipeline.Safe {
+		t.Errorf("ONLY drop safety = %v, want Safe", op.Safety())
+	}
+	if containsSQL(ops, "ADD CONSTRAINT") {
+		t.Errorf("expected no redundant ADD CONSTRAINT on the partition, got: %v", sqlList(ops))
+	}
+	if containsSQL(ops, `ALTER TABLE "public"."orders" DROP CONSTRAINT`) {
+		t.Errorf("expected the ONLY variant, not a plain cascading drop, got: %v", sqlList(ops))
+	}
+}
+
+// TestDiffPartitionConstraintPlainDropWhenNotRetained confirms the ordinary,
+// pre-existing behavior is unchanged when no partition retains the
+// constraint locally: a plain cascading DESTRUCTIVE drop, no ONLY.
+func TestDiffPartitionConstraintPlainDropWhenNotRetained(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.orders", &snapshot.SnapObject{
+		Kind: "table",
+		Table: &snapshot.SnapTable{
+			Schema:      "public",
+			Name:        "orders",
+			PartitionBy: "RANGE (id)",
+			Columns:     []snapshot.SnapColumn{{Name: "id", Type: "bigint"}, {Name: "amount", Type: "numeric"}},
+			Constraints: []snapshot.SnapConstraint{
+				{Name: "ck_amount", Type: "CHECK", Expr: "CHECK (amount > 0)"},
+			},
+			Partitions: []snapshot.SnapPartition{
+				{Schema: "public", Name: "orders_1", Bound: "FOR VALUES FROM (1) TO (1000)"},
+			},
+		},
+	})
+	desired := []pipeline.IRObject{
+		&ir.Table{
+			Schema:      "public",
+			Name:        "orders",
+			PartitionBy: &ir.PartitionSpec{Strategy: "RANGE", Columns: []string{"id"}},
+			Columns: []*ir.Column{
+				{Name: "id", Type: ir.TypeRef{Name: "bigint"}},
+				{Name: "amount", Type: ir.TypeRef{Name: "numeric"}},
+			},
+			Partitions: []*ir.Partition{
+				{Name: "orders_1", Bounds: "FOR VALUES FROM (1) TO (1000)"},
+			},
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := `ALTER TABLE "public"."orders" DROP CONSTRAINT "ck_amount";`
+	op := findOpSQL(ops, want)
+	if op == nil {
+		t.Fatalf("expected plain drop %q, got: %v", want, sqlList(ops))
+	}
+	if op.Safety() != pipeline.Destructive {
+		t.Errorf("plain drop safety = %v, want Destructive", op.Safety())
+	}
+	if containsSQL(ops, "ONLY") {
+		t.Errorf("expected no ONLY variant when no partition retains the constraint, got: %v", sqlList(ops))
+	}
+}
+
+// TestDiffPartitionLocalConstraintAdded guards the ordinary case: a
+// constraint declared directly on an already-existing partition, unrelated
+// to anything on the parent — a plain CAUTION ADD CONSTRAINT, no PostgreSQL
+// version dependency.
+func TestDiffPartitionLocalConstraintAdded(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.orders", &snapshot.SnapObject{
+		Kind: "table",
+		Table: &snapshot.SnapTable{
+			Schema:      "public",
+			Name:        "orders",
+			PartitionBy: "RANGE (id)",
+			Columns:     []snapshot.SnapColumn{{Name: "id", Type: "bigint"}},
+			Partitions: []snapshot.SnapPartition{
+				{Schema: "public", Name: "orders_1", Bound: "FOR VALUES FROM (1) TO (1000)"},
+			},
+		},
+	})
+	desired := []pipeline.IRObject{
+		&ir.Table{
+			Schema:      "public",
+			Name:        "orders",
+			PartitionBy: &ir.PartitionSpec{Strategy: "RANGE", Columns: []string{"id"}},
+			Columns:     []*ir.Column{{Name: "id", Type: ir.TypeRef{Name: "bigint"}}},
+			Partitions: []*ir.Partition{
+				{
+					Name:   "orders_1",
+					Bounds: "FOR VALUES FROM (1) TO (1000)",
+					Constraints: []*ir.Constraint{
+						{Name: "ck_id_positive", Type: "CHECK", Expr: "CHECK (id > 0)"},
+					},
+				},
+			},
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := `ALTER TABLE "public"."orders_1" ADD CONSTRAINT "ck_id_positive" CHECK (id > 0);`
+	op := findOpSQL(ops, want)
+	if op == nil {
+		t.Fatalf("expected %q, got: %v", want, sqlList(ops))
+	}
+	if op.Safety() != pipeline.Caution {
+		t.Errorf("ADD CONSTRAINT safety = %v, want Caution", op.Safety())
+	}
+}
+
+// TestDiffPartitionLocalConstraintDropped guards the ordinary removal case:
+// a partition's own local constraint disappearing from desired emits a
+// plain DESTRUCTIVE drop targeting the partition itself.
+func TestDiffPartitionLocalConstraintDropped(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.orders", &snapshot.SnapObject{
+		Kind: "table",
+		Table: &snapshot.SnapTable{
+			Schema:      "public",
+			Name:        "orders",
+			PartitionBy: "RANGE (id)",
+			Columns:     []snapshot.SnapColumn{{Name: "id", Type: "bigint"}},
+			Partitions: []snapshot.SnapPartition{
+				{
+					Schema: "public", Name: "orders_1", Bound: "FOR VALUES FROM (1) TO (1000)",
+					Constraints: []snapshot.SnapConstraint{
+						{Name: "ck_id_positive", Type: "CHECK", Expr: "CHECK (id > 0)"},
+					},
+				},
+			},
+		},
+	})
+	desired := []pipeline.IRObject{
+		&ir.Table{
+			Schema:      "public",
+			Name:        "orders",
+			PartitionBy: &ir.PartitionSpec{Strategy: "RANGE", Columns: []string{"id"}},
+			Columns:     []*ir.Column{{Name: "id", Type: ir.TypeRef{Name: "bigint"}}},
+			Partitions: []*ir.Partition{
+				{Name: "orders_1", Bounds: "FOR VALUES FROM (1) TO (1000)"},
+			},
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := `ALTER TABLE "public"."orders_1" DROP CONSTRAINT "ck_id_positive";`
+	op := findOpSQL(ops, want)
+	if op == nil {
+		t.Fatalf("expected %q, got: %v", want, sqlList(ops))
+	}
+	if op.Safety() != pipeline.Destructive {
+		t.Errorf("DROP CONSTRAINT safety = %v, want Destructive", op.Safety())
+	}
+}
+
+// TestDiffCreateNewPartitionWithLocalConstraint guards a brand-new partition
+// declaring its own local constraint from the start: the CREATE must be
+// followed by a separate ADD CONSTRAINT (createPartitionOps never inlines
+// constraints into the PARTITION OF statement itself).
+func TestDiffCreateNewPartitionWithLocalConstraint(t *testing.T) {
+	d := New()
+	snap := &pipeline.Snapshot{}
+	_ = snap.SetObject("public.orders", &snapshot.SnapObject{
+		Kind: "table",
+		Table: &snapshot.SnapTable{
+			Schema:      "public",
+			Name:        "orders",
+			PartitionBy: "RANGE (id)",
+			Columns:     []snapshot.SnapColumn{{Name: "id", Type: "bigint"}},
+		},
+	})
+	desired := []pipeline.IRObject{
+		&ir.Table{
+			Schema:      "public",
+			Name:        "orders",
+			PartitionBy: &ir.PartitionSpec{Strategy: "RANGE", Columns: []string{"id"}},
+			Columns:     []*ir.Column{{Name: "id", Type: ir.TypeRef{Name: "bigint"}}},
+			Partitions: []*ir.Partition{
+				{
+					Name:   "orders_1",
+					Bounds: "FOR VALUES FROM (1) TO (1000)",
+					Constraints: []*ir.Constraint{
+						{Name: "ck_id_positive", Type: "CHECK", Expr: "CHECK (id > 0)"},
+					},
+				},
+			},
+		},
+	}
+	ops, err := d.Diff(desired, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsSQL(ops, `CREATE TABLE "public"."orders_1" PARTITION OF "public"."orders" FOR VALUES FROM (1) TO (1000);`) {
+		t.Errorf("expected bare CREATE, got: %v", sqlList(ops))
+	}
+	if !containsSQL(ops, `ALTER TABLE "public"."orders_1" ADD CONSTRAINT "ck_id_positive" CHECK (id > 0);`) {
+		t.Errorf("expected ADD CONSTRAINT after CREATE, got: %v", sqlList(ops))
+	}
+}
+
 // TestDiffCreateTableWithForeignPartition guards RFC Section 7.13's
 // "FOREIGN partition-name ... SERVER server_name [OPTIONS (...)]" form:
 // createPartitionOps must emit CREATE FOREIGN TABLE ... PARTITION OF, not

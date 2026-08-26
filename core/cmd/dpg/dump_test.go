@@ -1258,6 +1258,90 @@ func TestRenderSubPartitionedTableCompiles(t *testing.T) {
 	}
 }
 
+// TestRenderPartitionLocalConstraintCompiles guards RFC Section 7.3's "DROP
+// CONSTRAINT ... ONLY" gap (PostgreSQL 18+): a partition's own local
+// constraint (ir.Partition.Constraints) must round-trip through dump ->
+// recompile, including alongside a sub-partitioned partition's own nested
+// PARTITIONS { } block.
+func TestRenderPartitionLocalConstraintCompiles(t *testing.T) {
+	fmtOpts := format.Options{IndentSize: 4, KeywordCase: "upper"}
+	tbl := &ir.Table{
+		Schema: "public", Name: "orders",
+		Columns: []*ir.Column{
+			{Name: "id", Type: ir.TypeRef{Name: "bigint"}},
+			{Name: "amount", Type: ir.TypeRef{Name: "numeric"}, NotNull: true},
+		},
+		PartitionBy: &ir.PartitionSpec{Strategy: "RANGE", Columns: []string{"id"}},
+		Partitions: []*ir.Partition{
+			{
+				Name:   "orders_1",
+				Bounds: "FOR VALUES FROM (1) TO (1000)",
+				Constraints: []*ir.Constraint{
+					{Name: "ck_amount", Type: "CHECK", Expr: "CHECK (amount > 0)"},
+				},
+			},
+			{
+				Name:        "orders_2",
+				Bounds:      "FOR VALUES FROM (1000) TO (2000)",
+				PartitionBy: &ir.PartitionSpec{Strategy: "LIST", Columns: []string{"amount"}},
+				Partitions: []*ir.Partition{
+					{Name: "orders_2_small", Bounds: "FOR VALUES IN ('1')"},
+				},
+				Constraints: []*ir.Constraint{
+					{Name: "ck_amount_valid", Type: "CHECK", Expr: "CHECK (amount > 0)", NotValid: true},
+				},
+			},
+		},
+	}
+
+	var b strings.Builder
+	renderObjectDPG(&b, tbl, fmtOpts)
+	rendered := b.String()
+
+	if !strings.Contains(rendered, `CONSTRAINT ck_amount CHECK (amount > 0)`) {
+		t.Errorf("rendered table missing partition-local constraint: %q", rendered)
+	}
+	if !strings.Contains(rendered, "NOT VALID") {
+		t.Errorf("rendered table missing NOT VALID on second partition's constraint: %q", rendered)
+	}
+	if !strings.Contains(rendered, "PARTITIONS {") {
+		t.Errorf("rendered table missing nested PARTITIONS alongside a constraint: %q", rendered)
+	}
+
+	dir := t.TempDir()
+	f := filepath.Join(dir, "objects.dpg")
+	if err := os.WriteFile(f, []byte(rendered), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	compiled, _, err := compiler.Compile([]string{f}, dir, pipeline.Default)
+	if err != nil {
+		t.Fatalf("dumped table with partition-local constraints failed to recompile: %v\n---\n%s", err, rendered)
+	}
+	var found *ir.Table
+	for _, o := range compiled {
+		if tb, ok := o.(*ir.Table); ok && tb.Name == "orders" {
+			found = tb
+		}
+	}
+	if found == nil {
+		t.Fatalf("table orders missing after recompile\n---\n%s", rendered)
+	}
+	if len(found.Partitions) != 2 {
+		t.Fatalf("expected 2 partitions after round-trip, got %d", len(found.Partitions))
+	}
+	p1 := found.Partitions[0]
+	if len(p1.Constraints) != 1 || p1.Constraints[0].Name != "ck_amount" {
+		t.Fatalf("orders_1 constraint did not round-trip: %+v", p1.Constraints)
+	}
+	p2 := found.Partitions[1]
+	if len(p2.Constraints) != 1 || !p2.Constraints[0].NotValid {
+		t.Fatalf("orders_2 NOT VALID constraint did not round-trip: %+v", p2.Constraints)
+	}
+	if p2.PartitionBy == nil || len(p2.Partitions) != 1 {
+		t.Fatalf("orders_2 sub-partitioning did not round-trip alongside its constraint: %+v", p2)
+	}
+}
+
 // TestRenderMaterializedViewCompiles guards a real bug found live-testing a
 // demo project: renderObjectDPG's View case always emitted the bare "VIEW"
 // keyword regardless of o.Materialized, and never rendered Owner, Comment,

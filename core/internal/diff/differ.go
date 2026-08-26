@@ -7392,7 +7392,7 @@ func diffTable(o *ir.Table, snap *snapshot.SnapTable, fullSnap *pipeline.Snapsho
 		return nil, err
 	}
 	ops = append(ops, colOps...)
-	constraintOps, err := diffConstraints(tbl, o, snap, fullSnap, pos, renamedCols, droppedCols)
+	constraintOps, droppedViaOnly, err := diffConstraints(tbl, o, snap, fullSnap, pos, renamedCols, droppedCols)
 	if err != nil {
 		return nil, err
 	}
@@ -7416,7 +7416,7 @@ func diffTable(o *ir.Table, snap *snapshot.SnapTable, fullSnap *pipeline.Snapsho
 		tableObjType = "FOREIGN TABLE"
 	}
 	ops = append(ops, diffSecurityLabelSet(snap.SecurityLabels, o.SecurityLabels, tableObjType+" "+tbl, pos)...)
-	partitionOps, err := diffPartitions(tbl, o, snap, pos, skipDetachedChildren)
+	partitionOps, err := diffPartitions(tbl, o, snap, pos, skipDetachedChildren, droppedViaOnly)
 	if err != nil {
 		return nil, err
 	}
@@ -7582,8 +7582,82 @@ func createPartitionOps(schema string, parent string, p *ir.Partition) []pipelin
 	stmt += ";"
 
 	ops := []pipeline.DiffOp{safeOp(stmt, p.SrcPos)}
+	for _, cst := range p.Constraints {
+		// A brand-new partition declaring its own local constraint from the
+		// start (RFC Section 7.3's "DROP CONSTRAINT ... ONLY" gap) — an
+		// ordinary ADD CONSTRAINT, no PostgreSQL version dependency at all
+		// (unlike the ONLY-drop transition itself, see diffConstraints):
+		// adding a constraint directly to an already-existing partition,
+		// independent of its parent, has always been valid PostgreSQL.
+		notValid := ""
+		if cst.NotValid {
+			notValid = " NOT VALID"
+		}
+		notEnforced := ""
+		if cst.NotEnforced {
+			notEnforced = " NOT ENFORCED"
+		}
+		ops = append(ops, cautionOp(
+			fmt.Sprintf("ALTER TABLE %s ADD CONSTRAINT %s %s%s%s;", childTbl, quoteIdent(cst.Name), cst.Expr, notValid, notEnforced),
+			p.SrcPos,
+		))
+	}
 	for _, sub := range p.Partitions {
 		ops = append(ops, createPartitionOps(schema, childTbl, sub)...)
+	}
+	return ops
+}
+
+// diffPartitionConstraints diffs one partition's own locally-declared
+// constraints (ir.Partition.Constraints) against its snapshot counterpart —
+// RFC Section 7.3's "DROP CONSTRAINT ... ONLY" gap, PostgreSQL 18+. Always
+// named per the { }-block grammar both sides share with a table's own
+// block-declared constraints (see buildBlockConstraint), so — unlike
+// diffConstraints above — this needs no unnamed-constraint structural or
+// PostgreSQL-auto-name matching, just a name-keyed comparison; a change to
+// an already-matched constraint's body is not detected here, the same
+// identity-only limitation diffConstraints' own doc comment already
+// documents for the table-level case. suppressAdd names constraints
+// diffConstraints already made locally present on this partition via
+// "ALTER TABLE ONLY parent DROP CONSTRAINT" this same run — physically
+// there already, so no separate ADD CONSTRAINT is emitted (or valid) for
+// them.
+func diffPartitionConstraints(partTbl string, desired []*ir.Constraint, snap []snapshot.SnapConstraint, pos pipeline.SourcePos, suppressAdd map[string]bool) []pipeline.DiffOp {
+	var ops []pipeline.DiffOp
+
+	snapByName := make(map[string]snapshot.SnapConstraint, len(snap))
+	for _, sc := range snap {
+		snapByName[sc.Name] = sc
+	}
+	desiredNames := make(map[string]bool, len(desired))
+	for _, c := range desired {
+		desiredNames[c.Name] = true
+		if _, exists := snapByName[c.Name]; exists {
+			continue
+		}
+		if suppressAdd[c.Name] {
+			continue
+		}
+		notValid := ""
+		if c.NotValid {
+			notValid = " NOT VALID"
+		}
+		notEnforced := ""
+		if c.NotEnforced {
+			notEnforced = " NOT ENFORCED"
+		}
+		ops = append(ops, cautionOp(
+			fmt.Sprintf("ALTER TABLE %s ADD CONSTRAINT %s %s%s%s;", partTbl, quoteIdent(c.Name), c.Expr, notValid, notEnforced),
+			pos,
+		))
+	}
+	for _, sc := range snap {
+		if !desiredNames[sc.Name] {
+			ops = append(ops, destructiveOp(
+				fmt.Sprintf("ALTER TABLE %s DROP CONSTRAINT %s;", partTbl, quoteIdent(sc.Name)),
+				pos,
+			))
+		}
 	}
 	return ops
 }
@@ -7599,7 +7673,7 @@ func dropPartitionVerb(foreign bool) string {
 	return "DROP TABLE"
 }
 
-func diffPartitions(tbl string, o *ir.Table, snap *snapshot.SnapTable, pos pipeline.SourcePos, skipDetachedChildren map[string]bool) ([]pipeline.DiffOp, error) {
+func diffPartitions(tbl string, o *ir.Table, snap *snapshot.SnapTable, pos pipeline.SourcePos, skipDetachedChildren map[string]bool, droppedViaOnly map[string]bool) ([]pipeline.DiffOp, error) {
 	var ops []pipeline.DiffOp
 
 	// Partition strategy change cannot be done in-place.
@@ -7615,7 +7689,7 @@ func diffPartitions(tbl string, o *ir.Table, snap *snapshot.SnapTable, pos pipel
 		return ops, nil
 	}
 
-	partOps, err := diffPartitionList(o.Schema, tbl, o.Partitions, snap.Partitions, pos, skipDetachedChildren)
+	partOps, err := diffPartitionList(o.Schema, tbl, o.Partitions, snap.Partitions, pos, skipDetachedChildren, droppedViaOnly)
 	if err != nil {
 		return nil, err
 	}
@@ -7638,7 +7712,14 @@ func diffPartitions(tbl string, o *ir.Table, snap *snapshot.SnapTable, pos pipel
 // intentionally being detached this run — excluded from the "absent from
 // desired" removal detection below, which would otherwise treat them as
 // simply dropped.
-func diffPartitionList(schema, parent string, desired []*ir.Partition, snap []snapshot.SnapPartition, pos pipeline.SourcePos, skipDetached map[string]bool) ([]pipeline.DiffOp, error) {
+// droppedViaOnly, also only meaningful at the top level (nil for every
+// recursive sub-partition call, matching skipDetached's own restriction —
+// see diffConstraints' doc comment on why this coordination isn't threaded
+// deeper than one level), names constraints diffConstraints already dropped
+// from parent via "ALTER TABLE ONLY parent DROP CONSTRAINT" this run —
+// already physically local on every direct partition as a result, so the
+// per-partition constraint diff below must not also emit an ADD for them.
+func diffPartitionList(schema, parent string, desired []*ir.Partition, snap []snapshot.SnapPartition, pos pipeline.SourcePos, skipDetached map[string]bool, droppedViaOnly map[string]bool) ([]pipeline.DiffOp, error) {
 	var ops []pipeline.DiffOp
 
 	snapByName := make(map[string]snapshot.SnapPartition, len(snap))
@@ -7734,7 +7815,8 @@ func diffPartitionList(schema, parent string, desired []*ir.Partition, snap []sn
 					p.SrcPos,
 				))
 			}
-			subOps, err := diffPartitionList(schema, partTbl, p.Partitions, sp.Partitions, p.SrcPos, nil)
+			ops = append(ops, diffPartitionConstraints(partTbl, p.Constraints, sp.Constraints, p.SrcPos, droppedViaOnly)...)
+			subOps, err := diffPartitionList(schema, partTbl, p.Partitions, sp.Partitions, p.SrcPos, nil, nil)
 			if err != nil {
 				return nil, err
 			}
@@ -8363,8 +8445,33 @@ func diffIdentityColumn(tbl string, col *ir.Column, sc *snapshot.SnapColumn) []p
 	return ops
 }
 
-func diffConstraints(tbl string, o *ir.Table, snap *snapshot.SnapTable, fullSnap *pipeline.Snapshot, pos pipeline.SourcePos, renamedCols map[string]string, droppedCols map[string]bool) ([]pipeline.DiffOp, error) {
+// diffConstraints returns the constraint DDL ops for tbl, along with the set
+// of constraint names it dropped via "ALTER TABLE ONLY tbl DROP CONSTRAINT"
+// rather than a plain cascading drop (see the partitionLocalNames branch
+// below) — diffPartitions/diffPartitionList use this to suppress the
+// redundant ADD CONSTRAINT that would otherwise fire for the exact same
+// constraint, now already physically present (as a local, non-inherited
+// row) on every direct partition.
+func diffConstraints(tbl string, o *ir.Table, snap *snapshot.SnapTable, fullSnap *pipeline.Snapshot, pos pipeline.SourcePos, renamedCols map[string]string, droppedCols map[string]bool) ([]pipeline.DiffOp, map[string]bool, error) {
 	var ops []pipeline.DiffOp
+	droppedViaOnly := make(map[string]bool)
+
+	// partitionLocalNames collects every constraint name a direct partition
+	// declares independently of the parent (RFC Section 7.3's "DROP
+	// CONSTRAINT ... ONLY" gap, PostgreSQL 18+) — used below to decide
+	// whether a constraint disappearing from THIS table's own declaration
+	// must be dropped with ONLY (retaining it, now local, on every existing
+	// partition) rather than the ordinary cascading drop that would remove
+	// it there too. Only direct partitions participate — see
+	// ir.Partition.Constraints' doc comment and diffPartitionList's
+	// recursive calls, which deliberately don't thread this coordination
+	// any deeper than one level.
+	partitionLocalNames := make(map[string]bool)
+	for _, p := range o.Partitions {
+		for _, c := range p.Constraints {
+			partitionLocalNames[c.Name] = true
+		}
+	}
 
 	// colStillNotNull records every desired column that is still NOT NULL
 	// (regardless of whether that's the plain bool or a promoted
@@ -8577,7 +8684,7 @@ func diffConstraints(tbl string, o *ir.Table, snap *snapshot.SnapTable, fullSnap
 		}
 		oldKey, newKey := "n:"+*c.RenamedFrom, "n:"+c.Name
 		if _, collide := desiredByKey[oldKey]; collide {
-			return nil, pipeline.Errorf(c.Pos,
+			return nil, nil, pipeline.Errorf(c.Pos,
 				"RENAMED FROM %q on constraint %q collides with another constraint of the same name in the desired declaration. Remove the stale constraint.",
 				*c.RenamedFrom, c.Name)
 		}
@@ -8588,7 +8695,7 @@ func diffConstraints(tbl string, o *ir.Table, snap *snapshot.SnapTable, fullSnap
 			continue
 		}
 		if !oldInSnap {
-			return nil, pipeline.ErrorfCode(c.Pos, "DPG-E021",
+			return nil, nil, pipeline.ErrorfCode(c.Pos, "DPG-E021",
 				"RENAMED FROM %q on constraint %q does not match the snapshot — neither the old nor the new name exists there. Remove RENAMED FROM if this is a genuinely new constraint.",
 				*c.RenamedFrom, c.Name)
 		}
@@ -8635,6 +8742,34 @@ func diffConstraints(tbl string, o *ir.Table, snap *snapshot.SnapTable, fullSnap
 					tbl, sc.Type, sc.Expr),
 				pos,
 			))
+			continue
+		}
+		if o.PartitionBy != nil && partitionLocalNames[sc.Name] {
+			// RFC Section 7.3's "DROP CONSTRAINT ... ONLY" (PostgreSQL 18+): a
+			// direct partition independently declares a constraint of this
+			// same name, so the user's intent is to detach it from the
+			// parent while keeping it live on the partitions, not to remove
+			// it everywhere. "ALTER TABLE ONLY tbl DROP CONSTRAINT" is real
+			// PostgreSQL's own mechanism for exactly this (confirmed live,
+			// PG17 vs PG18: PG17 rejects it outright — "cannot remove
+			// constraint from only the partitioned table when partitions
+			// exist" — while PG18 succeeds, flipping the identical row on
+			// every existing partition from inherited to local rather than
+			// dropping it there too). No proactive min_pg_version gate here,
+			// matching every other PostgreSQL 18+ construct in this
+			// codebase — a pre-18 target server rejects the statement with
+			// its own clear error at apply time (passthrough principle).
+			// SAFE, not DESTRUCTIVE, for the same reason NO INHERIT above
+			// is SAFE rather than CAUTION: catalog-only change, no rewrite,
+			// and nothing is actually destroyed — the constraint keeps
+			// enforcing everywhere it currently applies; only the
+			// propagate-to-future-partitions guarantee is what's being
+			// given up, and that's the explicit, declared intent here.
+			ops = append(ops, safeOp(
+				fmt.Sprintf("ALTER TABLE ONLY %s DROP CONSTRAINT %s;", tbl, quoteIdent(sc.Name)),
+				pos,
+			))
+			droppedViaOnly[sc.Name] = true
 			continue
 		}
 		ops = append(ops, destructiveOp(
@@ -8780,7 +8915,7 @@ func diffConstraints(tbl string, o *ir.Table, snap *snapshot.SnapTable, fullSnap
 			))
 		}
 	}
-	return ops, nil
+	return ops, droppedViaOnly, nil
 }
 
 // matchedConstraintOps handles a table constraint matched against an

@@ -791,6 +791,45 @@ func TestBuildTableSubPartitioned(t *testing.T) {
 	}
 }
 
+// TestBuildTablePartitionLocalConstraint guards RFC Section 7.3's "DROP
+// CONSTRAINT ... ONLY" gap (PostgreSQL 18+): a partition's own trailing { }
+// body declaring a constraint independently of the parent.
+func TestBuildTablePartitionLocalConstraint(t *testing.T) {
+	obj := buildObject(t, pipeline.KindTable,
+		`orders (
+			id     BIGINT GENERATED ALWAYS AS IDENTITY,
+			amount NUMERIC(10,2) NOT NULL
+		) PARTITION BY RANGE (id)`,
+		`
+			PARTITIONS {
+				orders_1 FOR VALUES FROM (1) TO (1000) {
+					CONSTRAINT ck_amount CHECK (amount > 0);
+				};
+				orders_2 FOR VALUES FROM (1000) TO (2000);
+			}
+		`,
+	)
+	tbl, ok := obj.(*ir.Table)
+	if !ok {
+		t.Fatalf("expected *ir.Table, got %T", obj)
+	}
+	if len(tbl.Partitions) != 2 {
+		t.Fatalf("expected 2 partitions, got %d", len(tbl.Partitions))
+	}
+	p1 := tbl.Partitions[0]
+	if len(p1.Constraints) != 1 {
+		t.Fatalf("orders_1: expected 1 local constraint, got %v", p1.Constraints)
+	}
+	cst := p1.Constraints[0]
+	if cst.Name != "ck_amount" || cst.Type != "CHECK" || cst.Expr != "CHECK (amount > 0)" {
+		t.Errorf("orders_1 constraint: got %+v", cst)
+	}
+	p2 := tbl.Partitions[1]
+	if len(p2.Constraints) != 0 {
+		t.Errorf("orders_2: expected no local constraints, got %v", p2.Constraints)
+	}
+}
+
 // TestBuildTableAttachedFromPartition guards RFC Section 7.13's "ATTACHED
 // FROM existing_table" form.
 func TestBuildTableAttachedFromPartition(t *testing.T) {

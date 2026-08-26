@@ -544,6 +544,9 @@ func toSnapPartition(schema string, p *ir.Partition) SnapPartition {
 	for _, sub := range p.Partitions {
 		sp.Partitions = append(sp.Partitions, toSnapPartition(schema, sub))
 	}
+	for _, cst := range p.Constraints {
+		sp.Constraints = append(sp.Constraints, toSnapConstraint(cst))
+	}
 	return sp
 }
 

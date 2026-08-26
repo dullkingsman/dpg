@@ -397,6 +397,10 @@ type SnapPartition struct {
 	Foreign        bool    `json:"foreign,omitempty"`
 	ForeignServer  *string `json:"foreign_server,omitempty"`
 	ForeignOptions string  `json:"foreign_options,omitempty"`
+	// Constraints mirrors ir.Partition.Constraints — constraints declared
+	// directly on this partition, independent of the parent (RFC Section
+	// 7.3's "DROP CONSTRAINT ... ONLY", PostgreSQL 18+).
+	Constraints []SnapConstraint `json:"constraints,omitempty"`
 }
 
 type SnapColumn struct {

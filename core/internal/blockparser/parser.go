@@ -2709,6 +2709,63 @@ func (b *blockParser) parsePartitionsBlock(pos pipeline.SourcePos) (*pipeline.Pa
 	return pd, nil
 }
 
+// parsePartitionBlockBody parses a single partition entry's own trailing
+// { } body — a narrow subset of the general object block grammar, holding
+// only two possible directives: PARTITIONS { ... } (sub-partitioning,
+// RFC Section 7.13, only legal when this entry itself has a PARTITION BY
+// clause — allowSubPartitions gates it) and CONSTRAINT/CONSTRAINTS (RFC
+// Section 7.3's "DROP CONSTRAINT ... ONLY" gap, PostgreSQL 18+ — a partition
+// declaring one or more constraints independently of its parent, using the
+// identical grammar a table's own { } body already accepts for the same
+// directive). Both may appear together in either order, since real
+// PostgreSQL treats "further sub-partitioned" and "carries its own local
+// constraints" as entirely independent facts about a partition.
+func (b *blockParser) parsePartitionBlockBody(allowSubPartitions bool) ([]pipeline.PartitionBound, []pipeline.ConstraintDef, error) {
+	if err := b.consumeBrace(); err != nil {
+		return nil, nil, err
+	}
+	var subPartitions []pipeline.PartitionBound
+	var constraints []pipeline.ConstraintDef
+	for {
+		b.skipWS()
+		if b.eof() {
+			return nil, nil, b.errorf("unexpected EOF in partition block")
+		}
+		if b.peek() == '}' {
+			break
+		}
+		dirPos := b.srcPos()
+		word := strings.ToUpper(b.readWord())
+		switch word {
+		case "PARTITIONS":
+			if !allowSubPartitions {
+				return nil, nil, b.errorf("PARTITIONS block requires a preceding PARTITION BY clause on this partition")
+			}
+			pd, err := b.parsePartitionsBlock(dirPos)
+			if err != nil {
+				return nil, nil, err
+			}
+			subPartitions = append(subPartitions, pd.Partitions...)
+		case "CONSTRAINT":
+			cst, err := b.parseConstraint(dirPos)
+			if err != nil {
+				return nil, nil, err
+			}
+			constraints = append(constraints, cst)
+		case "CONSTRAINTS":
+			csts, err := b.parseConstraintsBlock(dirPos)
+			if err != nil {
+				return nil, nil, err
+			}
+			constraints = append(constraints, csts...)
+		default:
+			return nil, nil, b.errorf("unexpected block directive %q in partition entry (only CONSTRAINT/CONSTRAINTS, and PARTITIONS when PARTITION BY is present, are allowed)", word)
+		}
+	}
+	b.advance() // consume '}'
+	return subPartitions, constraints, nil
+}
+
 // subPartitionByRe matches a trailing "PARTITION BY <strategy> (<cols>)" clause
 // at the end of a partition entry's raw bounds text, i.e. RFC Section 7.13
 // sub-partitioning. Bounds-clause literals never contain the word PARTITION,
@@ -2969,34 +3026,19 @@ func (b *blockParser) parseOnePartitionBound() (pipeline.PartitionBound, error) 
 	bound.Bounds = pipeline.RawExpr{Text: strings.TrimSpace(boundsText), Pos: pPos}
 
 	if hasSubPartition {
+		bound.SubStrategy = subStrategy
+		bound.SubColumns = subColumns
 		if b.peek() != '{' {
 			return pipeline.PartitionBound{}, b.errorf("expected '{' after PARTITION BY %s clause", subStrategy)
 		}
-		bound.SubStrategy = subStrategy
-		bound.SubColumns = subColumns
-
-		if err := b.consumeBrace(); err != nil {
-			return pipeline.PartitionBound{}, err
-		}
-		b.skipWS()
-		if err := b.expect("PARTITIONS"); err != nil {
-			return pipeline.PartitionBound{}, err
-		}
-		nestedPos := b.srcPos()
-		nested, err := b.parsePartitionsBlock(nestedPos)
+	}
+	if b.peek() == '{' {
+		subParts, csts, err := b.parsePartitionBlockBody(hasSubPartition)
 		if err != nil {
 			return pipeline.PartitionBound{}, err
 		}
-		bound.SubPartitions = nested.Partitions
-		b.skipWS()
-		if b.peek() != '}' {
-			return pipeline.PartitionBound{}, b.errorf("expected '}' to close nested PARTITION BY block")
-		}
-		b.advance()
-	} else {
-		if b.peek() == '{' {
-			return pipeline.PartitionBound{}, b.errorf("unexpected '{' in partition bounds (missing PARTITION BY clause?)")
-		}
+		bound.SubPartitions = subParts
+		bound.Constraints = csts
 	}
 
 	b.skipWS()

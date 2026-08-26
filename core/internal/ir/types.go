@@ -483,7 +483,22 @@ type Partition struct {
 	ForeignServer  *string
 	ForeignOptions []pipeline.StorageParam
 	Partitions     []*Partition
-	SrcPos         pipeline.SourcePos
+	// Constraints holds constraints declared directly on this partition,
+	// independent of the parent (RFC Section 7.3's "DROP CONSTRAINT ...
+	// ONLY" — PostgreSQL 18+). A partition otherwise has no independently
+	// declared structure at all (no Columns field exists here — it always
+	// inherits its parent's column list); this is the sole, narrowly-scoped
+	// exception, added specifically to represent a constraint that has been
+	// detached from the parent via "ALTER TABLE ONLY parent DROP CONSTRAINT"
+	// while remaining declared (and enforced) locally on this partition —
+	// or, identically in the catalog, one added directly to this partition
+	// from the start and never declared on the parent at all. Real
+	// PostgreSQL's own catalog makes no distinction between these two
+	// histories (confirmed live: both produce conislocal=true,
+	// coninhcount=0 on the partition's own pg_constraint row), so neither
+	// does this field.
+	Constraints []*Constraint
+	SrcPos      pipeline.SourcePos
 }
 
 // ── concrete IR object types ──────────────────────────────────────────────────

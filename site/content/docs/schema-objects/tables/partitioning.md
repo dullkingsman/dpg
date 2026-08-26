@@ -152,6 +152,71 @@ CREATE TABLE "public"."events_2024_eu"
     FOR VALUES IN ('eu-west', 'eu-central');
 ```
 
+## Partition-local constraints (PostgreSQL 18+)
+
+A partition can declare its own constraints, independent of the parent, by
+adding a trailing `{ }` body to its `PARTITIONS { }` entry:
+
+```sql
+TABLE orders (
+    id     BIGINT GENERATED ALWAYS AS IDENTITY,
+    amount NUMERIC(10,2) NOT NULL
+) PARTITION BY RANGE (id)
+{
+    PARTITIONS {
+        orders_1 FOR VALUES FROM (1) TO (1000) {
+            CONSTRAINT ck_amount CHECK (amount > 0);
+        };
+    }
+}
+```
+
+```sql
+-- emits (orders_1 already exists)
+ALTER TABLE "public"."orders_1"
+    ADD CONSTRAINT "ck_amount" CHECK (amount > 0);
+```
+
+This is the same mechanism that represents PostgreSQL 18's
+`ALTER TABLE ONLY parent DROP CONSTRAINT`: removing a constraint from the
+parent's own declaration while a partition keeps declaring it locally emits
+that statement instead of an ordinary drop, detaching the constraint from the
+parent while leaving it enforced (now local, no longer inherited) on the
+partition:
+
+```sql
+-- before: ck_amount declared on the parent, inherited by orders_1
+TABLE orders (
+    id     BIGINT GENERATED ALWAYS AS IDENTITY,
+    amount NUMERIC(10,2) NOT NULL,
+    CONSTRAINT ck_amount CHECK (amount > 0)
+) PARTITION BY RANGE (id) { PARTITIONS { orders_1 FOR VALUES FROM (1) TO (1000); } }
+
+-- after: dropped from the parent, kept locally on orders_1
+TABLE orders (
+    id     BIGINT GENERATED ALWAYS AS IDENTITY,
+    amount NUMERIC(10,2) NOT NULL
+) PARTITION BY RANGE (id)
+{
+    PARTITIONS {
+        orders_1 FOR VALUES FROM (1) TO (1000) {
+            CONSTRAINT ck_amount CHECK (amount > 0);
+        };
+    }
+}
+```
+
+```sql
+-- emits
+ALTER TABLE ONLY "public"."orders" DROP CONSTRAINT "ck_amount";
+```
+
+`ALTER TABLE ONLY ... DROP CONSTRAINT` on a partitioned table requires
+PostgreSQL 18 or newer — PostgreSQL 17 rejects it while any partition exists.
+A constraint added directly to a partition with no such history has no
+version requirement; it's an ordinary `ADD CONSTRAINT` on any PostgreSQL
+version.
+
 ## Partition management
 
 | Operation | Safety | Notes |
@@ -159,5 +224,7 @@ CREATE TABLE "public"."events_2024_eu"
 | Add a partition | `SAFE` | `CREATE TABLE ... PARTITION OF` |
 | Remove a partition | `DESTRUCTIVE` | `DROP TABLE partition_name` |
 | Change partition strategy | `MANUAL` | Requires `--approve-partition-rebuild`; full table rebuild |
+| Drop a constraint from the parent, keep it on existing partitions (PG18+) | `SAFE` | `ALTER TABLE ONLY parent DROP CONSTRAINT name` |
+| Add/remove a partition's own local constraint | `CAUTION`/`DESTRUCTIVE` | `ALTER TABLE partition ADD/DROP CONSTRAINT name` |
 
 Indexes and grants declared in the parent table's `{ }` block apply to all partitions.

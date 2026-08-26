@@ -1313,25 +1313,7 @@ func mergeTableBlock(tbl *Table, block pipeline.BlockAST) error {
 	// block-declared constraint — always named per the grammar above — can
 	// never need.
 	for _, cst := range block.Constraints {
-		newCst := &Constraint{
-			Name:        cst.Name.Name,
-			Type:        classifyConstraintExprType(cst.Expr.Text),
-			Expr:        cst.Expr.Text,
-			NotValid:    cst.NotValid,
-			NotEnforced: cst.NotEnforced,
-			RenamedFrom: cst.RenamedFrom,
-			Pos:         cst.Pos,
-		}
-		if newCst.Type == "NOT NULL" {
-			if col, noInherit, ok := parseNotNullExpr(cst.Expr.Text); ok {
-				newCst.Columns = []string{col}
-				newCst.NoInherit = noInherit
-			}
-		}
-		if cst.Comment != nil {
-			newCst.Comment = &cst.Comment.Value
-		}
-		tbl.Constraints = append(tbl.Constraints, newCst)
+		tbl.Constraints = append(tbl.Constraints, buildBlockConstraint(cst))
 	}
 
 	// Partitions
@@ -1341,6 +1323,35 @@ func mergeTableBlock(tbl *Table, block pipeline.BlockAST) error {
 		}
 	}
 	return nil
+}
+
+// buildBlockConstraint converts a single { }-block-declared
+// pipeline.ConstraintDef into an ir.Constraint — shared by a table's own top-
+// level Constraints (RFC Section 7.3) and a partition's local ones (RFC
+// Section 7.3's "DROP CONSTRAINT ... ONLY" gap, PostgreSQL 18+), which use
+// the identical grammar. See the call site above for why Type/Columns/
+// NoInherit are inferred from Expr's raw text rather than structured, and
+// why Columns/CheckColumn are otherwise left unset.
+func buildBlockConstraint(cst pipeline.ConstraintDef) *Constraint {
+	newCst := &Constraint{
+		Name:        cst.Name.Name,
+		Type:        classifyConstraintExprType(cst.Expr.Text),
+		Expr:        cst.Expr.Text,
+		NotValid:    cst.NotValid,
+		NotEnforced: cst.NotEnforced,
+		RenamedFrom: cst.RenamedFrom,
+		Pos:         cst.Pos,
+	}
+	if newCst.Type == "NOT NULL" {
+		if col, noInherit, ok := parseNotNullExpr(cst.Expr.Text); ok {
+			newCst.Columns = []string{col}
+			newCst.NoInherit = noInherit
+		}
+	}
+	if cst.Comment != nil {
+		newCst.Comment = &cst.Comment.Value
+	}
+	return newCst
 }
 
 // buildPartitionBound converts a parsed pipeline.PartitionBound into an
@@ -1372,6 +1383,9 @@ func buildPartitionBound(p pipeline.PartitionBound) *Partition {
 		for _, sp := range p.SubPartitions {
 			part.Partitions = append(part.Partitions, buildPartitionBound(sp))
 		}
+	}
+	for _, cst := range p.Constraints {
+		part.Constraints = append(part.Constraints, buildBlockConstraint(cst))
 	}
 	return part
 }

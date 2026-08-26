@@ -244,7 +244,15 @@ type PartitionBound struct {
 	Foreign bool
 	Server  *Identifier
 	Options []StorageParam
-	Pos     SourcePos
+	// Constraints are constraints declared directly in this partition's own
+	// trailing { } body (RFC Section 7.3's "DROP CONSTRAINT ... ONLY" gap,
+	// PostgreSQL 18+) — independent of whatever the parent declares, using
+	// the identical CONSTRAINT/CONSTRAINTS block-directive grammar a table's
+	// own { } body already accepts. Never populated for AttachedFrom (an
+	// already-existing standalone table's own Constraints govern it there
+	// instead).
+	Constraints []ConstraintDef
+	Pos         SourcePos
 }
 
 // PartitionDef is the PARTITIONS { } directive.

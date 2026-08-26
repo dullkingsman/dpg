@@ -2352,15 +2352,70 @@ TABLE room_bookings (
    **`DROP CONSTRAINT ... ONLY` on partitioned tables (PostgreSQL 18+):**
    real PostgreSQL can now drop a constraint from just a partitioned
    parent (`ALTER TABLE ONLY parent DROP CONSTRAINT name`), leaving it
-   declared on the existing partitions — breaking the normal
-   parent-constraint-propagates-to-partitions link. This document does
-   not yet have a declarative slot for that split state: a constraint
-   present on a parent's `PARTITIONS { }` children but absent from the
-   parent itself has no DPG source-syntax representation, since a
-   partition's constraints are not currently declared independently of
-   the parent's. Stated here as a known, narrow gap (Tenet 3) rather
-   than left silent — closing it properly needs per-partition
-   constraint override syntax, a larger design than this pass's scope.
+   in place on the existing partitions — breaking the normal
+   parent-constraint-propagates-to-partitions link. Confirmed live
+   against PostgreSQL 17 and 18 servers: PostgreSQL 17 rejects the
+   statement outright ("cannot remove constraint from only the
+   partitioned table when partitions exist"); PostgreSQL 18 succeeds,
+   flipping the constraint's existing row on every current partition
+   from inherited (`conislocal = false`) to local (`conislocal =
+   true`) rather than dropping it there too — the identical catalog
+   signature an ordinary constraint declared directly on that
+   partition, and never on the parent at all, produces from the start.
+   PostgreSQL itself draws no distinction between the two histories, so
+   this document doesn't either: a partition's `PARTITIONS { }` entry
+   MAY carry its own trailing `{ }` body declaring one or more
+   constraints independently of the parent, using the same
+   `CONSTRAINT`/`CONSTRAINTS` block-directive grammar (both Dual
+   Definition Modes, Section 4.8) a table's own `{ }` block already
+   accepts:
+
+```abnf
+partition-decl       =/ ... [ WSP "{" partition-block-body "}" ]
+partition-block-body = *( ( "PARTITIONS" WSP "{" *partition-decl "}" )
+                         / constraint-decl )       -- CONSTRAINT/CONSTRAINTS
+```
+
+   (`PARTITIONS { }` sub-partitioning, Section 7.13, and one or more
+   `CONSTRAINT`/`CONSTRAINTS` entries may appear together in the same
+   body, in either order — PostgreSQL treats "further sub-partitioned"
+   and "carries its own local constraint" as independent facts about a
+   partition.) When a constraint disappears from the parent's own
+   declaration while a direct partition independently declares a
+   constraint of that same name, the Differ emits `ALTER TABLE ONLY
+   parent DROP CONSTRAINT name` instead of the ordinary cascading drop
+   — `SAFE`, not `DESTRUCTIVE`, for the same reason `NO INHERIT`
+   (above) is `SAFE`: a catalog-only change, no table rewrite, and
+   nothing is actually destroyed, since the constraint keeps enforcing
+   everywhere it currently applies — only the propagate-to-future-
+   partitions guarantee is given up, which is the explicit, declared
+   intent here. No proactive `min_pg_version` gate is applied (matching
+   every other PostgreSQL 18+ construct in this document): a pre-18
+   target server rejects the statement with its own clear error at
+   apply time (the passthrough-validation principle used throughout
+   this document). A constraint declared directly on an
+   already-existing partition with no such parent-level history at all
+   is unaffected by any of this — it is simply an ordinary `ALTER TABLE
+   partition ADD CONSTRAINT`, valid on any PostgreSQL version, the same
+   as adding a constraint to any other table. This declarative slot is
+   the sole exception to partitions otherwise never declaring
+   structure independently of their parent (Section 7.13) — it does
+   not extend to columns or any other partition attribute, and it does
+   not apply to an `ATTACHED FROM` entry (Section 7.13), whose
+   constraints are governed by its own standalone `TABLE` declaration
+   instead. Because `ALTER TABLE ONLY parent DROP CONSTRAINT` demotes
+   the constraint on every *currently existing* partition at once, not
+   a caller-chosen subset, retaining it on only some partitions while
+   letting it lapse on others requires two migrations: the `ONLY` drop
+   (demoting it everywhere), then an ordinary `DROP CONSTRAINT`
+   declared directly against whichever partitions should no longer
+   keep it, once the following plan/apply cycle's snapshot reflects the
+   demoted state. Coordination between the parent-level drop and a
+   partition's local declaration is likewise scoped to direct
+   partitions only — a constraint retained through more than one level
+   of sub-partitioning (Section 7.13) is not specially detected, and
+   falls back to the same ordinary, independent ADD/DROP CONSTRAINT
+   handling a from-scratch partition-local constraint gets.
 
    Examples:
 
@@ -3335,6 +3390,9 @@ detached-from-dir = "DETACHED FROM" WSP table-ref [ WSP "CONCURRENTLY" ] ";"
    | Partition detached (`DETACHED FROM`) | `ALTER TABLE parent DETACH PARTITION name [CONCURRENTLY]` | `MANUAL` if `CONCURRENTLY` written, else `CAUTION` |
    | Partition removed (absent, not detached) | `DROP TABLE <name>` | `DESTRUCTIVE` |
    | Partition strategy change | Requires `--approve-partition-rebuild` | `MANUAL` |
+   | Parent constraint dropped, retained locally by a direct partition (PG18+, Section 7.3) | `ALTER TABLE ONLY parent DROP CONSTRAINT name` | `SAFE` |
+   | Partition's own local constraint added (Section 7.3) | `ALTER TABLE partition ADD CONSTRAINT name ...` | `CAUTION` |
+   | Partition's own local constraint dropped (Section 7.3) | `ALTER TABLE partition DROP CONSTRAINT name` | `DESTRUCTIVE` |
 
    **`RENAMED FROM` on a partition** matches an existing partition —
    which MUST already be attached as a partition of this same parent
@@ -6821,6 +6879,7 @@ serial_sequence_declared      = "off"
    | Constraint renamed only (`RENAMED FROM`, Section 7.3) | `renamed_from` set, body unchanged | `ALTER TABLE t RENAME CONSTRAINT old TO new` | `SAFE` |
    | Constraint deferrability-only change (FK, Section 7.3) | Only `DEFERRABLE`/`INITIALLY ...` differs | `ALTER TABLE t ALTER CONSTRAINT name ...` | `SAFE` |
    | `NOT NULL` constraint inheritability-only change (PG18, Section 7.3) | Only `NO INHERIT` differs | `ALTER TABLE t ALTER CONSTRAINT name [NO] INHERIT` | `SAFE` |
+   | Constraint dropped from a partitioned parent while a direct partition declares it locally (PG18+, Section 7.3) | Name absent from parent's desired, present in a direct partition's own `{ }` body | `ALTER TABLE ONLY t DROP CONSTRAINT name` | `SAFE` |
    | Constraint changed | Body text differs | Drop + re-add | `DESTRUCTIVE` |
    | NOT VALID removed | `not_valid` false in desired | `ALTER TABLE t VALIDATE CONSTRAINT name` | `CAUTION` |
    | Generated-column expression added/changed/dropped (Section 7.4) | `GENERATED ... AS (expr)` differs | `ADD GENERATED`/`SET EXPRESSION`/`DROP EXPRESSION` (Section 7.4 table) | `SAFE`/`CAUTION` |
@@ -8740,6 +8799,7 @@ ENUM user_status ('active', 'inactive', 'banned') {
    | E.21 | 2026-08-25 | Section 7.4's generated-column diffing table implemented in the reference implementation (`core/`) for the first time — previously referenced from Section 7.2's `VIRTUAL` text but not actually wired into the differ at all, so any change to a generated column's expression, or a `STORED`/`VIRTUAL` switch, was silently undetected. Corrected two factual errors found live-testing that implementation against a real PostgreSQL 18 server: (1) Section 7.4's "removed, column kept" row split into separate `STORED` (`DROP EXPRESSION`, `SAFE`) and `VIRTUAL` (drop-and-recreate, `DESTRUCTIVE`) variants — PostgreSQL 18 flatly rejects `DROP EXPRESSION` for a `VIRTUAL` column, which this document previously didn't distinguish from `STORED`; Section 7.2's `VIRTUAL` paragraph updated to match. (2) Section 7.1's `period-clause` grammar production and Section 7.3's `PERIOD FOR name (start_col, end_col)` generated-period-column construct removed entirely — confirmed live that no such syntax exists in real PostgreSQL 18 (a syntax error against a real server, and absent from PostgreSQL's own official documentation); this document had described it in error. `WITHOUT OVERLAPS`/`PERIOD` temporal keys (Section 7.3) now correctly documented as referencing an *already-existing* range/multirange column directly, with no generated-range declaration form. Also corrected Section 7.3's claim that a temporal key is "implemented as an exclusion constraint under the hood" — confirmed live (`pg_constraint.contype`) that it stays catalogued as an ordinary `PRIMARY KEY`/`UNIQUE`/`FOREIGN KEY`, not reclassified to `EXCLUDE`; only the internal enforcement mechanism (`pg_constraint.conexclop`) is exclusion-based. Appendix F's temporal-keys row and Tenet-3 classification row updated to match. |
    | E.22 | 2026-08-26 | Section 8.2's `TABLESPACE`/`WITH (...)` clauses on a materialized view — grammar already documented, but never implemented: the reference implementation silently dropped both on parse, and never diffed them, so this specification's own worked example (`product_stats WITH (fillfactor = 90) TABLESPACE analytics_space`) did not round-trip. Now implemented and live-verified against a real PostgreSQL 17 server; Section 8.2's diffing-semantics paragraph gains the `TABLESPACE`/`WITH (...)` rows, both targeted `ALTER MATERIALIZED VIEW` forms, `SAFE`, matching a table's identical `TABLESPACE`/`WITH (...)` treatment (Section 7.11). |
    | E.23 | 2026-08-26 | Two doc-accuracy corrections found during a fresh audit, no reference-implementation changes needed (the code was already correct): (1) Appendix D.1.8's `SnapRole`/`SnapSequence` wire-schema examples were stale and, for `SnapRole`, factually wrong — the accompanying note claimed role attributes are "NOT stored in the snapshot beyond the name and comment," but `PasswordHash` and 14 other attribute fields genuinely are (confirmed against `internal/snapshot/types.go`), directly contradicting Section 24's own correct description of password-hash storage; both examples rewritten to list every current field, and the note corrected. (2) Section 18.8 stated plainly "there is no `--format` flag" for `dpg portability` — false, `cmd/dpg/portability.go` has a real, working `--format json` flag (JSON per cluster/database analyzed); the false claim removed and the flag documented. |
+   | E.24 | 2026-08-26 | Closed the last open item from the 2026-08-26 fresh audit: `DROP CONSTRAINT ... ONLY` on partitioned tables (PostgreSQL 18+, Section 7.3), previously documented as a known, deliberately out-of-scope gap with no declarative representation at all. A partition's `PARTITIONS { }` entry may now carry its own trailing `{ }` body declaring one or more constraints independently of the parent (`CONSTRAINT`/`CONSTRAINTS`, the same Section 7.3 directive grammar a table's own block already accepts) — the sole exception to a partition otherwise never declaring structure independently of its parent. When a constraint disappears from the parent's own declaration while a direct partition declares it locally, the Differ emits `ALTER TABLE ONLY parent DROP CONSTRAINT` (`SAFE`) instead of the ordinary cascading drop; a constraint declared directly on a partition with no such parent-level history is simply an ordinary, version-independent `ALTER TABLE partition ADD/DROP CONSTRAINT`. Confirmed live against real PostgreSQL 17 and 18 servers: 17 rejects the `ONLY` statement outright ("cannot remove constraint from only the partitioned table when partitions exist"), 18 succeeds, flipping the constraint's row on every existing partition from inherited to local — the identical catalog signature (`conislocal = true`, `coninhcount = 0`) a from-scratch partition-local constraint produces, which is why this document's IR draws no distinction between the two histories either. Sections 7.13 and 21's constraint-diffing tables, and Appendix F, updated to match. |
 
 ---
 
@@ -8821,6 +8881,7 @@ ENUM user_status ('active', 'inactive', 'banned') {
    | Section 7.12 | `UNLOGGED TABLE` | PGSpecific | — | See Section 7.1 row. |
    | Section 7.12 | `CREATE FOREIGN TABLE` | Standard | — | SQL/MED (ISO/IEC 9075-9) standardizes foreign tables; PostgreSQL's FDW mechanism implements it. |
    | Section 7.13 | `PARTITION BY`/`PARTITION OF` | Standard | — | SQL:2016 adds declarative partitioning as a standard concept, though exact grammar varies by vendor; PostgreSQL's own syntax is a PG-specific dialect of a standardized concept — classified Mixed in spirit, PGSpecific in literal grammar. |
+   | Section 7.3 | `DROP CONSTRAINT ... ONLY` on a partitioned table (partition-local constraint declaration) | PGSpecific | 18 | PostgreSQL's own declarative-partitioning constraint-inheritance mechanism; no standard concept of detaching a constraint from a partitioned parent while it stays local to existing partitions. |
    | Section 8 | `CREATE VIEW` | Standard | — | Core SQL. |
    | Section 8 | `CREATE MATERIALIZED VIEW` | PGSpecific | — | Materialized views are a common vendor extension, not in ISO/IEC 9075. |
    | Section 8 | `RECURSIVE VIEW`/`WITH RECURSIVE` | Standard | — | SQL:1999+ recursive query support. |
